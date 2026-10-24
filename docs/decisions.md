@@ -36,6 +36,17 @@ Picked from four directions in `docs/ui-directions.html` (A Studio, B Sketch, C 
 - **No server.** Rust compiles to WebAssembly and runs on the visitor's machine. The site, editor and embed are static files (free on Cloudflare); the npm package is served free by jsDelivr and unpkg. A server is only needed later for sharing or accounts, and a small Cloudflare Worker would do.
 - Build and tune on a Mac with a real GPU. The prototype was built on a machine with no GPU, so its speed was never measured on hardware.
 
+## Phase 1 research picks (pending Phase 2 tests)
+
+From `docs/research/`, summarized in `docs/research/recommendation.md`. Each holds unless its Phase 2 test fails.
+
+- **Engine:** a sparse brick map per object (8^3 bricks, occupancy mask plus one palette byte per voxel), ray marched in compute shaders for both the editor view and the path tracer. No meshes in the core; greedy meshes from the same bricks are the fallback. Replaces the prototype's chunked greedy meshing.
+- **Live preview:** progressive path tracing at about 640x360 in a fixed slice of each frame, since wgpu and WebGPU have one queue and no async compute.
+- **UI:** egui first, HTML/CSS over the canvas as runner-up; test 3 decides.
+- **`.vox`:** our own codec, raw chunks kept in order so an unedited re-save is byte-identical. No Rust crate round-trips real MagicaVoxel files.
+- **Browser:** WebGPU is required for the editor and path tracer. The market research's WebGL2 fallback could only ever serve a mesh-based embed; whether to ship one or just a poster is decided after test 5.
+- **Embed:** its own crate and wasm target, WebGPU only, single-threaded (a one-tag embed cannot get cross-origin isolation), target 150 KB brotli.
+
 ## First work: five tests to cut the risk
 
 Throwaway spikes, measured on the Mac, before the real build.

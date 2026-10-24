@@ -324,9 +324,7 @@ The trigger for this research, a voxel desk scene for a homepage, is exactly the
 2. **Editor v1, roughly 1-3 days of agent wall-clock** across several sessions, counting review and CI.
 3. **Launch with a striking scene** in the HN Show HN / r/VOXEL / r/threejs channels. A pretty scene earns stars; a feature list does not.
 
-### Open choices for the captain
-
-These are tracked as one captain-held backlog task, `voxel-editor-decision`.
+### Open choices
 
 - **Go or no-go** on building the project.
 - **Platform:** web-first with a native shell (recommended), or native-first.

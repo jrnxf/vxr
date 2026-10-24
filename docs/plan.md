@@ -13,7 +13,7 @@ What to do first on vxr, in order. Read `docs/decisions.md` before this; it hold
   - Palette recolor through a palette texture read in the vertex shader is instant, with no remesh.
   - Its own `.vox` files round-trip with 0 mismatches; scenes over 256^3 split into 256^3 models. It ignores rotations (`_r`), `MATL` materials and layers, and was never checked against MagicaVoxel itself.
   - FPS was never measured on a real GPU (it was built on a machine without one).
-- **Browser vs desktop:** rendering through WebGPU runs near native speed. The browser falls behind on CPU-heavy work (wasm is roughly 1.5 to 2x slower, threads are harder) and on memory (wasm32 caps at 4 GB; GPU storage buffers default to 256 MiB per binding). Normal scenes should not feel laggy in either.
+- **Browser vs desktop:** rendering through WebGPU runs near native speed. The browser falls behind on CPU-heavy work (single-threaded wasm is about 1.45 to 1.55x slower on average, up to 2.5x; the one-tag embed usually gets no threads, so bulk work is about 5 to 10x slower, estimate), on GPU readback latency, and on memory (wasm32 caps at 4 GB and about 2 GB is safe; GPU storage buffers default to 128 MiB per binding and 256 MiB per buffer). Normal scenes should not feel laggy in either.
 
 ## Phase 1: desk research (no GPU needed)
 
@@ -29,6 +29,8 @@ Answer each with sources. Write findings to `docs/research/<topic>.md`, one file
 8. **Recommendation.** Stack picks, the riskiest unknowns left, and the Phase 2 tests below rewritten with exact metrics and pass/fail thresholds.
 
 ## Phase 2: risk tests on the Mac (real GPU)
+
+Exact metrics and pass/fail thresholds are in `docs/research/recommendation.md`.
 
 Throwaway spikes under `spikes/<name>/`. Each ends with a short `RESULTS.md`: what was measured, numbers, pass or fail, and what it changes.
 
