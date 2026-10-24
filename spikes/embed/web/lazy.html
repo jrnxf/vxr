@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Embed Lazy Check</title>
+<link rel="icon" href="data:,">
+<script src="voxel-scene.js" async></script>
+<style>body { margin: 0; background: #f6f4ef; font: 15px system-ui, sans-serif; } main { max-width: 720px; margin: 0 auto; padding: 16px; } .spacer { height: 250vh; }</style>
+</head>
+<body>
+<main>
+  <p>Checks that the viewer loads only when the embed scrolls into view, and draws only while on screen.</p>
+  <div class="spacer"></div>
+  <voxel-scene id="s" src="scene.vox" poster="poster.webp" autorotate></voxel-scene>
+  <div class="spacer"></div>
+</main>
+<script>
+(async () => {
+  const el = document.getElementById('s');
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const wasm = () => performance.getEntriesByType('resource').some((e) => e.name.includes('.wasm'));
+  let frames = 0;
+  await wait(1500);
+  const r = { ua: navigator.userAgent, wasm_before_scroll: wasm() };
+  el.scrollIntoView();
+  await new Promise((res) => el.addEventListener('vxr-frame', res, { once: true }));
+  el.onframe = () => frames++;
+  await wait(1000); r.frames_on_screen_1s = frames; frames = 0;
+  window.scrollTo(0, 0);
+  await wait(300); frames = 0;
+  await wait(1000); r.frames_off_screen_1s = frames;
+  el.scrollIntoView(); frames = 0;
+  await wait(1000); r.frames_back_on_screen_1s = frames;
+  const q = new URLSearchParams(location.search);
+  await fetch('/results?f=' + (q.get('f') || 'lazy'), { method: 'POST', body: JSON.stringify(r) });
+  document.title = 'Embed Lazy Check done';
+})();
+</script>
+</body>
+</html>

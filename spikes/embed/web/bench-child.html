@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Embed Bench Child</title>
+<link rel="icon" href="data:,">
+<script>
+  // Fresh shader every load so no shader cache helps; runs chain through ?i=.
+  window.VXR_NONCE = location.search.includes('warm') ? 7 : ((Math.random() * 4e9) >>> 0) || 1;
+  window.Q = new URLSearchParams(location.search);
+</script>
+<script src="voxel-scene.js" async></script>
+<style>
+  :root { --bg: #f6f4ef; --text: #22242a; --muted: #6b6f7a; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, sans-serif; }
+  main { max-width: 720px; margin: 0 auto; padding: 24px 16px 60px; }
+  h1 { font-size: 20px; margin: 0 0 12px; }
+  pre { background: #fff; border: 1px solid #e2ded4; border-radius: 8px; padding: 12px; font: 12px/1.5 ui-monospace, monospace; white-space: pre-wrap; word-break: break-all; }
+  button { font: inherit; padding: 6px 12px; }
+  .muted { color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>vxr embed bench</h1>
+  <voxel-scene id="s" bench src="scene.vox" alt="Voxel island" autorotate><img src="poster.webp" alt="" width="800" height="500" style="width:100%;height:auto;aspect-ratio:16/10;object-fit:cover"></voxel-scene>
+  <script>
+    performance.mark('tag');
+    // With an <img> child the poster can show before the custom element upgrades,
+    // so watch the image itself.
+    (() => { const im = document.querySelector('#s img'); const done = () => requestAnimationFrame(() => { window.CHILD_POSTER = performance.now(); document.getElementById('s').dispatchEvent(new CustomEvent('vxr-poster', { detail: { posterVisible: window.CHILD_POSTER } })); }); if (im.complete && im.naturalWidth) done(); else im.addEventListener('load', done); })();
+  </script>
+  <p class="muted" id="status">Loading...</p>
+  <button id="copy" type="button">Copy results</button>
+  <pre id="out"></pre>
+</main>
+<script>
+(() => {
+  const el = document.getElementById('s');
+  if (Q.has('split')) el.setAttribute('split', '');
+  const out = document.getElementById('out');
+  const status = document.getElementById('status');
+  const tag = performance.getEntriesByName('tag')[0].startTime;
+  const runs = +(Q.get('runs') || 1), i = +(Q.get('i') || 0), f = Q.get('f') || '';
+  const r2 = (x) => (x == null || isNaN(x) ? null : Math.round(x * 10) / 10);
+  let posted = false, posterAt = null;
+  el.addEventListener('vxr-poster', (e) => { posterAt = e.detail.posterVisible; show(collect(e.detail)); });
+
+  function res(name) {
+    const e = performance.getEntriesByType('resource').find((x) => x.name.includes(name));
+    return e ? { start: r2(e.startTime), end: r2(e.responseEnd), bytes: e.encodedBodySize || e.transferSize || null } : null;
+  }
+  function collect(t) {
+    const wasm = res('_bg.wasm');
+    return {
+      run: i, of: runs, label: f, page: location.pathname.split('/').pop(), ua: navigator.userAgent, dpr: devicePixelRatio, gpu: !!navigator.gpu,
+      split: el.hasAttribute('split'),
+      poster_after_tag: r2(posterAt != null ? posterAt - tag : null),
+      visible_after_tag: r2(t.visible - tag),
+      first_frame_after_visible: r2(t.firstPresented - t.visible),
+      first_frame_after_tag: r2(t.firstPresented - tag),
+      wasm_download_end_after_visible: wasm ? r2(wasm.end - t.visible) : null,
+      wasm_compile_tail: wasm && t.wasmCompiled ? r2(t.wasmCompiled - Math.max(wasm.end, t.engineStart)) : null,
+      wasm_compile_only: t.compileOnly != null ? r2(t.compileOnly) : null,
+      instantiate: r2(t.wasmInstantiated - t.wasmCompiled),
+      device: r2(t.deviceReady - t.wasmInstantiated),
+      pipelines: t.pipelinesReady ? r2(t.pipelinesReady - t.deviceReady) : null,
+      pipelines_create_calls: r2(t.pipelinesCreated - t.deviceReady),
+      vox_fetch_end_after_visible: r2(t.voxFetched - t.visible),
+      parse_upload: r2(t.loaded - t.voxFetched),
+      first_gpu: r2(t.firstDone - t.firstSubmit),
+      steady_gpu_frame: t.steady != null ? r2(t.steady) : null,
+      canvas: el.canvas.width + 'x' + el.canvas.height,
+      voxels: t.voxels, error: t.error || null, no_webgpu: !!t.noWebGPU,
+      sizes: { wasm: wasm && wasm.bytes, glue: (res('vxr_embed_spike.js') || {}).bytes, loader: (res('voxel-scene.js') || {}).bytes, vox: (res('scene.vox') || {}).bytes, poster: (res('poster.webp') || {}).bytes },
+    };
+  }
+  function show(r) {
+    out.textContent = Object.entries(r).map(([k, v]) => k + ': ' + (typeof v === 'object' && v ? JSON.stringify(v) : v)).join('\n');
+  }
+  async function finish(t) {
+    if (posted) return;
+    posted = true;
+    // Wait for the poster (it may land after the first frame on slow links), max 5 s.
+    for (let k = 0; k < 50 && posterAt == null && !t.noWebGPU && t.error == null; k++) await new Promise((r) => setTimeout(r, 100));
+    if (t.wasmCopy) {
+      const bytes = await t.wasmCopy.arrayBuffer();
+      const a = performance.now();
+      await WebAssembly.compile(bytes);
+      t.compileOnly = performance.now() - a;
+    }
+    if (el.glue && el.viewer && !t.error) {
+      // Steady GPU cost per frame at this canvas size: 20 frames, each waited on.
+      const g = el.glue, w = el.canvas.width, h = el.canvas.height;
+      el.viewer.render(1, 0.5, 0.88, w, h); await g.gpu_done();
+      const a = performance.now();
+      for (let k = 0; k < 20; k++) { el.viewer.render(1 + k * 0.05, 0.5, 0.88, w, h); await g.gpu_done(); }
+      t.steady = (performance.now() - a) / 20;
+    }
+    const r = collect(t);
+    show(r);
+    status.textContent = 'Run ' + (i + 1) + ' of ' + runs + (r.error ? ' (error: ' + r.error + ')' : '');
+    if (Q.has('report')) {
+      try { await fetch('/results?f=' + encodeURIComponent(f || 'results'), { method: 'POST', body: JSON.stringify(r) }); } catch (e) {}
+    }
+    // Keep every run of this batch on the device too (for phones without the bench server).
+    let all = [];
+    try {
+      const key = 'vxr-bench:' + f;
+      all = i === 0 ? [] : JSON.parse(sessionStorage.getItem(key) || '[]');
+      all.push(r);
+      sessionStorage.setItem(key, JSON.stringify(all));
+    } catch (e) { all = [r]; }
+    if (i + 1 >= runs && all.length > 1) showSummary(all);
+    if (i + 1 < runs) {
+      Q.set('i', i + 1);
+      setTimeout(() => location.replace(location.pathname + '?' + Q.toString()), 300);
+    } else {
+      status.textContent = 'Done: ' + runs + ' run(s).';
+      document.title = 'Embed Bench done';
+    }
+  }
+  function showSummary(all) {
+    const keys = ['poster_after_tag', 'first_frame_after_visible', 'wasm_compile_only', 'wasm_compile_tail', 'device', 'pipelines', 'parse_upload', 'first_gpu', 'steady_gpu_frame'];
+    const med = (xs) => { xs = xs.filter((x) => typeof x === 'number').sort((a, b) => a - b); return xs.length ? xs[(xs.length - 1) >> 1] : null; };
+    const lines = ['median of ' + all.length + ' runs (ms)'].concat(keys.map((k) => k + ': ' + med(all.map((r) => r[k]))));
+    out.textContent = lines.join('\n') + '\n\nall runs (JSON lines):\n' + all.map((r) => JSON.stringify(r)).join('\n');
+  }
+  el.addEventListener('vxr-frame', (e) => finish(e.detail));
+  el.addEventListener('vxr-error', (e) => finish(e.detail));
+  el.addEventListener('vxr-nowebgpu', (e) => finish(e.detail));
+  document.getElementById('copy').onclick = () => navigator.clipboard.writeText(out.textContent).then(() => (status.textContent = 'Copied.'));
+})();
+</script>
+</body>
+</html>

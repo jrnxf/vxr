@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Download the third-party .vox test corpus into corpus/fetched/ (git-ignored).
+# Every URL is pinned to a commit SHA and checked against its sha256 in manifest.tsv.
+# Files are untrusted input: nothing here executes them.
+set -euo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
+out="$here/fetched"
+mkdir -p "$out"
+fetched=0 kept=0 bad=0
+while IFS=$'\t' read -r sha path url; do
+  [[ -z "$sha" || "$sha" == \#* ]] && continue
+  dest="$out/$path"
+  if [[ -f "$dest" ]] && [[ "$(shasum -a 256 "$dest" | cut -d' ' -f1)" == "$sha" ]]; then
+    kept=$((kept + 1)); continue
+  fi
+  mkdir -p "$(dirname "$dest")"
+  tmp="$dest.part"
+  curl -fsSL --retry 3 -o "$tmp" "$url"
+  got="$(shasum -a 256 "$tmp" | cut -d' ' -f1)"
+  if [[ "$got" != "$sha" ]]; then
+    echo "sha256 mismatch: $path (expected $sha, got $got)" >&2
+    rm -f "$tmp"; bad=$((bad + 1)); continue
+  fi
+  mv "$tmp" "$dest"; fetched=$((fetched + 1))
+done < "$here/manifest.tsv"
+echo "fetched $fetched, already present $kept, failed $bad"
+[[ "$bad" -eq 0 ]]

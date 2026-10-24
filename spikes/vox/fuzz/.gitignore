@@ -1,0 +1,7 @@
+corpus/
+artifacts/
+seeds/
+coverage/
+target/
+*.log
+fuzz-start.txt

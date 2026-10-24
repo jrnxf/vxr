@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Serialize timed GPU runs across spikes so two benchmarks never share the GPU.
+# ./gpu-lock <command...>   (holds the lock while the command runs)
+set -euo pipefail
+lock="$(cd "$(dirname "$0")" && pwd)/.gpu-bench.lock"
+until mkdir "$lock" 2>/dev/null; do
+  if [[ -f "$lock/pid" ]] && ! kill -0 "$(cat "$lock/pid")" 2>/dev/null; then rm -rf "$lock"; continue; fi
+  sleep 2
+done
+echo $$ > "$lock/pid"
+trap 'rm -rf "$lock"' EXIT
+"$@"

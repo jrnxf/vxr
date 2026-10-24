@@ -36,28 +36,25 @@ Picked from four directions in `docs/ui-directions.html` (A Studio, B Sketch, C 
 - **No server.** Rust compiles to WebAssembly and runs on the visitor's machine. The site, editor and embed are static files (free on Cloudflare); the npm package is served free by jsDelivr and unpkg. A server is only needed later for sharing or accounts, and a small Cloudflare Worker would do.
 - Build and tune on a Mac with a real GPU. The prototype was built on a machine with no GPU, so its speed was never measured on hardware.
 
-## Phase 1 research picks (pending Phase 2 tests)
+## Engine, preview, `.vox` and embed (settled by Phase 2)
 
-From `docs/research/`, summarized in `docs/research/recommendation.md`. Each holds unless its Phase 2 test fails.
+Phase 1 picks from `docs/research/recommendation.md`, now confirmed or changed by the Phase 2 spikes in `spikes/` (each has a `RESULTS.md`). Measured on an Apple M4 Pro (16-core GPU) with other apps using the GPU, so times are upper bounds.
 
-- **Engine:** a sparse brick map per object (8^3 bricks, occupancy mask plus one palette byte per voxel), ray marched in compute shaders for both the editor view and the path tracer. No meshes in the core; greedy meshes from the same bricks are the fallback. Replaces the prototype's chunked greedy meshing.
-- **Live preview:** progressive path tracing at about 640x360 in a fixed slice of each frame, since wgpu and WebGPU have one queue and no async compute.
-- **UI:** egui first, HTML/CSS over the canvas as runner-up; test 3 decides.
-- **`.vox`:** our own codec, raw chunks kept in order so an unedited re-save is byte-identical. No Rust crate round-trips real MagicaVoxel files.
-- **Browser:** WebGPU is required for the editor and path tracer. The market research's WebGL2 fallback could only ever serve a mesh-based embed; whether to ship one or just a poster is decided after test 5.
-- **Embed:** its own crate and wasm target, WebGPU only, single-threaded (a one-tag embed cannot get cross-origin isolation), target 150 KB brotli.
+- **Engine: sparse brick map, ray marched, compacted layout by default.** 8^3 bricks with an occupancy mask; palette bytes stored only for occupied voxels (per-brick offset plus popcount). Measured 1.2 to 2.4 B per voxel on every scene tried; the dense layout used 4.3 to 8.9 B on hollow models and failed the 3 B line. Compacted costs 3 to 15% frame time. Full Retina, median: 10M voxels 4.7 ms native, 4.9 Chrome, 5.0 Safari; 100M voxels 6.9 / 7.1 / 7.4 ms. Radius-16 edits land in the next frame. Browsers loaded 300M voxels. Traversal: `trace_h` (brick steps plus a coarse 64-bit occupancy word that skips empty 32^3 cells).
+- **The browser draws as fast as native.** Native wins only on CPU work (building a 100M scene: 0.66 s native, 1.3 to 2.0 s in browsers). This backs "desktop first, browser from the same code".
+- **Live preview: progressive path tracing at 640x360 in the corner, passes everywhere.** It adds 2.5 to 3.8 ms per frame and comes clean in 0.3 to 1.2 s. Budget all preview work (trace, denoise, composite) at 3 ms per frame while editing and 12 ms after 300 ms idle; the idle boost is required. Write the preview into the editor image instead of a second full-screen pass. No 480x270 or pause-while-editing fallback needed.
+- **UI:** egui first, HTML/CSS over the canvas as runner-up; test 3 decides. Not run yet; it needs the owner to judge the look.
+- **`.vox`: our own two-layer codec (raw chunks plus semantics), about 1,700 lines.** 568 of 568 real MagicaVoxel files re-save byte for byte; edits change only the chunks they must; 1 hour of fuzzing found no crash after one fixed bug. MagicaVoxel (0.99.6.2) confirms that transforms compose parent then child and that pivots are floor(size/2). The scene model needs instancing (shared nodes) from the start. MagicaVoxel clamps positions to about +-1000, so warn when exporting wider scenes. 0.99.7.x-only behaviour (version 200 overlap order, `_frm_t`) is untested: it ships only for Windows.
+- **Browser:** WebGPU is required for the editor and path tracer.
+- **Embed: its own crate, WebGPU only, poster-only fallback (no WebGL2).** 39.8 KB brotli for wasm, glue and loader (target 150 KB). On an iPhone 17 Pro the scene shows 217 ms after scrolling into view at 10 Mbit/s and 1.16 s on Slow 4G. The snippet puts the poster as an `<img>` inside the tag (70 ms; the `poster=` attribute alone missed the 100 ms line). The embed loads a brick-format scene file with `.vox` as the fallback: the island is 14.5 KB as bricks against 137 KB as `.vox`. A built-in WebGL2 fallback would be about 25 times the viewer. Mid-range Android is not measured.
 
-## First work: five tests to cut the risk
+### Open going into Phase 3
 
-Throwaway spikes, measured on the Mac, before the real build.
-
-1. **Engine:** a Rust/wgpu sparse renderer built native and for the browser. Measure FPS, memory and edit latency at 10M and 100M voxels. Settles how big the native advantage really is.
-2. **Live render preview:** progressive path tracing in a corner view while editing. Measure the hit to editing frame rate. The riskiest piece of Hybrid.
-3. **UI layer:** a Rust-drawn UI (egui) against a web UI over the GPU canvas (Tauri-style shell). Hybrid's polish depends on this.
-4. **`.vox` round-trip:** open and re-save a corpus of real MagicaVoxel files (materials, layers, cameras, rotations) and prove nothing changes.
-5. **Embed weight:** wasm download size and time to first frame on a phone.
-
-After those, the first real milestone is a sample desktop app: Hybrid toolbar and palette, add/erase/paint, orbit, undo/redo, `.vox` open and save, FPS and voxel-count readout, with the browser build as a second target.
+- Growing the compacted pool on the GPU instead of repacking on the CPU: today a full pool costs one hitch of 54 ms native and about 100 ms in browsers at 100M voxels.
+- The native close, low view sits near the 120 fps line; a depth prepass is the likely fix.
+- Not measured: M1-class Macs (estimate about 15 ms at 10M, full Retina), mid-range Android, the iOS reload memory test, MagicaVoxel 0.99.7.x.
+- Longer multi-core fuzzing before the embed reads files from strangers.
+- Licence (still open from `docs/market-research.md`).
 
 ## What the prototype proved
 

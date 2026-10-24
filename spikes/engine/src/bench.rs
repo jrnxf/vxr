@@ -1,0 +1,541 @@
+//! The measurements for test 1, shared by the native binary and the browser page.
+
+use crate::camera::OrbitCamera;
+use crate::gpu::{self, now_ms, Gpu, GpuBrickMap, GpuTimer, RenderOptions, Renderer};
+use crate::scene::Scene;
+use glam::Vec3;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Config {
+    pub width: u32,
+    pub height: u32,
+    pub frames: u32,
+    pub edits: u32,
+    pub levels: u32,
+    /// Also run the half-resolution orbit.
+    pub half: bool,
+    /// Run the 256 MB upload throughput test.
+    pub upload_test: bool,
+    /// Frame time budget used to turn edit latency into frames (8.33 native, 16.7 browsers).
+    pub budget_ms: f64,
+    /// Only build and upload the scene, render a few frames (largest-scene probe).
+    pub load_only: bool,
+    /// GPU palette layout.
+    #[serde(default)]
+    pub layout: crate::gpu::MapLayout,
+    /// Brush edits only add (worst case for compacted bricks growing) instead of alternating.
+    #[serde(default)]
+    pub add_only: bool,
+    /// Worst-case edits that fill a mostly empty brick completely, one brick per edit.
+    #[serde(default)]
+    pub fill_edits: u32,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self { width: 3024, height: 1964, frames: 180, edits: 120, levels: 4, half: true, upload_test: true, budget_ms: 8.33, load_only: false, layout: crate::gpu::MapLayout::Dense, add_only: false, fill_edits: 0 }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Default)]
+pub struct Stats {
+    pub n: usize,
+    pub median: f64,
+    pub p95: f64,
+    pub mean: f64,
+    pub min: f64,
+    pub max: f64,
+}
+
+pub fn stats(v: &[f64]) -> Stats {
+    if v.is_empty() {
+        return Stats::default();
+    }
+    let mut s = v.to_vec();
+    s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let q = |p: f64| s[((s.len() - 1) as f64 * p).round() as usize];
+    Stats { n: s.len(), median: q(0.5), p95: q(0.95), mean: s.iter().sum::<f64>() / s.len() as f64, min: s[0], max: s[s.len() - 1] }
+}
+
+pub fn limits_json(gpu: &Gpu) -> Value {
+    let l = gpu.device.limits();
+    let info = gpu.adapter.get_info();
+    json!({
+        "adapter": format!("{} ({:?}, {:?})", info.name, info.backend, info.device_type),
+        "driver": info.driver_info,
+        "timestamp_query": gpu.timestamps,
+        "maxBufferSize": l.max_buffer_size,
+        "maxStorageBufferBindingSize": l.max_storage_buffer_binding_size,
+        "maxUniformBufferBindingSize": l.max_uniform_buffer_binding_size,
+        "maxStorageBuffersPerShaderStage": l.max_storage_buffers_per_shader_stage,
+        "maxStorageTexturesPerShaderStage": l.max_storage_textures_per_shader_stage,
+        "maxTextureDimension2D": l.max_texture_dimension_2d,
+        "maxTextureDimension3D": l.max_texture_dimension_3d,
+        "maxComputeWorkgroupStorageSize": l.max_compute_workgroup_storage_size,
+        "maxComputeInvocationsPerWorkgroup": l.max_compute_invocations_per_workgroup,
+        "maxComputeWorkgroupsPerDimension": l.max_compute_workgroups_per_dimension,
+        "maxBindGroups": l.max_bind_groups,
+    })
+}
+
+pub struct Bench<'a> {
+    pub gpu: &'a Gpu,
+    pub scene: Scene,
+    pub map: GpuBrickMap,
+    pub renderer: Renderer,
+    pub target: wgpu::Texture,
+    pub timer: Option<GpuTimer>,
+    pub cfg: Config,
+}
+
+pub const TARGET_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8Unorm;
+
+impl<'a> Bench<'a> {
+    /// Upload the scene and time it. Returns the bench and the upload result.
+    pub async fn new(gpu: &'a Gpu, scene: Scene, cfg: Config) -> Result<(Self, Value), String> {
+        let layout = gpu::brickmap_layout(&gpu.device);
+        let t0 = now_ms();
+        let map = GpuBrickMap::new_with_layout(&gpu.device, &gpu.queue, &layout, &scene.map, &scene.palette, cfg.layout)?;
+        let pack_ms = now_ms() - t0;
+        gpu.queue.submit([]);
+        gpu::wait_idle(&gpu.device, &gpu.queue).await;
+        let upload_ms = now_ms() - t0;
+        let renderer = Renderer::new(&gpu.device, &layout, TARGET_FORMAT, cfg.width, cfg.height, RenderOptions { gbuffer: false, levels: cfg.levels });
+        let target = Self::make_target(&gpu.device, cfg.width, cfg.height);
+        let timer = gpu.timestamps.then(|| GpuTimer::new(&gpu.device, &gpu.queue, cfg.frames.max(cfg.edits).max(64)));
+        let used = map.used_bytes(&scene.map);
+        let voxels = scene.map.voxels;
+        let up = json!({
+            "layout": cfg.layout,
+            "heap": map.heap_stats(),
+            "build_and_queue_ms": pack_ms,
+            "upload_ms": upload_ms,
+            "upload_mb": used as f64 / 1e6,
+            "upload_mb_per_s": used as f64 / 1e6 / (upload_ms / 1000.0),
+            "voxels": voxels,
+            "bricks": scene.map.live_bricks(),
+            "dims_bricks": scene.map.dims,
+            "gpu_bytes_used": used,
+            "gpu_bytes_allocated": map.allocated_bytes,
+            "bytes_per_voxel_used": used as f64 / voxels as f64,
+            "bytes_per_voxel_allocated": map.allocated_bytes as f64 / voxels as f64,
+            "bytes_per_voxel_palette_only": scene.map.pal.len() as f64 / voxels as f64,
+            "bytes_per_voxel_compacted_estimate": (scene.map.compacted_bytes() + map.coarse_bytes()) as f64 / voxels as f64,
+            "brick_fill": voxels as f64 / (scene.map.live_bricks() as f64 * 512.0),
+            "notes": scene.notes,
+        });
+        Ok((Self { gpu, scene, map, renderer, target, timer, cfg }, up))
+    }
+
+    fn make_target(device: &wgpu::Device, w: u32, h: u32) -> wgpu::Texture {
+        device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("offscreen target"),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: TARGET_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        })
+    }
+
+    pub fn resize(&mut self, w: u32, h: u32) {
+        self.renderer.resize(&self.gpu.device, w, h);
+        self.target = Self::make_target(&self.gpu.device, w, h);
+    }
+
+    /// One frame: march + blit into the offscreen target, timestamps in slot `slot`.
+    pub fn frame(&self, cam: &OrbitCamera, slot: Option<u32>) {
+        let g = self.gpu;
+        self.renderer.set_camera(&g.queue, cam);
+        let mut enc = g.device.create_command_encoder(&Default::default());
+        let view = self.target.create_view(&Default::default());
+        match (&self.timer, slot) {
+            (Some(t), Some(i)) => {
+                self.renderer.march(&mut enc, &self.map, Some(t.begin(i)));
+                self.renderer.blit(&mut enc, &view, Some(t.end(i)));
+            }
+            _ => {
+                self.renderer.march(&mut enc, &self.map, None);
+                self.renderer.blit(&mut enc, &view, None);
+            }
+        }
+        g.queue.submit([enc.finish()]);
+    }
+
+    pub fn framed_camera(&self) -> OrbitCamera {
+        let (lo, hi) = self.scene.map.occupied_bounds().unwrap_or(([0; 3], [8; 3]));
+        let lo = Vec3::new(lo[0] as f32, lo[1] as f32, lo[2] as f32);
+        let hi = Vec3::new(hi[0] as f32, hi[1] as f32, hi[2] as f32);
+        OrbitCamera::framing_aspect(lo, hi, self.renderer.width as f32 / self.renderer.height as f32)
+    }
+
+    /// Close, low camera: looking at the middle of the scene from 15 degrees above the
+    /// horizon at a quarter of the framing distance, so the horizon is in view. The worst case
+    /// for long grazing rays.
+    pub fn close_camera(&self) -> OrbitCamera {
+        let (lo, hi) = self.scene.map.occupied_bounds().unwrap_or(([0; 3], [8; 3]));
+        let lo = Vec3::new(lo[0] as f32, lo[1] as f32, lo[2] as f32);
+        let hi = Vec3::new(hi[0] as f32, hi[1] as f32, hi[2] as f32);
+        let mut c = self.framed_camera();
+        c.target = Vec3::new((lo.x + hi.x) * 0.5, lo.y + (hi.y - lo.y) * 0.3, (lo.z + hi.z) * 0.5);
+        c.distance *= 0.25;
+        c.pitch = 15f32.to_radians();
+        c
+    }
+
+    /// Orbit a full turn over `frames` frames. Returns GPU timestamps (ms from the start of
+    /// the march to the end of the blit, one frame in flight at a time, if available) and
+    /// wall-clock throughput per frame from batches of 30 back-to-back frames.
+    pub async fn orbit(&self, base: OrbitCamera) -> Value {
+        let g = self.gpu;
+        let n = self.cfg.frames;
+        let cam_at = |i: u32| {
+            let mut c = base;
+            c.yaw = base.yaw + i as f32 / n as f32 * std::f32::consts::TAU;
+            c
+        };
+        // Warm up (pipeline caches, clocks).
+        for i in 0..20 {
+            self.frame(&cam_at(i * 9), None);
+        }
+        gpu::wait_idle(&g.device, &g.queue).await;
+        let mut gpu_ms = Vec::new();
+        if let Some(t) = &self.timer {
+            // One frame at a time, so a frame's timestamps never include another frame's
+            // work running alongside it on the GPU.
+            for i in 0..n {
+                self.frame(&cam_at(i), Some(i));
+                gpu::wait_idle(&g.device, &g.queue).await;
+            }
+            gpu_ms = t.read_ms(&g.device, &g.queue, n).await;
+        }
+        let batch = 30;
+        let mut wall = Vec::new();
+        for b in 0..n / batch {
+            let t0 = now_ms();
+            for i in 0..batch {
+                self.frame(&cam_at(b * batch + i), None);
+            }
+            gpu::wait_idle(&g.device, &g.queue).await;
+            wall.push((now_ms() - t0) / batch as f64);
+        }
+        json!({
+            "gpu_ms": stats(&gpu_ms),
+            "wall_ms_per_frame_batched": stats(&wall),
+            "camera": { "distance": base.distance, "pitch_deg": base.pitch.to_degrees() },
+            "gpu_ms_all": gpu_ms,
+            "wall_ms_all": wall,
+        })
+    }
+
+    /// Radius-16 brush edits at the surface point under the screen centre, alternating add and
+    /// erase. Measures CPU brush time, upload time, and the GPU time of the frame that shows it.
+    pub async fn edits(&mut self) -> Value {
+        let g = self.gpu;
+        let cam = self.framed_camera();
+        let (w, h) = (self.renderer.width as f32, self.renderer.height as f32);
+        let mut brush_ms = Vec::new();
+        let mut upload_ms = Vec::new();
+        let mut frame_gpu = Vec::new();
+        let mut total_ms = Vec::new();
+        let mut voxels_changed = Vec::new();
+        let mut bricks = Vec::new();
+        let mut writes = Vec::new();
+        let mut reallocs = Vec::new();
+        let mut rebuilds = 0u32;
+        let mut visible = Value::Null;
+        self.scene.map.track_dirty(true);
+        for e in 0..self.cfg.edits {
+            // Walk the brush across the screen so edits hit different bricks.
+            let fx = 0.3 + 0.4 * ((e / 2) as f32 * 0.137).fract();
+            let fy = 0.4 + 0.2 * ((e / 2) as f32 * 0.291).fract();
+            let (ro, dir) = cam.ray(fx * w, fy * h, w, h);
+            let Some(hit) = self.scene.map.raycast(ro.into(), dir.into(), 1e6) else { continue };
+            let add = self.cfg.add_only || e % 2 == 0;
+            let c = [hit.voxel[0] as f32 + 0.5, hit.voxel[1] as f32 + 0.5, hit.voxel[2] as f32 + 0.5];
+            let before = if e == 0 {
+                self.frame(&cam, None);
+                gpu::wait_idle(&g.device, &g.queue).await;
+                Some(self.renderer.read_color(&g.device, &g.queue).await)
+            } else {
+                None
+            };
+            let t0 = now_ms();
+            let st = self.scene.map.sphere(c, 16.0, if add { 200 } else { 0 }, false);
+            let t1 = now_ms();
+            let up = self.map.upload_dirty(&g.device, &g.queue, &mut self.scene.map, &self.scene.palette).unwrap();
+            let t2 = now_ms();
+            let slot = e % self.timer.as_ref().map(|t| t.cap).unwrap_or(1);
+            self.frame(&cam, self.timer.as_ref().map(|_| slot));
+            gpu::wait_idle(&g.device, &g.queue).await;
+            let t3 = now_ms();
+            if let Some(t) = &self.timer {
+                let v = t.read_ms(&g.device, &g.queue, slot + 1).await;
+                frame_gpu.push(v[slot as usize]);
+            }
+            brush_ms.push(t1 - t0);
+            upload_ms.push(t2 - t1);
+            total_ms.push(t3 - t0);
+            voxels_changed.push(st.voxels_changed as f64);
+            bricks.push(up.bricks as f64);
+            writes.push(up.writes as f64);
+            reallocs.push(up.reallocs as f64);
+            rebuilds += up.rebuilt as u32;
+            if let Some(before) = before {
+                // Re-render the same view and count changed pixels: proof the edit is visible
+                // in the very next frame.
+                let after = self.renderer.read_color(&g.device, &g.queue).await;
+                let changed = before.chunks_exact(4).zip(after.chunks_exact(4)).filter(|(a, b)| a != b).count();
+                visible = json!({ "changed_pixels_first_edit": changed });
+            }
+        }
+        self.scene.map.track_dirty(false);
+        let cpu: Vec<f64> = brush_ms.iter().zip(&upload_ms).map(|(a, b)| a + b).collect();
+        // Input lands during frame N's CPU work; the edit shows in frame N if the CPU edit and the
+        // GPU frame fit one frame budget, otherwise it slips by the overflow.
+        let budget = self.cfg.budget_ms;
+        let lat: Vec<f64> = cpu
+            .iter()
+            .enumerate()
+            .map(|(i, c)| ((c + frame_gpu.get(i).copied().unwrap_or(0.0)) / budget).ceil().max(1.0))
+            .collect();
+        let steady = |v: &Vec<f64>| stats(&v[1.min(v.len())..]);
+        let within_one = lat.iter().filter(|&&f| f <= 1.0).count();
+        json!({
+            "n": cpu.len(),
+            "first_edit": {
+                "brush_ms": brush_ms.first(), "upload_ms": upload_ms.first(),
+                "frame_gpu_ms": frame_gpu.first(), "latency_frames": lat.first(),
+            },
+            "steady": {
+                "brush_ms": steady(&brush_ms),
+                "upload_ms": steady(&upload_ms),
+                "cpu_edit_ms": steady(&cpu),
+                "frame_gpu_ms": steady(&frame_gpu),
+                "latency_frames": steady(&lat),
+            },
+            "all": {
+                "cpu_edit_ms": stats(&cpu),
+                "latency_frames": stats(&lat),
+                "edits_within_1_frame": within_one,
+            },
+            "submit_to_done_ms": stats(&total_ms),
+            "voxels_changed": stats(&voxels_changed),
+            "bricks_uploaded": stats(&bricks),
+            "write_calls": stats(&writes),
+            "budget_ms": budget,
+            "visible": visible,
+            "reallocs_per_edit": stats(&reallocs),
+            "rebuilds": rebuilds,
+            "heap_after": self.map.heap_stats(),
+            "bytes_per_voxel_used_after": self.map.used_bytes(&self.scene.map) as f64 / self.scene.map.voxels as f64,
+            "per_edit_cpu_ms": cpu,
+            "per_edit_frame_gpu_ms": frame_gpu,
+            "per_edit_latency_frames": lat,
+        })
+    }
+
+    /// Worst case for compacted bricks: pick mostly empty bricks (at most 64 of 512 voxels set)
+    /// and fill each one completely in a single edit, so its heap block has to grow and move.
+    pub async fn fill_edits(&mut self, n: u32) -> Value {
+        let g = self.gpu;
+        let cam = self.framed_camera();
+        let map = &self.scene.map;
+        let mut sparse = Vec::new();
+        for bz in 0..map.dims[2] {
+            for by in 0..map.dims[1] {
+                for bx in 0..map.dims[0] {
+                    let b = map.grid[map.cell_index(bx, by, bz)];
+                    if b == crate::brickmap::EMPTY {
+                        continue;
+                    }
+                    let ones: u32 = map.masks[b as usize * 16..b as usize * 16 + 16].iter().map(|w| w.count_ones()).sum();
+                    if ones <= 64 {
+                        sparse.push(([bx, by, bz], ones));
+                    }
+                }
+            }
+        }
+        let step = (sparse.len() / n.max(1) as usize).max(1);
+        let picks: Vec<([u32; 3], u32)> = sparse.iter().step_by(step).take(n as usize).copied().collect();
+        let mut cpu = Vec::new();
+        let mut fill_ms = Vec::new();
+        let mut upload_ms = Vec::new();
+        let mut frame_gpu = Vec::new();
+        let mut reallocs = Vec::new();
+        let mut before_voxels = Vec::new();
+        let mut rebuilds = 0;
+        self.scene.map.track_dirty(true);
+        for (i, (bc, ones)) in picks.iter().enumerate() {
+            let t0 = now_ms();
+            for z in 0..8 {
+                for y in 0..8 {
+                    for x in 0..8 {
+                        self.scene.map.set((bc[0] * 8 + x) as i32, (bc[1] * 8 + y) as i32, (bc[2] * 8 + z) as i32, 201);
+                    }
+                }
+            }
+            let t1 = now_ms();
+            let up = self.map.upload_dirty(&g.device, &g.queue, &mut self.scene.map, &self.scene.palette).unwrap();
+            let t2 = now_ms();
+            let slot = i as u32 % self.timer.as_ref().map(|t| t.cap).unwrap_or(1);
+            self.frame(&cam, self.timer.as_ref().map(|_| slot));
+            gpu::wait_idle(&g.device, &g.queue).await;
+            if let Some(t) = &self.timer {
+                frame_gpu.push(t.read_ms(&g.device, &g.queue, slot + 1).await[slot as usize]);
+            }
+            fill_ms.push(t1 - t0);
+            upload_ms.push(t2 - t1);
+            cpu.push(t2 - t0);
+            reallocs.push(up.reallocs as f64);
+            before_voxels.push(*ones as f64);
+            rebuilds += up.rebuilt as u32;
+        }
+        self.scene.map.track_dirty(false);
+        let budget = self.cfg.budget_ms;
+        let lat: Vec<f64> = cpu.iter().enumerate().map(|(i, c)| ((c + frame_gpu.get(i).copied().unwrap_or(0.0)) / budget).ceil().max(1.0)).collect();
+        json!({
+            "n": cpu.len(),
+            "sparse_bricks_available": sparse.len(),
+            "voxels_before_fill": stats(&before_voxels),
+            "fill_ms": stats(&fill_ms),
+            "upload_ms": stats(&upload_ms),
+            "cpu_edit_ms": stats(&cpu),
+            "frame_gpu_ms": stats(&frame_gpu),
+            "latency_frames": stats(&lat),
+            "reallocs_per_edit": stats(&reallocs),
+            "rebuilds": rebuilds,
+            "heap_after": self.map.heap_stats(),
+            "per_edit_cpu_ms": cpu,
+        })
+    }
+
+    /// Frame time of the framed orbit before and after `n` radius-16 brush edits (alternating add
+    /// and erase across the screen), to catch traversal slowing down as edits pile up.
+    pub async fn drift(&mut self, n: u32) -> Value {
+        let g = self.gpu;
+        let before = self.orbit(self.framed_camera()).await;
+        let cam = self.framed_camera();
+        let (w, h) = (self.renderer.width as f32, self.renderer.height as f32);
+        self.scene.map.track_dirty(true);
+        let mut done = 0;
+        for e in 0..n {
+            let fx = 0.3 + 0.4 * ((e / 2) as f32 * 0.137).fract();
+            let fy = 0.4 + 0.2 * ((e / 2) as f32 * 0.291).fract();
+            let (ro, dir) = cam.ray(fx * w, fy * h, w, h);
+            let Some(hit) = self.scene.map.raycast(ro.into(), dir.into(), 1e6) else { continue };
+            let c = [hit.voxel[0] as f32 + 0.5, hit.voxel[1] as f32 + 0.5, hit.voxel[2] as f32 + 0.5];
+            self.scene.map.sphere(c, 16.0, if e % 2 == 0 { 200 } else { 0 }, false);
+            self.map.upload_dirty(&g.device, &g.queue, &mut self.scene.map, &self.scene.palette).unwrap();
+            done += 1;
+        }
+        self.scene.map.track_dirty(false);
+        gpu::wait_idle(&g.device, &g.queue).await;
+        let after = self.orbit(self.framed_camera()).await;
+        json!({ "edits": done, "before": before, "after": after })
+    }
+
+    /// Recolor one palette slot: just the 4 KB palette write.
+    pub async fn recolor(&mut self) -> Value {
+        let g = self.gpu;
+        let mut p = self.scene.palette;
+        let t0 = now_ms();
+        p[9] = 0xff3040e0;
+        self.map.set_palette(&g.queue, &p);
+        let t1 = now_ms();
+        self.frame(&self.framed_camera(), None);
+        gpu::wait_idle(&g.device, &g.queue).await;
+        self.map.set_palette(&g.queue, &self.scene.palette);
+        json!({ "palette_write_ms": t1 - t0 })
+    }
+}
+
+/// Upload throughput for a 256 MB brick pool (two 128 MiB buffers), write + wait, median of 3.
+pub async fn upload_throughput(gpu: &Gpu) -> Value {
+    let size = 128u64 << 20;
+    let bufs: Vec<wgpu::Buffer> = (0..2)
+        .map(|_| {
+            gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("upload test"),
+                size,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        })
+        .collect();
+    let data: Vec<u8> = (0..size as usize).map(|i| (i * 31 % 251) as u8).collect();
+    let mut ms = Vec::new();
+    for _ in 0..4 {
+        let t0 = now_ms();
+        for b in &bufs {
+            gpu.queue.write_buffer(b, 0, &data);
+        }
+        gpu.queue.submit([]);
+        gpu::wait_idle(&gpu.device, &gpu.queue).await;
+        ms.push(now_ms() - t0);
+    }
+    ms.remove(0); // first run includes allocation
+    let s = stats(&ms);
+    json!({ "bytes": size * 2, "ms": s, "mb_per_s_median": (size * 2) as f64 / 1e6 / (s.median / 1000.0) })
+}
+
+/// Run the whole test 1 measurement set for one scene.
+pub async fn run(gpu: &Gpu, scene: Scene, cfg: Config) -> Result<Value, String> {
+    run_keep(gpu, scene, cfg).await.map(|(v, _)| v)
+}
+
+/// Same as `run`, and hands back the bench so the caller can keep drawing the scene.
+pub async fn run_keep(gpu: &Gpu, scene: Scene, cfg: Config) -> Result<(Value, Bench<'_>), String> {
+    let name = scene.name.clone();
+    let t_all = now_ms();
+    let (mut b, upload) = Bench::new(gpu, scene, cfg.clone()).await?;
+    if cfg.load_only {
+        let f = b.orbit_short().await;
+        return Ok((json!({ "scene": name, "config": cfg, "upload": upload, "frames": f }), b));
+    }
+    let framed = b.orbit(b.framed_camera()).await;
+    let close = b.orbit(b.close_camera()).await;
+    let half = if cfg.half {
+        b.resize(cfg.width / 2, cfg.height / 2);
+        let r = b.orbit(b.framed_camera()).await;
+        b.resize(cfg.width, cfg.height);
+        r
+    } else {
+        Value::Null
+    };
+    let edits = if cfg.edits > 0 { b.edits().await } else { Value::Null };
+    let fill = if cfg.fill_edits > 0 { b.fill_edits(cfg.fill_edits).await } else { Value::Null };
+    let recolor = b.recolor().await;
+    let v = json!({
+        "scene": name,
+        "config": cfg,
+        "upload": upload,
+        "orbit_framed": framed,
+        "orbit_close": close,
+        "orbit_framed_half_res": half,
+        "edits": edits,
+        "fill_edits": fill,
+        "recolor": recolor,
+        "total_ms": now_ms() - t_all,
+    });
+    Ok((v, b))
+}
+
+impl Bench<'_> {
+    async fn orbit_short(&self) -> Value {
+        let g = self.gpu;
+        let base = self.framed_camera();
+        let t0 = now_ms();
+        for i in 0..30 {
+            let mut c = base;
+            c.yaw += i as f32 * 0.2;
+            self.frame(&c, None);
+        }
+        gpu::wait_idle(&g.device, &g.queue).await;
+        json!({ "wall_ms_per_frame": (now_ms() - t0) / 30.0 })
+    }
+}

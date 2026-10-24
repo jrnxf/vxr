@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Embed Demo</title>
+<link rel="icon" href="data:,">
+<script>if (new URLSearchParams(location.search).has('nogpu')) Object.defineProperty(navigator, 'gpu', { value: undefined });</script>
+<script src="voxel-scene.js" async></script>
+<style>
+  :root { --bg: #f6f4ef; --text: #22242a; --muted: #6b6f7a; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 17px/1.65 Georgia, serif; }
+  main { max-width: 720px; margin: 0 auto; padding: 48px 16px 80px; }
+  h1 { font-size: 34px; line-height: 1.15; margin: 0 0 16px; }
+  .cap { font: 13px/1.5 system-ui, sans-serif; color: var(--muted); margin: 10px 0 28px; }
+  voxel-scene { box-shadow: 0 16px 40px rgba(30, 30, 40, .16); }
+  .spacer { height: 70vh; }
+</style>
+</head>
+<body>
+<main>
+  <h1>One tag, one scene</h1>
+  <p>The scene below is a single <code>&lt;voxel-scene&gt;</code> element. It shows a poster at once, loads the viewer only when it scrolls into view, and stops drawing when it leaves. Drag sideways to turn it; scrolling the page still works over it.</p>
+  <voxel-scene src="scene.vox" poster="poster.webp" alt="Voxel island" autorotate></voxel-scene>
+  <p class="cap">Starter island, 145k voxels.</p>
+  <div class="spacer"></div>
+  <p>A second scene further down shares the same GPU device and wasm module.</p>
+  <voxel-scene src="scene.vox" poster="poster.webp" alt="Voxel island, again"></voxel-scene>
+  <p class="cap">Same file, no autorotate.</p>
+</main>
+<script>
+  // ?nogpu&report: check the no-WebGPU path keeps the poster and never fetches the viewer.
+  const q = new URLSearchParams(location.search);
+  if (q.has('report')) setTimeout(() => {
+    const el = document.querySelector('voxel-scene');
+    const img = el.shadowRoot && el.shadowRoot.querySelector('img');
+    const r = {
+      ua: navigator.userAgent, nogpu_forced: q.has('nogpu'), webgpu: !!navigator.gpu,
+      upgraded: !!customElements.get('voxel-scene'),
+      poster_shown: !!(img && img.complete && img.naturalWidth > 0 && getComputedStyle(img).opacity === '1'),
+      live: el.hasAttribute('data-live'),
+      wasm_requested: performance.getEntriesByType('resource').some((e) => e.name.includes('.wasm')),
+      glue_requested: performance.getEntriesByType('resource').some((e) => e.name.includes('vxr_embed_spike.js')),
+    };
+    fetch('/results?f=' + (q.get('f') || 'nogpu'), { method: 'POST', body: JSON.stringify(r) });
+    document.title = 'Embed Demo checked';
+  }, 3000);
+</script>
+</body>
+</html>

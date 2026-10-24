@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Embed Poster</title>
+<link rel="icon" href="data:,">
+<script src="voxel-scene.js"></script>
+<style>body { margin: 0; background: #f6f4ef; } voxel-scene { width: 400px; }</style>
+</head>
+<body>
+<!-- Renders one frame at 800x500 and saves it as web/poster.webp through the bench server. -->
+<voxel-scene id="s" src="scene.vox"></voxel-scene>
+<script>
+  const el = document.getElementById('s');
+  el.onframe = (c) => {
+    el.onframe = null;
+    c.toBlob((b) => fetch('/poster', { method: 'POST', body: b }).then(() => (document.title = 'poster saved ' + b.size)), 'image/webp', +(new URLSearchParams(location.search).get('q') || 0.8));
+  };
+</script>
+</body>
+</html>

@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vxr engine spike</title>
+<style>
+  body { margin: 0; font: 13px/1.4 ui-monospace, Menlo, monospace; background: #1b1d22; color: #d8dbe2; }
+  canvas { display: block; width: 100vw; height: 62vh; background: #000; }
+  pre { margin: 0; padding: 12px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<pre id="log">loading...</pre>
+<script type="module">
+import init, { run_bench, heap_probe } from './pkg/vxr_engine_spike.js';
+
+const q = new URLSearchParams(location.search);
+const log = (s) => { document.getElementById('log').textContent = s; };
+const name = q.get('name') || 'unnamed';
+
+async function post(obj) {
+  await fetch('/results?name=' + encodeURIComponent(name), { method: 'POST', body: JSON.stringify(obj) });
+}
+
+async function main() {
+  const t0 = performance.now();
+  await init();
+  const wasm_init_ms = performance.now() - t0;
+  const meta = { user_agent: navigator.userAgent, webgpu: !!navigator.gpu, wasm_init_ms, url: location.search };
+  if (q.get('heap')) {
+    const mib = heap_probe(Number(q.get('heap')));
+    const r = { ...meta, heap_probe_mib: mib };
+    log(JSON.stringify(r, null, 2));
+    await post(r);
+    document.title = 'done';
+    return;
+  }
+  const canvas = document.getElementById('c');
+  canvas.width = Math.round(canvas.clientWidth * devicePixelRatio);
+  canvas.height = Math.round(canvas.clientHeight * devicePixelRatio);
+  const scene = q.get('scene') || 'terrain:10m';
+  let vox = undefined;
+  if (!scene.startsWith('terrain:')) {
+    const r = await fetch('/vox/' + scene);
+    vox = new Uint8Array(await r.arrayBuffer());
+  }
+  const cfg = q.get('cfg') || '{}';
+  log(`running ${scene} ${cfg} ...`);
+  let res;
+  try {
+    res = JSON.parse(await run_bench(scene, cfg, vox, canvas));
+  } catch (e) {
+    res = { error: String(e && e.stack || e) };
+  }
+  Object.assign(res, meta);
+  log(JSON.stringify(res, null, 2).slice(0, 6000));
+  await post(res);
+  document.title = 'done';
+  // Free the scene's memory in browsers we cannot close tabs in.
+  if (q.get('blank')) setTimeout(() => location.replace('about:blank'), 1500);
+}
+main().catch(async (e) => { log('error: ' + e); await post({ error: String(e), user_agent: navigator.userAgent }); document.title = 'done'; });
+</script>
+</body>
+</html>

@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Compile Probe</title>
+<link rel="icon" href="data:,">
+<style>body { font: 13px/1.5 ui-monospace, monospace; margin: 16px; background: #f6f4ef; }</style>
+</head>
+<body>
+<pre id="out">running...</pre>
+<script type="module">
+// Times shader module + pipeline creation for the embed shader, each with a fresh nonce
+// so no cache helps. Uses the async pipeline calls so each part is timed on its own.
+const out = document.getElementById('out');
+const Q = new URLSearchParams(location.search);
+const src0 = await (await fetch('/shader.wgsl')).text();
+const adapter = await navigator.gpu.requestAdapter();
+const device = await adapter.requestDevice();
+const fmt = navigator.gpu.getPreferredCanvasFormat();
+const variants = {
+  full: (s) => s,
+  no_shadow: (s) => s.replace('for (var k = 0; k < 2; k++)', 'for (var k = 0; k < 1; k++)'),
+  trivial: (s) => '@group(0) @binding(0) var<storage, read_write> o: array<u32>;\n@compute @workgroup_size(8, 8) fn march(@builtin(global_invocation_id) id: vec3u) { o[id.x] = 4294967295u; }\n@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0.0); }\n@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0); }',
+  trivial_tex: () => '@group(0) @binding(5) var img: texture_storage_2d<rgba8unorm, write>;\n@compute @workgroup_size(8, 8) fn march(@builtin(global_invocation_id) id: vec3u) { textureStore(img, id.xy, vec4f(f32(4294967295u))); }\n@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0.0); }\n@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0); }',
+  trivial_uniform: () => 'struct C { a: vec4f, b: vec4u }\n@group(0) @binding(0) var<uniform> cam: C;\n@group(0) @binding(1) var<storage, read_write> o: array<u32>;\n@compute @workgroup_size(8, 8) fn march(@builtin(global_invocation_id) id: vec3u) { o[id.x] = cam.b.x + 4294967295u; }\n@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0.0); }\n@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0); }',
+  trivial_wg1: () => '@group(0) @binding(0) var<storage, read_write> o: array<u32>;\n@compute @workgroup_size(1) fn march(@builtin(global_invocation_id) id: vec3u) { o[id.x] = 4294967295u; }\n@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0.0); }\n@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0); }',
+  no_trace: (s) => s.replace('let h = trace(ro, dir);', 'var h: Hit; h.t = -1.0 + f32(grid[0] + masks[0] + colors[0]);'),
+  march_store_only: (s) => s.replace(/fn march\(@builtin\(global_invocation_id\) id: vec3u\) \{[\s\S]*?\n\}\n/, 'fn march(@builtin(global_invocation_id) id: vec3u) { img[id.x] = NONCE; }\n'),
+};
+const n = +(Q.get('n') || 5);
+const rows = [];
+for (const [name, edit] of Object.entries(variants)) {
+  for (let i = 0; i < n; i++) {
+    const nonce = ((Math.random() * 4e9) >>> 0) || 1;
+    const code = edit(src0).replace('4294967295u', nonce + 'u');
+    let a = performance.now();
+    const module = device.createShaderModule({ code });
+    const info = await module.getCompilationInfo();
+    const tModule = performance.now() - a;
+    a = performance.now();
+    await device.createComputePipelineAsync({ layout: 'auto', compute: { module, entryPoint: 'march' } });
+    const tCompute = performance.now() - a;
+    a = performance.now();
+    await device.createRenderPipelineAsync({ layout: 'auto', vertex: { module, entryPoint: 'vs' }, fragment: { module, entryPoint: 'fs', targets: [{ format: fmt }] } });
+    const tRender = performance.now() - a;
+    rows.push({ variant: name, module: +tModule.toFixed(1), compute: +tCompute.toFixed(1), render: +tRender.toFixed(1), msgs: info.messages.length });
+  }
+}
+const med = (xs) => { const s = [...xs].sort((a, b) => a - b); return s[s.length >> 1]; };
+const summary = Object.keys(variants).map((v) => {
+  const r = rows.filter((x) => x.variant === v);
+  return { variant: v, module_med: med(r.map((x) => x.module)), compute_med: med(r.map((x) => x.compute)), render_med: med(r.map((x) => x.render)) };
+});
+const res = { ua: navigator.userAgent, summary, rows };
+out.textContent = JSON.stringify(res, null, 1);
+document.title = 'Compile Probe done';
+if (Q.has('report')) await fetch('/results?f=' + (Q.get('f') || 'compile'), { method: 'POST', body: JSON.stringify(res) });
+</script>
+</body>
+</html>

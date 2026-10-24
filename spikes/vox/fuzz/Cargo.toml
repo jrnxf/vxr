@@ -1,0 +1,23 @@
+[package]
+name = "vxr-vox-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+vxr-vox = { path = ".." }
+
+[[bin]]
+name = "read"
+path = "fuzz_targets/read.rs"
+test = false
+doc = false
+bench = false
+
+# Keep the fuzz crate out of any parent workspace.
+[workspace]
+members = ["."]

@@ -1,0 +1,40 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>vxr test 2: live preview bench</title>
+<style>
+  body { margin: 0; font: 12px ui-monospace, monospace; background: #1b1d22; color: #d8dce4; }
+  canvas { display: block; width: 1512px; height: 982px; max-width: 100%; height: auto; }
+  pre { margin: 8px; white-space: pre-wrap; }
+</style>
+<canvas id="c" width="3024" height="1964"></canvas>
+<pre id="log">loading</pre>
+<script type="module">
+  import init, { run_preview } from "./pkg/vxr_preview_spike.js";
+  const q = new URLSearchParams(location.search);
+  const name = q.get("name") || "browser";
+  const steps = q.get("steps") || "edit,rays,clean,recolor,half";
+  const config = q.get("config") || "{}";
+  const el = document.getElementById("log");
+  const post = (path, body) => fetch(`/${path}?name=${encodeURIComponent(name)}`, { method: "POST", body }).catch(() => {});
+  const log = (s) => { el.textContent += "\n" + s; post("log", s); };
+  // Mirror the wasm side's console.log lines into the page and the progress log.
+  const orig = console.log.bind(console);
+  console.log = (...a) => { orig(...a); log(a.join(" ")); };
+  el.textContent = `${name}: ${navigator.userAgent}\nWebGPU: ${!!navigator.gpu}`;
+  post("log", `start ${navigator.userAgent}`);
+  window.__done = false;
+  try {
+    await init();
+    const t0 = performance.now();
+    const out = await run_preview(config, steps, document.getElementById("c"));
+    const res = JSON.parse(out);
+    res.user_agent = navigator.userAgent;
+    res.run_ms = performance.now() - t0;
+    await post("results", JSON.stringify(res));
+    log(`done in ${(res.run_ms / 1000).toFixed(1)} s`);
+  } catch (e) {
+    log(`error: ${e && e.stack ? e.stack : e}`);
+    await post("results", JSON.stringify({ error: String(e), user_agent: navigator.userAgent }));
+  }
+  window.__done = true;
+</script>

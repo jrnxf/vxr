@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Build the ogt_vox reference reader from the pinned header in corpus/fetched/.
+set -euo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
+inc="$here/../../corpus/fetched/opengametools/src"
+[[ -f "$inc/ogt_vox.h" ]] || { echo "run corpus/fetch-corpus first" >&2; exit 1; }
+mkdir -p "$here/../target"
+for t in ogt_dump ogt_resave; do
+  clang++ -std=c++17 -O2 -DNDEBUG -w -I "$inc" "$here/$t.cpp" -o "$here/../target/$t"
+  echo "built target/$t"
+done
