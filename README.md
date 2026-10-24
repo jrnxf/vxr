@@ -10,7 +10,7 @@ Early stage. Nothing here is the real build yet.
   - `prototype/demo/` is the built version. Serve it with any static server, for example `python3 -m http.server -d prototype/demo`, then open `index.html` (`?scene=terrain` loads a 3.9M-voxel stress scene) or `embed.html`.
   - `prototype/src/` holds the sources and `build.mjs`.
 - `docs/market-research.md` - whether there is a market for an open-source voxel editor, and which wedge to take.
-- `docs/ui-directions.html` - four UI directions for the editor. The pick is **D, Hybrid**.
+- `ui-directions.html` (in `vxr-design-references.zip` on the `design-references` GitHub release) - four UI directions for the editor. The pick is **D, Hybrid**.
 
 ## Direction
 

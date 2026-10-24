@@ -11,7 +11,7 @@ Facts below are as of 2026-10-24. Star counts and release dates come from the Gi
 
 ## What Hybrid needs from the UI
 
-From `docs/decisions.md` and the mockups (`docs/screenshots/board-dir-d.png`, `docs/screenshots/editor-island.png`):
+From `docs/decisions.md` and the mockups (`board-dir-d.png` and `editor-island.png` in `vxr-design-references.zip` on the `design-references` GitHub release):
 
 - Floating rounded panels with soft shadows over a full-bleed 3D view: toolbar, palette, hint bar, stats corner, live render corner.
 - Crisp small text (labels at about 11 to 13 px, monospace numbers), key-cap hints, a Cmd-K palette with a text field.

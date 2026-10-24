@@ -18,7 +18,7 @@ What has been settled for vxr so far, and why. Newest context first within each 
 
 ## UI: Hybrid (direction D)
 
-Picked from four directions in `docs/ui-directions.html` (A Studio, B Sketch, C Diorama, D Hybrid).
+Picked from four directions in `ui-directions.html` (in the `design-references` GitHub release) (A Studio, B Sketch, C Diorama, D Hybrid).
 
 - One small floating toolbar: add, erase, paint, pick, plus a few shapes (voxel, box, face). Single-letter keys for everything, modifiers for quick overrides (Shift erases, Alt picks), and hints near the cursor.
 - The palette is always on screen. Editing a palette slot recolors every voxel using it.
@@ -67,4 +67,4 @@ Phase 1 picks from `docs/research/recommendation.md`, now confirmed or changed b
 - The embed as a web component: shadow DOM, its own orbit that never captures page scroll, and rendering only while on screen.
 - Island draws 32k triangles in 18 draw calls; the 3.9M-voxel terrain draws 595k triangles in 248 calls. FPS was not measured on real hardware.
 
-Screenshots: `docs/screenshots/`.
+Screenshots: `vxr-design-references.zip` on the `design-references` GitHub release.
