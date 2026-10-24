@@ -1,0 +1,568 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voxel Editor UI</title>
+<link rel="icon" href="data:,">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
+<style>
+  :root {
+    --bg: #0d0f14; --bg2: #13161d; --card: #171a22; --line: rgba(255,255,255,.08); --line2: rgba(255,255,255,.14);
+    --text: #e8eaf0; --muted: #9298a8; --faint: #636878;
+    --accent: #8ea2ff; --accent-bg: rgba(142,162,255,.14); --good: #6ee7a8; --warn: #ffd166; --bad: #ff6b7a;
+    --panel: rgba(18, 21, 28, .82);
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  html { background: var(--bg); }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.55 Inter, system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+  :where(.grid, .flex) > * { min-width: 0; }
+  :where(p, li, td, th, h1, h2, h3) { overflow-wrap: anywhere; }
+  a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
+  main { max-width: 1240px; margin: 0 auto; padding: 48px 20px 96px; }
+  .mono { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+  .kicker { font: 600 11.5px/1 Inter; letter-spacing: .14em; text-transform: uppercase; color: var(--accent); }
+  h1 { font-size: 40px; line-height: 1.08; letter-spacing: -.025em; margin: 12px 0 14px; max-width: 900px; }
+  h2 { font-size: 26px; letter-spacing: -.02em; margin: 0 0 6px; }
+  h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 10px; font-weight: 600; }
+  .lede { color: var(--muted); font-size: 17px; max-width: 820px; margin: 0; }
+  .tldr { margin-top: 26px; display: grid; grid-template-columns: auto 1fr; gap: 16px; align-items: start; background: linear-gradient(135deg, rgba(142,162,255,.14), rgba(142,162,255,.04)); border: 1px solid rgba(142,162,255,.3); border-radius: 14px; padding: 18px 20px; }
+  .tldr .icon { width: 36px; height: 36px; border-radius: 10px; background: var(--accent); color: #0d1020; display: grid; place-items: center; }
+  .tldr b { color: #fff; }
+  .tldr p { margin: 0; }
+  .links { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 999px; border: 1px solid var(--line2); color: var(--text); font-size: 13px; }
+  .pill svg { width: 14px; height: 14px; }
+  section { margin-top: 64px; }
+  .sec-head { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 18px; flex-wrap: wrap; }
+  .sec-head p { margin: 0; color: var(--muted); }
+
+  /* grounding */
+  .ground { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .gcol { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px; }
+  .gcol h3 { display: flex; align-items: center; gap: 8px; }
+  .gcol ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+  .gcol li { display: grid; grid-template-columns: 22px 1fr; gap: 8px; font-size: 14px; }
+  .gcol li .q { color: var(--faint); font-size: 12.5px; display: block; margin-top: 2px; }
+  .love li::before { content: '+'; color: var(--good); font-weight: 700; }
+  .hate li::before { content: '−'; color: var(--bad); font-weight: 700; }
+  .implies { margin-top: 16px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  .imp { background: var(--bg2); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; font-size: 13.5px; color: var(--muted); }
+  .imp b { display: block; color: var(--text); margin-bottom: 3px; font-size: 14px; }
+
+  /* direction rows */
+  .dir { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); gap: 24px; background: var(--card); border: 1px solid var(--line); border-radius: 18px; padding: 20px; margin-bottom: 22px; }
+  .dir.rec { border-color: rgba(142,162,255,.45); box-shadow: 0 0 0 1px rgba(142,162,255,.2), 0 20px 60px rgba(142,162,255,.08); }
+  .dir-title { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; flex-wrap: wrap; }
+  .tag { font: 600 11px/1 Inter; letter-spacing: .06em; text-transform: uppercase; padding: 5px 8px; border-radius: 6px; background: rgba(255,255,255,.06); color: var(--muted); }
+  .tag.rec { background: var(--accent); color: #0d1020; }
+  .letter { width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; font-weight: 700; background: rgba(255,255,255,.07); }
+  .rec .letter { background: var(--accent); color: #0d1020; }
+  .one { color: var(--muted); margin: 0 0 14px; }
+  .legend { list-style: none; padding: 0; margin: 14px 0 0; display: grid; gap: 7px; font-size: 13.5px; }
+  .legend li { display: grid; grid-template-columns: 22px 1fr; gap: 8px; align-items: start; color: var(--muted); }
+  .legend li b { color: var(--text); font-weight: 500; }
+  .num { width: 20px; height: 20px; border-radius: 50%; background: var(--accent); color: #0d1020; font: 700 11px/20px Inter; text-align: center; }
+  .side h3 { margin-top: 18px; } .side h3:first-child { margin-top: 0; }
+  .minute { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; counter-reset: m; }
+  .minute li { position: relative; padding-left: 64px; font-size: 13.5px; color: var(--muted); }
+  .minute li::before { content: attr(data-t); position: absolute; left: 0; top: 0; font: 500 11.5px/1.75 'JetBrains Mono', monospace; color: var(--accent); }
+  .minute li b { color: var(--text); font-weight: 500; }
+  .keys { display: flex; flex-wrap: wrap; gap: 6px 12px; font-size: 13px; color: var(--muted); }
+  kbd { font: 500 11px 'JetBrains Mono', monospace; color: var(--text); border: 1px solid var(--line2); border-bottom-width: 2px; border-radius: 5px; padding: 1px 5px; }
+  .pc { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .pc ul { margin: 0; padding-left: 16px; font-size: 13.5px; color: var(--muted); display: grid; gap: 5px; }
+  .pc .pro h3 { color: var(--good); } .pc .con h3 { color: var(--bad); }
+
+  /* the mock frame */
+  .mock { position: relative; aspect-ratio: 16 / 10; border-radius: 12px; overflow: hidden; background: #12141a var(--scene) center / cover no-repeat; border: 1px solid var(--line2); container-type: inline-size; font-size: clamp(7px, 1.25cqw, 11px); color: #e8eaf0; user-select: none; }
+  .mock * { line-height: 1.3; }
+  .m-panel { position: absolute; background: var(--panel); border: 1px solid rgba(255,255,255,.09); border-radius: .8em; backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); box-shadow: 0 .6em 1.6em rgba(0,0,0,.35); }
+  .m-ico { width: 2.6em; height: 2.6em; border-radius: .6em; display: grid; place-items: center; color: #9aa0b0; }
+  .m-ico svg { width: 1.45em; height: 1.45em; }
+  .m-ico.on { background: var(--accent-bg); color: var(--accent); box-shadow: inset 0 0 0 1px rgba(142,162,255,.4); }
+  .m-label { font-size: .78em; text-transform: uppercase; letter-spacing: .08em; color: #687080; }
+  .m-sw { display: grid; gap: .25em; }
+  .m-sw i { display: block; aspect-ratio: 1; border-radius: .25em; }
+  .m-sw i.on { box-shadow: 0 0 0 .15em #161920, 0 0 0 .32em #fff; }
+  .m-row { display: flex; align-items: center; gap: .5em; }
+  .m-txt { color: #9aa0b0; }
+  .m-btn { padding: .35em .7em; border-radius: .5em; color: #9aa0b0; white-space: nowrap; }
+  .m-btn.on { background: rgba(255,255,255,.1); color: #fff; }
+  .m-btn.primary { background: var(--accent); color: #0d1020; font-weight: 600; }
+  .pin { position: absolute; width: 2.1em; height: 2.1em; border-radius: 50%; background: var(--accent); color: #0d1020; font-weight: 700; font-size: 1em; display: grid; place-items: center; box-shadow: 0 0 0 .3em rgba(142,162,255,.3), 0 .3em .8em rgba(0,0,0,.4); z-index: 5; }
+  .cursor-box { position: absolute; border: .15em solid #fff; background: rgba(94,166,74,.55); box-shadow: 0 0 0 .1em rgba(0,0,0,.3); }
+  .sel-box { position: absolute; border: .15em dashed var(--accent); background: rgba(142,162,255,.1); }
+  .tree div { padding: .3em .6em; border-radius: .4em; color: #9aa0b0; display: flex; gap: .45em; align-items: center; white-space: nowrap; }
+  .tree div.on { background: var(--accent-bg); color: #fff; }
+  .tree svg { width: 1.2em; height: 1.2em; flex: none; }
+  .dim { color: #687080; }
+
+  /* scorecard */
+  table { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; font-size: 14px; }
+  th, td { padding: 11px 14px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+  th { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; background: var(--bg2); }
+  th.recol, td.recol { background: rgba(142,162,255,.07); }
+  td .why { display: block; color: var(--faint); font-size: 12.5px; margin-top: 2px; }
+  .dots { display: inline-flex; gap: 3px; }
+  .dots i { width: 8px; height: 8px; border-radius: 50%; background: rgba(255,255,255,.12); }
+  .dots i.f { background: var(--accent); }
+  .tablewrap { overflow-x: auto; }
+
+  /* recommendation grid */
+  .recgrid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
+  .ri { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+  .ri h4 { margin: 0 0 6px; font-size: 15px; display: flex; align-items: center; gap: 8px; }
+  .ri h4 svg { width: 16px; height: 16px; color: var(--accent); }
+  .ri p { margin: 0; color: var(--muted); font-size: 13.5px; }
+  .ri .src { display: block; margin-top: 6px; font-size: 12px; color: var(--faint); }
+  .built { font: 600 10.5px/1 Inter; letter-spacing: .05em; text-transform: uppercase; color: var(--good); border: 1px solid rgba(110,231,168,.35); padding: 3px 6px; border-radius: 5px; margin-left: auto; }
+  .todo { font: 600 10.5px/1 Inter; letter-spacing: .05em; text-transform: uppercase; color: var(--warn); border: 1px solid rgba(255,209,102,.35); padding: 3px 6px; border-radius: 5px; margin-left: auto; }
+
+  /* pick form */
+  form.pick { background: var(--card); border: 1px solid rgba(142,162,255,.35); border-radius: 18px; padding: 22px; display: grid; gap: 20px; }
+  .opts { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+  .opt { position: relative; display: block; border: 1px solid var(--line2); border-radius: 12px; padding: 14px; cursor: pointer; background: var(--bg2); }
+  .opt input { position: absolute; opacity: 0; pointer-events: none; }
+  .opt b { display: block; font-size: 15px; margin-bottom: 3px; }
+  .opt span { color: var(--muted); font-size: 13px; }
+  .opt:has(input:checked) { border-color: var(--accent); background: var(--accent-bg); box-shadow: 0 0 0 1px var(--accent); }
+  .opt:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  fieldset { border: 0; padding: 0; margin: 0; }
+  legend { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); font-weight: 600; margin-bottom: 10px; }
+  .chk { display: flex; gap: 9px; align-items: flex-start; padding: 6px 0; font-size: 14px; color: var(--text); cursor: pointer; }
+  .chk input { margin-top: 3px; accent-color: var(--accent); }
+  .chk small { display: block; color: var(--faint); font-size: 12.5px; }
+  textarea { width: 100%; min-height: 80px; background: var(--bg2); color: var(--text); border: 1px solid var(--line2); border-radius: 10px; padding: 10px 12px; font: inherit; resize: vertical; }
+  .submit { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  .submit button { background: var(--accent); color: #0d1020; border: 0; font: 600 15px Inter; padding: 11px 20px; border-radius: 10px; cursor: pointer; }
+  .submit button:hover { background: #a6b6ff; }
+  .status { color: var(--muted); font-size: 13.5px; }
+  .status.q { color: var(--good); }
+  footer { margin-top: 56px; color: var(--faint); font-size: 13px; }
+
+  @media (max-width: 980px) {
+    .dir { grid-template-columns: 1fr; }
+    .opts { grid-template-columns: 1fr 1fr; }
+    .implies { grid-template-columns: 1fr 1fr; }
+  }
+  @media (max-width: 680px) {
+    h1 { font-size: 30px; }
+    .ground, .recgrid, .row2, .pc { grid-template-columns: 1fr; }
+    .opts, .implies { grid-template-columns: 1fr; }
+  }
+</style>
+<style>:root { --scene: url(__SCENE_DATA__); }</style>
+</head>
+<body>
+<main>
+  <div class="kicker">Voxel editor · UI direction</div>
+  <h1>Which UI should the voxel editor have?</h1>
+  <p class="lede">Three different directions, each with a mock, how the first minute goes, the keys, and what it costs. Then my recommendation. The mocks sit on a real render from the working demo, so the scale is honest.</p>
+  <div class="tldr">
+    <div class="icon"><i data-lucide="sparkles"></i></div>
+    <p><b>My pick: the Hybrid (D).</b> Use Sketch's (B) gestures: three tool verbs, with modifiers for everything else. Keep MagicaVoxel's palette-first panel from Studio (A). Show Diorama's (C) scene tree only once a second object exists. Path-traced render runs live in a corner and never blocks editing. The demo already implements about half of D, so you can feel it now.</p>
+  </div>
+  <div class="links">
+    <a class="pill" href="__DEMO_URL__" target="_blank"><i data-lucide="box"></i>Try the demo editor</a>
+    <a class="pill" href="__EMBED_URL__" target="_blank"><i data-lucide="code-xml"></i>See the one-tag embed</a>
+    <a class="pill" href="#pick"><i data-lucide="check-circle"></i>Jump to the pick</a>
+  </div>
+
+  <section>
+    <div class="sec-head"><h2>What the research says users love and hate</h2><p>From the market report; every line has its source.</p></div>
+    <div class="ground">
+      <div class="gcol love">
+        <h3>Love - keep these</h3>
+        <ul>
+          <li><span>Results in minutes: <span class="q">"buildin things out of voxels in 20 minutes" (<a href="https://news.ycombinator.com/item?id=18510861">HN</a>); "a mix between minecraft, blender and photoshop" (<a href="https://www.reddit.com/r/ImaginarySliceOfLife/comments/kp0yv9/small_onsen/ghvfiez/">Reddit</a>)</span></span></li>
+          <li><span>Hand-sculpting feel <span class="q">"What I loved about MV was handsculpting everything" (<a href="https://www.reddit.com/r/Art/comments/1v3hmx0/isle_of_the_dead_hasan_goktepe_voxel_art_2021/oz9o2ez/">Reddit</a>)</span></span></li>
+          <li><span>Palette-first: recolor the whole scene at once <span class="q"><a href="https://80.lv/articles/using-voxels-for-simple-dioramas">80.lv</a>; batch HSV/palette swaps</span></span></li>
+          <li><span>A gorgeous renderer built into the editor <span class="q">"MagicaVoxel's renderer is just gorgeous" (<a href="https://www.reddit.com/r/MagicaVoxel/comments/lnmvsg/laterrrrz_rendered_at_15k_samples/go1o3ue/">Reddit</a>)</span></span></li>
+          <li><span>Tiny, free, no account, opens instantly <span class="q">"only a few mb" (<a href="https://www.reddit.com/r/VOXEL/comments/gq73jr/where_would_i_begin_learning_voxel_art/frr9y7x/">Reddit</a>)</span></span></li>
+        </ul>
+      </div>
+      <div class="gcol hate">
+        <h3>Hate - fix these</h3>
+        <ul>
+          <li><span>256³ cap, scenes chopped into blocks <span class="q">"a nightmare. Stuff like terrain and large walls" (<a href="https://www.reddit.com/r/VOXEL/comments/1uqdl3a/i_find_the_256_limit_frustrating/owb38p9/">Reddit</a>)</span></span></li>
+          <li><span>Rendering and editing are separate modes <span class="q">"switching back and forth between rendering and editing" (<a href="https://www.reddit.com/r/VOXEL/comments/760t5s/my_magicavoxel_wishlist/dobec2h/">Reddit</a>)</span></span></li>
+          <li><span>Clunky UI <span class="q">"It's UI just feels clunky" - Goxel (<a href="https://news.ycombinator.com/item?id=46292054">HN</a>)</span></span></li>
+          <li><span>Lag on big scenes or selections <span class="q">Goxel <a href="https://github.com/guillaumechereau/goxel/issues/414">#414</a>; VoxEdit "lag to the point of crashing" (<a href="https://www.reddit.com/r/godot/comments/fxtv0r/me_an_completly_coding_newbie_trying_to_make_an/fmy1bae/">Reddit</a>)</span></span></li>
+          <li><span>Undo capped at 100, autosave freezes <span class="q">MV <a href="https://github.com/ephtracy/ephtracy.github.io/blob/master/mv_main.html">changelog</a>, <a href="https://github.com/ephtracy/voxel-model/issues/59">#59</a></span></span></li>
+        </ul>
+      </div>
+    </div>
+    <div class="implies">
+      <div class="imp"><b>Verbs, not a mode matrix</b>Learn it in minutes: three verbs, with modifiers instead of a 3×5 grid of modes.</div>
+      <div class="imp"><b>Palette is a first-class panel</b>Always visible. Editing a slot recolors every voxel that uses it.</div>
+      <div class="imp"><b>Render is a view, not a mode</b>A live path-traced preview that runs while you edit.</div>
+      <div class="imp"><b>Structure appears when needed</b>No 256 cap and no forced objects. A tree shows up once there are two objects.</div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>Three directions</h2><p>Numbered pins on each mock match its legend.</p></div>
+
+    <!-- A: Studio -->
+    <div class="dir" id="dir-a">
+      <div>
+        <div class="dir-title"><span class="letter">A</span><h2>Studio</h2><span class="tag">MagicaVoxel-familiar</span></div>
+        <p class="one">Everything is visible: tool and brush as two columns of modes, palette and materials on the right, an object outliner, and Edit/Render tabs.</p>
+        <div class="mock">
+          <div class="m-panel" style="left:0;right:0;top:0;height:7%;border-radius:0;display:flex;align-items:center;gap:1.2em;padding:0 1.2em">
+            <b>Voxel Studio</b><span class="m-txt">File</span><span class="m-txt">Edit</span><span class="m-txt">View</span><span class="m-txt">Help</span>
+            <div style="margin-left:auto" class="m-row"><span class="m-btn on">Edit</span><span class="m-btn">Render</span><span class="m-btn">World</span></div>
+          </div>
+          <div class="m-panel" style="left:1%;top:9%;width:13.5%;padding:.7em;display:grid;grid-template-columns:1fr 1fr;gap:.35em .4em">
+            <span class="m-label">Tool</span><span class="m-label">Brush</span>
+            <div class="m-ico on" title="Attach"><i data-lucide="box"></i></div><div class="m-ico"><i data-lucide="mouse-pointer-2"></i></div>
+            <div class="m-ico"><i data-lucide="eraser"></i></div><div class="m-ico on"><i data-lucide="square-dashed"></i></div>
+            <div class="m-ico"><i data-lucide="paintbrush"></i></div><div class="m-ico"><i data-lucide="minus"></i></div>
+            <div class="m-ico"><i data-lucide="pipette"></i></div><div class="m-ico"><i data-lucide="layers"></i></div>
+            <div class="m-ico"><i data-lucide="move-3d"></i></div><div class="m-ico"><i data-lucide="locate"></i></div>
+            <span class="m-label" style="grid-column:span 2;margin-top:.4em">Mirror</span>
+            <div class="m-row" style="grid-column:span 2;gap:.3em"><span class="m-btn on">X</span><span class="m-btn">Y</span><span class="m-btn">Z</span></div>
+          </div>
+          <div class="m-panel" style="right:1%;top:9%;width:20%;padding:.7em">
+            <div class="m-row" style="margin-bottom:.5em"><span class="m-btn on">Palette</span><span class="m-btn">Material</span></div>
+            <div class="m-sw" style="grid-template-columns:repeat(8,1fr)" id="pal-a"></div>
+          </div>
+          <div class="m-panel tree" style="right:1%;bottom:8%;width:25%;padding:.5em">
+            <div class="m-label" style="padding:.2em .6em">Objects (≤ 256³ each)</div>
+            <div class="on"><i data-lucide="box"></i>island_a <span class="dim" style="margin-left:auto">256·24·256</span></div>
+            <div><i data-lucide="box"></i>island_b <span class="dim" style="margin-left:auto">64·24·256</span></div>
+            <div><i data-lucide="box"></i>house <span class="dim" style="margin-left:auto">13·13·11</span></div>
+          </div>
+          <div class="m-panel" style="left:0;right:0;bottom:0;height:5.5%;border-radius:0;display:flex;align-items:center;gap:2em;padding:0 1.2em" >
+            <span class="m-txt mono">x 12  y 14  z -3</span><span class="m-txt">Attach · Box</span><span class="m-txt" style="margin-left:auto">Undo 37 / 100</span>
+          </div>
+          <div class="sel-box" style="left:40%;top:49%;width:14%;height:9%;border-style:solid;border-color:#fff;background:rgba(94,166,74,.4)"></div>
+          <div class="pin" style="left:15.5%;top:10%">1</div>
+          <div class="pin" style="right:21.8%;top:10%">2</div>
+          <div class="pin" style="right:27%;bottom:20%">3</div>
+          <div class="pin" style="right:28.5%;top:.6%">4</div>
+        </div>
+        <ul class="legend">
+          <li><span class="num">1</span><span><b>Tool × brush matrix.</b> 5 tools × 5 brushes = 25 modes, each visible and one click away. Exactly how MagicaVoxel works.</span></li>
+          <li><span class="num">2</span><span><b>Palette + material tabs.</b> Palette-first, like MV.</span></li>
+          <li><span class="num">3</span><span><b>Object outliner.</b> Big scenes are split into objects, so the 256³ habit carries over.</span></li>
+          <li><span class="num">4</span><span><b>Edit / Render / World tabs.</b> Render is a separate mode, as in MV.</span></li>
+        </ul>
+      </div>
+      <div class="side">
+        <h3>First minute</h3>
+        <ol class="minute">
+          <li data-t="0:00">Opens to an empty 40³ box. <b>Attach · Voxel</b> is preselected.</li>
+          <li data-t="0:15">Click adds voxels. To erase, look for <b>Erase</b> in the left column.</li>
+          <li data-t="0:40">Tries Box, gets <b>Erase+Box</b> by mistake (a mode error), and undoes.</li>
+          <li data-t="1:00">MV users are productive at once; newcomers are still reading icons.</li>
+        </ol>
+        <h3>Keys</h3>
+        <div class="keys"><span><kbd>1</kbd>-<kbd>5</kbd> tool</span><span><kbd>Q</kbd>-<kbd>T</kbd> brush</span><span><kbd>Tab</kbd> edit/render</span><span>RMB orbit</span></div>
+        <div class="pc" style="margin-top:18px">
+          <div class="pro"><h3>Why it's intuitive</h3><ul><li>Zero relearning for 1.6M MV downloaders.</li><li>Every capability is visible, so nothing is hidden.</li><li>Easy to document and screenshot.</li></ul></div>
+          <div class="con"><h3>Costs</h3><ul><li>Mode errors: the wrong pair of modes is a common slip.</li><li>Panels take about 30% of the canvas; bad on laptops and tablets.</li><li>Copies MV's split between render and edit, which users dislike.</li></ul></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- B: Sketch -->
+    <div class="dir" id="dir-b">
+      <div>
+        <div class="dir-title"><span class="letter">B</span><h2>Sketch</h2><span class="tag">Gesture-first, near chromeless</span></div>
+        <p class="one">Almost no chrome. A single floating pill holds color, verbs and shape. Modifiers do the rest, and <kbd>⌘K</kbd> finds anything.</p>
+        <div class="mock">
+          <div class="m-panel" style="left:1.2%;top:2%;padding:.55em .8em" ><div class="m-row"><b>island.vox</b><i data-lucide="chevron-down" style="width:1.1em;height:1.1em;color:#9aa0b0"></i><span class="dim">· saved</span></div></div>
+          <div class="m-panel" style="left:50%;top:2%;transform:translateX(-50%);width:34%;padding:.5em">
+            <div class="m-row" style="padding:.3em .5em;border-bottom:1px solid rgba(255,255,255,.08);margin-bottom:.3em"><i data-lucide="search" style="width:1.2em;height:1.2em;color:#9aa0b0"></i><span>mirr</span><span class="dim" style="margin-left:auto">⌘K</span></div>
+            <div class="m-btn on" style="display:flex">Mirror X <span class="dim" style="margin-left:auto">M</span></div>
+            <div class="m-btn" style="display:flex">Mirror selection <span class="dim" style="margin-left:auto"></span></div>
+            <div class="m-btn" style="display:flex">Mirror Z <span class="dim" style="margin-left:auto">⇧M</span></div>
+          </div>
+          <div class="m-panel" style="left:50%;bottom:16%;transform:translateX(-62%);padding:.6em;width:17%">
+            <div class="m-label" style="margin-bottom:.4em">Ramps</div>
+            <div class="m-sw" style="grid-template-columns:repeat(6,1fr)" id="pal-b"></div>
+          </div>
+          <div class="m-panel" style="left:50%;bottom:3%;transform:translateX(-50%);padding:.45em;display:flex;gap:.3em;align-items:center;border-radius:2em">
+            <span style="width:2.6em;height:2.6em;border-radius:50%;background:#5ea64a;box-shadow:inset 0 0 0 .15em rgba(255,255,255,.3)"></span>
+            <div class="m-ico on"><i data-lucide="plus"></i></div><div class="m-ico"><i data-lucide="eraser"></i></div><div class="m-ico"><i data-lucide="paintbrush"></i></div>
+            <span style="width:1px;height:1.8em;background:rgba(255,255,255,.12);margin:0 .3em"></span>
+            <div class="m-ico on"><i data-lucide="dot"></i></div><div class="m-ico"><i data-lucide="square"></i></div><div class="m-ico"><i data-lucide="layers"></i></div>
+          </div>
+          <div class="cursor-box" style="left:57%;top:47%;width:2.2%;height:3.4%"></div>
+          <div class="m-panel" style="left:60%;top:42%;padding:.3em .6em;border-radius:.5em;font-size:.9em;white-space:nowrap"><span class="dim">⇧</span> erase · <span class="dim">⌥</span> pick · <span class="dim">2×click</span> face</div>
+          <div class="pin" style="left:26.5%;bottom:4%">1</div>
+          <div class="pin" style="left:29%;bottom:24%">2</div>
+          <div class="pin" style="left:66%;top:3%">3</div>
+          <div class="pin" style="left:63%;top:34%">4</div>
+        </div>
+        <ul class="legend">
+          <li><span class="num">1</span><span><b>One pill.</b> Color chip, three verbs (add, erase, paint) and three shapes (dot, box, face). There is nothing else to learn first.</span></li>
+          <li><span class="num">2</span><span><b>Ramp palette</b> pops from the chip. Colors are grouped by hue ramp, not as a 256-cell grid.</span></li>
+          <li><span class="num">3</span><span><b>⌘K command palette</b> holds the long tail: mirror, hollow, export, palette swap and settings.</span></li>
+          <li><span class="num">4</span><span><b>Cursor whisper.</b> The live hints sit next to the ghost voxel, not in a status bar.</span></li>
+        </ul>
+      </div>
+      <div class="side">
+        <h3>First minute</h3>
+        <ol class="minute">
+          <li data-t="0:00">Opens on a starter scene with a ghost voxel already under the cursor.</li>
+          <li data-t="0:05">Clicks to add and <b>drags to draw</b> on that plane. Shift erases, Alt picks.</li>
+          <li data-t="0:30">Two fingers orbit on a trackpad or tablet; one finger draws.</li>
+          <li data-t="1:00">Has sculpted something. Needs to discover ⌘K for anything beyond the basics.</li>
+        </ol>
+        <h3>Keys</h3>
+        <div class="keys"><span><kbd>⇧</kbd> erase</span><span><kbd>⌥</kbd> pick</span><span><kbd>⌘</kbd> paint</span><span>dbl-click face</span><span><kbd>⌘K</kbd> everything</span></div>
+        <div class="pc" style="margin-top:18px">
+          <div class="pro"><h3>Why it's intuitive</h3><ul><li>The fastest path to a first result, with no mode matrix.</li><li>The canvas gets about 95% of the screen; works on tablets.</li><li>The same model works with a mouse, a trackpad and touch.</li></ul></div>
+          <div class="con"><h3>Costs</h3><ul><li>Hidden power: Box, Face and Mirror are invisible until found.</li><li>No home for structure, so big scenes get messy.</li><li>MV veterans may find it toy-like at first.</li></ul></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- C: Diorama -->
+    <div class="dir" id="dir-c">
+      <div>
+        <div class="dir-title"><span class="letter">C</span><h2>Diorama</h2><span class="tag">Scene-first, select-then-act</span></div>
+        <p class="one">You build a scene, not a model. You see a tree of unlimited-size objects and a stamp library. You select first, then act with a gizmo and inspector. Publish to the embed is a top-level action.</p>
+        <div class="mock">
+          <div class="m-panel" style="left:0;right:0;top:0;height:7.5%;border-radius:0;display:flex;align-items:center;gap:1em;padding:0 1.2em">
+            <b>Island diorama</b>
+            <div class="m-row" style="margin-left:2em;background:rgba(255,255,255,.05);border-radius:.6em;padding:.2em"><span class="m-btn">Build</span><span class="m-btn on">Select</span><span class="m-btn">Light</span></div>
+            <span class="m-btn primary" style="margin-left:auto">&lt;/&gt; Publish embed</span>
+          </div>
+          <div class="m-panel tree" style="left:1%;top:9.5%;width:22%;padding:.5em">
+            <div class="m-label" style="padding:.2em .6em">Scene</div>
+            <div><i data-lucide="mountain"></i>Terrain <span class="dim" style="margin-left:auto">128·24·128</span></div>
+            <div class="on"><i data-lucide="house"></i>House <span class="dim" style="margin-left:auto">13·13·11</span></div>
+            <div style="padding-left:1.8em"><i data-lucide="square"></i>Roof</div>
+            <div><i data-lucide="trees"></i>Trees <span class="dim" style="margin-left:auto">×30 inst</span></div>
+            <div><i data-lucide="waves"></i>Dock</div>
+            <div class="m-label" style="padding:.6em .6em .3em">Stamps</div>
+            <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:.35em;padding:.2em .6em .4em">
+              <i style="aspect-ratio:1;border-radius:.35em;background:linear-gradient(#5ea64a 60%,#5c4033 60%)"></i>
+              <i style="aspect-ratio:1;border-radius:.35em;background:linear-gradient(#2f5d3a 70%,#5c4033 70%)"></i>
+              <i style="aspect-ratio:1;border-radius:.35em;background:#7e8496"></i>
+              <i style="aspect-ratio:1;border-radius:.35em;background:linear-gradient(#b83b3b 45%,#e9e2d0 45%)"></i>
+            </div>
+          </div>
+          <div class="m-panel" style="right:1%;top:9.5%;width:20%;padding:.7em;display:grid;gap:.55em">
+            <div class="m-label">Selection</div>
+            <div><b>House</b> <span class="dim">· 1,240 voxels</span></div>
+            <div class="m-row mono" style="gap:.3em"><span class="m-btn on">x -6</span><span class="m-btn on">y 12</span><span class="m-btn on">z 6</span></div>
+            <div class="m-label">Colors in selection</div>
+            <div class="m-sw" style="grid-template-columns:repeat(6,1fr)"><i style="background:#e9e2d0"></i><i style="background:#c2b8a3"></i><i style="background:#b83b3b" class="on"></i><i style="background:#e5604f"></i><i style="background:#9cc9f5"></i><i style="background:#a35a2a"></i></div>
+            <div class="m-row" style="flex-wrap:wrap;gap:.3em"><span class="m-btn on">Recolor</span><span class="m-btn on">Mirror</span><span class="m-btn on">Hollow</span><span class="m-btn on">Stamp</span></div>
+          </div>
+          <div class="sel-box" style="left:42%;top:33%;width:11%;height:14%"></div>
+          <svg style="position:absolute;left:47.5%;top:38%;width:9%;height:14%;overflow:visible" viewBox="0 0 100 100"><line x1="0" y1="60" x2="70" y2="60" stroke="#ff6b7a" stroke-width="4"/><polygon points="70,52 86,60 70,68" fill="#ff6b7a"/><line x1="0" y1="60" x2="0" y2="-10" stroke="#6ee7a8" stroke-width="4"/><polygon points="-8,-10 0,-26 8,-10" fill="#6ee7a8"/><line x1="0" y1="60" x2="-34" y2="86" stroke="#8ea2ff" stroke-width="4"/><polygon points="-40,78 -46,96 -28,90" fill="#8ea2ff"/></svg>
+          <div class="pin" style="left:24%;top:11%">1</div>
+          <div class="pin" style="left:24%;top:43%">2</div>
+          <div class="pin" style="left:55%;top:30%">3</div>
+          <div class="pin" style="right:22%;top:11%">4</div>
+          <div class="pin" style="right:20%;top:.8%">5</div>
+        </div>
+        <ul class="legend">
+          <li><span class="num">1</span><span><b>Scene tree.</b> Objects of any size, plus instances (30 trees cost the memory of one).</span></li>
+          <li><span class="num">2</span><span><b>Stamps.</b> Reusable pieces you drop in: the diorama-builder hook that earned Tiny World Builder its stars.</span></li>
+          <li><span class="num">3</span><span><b>Select, then act.</b> A gizmo moves, rotates and copies the selection.</span></li>
+          <li><span class="num">4</span><span><b>Inspector.</b> Shows the palette for this selection, with batch actions.</span></li>
+          <li><span class="num">5</span><span><b>Publish embed</b> is the main button: the file is the embed.</span></li>
+        </ul>
+      </div>
+      <div class="side">
+        <h3>First minute</h3>
+        <ol class="minute">
+          <li data-t="0:00">Opens on a starter diorama with the tree and inspector visible.</li>
+          <li data-t="0:20">Drags a tree stamp onto the island and moves it with the gizmo.</li>
+          <li data-t="0:45">Switches to <b>Build</b> to hand-place voxels. That is a mode switch.</li>
+          <li data-t="1:00">Has a nice scene, but has barely sculpted.</li>
+        </ol>
+        <h3>Keys</h3>
+        <div class="keys"><span><kbd>B</kbd>/<kbd>S</kbd> build/select</span><span><kbd>G</kbd> <kbd>R</kbd> move/rotate</span><span><kbd>⌘D</kbd> duplicate</span><span><kbd>⌘⇧P</kbd> publish</span></div>
+        <div class="pc" style="margin-top:18px">
+          <div class="pro"><h3>Why it's intuitive</h3><ul><li>Familiar to Figma, Blender and game-engine users.</li><li>Fixes the 256³ pain: no cap, and instancing.</li><li>The embed/publish wedge sits front and center.</li></ul></div>
+          <div class="con"><h3>Costs</h3><ul><li>Most concepts on day one; a slower first minute.</li><li>The hand-sculpting feel, which users love most, comes second.</li><li>The heaviest build (instancing, gizmo, stamps).</li></ul></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- D: Hybrid -->
+    <div class="dir rec" id="dir-d">
+      <div>
+        <div class="dir-title"><span class="letter">D</span><h2>Hybrid</h2><span class="tag rec">Recommended</span><span class="tag">Progressive disclosure</span></div>
+        <p class="one">Sketch's gesture model and Studio's always-on palette. Diorama's structure appears only when the scene needs it. Render is a live corner view, not a mode.</p>
+        <div class="mock">
+          <div class="m-panel" style="left:1%;right:1%;top:1.5%;height:7%;display:flex;align-items:center;gap:1em;padding:0 1em">
+            <b>Voxel Sketch</b><span class="m-btn on">Island diorama ⌄</span><span class="m-txt">Open</span><span class="m-txt">Save .vox</span>
+            <span class="m-row dim" style="margin-left:auto;border:1px solid rgba(255,255,255,.1);border-radius:.5em;padding:.25em .6em"><i data-lucide="search" style="width:1.1em;height:1.1em"></i>⌘K</span>
+            <span class="m-btn primary">&lt;/&gt; Embed</span>
+          </div>
+          <div class="m-panel" style="left:1%;top:10.5%;width:5.4%;padding:.4em;display:grid;gap:.25em;justify-items:center">
+            <span class="m-label">Tool</span>
+            <div class="m-ico on"><i data-lucide="box"></i></div><div class="m-ico"><i data-lucide="eraser"></i></div><div class="m-ico"><i data-lucide="paintbrush"></i></div><div class="m-ico"><i data-lucide="pipette"></i></div>
+            <span class="m-label" style="margin-top:.3em">Shape</span>
+            <div class="m-ico"><i data-lucide="mouse-pointer-2"></i></div><div class="m-ico on"><i data-lucide="square-dashed"></i></div><div class="m-ico"><i data-lucide="layers"></i></div>
+          </div>
+          <div class="m-panel" style="right:1%;top:10.5%;width:19%;padding:.7em">
+            <div class="m-row" style="margin-bottom:.5em;padding:.4em;border-radius:.5em;background:rgba(255,255,255,.04)"><span style="width:2.4em;height:2.4em;border-radius:.45em;background:#5ea64a"></span><div><div class="mono">#5EA64A</div><div class="dim">Slot 28</div></div><span class="m-btn on" style="margin-left:auto">Edit</span></div>
+            <div class="m-sw" style="grid-template-columns:repeat(8,1fr)" id="pal-d"></div>
+          </div>
+          <div class="m-panel tree" style="left:1%;bottom:12%;padding:.35em .2em">
+            <div><i data-lucide="plus"></i>Add object <span class="dim">(tree appears at 2)</span></div>
+          </div>
+          <div class="sel-box" style="left:36%;top:55%;width:16%;height:10%"></div>
+          <div class="m-panel" style="left:36%;top:47.5%;padding:.3em;display:flex;gap:.2em;border-radius:.6em">
+            <span class="m-btn on">Move</span><span class="m-btn on">Copy</span><span class="m-btn on">Recolor</span><span class="m-btn on">Mirror</span><span class="m-btn on" style="color:#ff6b7a">Delete</span>
+          </div>
+          <div class="m-panel" style="right:1%;bottom:12%;width:24%;aspect-ratio:16/10;overflow:hidden;padding:0">
+            <div style="position:absolute;inset:0;background:var(--scene) 48% 45% / 230% no-repeat;filter:saturate(1.15) contrast(1.08) brightness(1.08)"></div>
+            <div style="position:absolute;left:.5em;top:.5em;background:rgba(0,0,0,.55);padding:.2em .5em;border-radius:.4em">Path trace · 214 spp · live</div>
+          </div>
+          <div class="m-panel" style="left:50%;bottom:2%;transform:translateX(-50%);padding:.45em .9em;display:flex;gap:1.1em;white-space:nowrap">
+            <span><b>Drag</b> <span class="dim">fill a rectangle</span></span><span><b>⇧</b> <span class="dim">erase</span></span><span><b>⌥</b> <span class="dim">pick</span></span><span><b>RMB</b> <span class="dim">orbit</span></span>
+          </div>
+          <div class="m-panel mono" style="left:1%;bottom:2%;padding:.4em .7em;display:flex;gap:1.2em"><span><span class="dim">VOX</span> 145,064</span><span style="color:#6ee7a8"><span class="dim">FPS</span> 120</span></div>
+          <div class="pin" style="left:7.4%;top:12%">1</div>
+          <div class="pin" style="left:36%;bottom:9.5%">2</div>
+          <div class="pin" style="right:20.7%;top:12%">3</div>
+          <div class="pin" style="right:25.6%;bottom:30%">4</div>
+          <div class="pin" style="left:1.5%;bottom:20%">5</div>
+          <div class="pin" style="left:46%;top:40.5%">6</div>
+        </div>
+        <ul class="legend">
+          <li><span class="num">1</span><span><b>4 verbs, 3 shapes</b> as two short columns, never one 25-cell matrix. <span class="dim">Built in the demo.</span></span></li>
+          <li><span class="num">2</span><span><b>Modifiers + live hint bar.</b> Shift erases and Alt picks; the bar rewrites itself for the current tool and modifier. <span class="dim">Built.</span></span></li>
+          <li><span class="num">3</span><span><b>Palette-first panel.</b> Editing a slot recolors the scene instantly; dots mark used colors. <span class="dim">Built.</span></span></li>
+          <li><span class="num">4</span><span><b>Live render corner.</b> A progressive path tracer that never blocks editing; click to swap it with the main view.</span></li>
+          <li><span class="num">5</span><span><b>Structure on demand.</b> One sparse world with no cap. The object tree appears when you add a second object.</span></li>
+          <li><span class="num">6</span><span><b>Selection floats its actions.</b> A box selection gets a mini bar (move, copy, recolor, mirror, delete), with no inspector to hunt through.</span></li>
+        </ul>
+      </div>
+      <div class="side">
+        <h3>First minute</h3>
+        <ol class="minute">
+          <li data-t="0:00">Opens on the starter island. A 3-line coach card covers click, orbit and modifiers.</li>
+          <li data-t="0:05">Clicks to add. The coach card goes away on the first edit and the hint bar takes over.</li>
+          <li data-t="0:20">Holds Shift to erase and Alt to grab a color from the scene: no tool switch.</li>
+          <li data-t="0:40">Double-clicks a palette slot, drags the hue, and the whole roof changes.</li>
+          <li data-t="1:00">Presses <b>Embed</b> and sees the same scene live on a plain page.</li>
+        </ol>
+        <h3>Keys</h3>
+        <div class="keys"><span><kbd>A</kbd> <kbd>E</kbd> <kbd>P</kbd> <kbd>I</kbd> verbs</span><span><kbd>V</kbd> <kbd>B</kbd> <kbd>F</kbd> shapes</span><span><kbd>⇧</kbd> erase</span><span><kbd>⌥</kbd> pick</span><span><kbd>M</kbd> mirror</span><span><kbd>[</kbd> <kbd>]</kbd> color</span><span><kbd>.</kbd> frame</span><span><kbd>?</kbd> all keys</span><span><kbd>⌘K</kbd> long tail</span></div>
+        <div class="pc" style="margin-top:18px">
+          <div class="pro"><h3>Why it's intuitive</h3><ul><li>Keeps all four things users love: speed, sculpting, palette, render.</li><li>Fixes the two loudest complaints by design: the 256 cap and render-as-mode.</li><li>Feels like MV to veterans, and like a sketch app to newcomers.</li></ul></div>
+          <div class="con"><h3>Costs</h3><ul><li>Two layers of discovery (visible core plus ⌘K) need good hints.</li><li>The on-demand tree needs careful animation so it doesn't feel like it jumped.</li><li>The live path tracer is the riskiest piece of engineering.</li></ul></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>Side by side</h2><p>Five dots is best. Build cost is agent wall-clock for v1 of that UI on the same engine.</p></div>
+    <div class="tablewrap">
+    <table>
+      <thead><tr><th>Criterion</th><th>A · Studio</th><th>B · Sketch</th><th>C · Diorama</th><th class="recol">D · Hybrid</th></tr></thead>
+      <tbody id="score"></tbody>
+    </table>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>The Hybrid, piece by piece</h2><p>What each UI area does, and whether the demo already has it.</p></div>
+    <div class="recgrid">
+      <div class="ri"><h4><i data-lucide="wrench"></i>Tools<span class="built">in demo</span></h4><p>Add, Erase, Paint and Pick are verbs; Voxel, Box and Face are shapes. Any verb works with any shape, and modifiers override the verb while held.</p><span class="src">Fixes: mode errors in MV's matrix. Keeps: "results in 20 minutes".</span></div>
+      <div class="ri"><h4><i data-lucide="palette"></i>Palette<span class="built">in demo</span></h4><p>An always-visible slot grid. Editing a slot recolors the scene through a palette texture: no remesh, instant. Next: hue ramps, several palettes, and per-voxel materials.</p><span class="src">Keeps: palette-first workflow. Fixes: 255-color, material-per-slot limit.</span></div>
+      <div class="ri"><h4><i data-lucide="rotate-3d"></i>Camera<span class="built">in demo</span></h4><p>Right-drag orbits (as in MV), Shift+right-drag or middle-drag pans, and the wheel zooms toward the cursor. Space+drag orbits on trackpads, <kbd>.</kbd> frames the scene, and two fingers orbit on touch.</p><span class="src">MV muscle memory with no trackpad dead end.</span></div>
+      <div class="ri"><h4><i data-lucide="list-tree"></i>Layers / scene tree<span class="todo">next</span></h4><p>One sparse world with no cap. The tree appears with the second object, and objects can be instanced. Plain layers (show, hide, lock) come before groups.</p><span class="src">Fixes: "split your scene into multiple blocks ... a nightmare".</span></div>
+      <div class="ri"><h4><i data-lucide="square-dashed-mouse-pointer"></i>Selection<span class="todo">next</span></h4><p><kbd>S</kbd> turns any shape into a selector (box, face, color). The selection floats its own action bar. Moving it is a drag; copying is Alt+drag.</p><span class="src">Fixes: VoxEdit selection lag; Qubicle's paywalled box select.</span></div>
+      <div class="ri"><h4><i data-lucide="aperture"></i>Render<span class="todo">next</span></h4><p>A progressive path tracer in a corner view that you can click to swap with the main view. It renders while you keep editing, and the same renderer drives headless and CLI renders.</p><span class="src">Fixes: "switching back and forth between rendering and editing"; #67 headless.</span></div>
+      <div class="ri"><h4><i data-lucide="keyboard"></i>Keyboard<span class="built">in demo</span></h4><p>Single letters, printed on the buttons they trigger. <kbd>?</kbd> shows every key; <kbd>⌘K</kbd> holds the long tail. Undo is unlimited, by diff.</p><span class="src">Fixes: MV's 100-step undo cap.</span></div>
+      <div class="ri"><h4><i data-lucide="hand"></i>First minute<span class="built">in demo</span></h4><p>Opens on a real scene, not an empty box. A 3-line coach card leaves on the first edit, and a context hint bar changes with the tool and modifier.</p><span class="src">Keeps: instant start, no account, a page of a few hundred KB.</span></div>
+    </div>
+  </section>
+
+  <section id="pick">
+    <div class="sec-head"><h2>Your pick</h2><p>Choose, then press Queue. Nothing is sent until you do.</p></div>
+    <form class="pick" data-lavish-question="voxel-editor-ui-direction" id="pickform">
+      <fieldset>
+        <legend>UI direction for editor v1</legend>
+        <div class="opts">
+          <label class="opt"><input type="radio" name="direction" value="D Hybrid" checked><b>D · Hybrid</b><span>Recommended. Gestures + palette panel + tree on demand + live render.</span></label>
+          <label class="opt"><input type="radio" name="direction" value="A Studio"><b>A · Studio</b><span>MagicaVoxel-familiar mode matrix and panels.</span></label>
+          <label class="opt"><input type="radio" name="direction" value="B Sketch"><b>B · Sketch</b><span>Chromeless pill, modifiers, ⌘K.</span></label>
+          <label class="opt"><input type="radio" name="direction" value="C Diorama"><b>C · Diorama</b><span>Scene tree, stamps, select-then-act, publish-first.</span></label>
+        </div>
+      </fieldset>
+      <div class="row2">
+        <fieldset>
+          <legend>Camera model</legend>
+          <label class="chk"><input type="radio" name="camera" value="MagicaVoxel right-drag orbit" checked><span>MagicaVoxel style <small>Right-drag orbits, middle pans, wheel zooms (in the demo)</small></span></label>
+          <label class="chk"><input type="radio" name="camera" value="Blender middle-drag orbit"><span>Blender style <small>Middle-drag orbits, Shift+middle pans</small></span></label>
+          <label class="chk"><input type="radio" name="camera" value="Trackpad-first two-finger orbit"><span>Trackpad first <small>Two-finger orbit, pinch zoom, click always edits</small></span></label>
+        </fieldset>
+        <fieldset>
+          <legend>Also in v1? (optional)</legend>
+          <label class="chk"><input type="checkbox" name="extra" value="live path-traced render corner" checked><span>Live path-traced render corner</span></label>
+          <label class="chk"><input type="checkbox" name="extra" value="command palette"><span>⌘K command palette</span></label>
+          <label class="chk"><input type="checkbox" name="extra" value="touch and tablet support"><span>Touch and tablet support</span></label>
+          <label class="chk"><input type="checkbox" name="extra" value="stamps library"><span>Stamps / prefab library</span></label>
+        </fieldset>
+      </div>
+      <fieldset>
+        <legend>Anything else? (optional)</legend>
+        <textarea name="notes" placeholder="e.g. what felt off in the demo, a tool you missed, a reference editor you love"></textarea>
+      </fieldset>
+      <div class="submit"><button type="submit">Queue this pick</button><span class="status" id="pickstatus">Selected: D · Hybrid. Not queued yet.</span></div>
+    </form>
+  </section>
+
+  <footer>Mocks are static HTML over a real render from the demo (145,064-voxel island). Sources: the voxel market report.</footer>
+</main>
+<script>
+  lucide.createIcons({ attrs: { 'stroke-width': 1.75 } });
+  const PAL = ['0e0f13','272a33','3e4250','5b6070','7e8496','a5abbb','cfd3dd','f4f5f8','4a1621','7a2133','b83b3b','e5604f','ff8a6b','ffb199','f2557a','ff9bb8','6b3a1f','a35a2a','d98a3a','f2b04a','ffd166','ffe7a3','c7a06a','e8cfa0','1f3b2a','2f5d3a','3f7f43','5ea64a','8cc95b','bfe38a','4b6b3a','7d9a4c','12343f','1b5466','22808a','33b0b0','7fd8d0','1d3f73','2f6db5','5aa0e6','9cc9f5','cfe6ff','2b2554','4b3a8c','7559c2','a68cf0','d2c4ff','5a2b6b','3b2a22','5c4033','80594a','a9796a','d4a58c','f0cdb4','8a6a4f','b89470','ffffff','e9e2d0','c2b8a3','8f8775','5f5a4e','ff4d6d','ffcc00','00d1b2'];
+  const fill = (id, list, on) => { const el = document.getElementById(id); el.innerHTML = list.map((h, i) => `<i style="background:#${h}"${i === on ? ' class="on"' : ''}></i>`).join(''); };
+  fill('pal-a', PAL.slice(0, 64), 27);
+  fill('pal-d', PAL.slice(0, 64), 27);
+  fill('pal-b', ['1f3b2a','2f5d3a','3f7f43','5ea64a','8cc95b','bfe38a','4a1621','7a2133','b83b3b','e5604f','ff8a6b','ffb199','12343f','1b5466','22808a','33b0b0','7fd8d0','cfe6ff','3b2a22','5c4033','80594a','a9796a','d4a58c','f0cdb4'], 3);
+
+  const SCORE = [
+    ['First-minute success', [3, 5, 2, 5], 'B and D open on a scene with modifiers; A needs reading; C teaches concepts first'],
+    ['Familiar to MagicaVoxel users', [5, 2, 2, 4], 'D keeps right-drag orbit, palette panel, single-letter keys'],
+    ['Hand-sculpting feel', [4, 5, 2, 5], 'C puts selection and stamps ahead of sculpting'],
+    ['Canvas space', [2, 5, 2, 4], 'A and C use about 30% of the width for panels'],
+    ['Power-user speed', [4, 3, 4, 5], 'B hides the tools behind ⌘K; D has keys plus ⌘K'],
+    ['Big scenes (no 256³ cap)', [2, 2, 5, 4], 'C and D have the tree and instancing; A keeps the 256 habit'],
+    ['Touch and tablet', [1, 5, 2, 3], 'B is designed for it; D gets two-finger orbit and one-finger draw'],
+    ['Embed / publish flow', [2, 2, 5, 4], 'D: one Embed button; C makes publishing its main action'],
+    ['Build cost (agent wall-clock, v1 UI)', [4, 4, 2, 3], 'about 1 day, 1 day, 2-3 days, and 1.5-2 days of agent wall-clock'],
+  ];
+  const dots = (n) => `<span class="dots">${[1,2,3,4,5].map((i) => `<i class="${i <= n ? 'f' : ''}"></i>`).join('')}</span>`;
+  document.getElementById('score').innerHTML = SCORE.map(([c, v, why]) => `<tr><td>${c}<span class="why">${why}</span></td>${v.map((n, i) => `<td class="${i === 3 ? 'recol' : ''}">${dots(n)}</td>`).join('')}</tr>`).join('') +
+    `<tr><td><b>Total</b></td>${[0,1,2,3].map((i) => `<td class="${i === 3 ? 'recol' : ''}"><b>${SCORE.reduce((s, r) => s + r[1][i], 0)}</b> / 45</td>`).join('')}</tr>`;
+
+  const form = document.getElementById('pickform'), status = document.getElementById('pickstatus');
+  const readPick = () => {
+    const fd = new FormData(form);
+    return { direction: fd.get('direction'), camera: fd.get('camera'), extras: fd.getAll('extra'), notes: (fd.get('notes') || '').trim() };
+  };
+  form.addEventListener('change', () => { const p = readPick(); status.className = 'status'; status.textContent = `Selected: ${p.direction.replace(' ', ' · ')}. Not queued yet.`; });
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const p = readPick();
+    const answer = `${p.direction}; camera: ${p.camera}; extras: ${p.extras.length ? p.extras.join(', ') : 'none'}${p.notes ? '; notes: ' + p.notes : ''}`;
+    if (window.lavish && window.lavish.queuePrompt) {
+      window.lavish.queuePrompt(`Voxel editor UI pick: ${answer}`, { tag: 'choice', text: `UI direction: ${answer}`, element: form, queueKey: 'voxel-editor-ui-direction', data: { question: 'voxel-editor-ui-direction', answer } });
+      status.className = 'status q'; status.textContent = 'Queued. Press Send in the Lavish bar to deliver it.';
+    } else {
+      status.className = 'status q'; status.textContent = `Not inside Lavish. Paste this back: ${answer}`;
+    }
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Embed Demo</title>
+<link rel="icon" href="data:,">
+<style>
+  :root { --bg: #f6f4ef; --text: #22242a; --muted: #6b6f7a; --line: #e2ded4; --code: #1b1e26; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 17px/1.65 Georgia, 'Iowan Old Style', serif; }
+  main { max-width: 720px; margin: 0 auto; padding: 56px 16px 80px; }
+  .kicker { font: 600 12px/1 system-ui, sans-serif; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+  h1 { font-size: 40px; line-height: 1.1; margin: 10px 0 18px; letter-spacing: -0.02em; }
+  p { margin: 0 0 18px; }
+  voxel-scene { margin: 28px 0 10px; box-shadow: 0 20px 50px rgba(30, 30, 40, .18); }
+  .cap { font: 13px/1.5 system-ui, sans-serif; color: var(--muted); margin-bottom: 30px; }
+  pre { background: var(--code); color: #dfe3ee; padding: 16px 18px; border-radius: 10px; font: 13.5px/1.6 'JetBrains Mono', ui-monospace, monospace; overflow-x: auto; }
+  .t { color: #8ea2ff; } .a { color: #ffd166; } .s { color: #6ee7a8; }
+  a { color: inherit; }
+</style>
+</head>
+<body>
+<main>
+  <div class="kicker">A plain HTML page</div>
+  <h1>The scene file is the embed</h1>
+  <p>This page has no build step and no framework. The 3D scene below is a single custom element pointing at the same <code>.vox</code> file the editor saves. Drag it to look around; it stops rendering when scrolled out of view.</p>
+  <voxel-scene id="scene" src="scene.vox" autorotate></voxel-scene>
+  <div class="cap" id="cap">Starter island · <a href="index.html">open the editor</a></div>
+  <p>Everything it took:</p>
+<pre><span class="t">&lt;script</span> <span class="a">src</span>=<span class="s">"voxel-scene.js"</span><span class="t">&gt;&lt;/script&gt;</span>
+<span class="t">&lt;voxel-scene</span> <span class="a">src</span>=<span class="s">"scene.vox"</span> <span class="a">autorotate</span><span class="t">&gt;&lt;/voxel-scene&gt;</span></pre>
+  <p>In a real build this would be one versioned script on a CDN, streaming a sparse native scene format, with the <code>.vox</code> path kept for interop.</p>
+</main>
+<script>
+  if (new URLSearchParams(location.search).get('scene') === 'mine' && localStorage.getItem('voxel-sketch:scene')) {
+    document.getElementById('scene').setAttribute('src', 'local:voxel-sketch:scene');
+    document.getElementById('cap').innerHTML = 'Your scene, handed over from the editor · <a href="index.html">back to the editor</a>';
+  }
+</script>
+<script src="voxel-scene.js"></script>
+</body>
+</html>

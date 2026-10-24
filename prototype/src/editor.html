@@ -1,0 +1,720 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voxel Sketch</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 2.5l8.5 4.9v9.2L12 21.5l-8.5-4.9V7.4z' fill='%238ea2ff'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+} }
+</script>
+<style>
+  :root {
+    --bg0: #0d0f14; --bg1: #1a1e27;
+    --panel: rgba(20, 23, 30, 0.78); --panel-solid: #161920;
+    --line: rgba(255, 255, 255, 0.08); --line2: rgba(255, 255, 255, 0.14);
+    --text: #e8eaf0; --muted: #8a90a0; --faint: #5b6070;
+    --accent: #8ea2ff; --accent-bg: rgba(142, 162, 255, 0.16);
+    --danger: #ff6b7a; --ok: #6ee7a8;
+    --r: 12px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: radial-gradient(120% 90% at 50% 35%, #262b37 0%, var(--bg0) 70%); color: var(--text); font: 13px/1.4 Inter, system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+  canvas#c { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; outline: none; }
+  .panel { position: fixed; background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); backdrop-filter: blur(18px) saturate(1.2); -webkit-backdrop-filter: blur(18px) saturate(1.2); box-shadow: 0 10px 30px rgba(0,0,0,.35); }
+  button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
+  .mono { font-family: 'JetBrains Mono', ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+  kbd { font: 500 10.5px 'JetBrains Mono', monospace; color: var(--muted); border: 1px solid var(--line2); border-bottom-width: 2px; border-radius: 5px; padding: 0 4px; min-width: 18px; display: inline-block; text-align: center; line-height: 16px; }
+
+  /* top bar */
+  #top { top: 12px; left: 12px; right: 12px; height: 44px; display: flex; align-items: center; gap: 4px; padding: 0 6px 0 12px; }
+  #brand { display: flex; align-items: center; gap: 8px; font-weight: 600; letter-spacing: -0.01em; margin-right: 10px; white-space: nowrap; }
+  #brand .logo { width: 18px; height: 18px; }
+  .tbtn { height: 32px; padding: 0 10px; border-radius: 8px; display: inline-flex; align-items: center; gap: 6px; color: var(--muted); white-space: nowrap; }
+  .tbtn:hover { background: rgba(255,255,255,.06); color: var(--text); }
+  .tbtn svg { width: 16px; height: 16px; }
+  .tbtn[disabled] { opacity: .35; pointer-events: none; }
+  .sep { width: 1px; height: 20px; background: var(--line); margin: 0 6px; }
+  .grow { flex: 1; }
+  select.tbtn { appearance: none; background: transparent; border: 0; outline: none; }
+  #scene-select { background: rgba(255,255,255,.04); border: 1px solid var(--line); color: var(--text); padding-right: 26px; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%238a90a0' fill='none' stroke-width='1.5'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 9px center; }
+  #scene-select option { background: var(--panel-solid); }
+  .primary { background: var(--accent); color: #0d1020; font-weight: 600; }
+  .primary:hover { background: #a6b6ff; color: #0d1020; }
+
+  /* tool rail */
+  #rail { left: 12px; top: 68px; width: 52px; padding: 6px; display: flex; flex-direction: column; gap: 2px; }
+  .tool { position: relative; width: 40px; height: 40px; border-radius: 9px; display: grid; place-items: center; color: var(--muted); }
+  .tool svg { width: 19px; height: 19px; }
+  .tool:hover { background: rgba(255,255,255,.06); color: var(--text); }
+  .tool.on { background: var(--accent-bg); color: var(--accent); box-shadow: inset 0 0 0 1px rgba(142,162,255,.35); }
+  .tool .k { position: absolute; right: 3px; bottom: 2px; font: 500 8.5px 'JetBrains Mono', monospace; color: var(--faint); }
+  .tool.on .k { color: var(--accent); opacity: .8; }
+  .rail-sep { height: 1px; background: var(--line); margin: 5px 4px; }
+  .rail-label { font-size: 9px; text-transform: uppercase; letter-spacing: .08em; color: var(--faint); text-align: center; padding: 4px 0 2px; }
+  .tool[data-tip]:hover::after { content: attr(data-tip); position: absolute; left: 50px; top: 50%; transform: translateY(-50%); background: var(--panel-solid); border: 1px solid var(--line2); color: var(--text); padding: 5px 9px; border-radius: 7px; white-space: nowrap; font-size: 12px; pointer-events: none; z-index: 10; }
+
+  /* palette */
+  #palette { right: 12px; top: 68px; width: 232px; padding: 12px; }
+  .ph { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+  .ph h3 { margin: 0; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); font-weight: 600; }
+  #current { display: flex; align-items: center; gap: 10px; padding: 8px; border-radius: 9px; background: rgba(255,255,255,.035); border: 1px solid var(--line); margin-bottom: 10px; }
+  #current .chip { width: 34px; height: 34px; border-radius: 8px; box-shadow: inset 0 0 0 1px rgba(255,255,255,.15), 0 4px 12px rgba(0,0,0,.3); flex: none; }
+  #current .meta { flex: 1; min-width: 0; }
+  #current .hex { font-size: 13px; }
+  #current .sub { color: var(--faint); font-size: 11px; }
+  #edit-color { height: 28px; padding: 0 9px; border-radius: 7px; border: 1px solid var(--line2); color: var(--muted); font-size: 12px; }
+  #edit-color:hover { color: var(--text); border-color: rgba(255,255,255,.25); }
+  #swatches { display: grid; grid-template-columns: repeat(8, 1fr); gap: 4px; max-height: 240px; overflow-y: auto; padding: 2px; scrollbar-width: thin; }
+  .sw { aspect-ratio: 1; border-radius: 5px; box-shadow: inset 0 0 0 1px rgba(255,255,255,.08); transition: transform .08s ease-out; }
+  .sw:hover { transform: scale(1.12); z-index: 1; }
+  .sw.on { box-shadow: 0 0 0 2px var(--panel-solid), 0 0 0 3.5px #fff; transform: scale(1.05); }
+  .sw.used::after { content: ''; display: block; width: 4px; height: 4px; border-radius: 50%; background: rgba(255,255,255,.75); margin: auto; position: relative; top: calc(50% - 2px); mix-blend-mode: difference; }
+  .note { color: var(--faint); font-size: 11px; margin-top: 10px; line-height: 1.45; }
+
+  /* stats */
+  #stats { left: 12px; bottom: 12px; padding: 8px 12px; display: flex; gap: 16px; font-size: 11.5px; }
+  #stats .s { display: flex; flex-direction: column; }
+  #stats .l { color: var(--faint); font-size: 9.5px; text-transform: uppercase; letter-spacing: .08em; }
+  #stats .v { font-size: 13px; }
+  #fps.good { color: var(--ok); } #fps.mid { color: #ffd166; } #fps.bad { color: var(--danger); }
+
+  /* hint bar */
+  #hint { left: 50%; bottom: 12px; transform: translateX(-50%); padding: 8px 14px; display: flex; gap: 14px; align-items: center; color: var(--muted); font-size: 12px; white-space: nowrap; }
+  #hint b { color: var(--text); font-weight: 500; }
+  #hint span { display: inline-flex; align-items: center; gap: 5px; }
+
+  /* undo cluster */
+  #history { right: 12px; bottom: 12px; padding: 4px; display: flex; gap: 2px; }
+
+  /* welcome + toast + help */
+  #welcome { left: 50%; top: 70px; transform: translateX(-50%); padding: 14px 16px; width: min(440px, calc(100% - 32px)); display: flex; gap: 14px; align-items: flex-start; }
+  #welcome h4 { margin: 0 0 4px; font-size: 14px; }
+  #welcome p { margin: 0; color: var(--muted); font-size: 12.5px; }
+  #welcome ol { margin: 8px 0 0; padding-left: 18px; color: var(--muted); font-size: 12.5px; }
+  #welcome li { margin: 2px 0; } #welcome li b { color: var(--text); font-weight: 500; }
+  #welcome .x { margin-left: auto; color: var(--faint); font-size: 18px; line-height: 1; padding: 2px 4px; }
+  #toast { left: 50%; top: 68px; transform: translate(-50%, -8px); padding: 9px 14px; opacity: 0; pointer-events: none; transition: opacity .18s ease-out, transform .18s ease-out; font-size: 12.5px; }
+  #toast.show { opacity: 1; transform: translate(-50%, 0); }
+  #help { inset: 0; margin: auto; width: min(560px, calc(100% - 32px)); height: fit-content; padding: 18px 20px; display: none; z-index: 20; }
+  #help.show { display: block; }
+  #help h3 { margin: 0 0 12px; font-size: 14px; }
+  #help .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 24px; }
+  #help .row { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); padding: 3px 0; border-bottom: 1px solid var(--line); }
+  #loading { position: fixed; inset: 0; display: grid; place-items: center; color: var(--muted); pointer-events: none; }
+  #drop { position: fixed; inset: 0; display: none; place-items: center; background: rgba(142,162,255,.08); border: 2px dashed var(--accent); z-index: 30; font-size: 16px; color: var(--accent); }
+  #drop.show { display: grid; }
+  @media (max-width: 760px) { #palette { width: 180px; } #hint, #brand span { display: none; } #stats { gap: 10px; } }
+</style>
+</head>
+<body>
+<canvas id="c" tabindex="0"></canvas>
+<div id="loading">Loading renderer…</div>
+
+<div id="top" class="panel">
+  <div id="brand">
+    <svg class="logo" viewBox="0 0 24 24" fill="none"><path d="M12 2.5l8.5 4.9v9.2L12 21.5l-8.5-4.9V7.4z" fill="#8ea2ff" opacity=".25"/><path d="M12 12l8.5-4.6M12 12v9.5M12 12L3.5 7.4M12 2.5l8.5 4.9v9.2L12 21.5l-8.5-4.9V7.4z" stroke="#8ea2ff" stroke-width="1.6" stroke-linejoin="round"/></svg>
+    <span>Voxel Sketch</span>
+  </div>
+  <select id="scene-select" class="tbtn" title="Starter scenes">
+    <option value="island">Island diorama</option>
+    <option value="terrain">Big terrain · 384² · 3.9M voxels</option>
+    <option value="empty">Empty canvas</option>
+  </select>
+  <div class="sep"></div>
+  <button class="tbtn" id="open-btn" title="Open a .vox file (or drop one on the canvas)"><i data-lucide="folder-open"></i>Open .vox</button>
+  <button class="tbtn" id="save-btn" title="Download as MagicaVoxel .vox"><i data-lucide="download"></i>Save .vox</button>
+  <div class="grow"></div>
+  <button class="tbtn" id="help-btn" title="Keyboard shortcuts (?)"><i data-lucide="keyboard"></i></button>
+  <button class="tbtn primary" id="embed-btn" title="See this scene as a one-tag embed on a plain page"><i data-lucide="code-xml"></i>Embed</button>
+  <input type="file" id="file" accept=".vox" hidden>
+</div>
+
+<div id="rail" class="panel">
+  <div class="rail-label">Tool</div>
+  <button class="tool" data-tool="attach" data-tip="Add · A"><i data-lucide="box"></i><span class="k">A</span></button>
+  <button class="tool" data-tool="erase" data-tip="Erase · E  (or hold Shift)"><i data-lucide="eraser"></i><span class="k">E</span></button>
+  <button class="tool" data-tool="paint" data-tip="Paint · P"><i data-lucide="paintbrush"></i><span class="k">P</span></button>
+  <button class="tool" data-tool="pick" data-tip="Pick color · I  (or hold Alt)"><i data-lucide="pipette"></i><span class="k">I</span></button>
+  <div class="rail-sep"></div>
+  <div class="rail-label">Brush</div>
+  <button class="tool" data-brush="voxel" data-tip="Single voxel · drag to draw · V"><i data-lucide="mouse-pointer-2"></i><span class="k">V</span></button>
+  <button class="tool" data-brush="box" data-tip="Box · drag a rectangle · B"><i data-lucide="square-dashed"></i><span class="k">B</span></button>
+  <button class="tool" data-brush="face" data-tip="Face · whole connected surface · F"><i data-lucide="layers"></i><span class="k">F</span></button>
+  <div class="rail-sep"></div>
+  <button class="tool" id="mirror-btn" data-tip="Mirror X · M"><i data-lucide="flip-horizontal-2"></i><span class="k">M</span></button>
+  <button class="tool" id="frame-btn" data-tip="Frame scene · ."><i data-lucide="scan"></i><span class="k">.</span></button>
+</div>
+
+<div id="palette" class="panel">
+  <div class="ph"><h3>Palette</h3><span class="mono" style="color:var(--faint);font-size:11px" id="pal-count"></span></div>
+  <div id="current">
+    <div class="chip" id="cur-chip"></div>
+    <div class="meta"><div class="hex mono" id="cur-hex"></div><div class="sub" id="cur-sub"></div></div>
+    <button id="edit-color" title="Change this palette color everywhere it is used">Edit</button>
+    <input type="color" id="color-input" hidden>
+  </div>
+  <div id="swatches"></div>
+  <div class="note">Editing a color recolors every voxel that uses it, instantly. Dots mark colors in the scene. <kbd>[</kbd> <kbd>]</kbd> step colors.</div>
+</div>
+
+<div id="stats" class="panel mono">
+  <div class="s"><span class="l">Voxels</span><span class="v" id="st-vox">0</span></div>
+  <div class="s"><span class="l">FPS</span><span class="v" id="fps">-</span></div>
+  <div class="s"><span class="l">Triangles</span><span class="v" id="st-tri">0</span></div>
+  <div class="s"><span class="l">Draws</span><span class="v" id="st-draw">0</span></div>
+  <div class="s"><span class="l">Remesh</span><span class="v" id="st-mesh">-</span></div>
+  <div class="s"><span class="l">Cursor</span><span class="v" id="st-cur">-</span></div>
+</div>
+
+<div id="hint" class="panel"></div>
+
+<div id="history" class="panel">
+  <button class="tbtn" id="undo-btn" title="Undo (Ctrl/Cmd+Z)"><i data-lucide="undo-2"></i></button>
+  <button class="tbtn" id="redo-btn" title="Redo (Ctrl/Cmd+Shift+Z)"><i data-lucide="redo-2"></i></button>
+</div>
+
+<div id="welcome" class="panel">
+  <div>
+    <h4>Sculpt in under a minute</h4>
+    <ol>
+      <li><b>Click</b> a surface to add a voxel. <b>Drag</b> to draw along that surface.</li>
+      <li><b>Right-drag</b> to orbit, <b>scroll</b> to zoom, <b>Shift+right-drag</b> to pan.</li>
+      <li>Hold <b>Shift</b> to erase, <b>Alt</b> to pick a color. <kbd>?</kbd> for every key.</li>
+    </ol>
+  </div>
+  <button class="x" id="welcome-x" aria-label="Dismiss">×</button>
+</div>
+
+<div id="help" class="panel">
+  <h3>Keyboard</h3>
+  <div class="grid">
+    <div class="row">Add / Erase / Paint <span><kbd>A</kbd> <kbd>E</kbd> <kbd>P</kbd></span></div>
+    <div class="row">Pick color <span><kbd>I</kbd> or hold <kbd>Alt</kbd></span></div>
+    <div class="row">Erase while held <span><kbd>Shift</kbd></span></div>
+    <div class="row">Voxel / Box / Face <span><kbd>V</kbd> <kbd>B</kbd> <kbd>F</kbd></span></div>
+    <div class="row">Mirror X <span><kbd>M</kbd></span></div>
+    <div class="row">Prev / next color <span><kbd>[</kbd> <kbd>]</kbd></span></div>
+    <div class="row">Undo <span><kbd>Ctrl</kbd> <kbd>Z</kbd></span></div>
+    <div class="row">Redo <span><kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>Z</kbd></span></div>
+    <div class="row">Orbit <span>right-drag · <kbd>Space</kbd>+drag</span></div>
+    <div class="row">Pan / Zoom <span><kbd>Shift</kbd>+right-drag · wheel</span></div>
+    <div class="row">Frame scene <span><kbd>.</kbd></span></div>
+    <div class="row">Toggle grid <span><kbd>G</kbd></span></div>
+  </div>
+  <p class="note">Press any key or click to close.</p>
+</div>
+<div id="toast" class="panel"></div>
+<div id="drop">Drop a .vox file to open it</div>
+
+<script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+//@@CORE@@
+
+lucide.createIcons({ attrs: { 'stroke-width': 1.75 } });
+const $ = (s) => document.querySelector(s);
+
+// ---------- renderer / scene ----------
+const canvas = $('#c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.NeutralToneMapping;
+renderer.toneMappingExposure = 1.05;
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(40, 1, 0.5, 6000);
+const controls = new OrbitControls(camera, canvas);
+controls.enableDamping = true; controls.dampingFactor = 0.12;
+controls.mouseButtons = { LEFT: -1, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE };
+controls.touches = { ONE: -1, TWO: THREE.TOUCH.DOLLY_ROTATE };
+controls.maxPolarAngle = Math.PI * 0.495;
+controls.zoomToCursor = true;
+
+scene.add(new THREE.HemisphereLight(0xdfe8ff, 0x3a3226, 1.15));
+const sun = new THREE.DirectionalLight(0xfff1dc, 2.4);
+sun.castShadow = true;
+sun.shadow.mapSize.set(4096, 4096);
+sun.shadow.bias = -0.0004;
+scene.add(sun, sun.target);
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.ShadowMaterial({ opacity: 0.28 }));
+ground.rotation.x = -Math.PI / 2; ground.receiveShadow = true; ground.position.y = -0.01;
+scene.add(ground);
+let grid = null;
+
+const palette = defaultPalette();
+const palTex = createPaletteTexture(THREE, palette);
+const material = createVoxelMaterial(THREE, palTex);
+
+let world = new VoxelWorld();
+const meshes = new Map();
+const chunkGroup = new THREE.Group();
+scene.add(chunkGroup);
+
+function remeshDirty(budgetMs) {
+  if (world.dirtyRemoved) { for (const k of world.dirtyRemoved) dropMesh(k); world.dirtyRemoved = null; }
+  if (!world.dirty.size) return 0;
+  const t0 = performance.now();
+  let n = 0;
+  for (const k of world.dirty) {
+    world.dirty.delete(k);
+    const c = world.chunks.get(k);
+    dropMesh(k);
+    if (c) {
+      const r = meshChunk(world, c);
+      if (r) {
+        const m = new THREE.Mesh(buildChunkGeometry(THREE, r), material);
+        m.position.set(c.cx * CS, c.cy * CS, c.cz * CS);
+        m.castShadow = m.receiveShadow = true;
+        m.matrixAutoUpdate = false; m.updateMatrix();
+        chunkGroup.add(m); meshes.set(k, m);
+      } else if (!c.n) world.chunks.delete(k);
+    }
+    n++;
+    if (budgetMs && performance.now() - t0 > budgetMs) break;
+  }
+  const dt = performance.now() - t0;
+  if (n) $('#st-mesh').textContent = `${dt.toFixed(1)}ms`;
+  return n;
+}
+function dropMesh(k) { const m = meshes.get(k); if (m) { chunkGroup.remove(m); m.geometry.dispose(); meshes.delete(k); } }
+
+function fitEnvironment(frame) {
+  const b = world.bounds() || { minX: -16, minY: 0, minZ: -16, maxX: 16, maxY: 16, maxZ: 16 };
+  const cx = (b.minX + b.maxX) / 2, cz = (b.minZ + b.maxZ) / 2;
+  const span = Math.max(b.maxX - b.minX, b.maxZ - b.minZ, 32);
+  const R = span * 0.75 + (b.maxY - b.minY);
+  sun.position.set(cx + R * 0.55, R * 1.1, cz + R * 0.75);
+  sun.target.position.set(cx, 0, cz);
+  const sc = sun.shadow.camera;
+  sc.left = sc.bottom = -R; sc.right = sc.top = R; sc.near = 1; sc.far = R * 4; sc.updateProjectionMatrix();
+  sun.shadow.normalBias = Math.max(0.03, span / 4096 * 2.5);
+  ground.scale.set(span * 6, span * 6, 1); ground.position.x = cx; ground.position.z = cz;
+  if (grid) { scene.remove(grid); grid.geometry.dispose(); }
+  const gs = Math.ceil(span * 1.5 / 16) * 16;
+  grid = new THREE.GridHelper(gs, gs, 0x8ea2ff, 0xffffff);
+  grid.material.transparent = true; grid.material.opacity = 0.06; grid.material.depthWrite = false;
+  grid.position.set(Math.round(cx), 0.002, Math.round(cz));
+  grid.visible = showGrid;
+  scene.add(grid);
+  if (frame) {
+    const d = span * 1.1 + (b.maxY - b.minY) * 0.6;
+    controls.target.set(cx, Math.min(b.maxY, 24) * 0.35, cz);
+    camera.position.set(cx + d * 0.72, d * 0.62, cz + d * 0.86);
+    camera.far = d * 8; camera.updateProjectionMatrix();
+    controls.maxDistance = d * 3;
+    controls.update();
+  }
+}
+
+// ---------- palette UI ----------
+let color = 28;
+const swEl = $('#swatches');
+function hexOf(i) { return '#' + [0, 1, 2].map((c) => palette[i * 4 + c].toString(16).padStart(2, '0')).join(''); }
+let usedColors = new Set();
+function computeUsed() { usedColors = new Set(); for (const c of world.chunks.values()) { if (!c.n) continue; for (let i = 0; i < c.data.length; i++) if (c.data[i]) usedColors.add(c.data[i]); } }
+let paletteSize = 64;
+function renderPalette() {
+  swEl.innerHTML = '';
+  for (let i = 1; i <= paletteSize; i++) {
+    const b = document.createElement('button');
+    b.className = 'sw' + (i === color ? ' on' : '') + (usedColors.has(i) ? ' used' : '');
+    b.style.background = hexOf(i); b.title = `${i} · ${hexOf(i)}`; b.dataset.i = i;
+    swEl.appendChild(b);
+  }
+  $('#pal-count').textContent = `${usedColors.size} used`;
+  renderCurrent();
+}
+function renderCurrent() {
+  $('#cur-chip').style.background = hexOf(color);
+  $('#cur-hex').textContent = hexOf(color).toUpperCase();
+  $('#cur-sub').textContent = `Slot ${color}${usedColors.has(color) ? ' · in scene' : ''}`;
+  swEl.querySelectorAll('.sw.on').forEach((e) => e.classList.remove('on'));
+  const on = swEl.querySelector(`[data-i="${color}"]`); if (on) on.classList.add('on');
+  updateCursorLook();
+}
+function setColor(i) { color = Math.max(1, Math.min(paletteSize, i)); renderCurrent(); }
+swEl.addEventListener('click', (e) => { const i = +e.target.dataset.i; if (i) setColor(i); });
+swEl.addEventListener('dblclick', (e) => { if (+e.target.dataset.i) openColorEdit(); });
+const colorInput = $('#color-input');
+function openColorEdit() { colorInput.value = hexOf(color); colorInput.click(); }
+$('#edit-color').onclick = openColorEdit;
+colorInput.addEventListener('input', () => {
+  const n = parseInt(colorInput.value.slice(1), 16);
+  palette[color * 4] = n >> 16; palette[color * 4 + 1] = (n >> 8) & 255; palette[color * 4 + 2] = n & 255;
+  palTex.needsUpdate = true;
+  const sw = swEl.querySelector(`[data-i="${color}"]`); if (sw) sw.style.background = colorInput.value;
+  renderCurrent();
+});
+
+// ---------- tools ----------
+let tool = 'attach', brush = 'voxel', mirror = false, showGrid = true;
+let spaceDown = false, shiftDown = false, altDown = false;
+function effectiveTool() { return altDown ? 'pick' : shiftDown && tool !== 'pick' ? 'erase' : tool; }
+function setTool(t) { tool = t; document.querySelectorAll('[data-tool]').forEach((b) => b.classList.toggle('on', b.dataset.tool === t)); updateHint(); updateCursorLook(); }
+function setBrush(b) { brush = b; document.querySelectorAll('[data-brush]').forEach((e) => e.classList.toggle('on', e.dataset.brush === b)); updateHint(); }
+document.querySelectorAll('[data-tool]').forEach((b) => b.onclick = () => setTool(b.dataset.tool));
+document.querySelectorAll('[data-brush]').forEach((b) => b.onclick = () => setBrush(b.dataset.brush));
+$('#mirror-btn').onclick = () => toggleMirror();
+$('#frame-btn').onclick = () => fitEnvironment(true);
+function toggleMirror() { mirror = !mirror; $('#mirror-btn').classList.toggle('on', mirror); mirrorPlane.visible = mirror; toast(mirror ? 'Mirror X on: edits are reflected across x = 0' : 'Mirror off'); }
+
+const HINTS = {
+  attach: { voxel: [['Click', 'add'], ['Drag', 'draw on that plane']], box: [['Drag', 'fill a rectangle']], face: [['Click', 'extrude the whole face']] },
+  erase: { voxel: [['Click', 'erase'], ['Drag', 'erase as you go']], box: [['Drag', 'clear a rectangle']], face: [['Click', 'peel the whole face']] },
+  paint: { voxel: [['Click', 'paint'], ['Drag', 'paint as you go']], box: [['Drag', 'paint a rectangle']], face: [['Click', 'fill the connected face']] },
+  pick: { voxel: [['Click', 'take that color']], box: [['Click', 'take that color']], face: [['Click', 'take that color']] },
+};
+function updateHint() {
+  const t = effectiveTool();
+  const items = [...HINTS[t][brush], ['Shift', 'erase'], ['Alt', 'pick'], ['Right-drag', 'orbit']];
+  if (t === 'erase' && shiftDown) items.splice(-3, 1);
+  $('#hint').innerHTML = items.map(([k, v]) => `<span><b>${k}</b> ${v}</span>`).join('');
+}
+
+// cursor / preview
+const cursorMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.35, depthWrite: false });
+const cursorBox = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), cursorMat);
+const cursorEdges = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1)), new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.9 }));
+const cursor = new THREE.Group(); cursor.add(cursorBox, cursorEdges); cursor.visible = false; cursor.renderOrder = 10;
+const cursorMirror = cursor.clone(); cursorMirror.visible = false;
+scene.add(cursor, cursorMirror);
+const mirrorPlane = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({ color: 0x8ea2ff, transparent: true, opacity: 0.07, side: THREE.DoubleSide, depthWrite: false }));
+mirrorPlane.rotation.y = Math.PI / 2; mirrorPlane.visible = false; scene.add(mirrorPlane);
+function updateCursorLook() {
+  const t = effectiveTool();
+  const c = t === 'erase' ? new THREE.Color(0xff6b7a) : t === 'pick' ? new THREE.Color(0xffffff) : new THREE.Color(hexOf(color));
+  cursorMat.color.copy(c); cursorMat.opacity = t === 'attach' ? 0.55 : t === 'paint' ? 0.7 : 0.25;
+  cursorEdges.material.color.copy(t === 'paint' || t === 'attach' ? new THREE.Color(0xffffff) : c);
+}
+function showCursorBox(x0, y0, z0, x1, y1, z1) {
+  const sx = x1 - x0 + 1, sy = y1 - y0 + 1, sz = z1 - z0 + 1;
+  const e = 0.03;
+  for (const [g, mx] of [[cursor, false], [cursorMirror, true]]) {
+    if (mx && !mirror) { g.visible = false; continue; }
+    const cx = mx ? -(x0 + x1 + 1) / 2 : (x0 + x1 + 1) / 2;
+    g.position.set(cx, (y0 + y1 + 1) / 2, (z0 + z1 + 1) / 2);
+    g.scale.set(sx + e, sy + e, sz + e);
+    g.visible = true;
+  }
+}
+
+// ---------- picking ----------
+const ray = new THREE.Raycaster();
+const ndc = new THREE.Vector2();
+function pickAt(cx, cy) {
+  const r = canvas.getBoundingClientRect();
+  ndc.set(((cx - r.left) / r.width) * 2 - 1, -((cy - r.top) / r.height) * 2 + 1);
+  ray.setFromCamera(ndc, camera);
+  const o = ray.ray.origin, d = ray.ray.direction;
+  const hit = raycastVoxels(world, o.x, o.y, o.z, d.x, d.y, d.z, camera.far);
+  let floor = null;
+  if (d.y < 0) {
+    const t = -o.y / d.y;
+    floor = { x: Math.floor(o.x + d.x * t), y: -1, z: Math.floor(o.z + d.z * t), nx: 0, ny: 1, nz: 0, t, v: 0, floor: true };
+  }
+  if (hit && (!floor || hit.t <= floor.t)) return hit;
+  return floor;
+}
+// intersect the ray with an axis-aligned plane through cell layer k on axis a
+function pickOnPlane(cx, cy, a, k) {
+  const r = canvas.getBoundingClientRect();
+  ndc.set(((cx - r.left) / r.width) * 2 - 1, -((cy - r.top) / r.height) * 2 + 1);
+  ray.setFromCamera(ndc, camera);
+  const o = ray.ray.origin.toArray(), d = ray.ray.direction.toArray();
+  if (Math.abs(d[a]) < 1e-6) return null;
+  const t = (k + 0.5 - o[a]) / d[a];
+  if (t < 0) return null;
+  const p = [0, 1, 2].map((i) => (i === a ? k : Math.floor(o[i] + d[i] * t)));
+  return p;
+}
+
+// ---------- edits + undo ----------
+let edit = null;
+const undoStack = [], redoStack = [];
+function beginEdit() { edit = new Map(); }
+function put(x, y, z, v) {
+  const one = (x, y, z) => {
+    const key = `${x},${y},${z}`;
+    const old = world.set(x, y, z, v);
+    if (old === v) return;
+    if (!edit.has(key)) edit.set(key, [x, y, z, old, v]); else edit.get(key)[4] = v;
+  };
+  one(x, y, z);
+  if (mirror) { const mx = -1 - x; if (mx !== x) one(mx, y, z); }
+}
+function endEdit() {
+  if (edit && edit.size) {
+    undoStack.push([...edit.values()].filter((e) => e[3] !== e[4]));
+    if (undoStack.length > 2000) undoStack.shift();
+    redoStack.length = 0;
+    paletteDirty = true;
+  }
+  edit = null; updateHistoryButtons();
+}
+function applyChanges(list, forward) {
+  for (let i = forward ? 0 : list.length - 1; forward ? i < list.length : i >= 0; forward ? i++ : i--) {
+    const [x, y, z, a, b] = list[i]; world.set(x, y, z, forward ? b : a);
+  }
+  paletteDirty = true;
+}
+function undo() { const l = undoStack.pop(); if (!l) return; applyChanges(l, false); redoStack.push(l); updateHistoryButtons(); }
+function redo() { const l = redoStack.pop(); if (!l) return; applyChanges(l, true); undoStack.push(l); updateHistoryButtons(); }
+function updateHistoryButtons() { $('#undo-btn').disabled = !undoStack.length; $('#redo-btn').disabled = !redoStack.length; }
+$('#undo-btn').onclick = undo; $('#redo-btn').onclick = redo;
+let paletteDirty = false;
+
+// face region: connected voxels of the same color in the hit layer whose face (along the normal) is exposed
+function faceRegion(h) {
+  const n = [h.nx, h.ny, h.nz], a = n[0] ? 0 : n[1] ? 1 : 2;
+  const u = (a + 1) % 3, v = (a + 2) % 3;
+  const start = [h.x, h.y, h.z], col = h.v;
+  const seen = new Set(), out = [], stack = [start];
+  const exposed = (p) => world.get(p[0], p[1], p[2]) === col && !world.get(p[0] + n[0], p[1] + n[1], p[2] + n[2]);
+  while (stack.length && out.length < 120000) {
+    const p = stack.pop(), key = p.join(',');
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (!exposed(p)) continue;
+    out.push(p);
+    for (const [du, dv] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const q = p.slice(); q[u] += du; q[v] += dv; stack.push(q); }
+  }
+  return { cells: out, n };
+}
+
+// ---------- pointer interaction ----------
+let drag = null; // {tool, brush, plane:{a,k}, start:[..], last:key}
+canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+canvas.addEventListener('pointerdown', (e) => {
+  canvas.focus();
+  if (e.button !== 0 || spaceDown || (e.pointerType === 'touch' && !e.isPrimary)) {
+    if (spaceDown && e.button === 0) { controls.mouseButtons.LEFT = THREE.MOUSE.ROTATE; }
+    return;
+  }
+  dismissWelcome();
+  const t = effectiveTool();
+  const h = pickAt(e.clientX, e.clientY);
+  if (!h) return;
+  if (t === 'pick') { if (h.v) { setColor(h.v); toast(`Picked ${hexOf(h.v).toUpperCase()}`); } return; }
+  if (h.floor && t !== 'attach') return;
+  canvas.setPointerCapture(e.pointerId);
+  const a = h.nx ? 0 : h.ny ? 1 : 2;
+  const target = t === 'attach' ? [h.x + h.nx, h.y + h.ny, h.z + h.nz] : [h.x, h.y, h.z];
+  beginEdit();
+  if (brush === 'face') {
+    if (h.floor) { endEdit(); return; }
+    const { cells, n } = faceRegion(h);
+    for (const p of cells) {
+      if (t === 'attach') put(p[0] + n[0], p[1] + n[1], p[2] + n[2], color);
+      else if (t === 'erase') put(p[0], p[1], p[2], 0);
+      else put(p[0], p[1], p[2], color);
+    }
+    endEdit(); return;
+  }
+  drag = { tool: t, plane: { a, k: target[a] }, start: target, end: target, last: target.join(',') };
+  if (brush === 'voxel') applyVoxel(t, target);
+  else showCursorBox(target[0], target[1], target[2], target[0], target[1], target[2]);
+});
+function applyVoxel(t, p) {
+  if (t === 'attach') put(p[0], p[1], p[2], color);
+  else if (world.get(p[0], p[1], p[2])) put(p[0], p[1], p[2], t === 'erase' ? 0 : color);
+}
+canvas.addEventListener('pointermove', (e) => {
+  if (drag) {
+    let p;
+    if (drag.tool === 'attach' || brush === 'box') p = pickOnPlane(e.clientX, e.clientY, drag.plane.a, drag.plane.k);
+    else { const h = pickAt(e.clientX, e.clientY); p = h && !h.floor ? [h.x, h.y, h.z] : null; }
+    if (!p) return;
+    const key = p.join(',');
+    if (key === drag.last) return;
+    if (brush === 'voxel') {
+      // fill the gap between samples so fast strokes stay continuous
+      const [x0, y0, z0] = drag.last.split(',').map(Number);
+      const steps = drag.tool === 'attach' ? Math.max(Math.abs(p[0] - x0), Math.abs(p[1] - y0), Math.abs(p[2] - z0)) : 1;
+      for (let s = 1; s <= steps; s++) {
+        const q = [Math.round(x0 + (p[0] - x0) * s / steps), Math.round(y0 + (p[1] - y0) * s / steps), Math.round(z0 + (p[2] - z0) * s / steps)];
+        applyVoxel(drag.tool, q);
+      }
+      showCursorBox(p[0], p[1], p[2], p[0], p[1], p[2]);
+    } else {
+      drag.end = p;
+      const [s, en] = [drag.start, drag.end];
+      showCursorBox(Math.min(s[0], en[0]), Math.min(s[1], en[1]), Math.min(s[2], en[2]), Math.max(s[0], en[0]), Math.max(s[1], en[1]), Math.max(s[2], en[2]));
+      $('#st-cur').textContent = `${Math.abs(en[0] - s[0]) + 1}×${Math.abs(en[1] - s[1]) + 1}×${Math.abs(en[2] - s[2]) + 1}`;
+    }
+    drag.last = key;
+    return;
+  }
+  hover(e.clientX, e.clientY);
+});
+function finishDrag() {
+  if (!drag) return;
+  if (brush === 'box') {
+    const s = drag.start, en = drag.end;
+    for (let x = Math.min(s[0], en[0]); x <= Math.max(s[0], en[0]); x++)
+      for (let y = Math.min(s[1], en[1]); y <= Math.max(s[1], en[1]); y++)
+        for (let z = Math.min(s[2], en[2]); z <= Math.max(s[2], en[2]); z++) applyVoxel(drag.tool, [x, y, z]);
+  }
+  drag = null; endEdit();
+}
+canvas.addEventListener('pointerup', (e) => { if (e.button === 0) controls.mouseButtons.LEFT = -1; finishDrag(); });
+canvas.addEventListener('pointercancel', finishDrag);
+canvas.addEventListener('pointerleave', () => { if (!drag) { cursor.visible = cursorMirror.visible = false; } });
+let lastHover = null;
+function hover(x, y) {
+  lastHover = [x, y];
+  if (spaceDown) { cursor.visible = cursorMirror.visible = false; return; }
+  const t = effectiveTool();
+  const h = pickAt(x, y);
+  if (!h || (h.floor && t !== 'attach')) { cursor.visible = cursorMirror.visible = false; $('#st-cur').textContent = '-'; return; }
+  const p = t === 'attach' ? [h.x + h.nx, h.y + h.ny, h.z + h.nz] : [h.x, h.y, h.z];
+  if (brush === 'face' && !h.floor && t !== 'pick') {
+    // preview the face extent cheaply as its bounding box
+    const { cells, n } = faceRegion(h);
+    let mn = [Infinity, Infinity, Infinity], mxv = [-Infinity, -Infinity, -Infinity];
+    for (const c of cells) for (let i = 0; i < 3; i++) { mn[i] = Math.min(mn[i], c[i]); mxv[i] = Math.max(mxv[i], c[i]); }
+    if (t === 'attach') for (let i = 0; i < 3; i++) { mn[i] += n[i]; mxv[i] += n[i]; }
+    showCursorBox(mn[0], mn[1], mn[2], mxv[0], mxv[1], mxv[2]);
+    $('#st-cur').textContent = `${cells.length} faces`;
+    return;
+  }
+  showCursorBox(p[0], p[1], p[2], p[0], p[1], p[2]);
+  $('#st-cur').textContent = `${p[0]},${p[1]},${p[2]}`;
+}
+
+// ---------- keyboard ----------
+const help = $('#help');
+addEventListener('keydown', (e) => {
+  if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
+  if (help.classList.contains('show')) { help.classList.remove('show'); e.preventDefault(); return; }
+  const mod = e.ctrlKey || e.metaKey;
+  if (mod && e.key.toLowerCase() === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
+  if (mod && e.key.toLowerCase() === 'y') { e.preventDefault(); redo(); return; }
+  if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); saveVox(); return; }
+  if (mod) return;
+  if (e.key === 'Shift') { shiftDown = true; refreshModifiers(); return; }
+  if (e.key === 'Alt') { altDown = true; e.preventDefault(); refreshModifiers(); return; }
+  if (e.code === 'Space') { spaceDown = true; canvas.style.cursor = 'grab'; e.preventDefault(); cursor.visible = cursorMirror.visible = false; return; }
+  const k = e.key.toLowerCase();
+  const map = { a: () => setTool('attach'), e: () => setTool('erase'), p: () => setTool('paint'), i: () => setTool('pick'), v: () => setBrush('voxel'), b: () => setBrush('box'), f: () => setBrush('face'), m: toggleMirror, '.': () => fitEnvironment(true), g: () => { showGrid = !showGrid; if (grid) grid.visible = showGrid; }, '[': () => setColor(color - 1), ']': () => setColor(color + 1), '?': () => help.classList.add('show') };
+  if (map[k]) { map[k](); e.preventDefault(); dismissWelcome(); }
+});
+addEventListener('keyup', (e) => {
+  if (e.key === 'Shift') { shiftDown = false; refreshModifiers(); }
+  if (e.key === 'Alt') { altDown = false; refreshModifiers(); }
+  if (e.code === 'Space') { spaceDown = false; canvas.style.cursor = ''; controls.mouseButtons.LEFT = -1; }
+});
+addEventListener('blur', () => { shiftDown = altDown = spaceDown = false; refreshModifiers(); });
+function refreshModifiers() { updateHint(); updateCursorLook(); if (lastHover && !drag) hover(...lastHover); }
+help.addEventListener('click', () => help.classList.remove('show'));
+$('#help-btn').onclick = () => help.classList.add('show');
+
+// ---------- welcome / toast ----------
+function dismissWelcome() { const w = $('#welcome'); if (w) w.remove(); }
+$('#welcome-x').onclick = dismissWelcome;
+let toastTimer;
+function toast(msg) { const t = $('#toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 1800); }
+
+// ---------- scenes / file io ----------
+function loadWorld(w, pal, frame = true) {
+  world.clear();
+  remeshDirty(0);
+  world = w;
+  world.markAllDirty();
+  if (pal) { palette.set(pal); palTex.needsUpdate = true; }
+  undoStack.length = redoStack.length = 0; updateHistoryButtons();
+  computeUsed();
+  let maxUsed = 64; for (const c of usedColors) maxUsed = Math.max(maxUsed, c);
+  paletteSize = maxUsed > 64 ? 255 : 64;
+  renderPalette();
+  remeshDirty(0);
+  fitEnvironment(frame);
+}
+function loadScene(name) {
+  const w = new VoxelWorld();
+  if (name === 'island') generateIsland(w);
+  else if (name === 'terrain') generateTerrain(w, 192);
+  const t0 = performance.now();
+  loadWorld(w, defaultPalette());
+  if (name !== 'empty') toast(`${w.count.toLocaleString()} voxels meshed in ${(performance.now() - t0).toFixed(0)} ms`);
+  else toast('Empty canvas: click the grid to place your first voxel');
+}
+$('#scene-select').onchange = (e) => { loadScene(e.target.value); canvas.focus(); };
+function voxBytes() { return writeVox(world, palette); }
+function download(bytes, name) {
+  const url = URL.createObjectURL(new Blob([bytes], { type: 'application/octet-stream' }));
+  const a = document.createElement('a'); a.href = url; a.download = name; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+function saveVox() { const b = voxBytes(); download(b, 'scene.vox'); toast(`Saved scene.vox · ${(b.length / 1024).toFixed(0)} KB · ${world.count.toLocaleString()} voxels`); }
+$('#save-btn').onclick = saveVox;
+$('#open-btn').onclick = () => $('#file').click();
+async function openFile(f) {
+  try {
+    const { world: w, palette: p, models } = readVox(await f.arrayBuffer());
+    loadWorld(w, p);
+    $('#scene-select').value = '';
+    toast(`Opened ${f.name} · ${w.count.toLocaleString()} voxels in ${models} model${models === 1 ? '' : 's'}`);
+  } catch (err) { toast(`Could not open ${f.name}: ${err.message}`); }
+}
+$('#file').onchange = (e) => { if (e.target.files[0]) openFile(e.target.files[0]); e.target.value = ''; };
+addEventListener('dragover', (e) => { e.preventDefault(); $('#drop').classList.add('show'); });
+addEventListener('dragleave', (e) => { if (e.target === $('#drop')) $('#drop').classList.remove('show'); });
+addEventListener('drop', (e) => { e.preventDefault(); $('#drop').classList.remove('show'); const f = e.dataTransfer.files[0]; if (f) openFile(f); });
+$('#embed-btn').onclick = () => {
+  const b = voxBytes();
+  try {
+    let s = ''; for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode.apply(null, b.subarray(i, i + 0x8000));
+    localStorage.setItem('voxel-sketch:scene', btoa(s));
+    window.open('embed.html?scene=mine', '_blank');
+  } catch {
+    toast('Scene too large to hand over in this demo; opening the starter embed');
+    window.open('embed.html', '_blank');
+  }
+};
+
+// ---------- loop ----------
+function resize() {
+  const w = innerWidth, h = innerHeight;
+  renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix();
+}
+addEventListener('resize', resize); resize();
+let frames = 0, fpsT = performance.now();
+const fpsEl = $('#fps'), voxEl = $('#st-vox'), triEl = $('#st-tri'), drawEl = $('#st-draw');
+renderer.setAnimationLoop(() => {
+  remeshDirty(12);
+  if (paletteDirty && !drag) {
+    paletteDirty = false; computeUsed();
+    swEl.querySelectorAll('.sw').forEach((s) => s.classList.toggle('used', usedColors.has(+s.dataset.i)));
+    $('#pal-count').textContent = `${usedColors.size} used`;
+  }
+  controls.update();
+  renderer.render(scene, camera);
+  frames++;
+  const now = performance.now();
+  if (now - fpsT > 500) {
+    const fps = Math.round(frames * 1000 / (now - fpsT));
+    fpsEl.textContent = fps; fpsEl.className = 'v ' + (fps >= 55 ? 'good' : fps >= 30 ? 'mid' : 'bad');
+    voxEl.textContent = world.count.toLocaleString();
+    triEl.textContent = renderer.info.render.triangles.toLocaleString();
+    drawEl.textContent = renderer.info.render.calls;
+    frames = 0; fpsT = now;
+  }
+});
+$('#loading').remove();
+setTool('attach'); setBrush('voxel'); updateHistoryButtons();
+const params = new URLSearchParams(location.search);
+if (params.get('scene') && ['island', 'terrain', 'empty'].includes(params.get('scene'))) $('#scene-select').value = params.get('scene');
+loadScene($('#scene-select').value);
+window.__voxel = { get world() { return world; }, scene, palette, writeVox: () => voxBytes(), camera, controls, renderer, loadScene };
+</script>
+</body>
+</html>
