@@ -16,7 +16,7 @@ fast voxel scenes: an open-source voxel scene editor (Rust, wgpu) with a one-tag
 - `docs/market-research.md`: the market case. Reference only.
 - `ui-directions.html` and the prototype screenshots: the UI options that led to Hybrid (direction D) and the mockups test 3 compares against. Reference only, in `vxr-design-references.zip` on the `design-references` GitHub release, not in git.
 - `spikes/`: Phase 2 risk tests (engine, preview, vox, embed), each with a `RESULTS.md`. Throwaway, but the engine and the `.vox` codec are the starting point for Phase 3.
-- `prototype/`: a throwaway three.js editor used to try the feel. Not the real build; mine it for ideas (chunking, greedy meshing, palette-texture recolor, `.vox` I/O), do not extend it.
+- `prototype/`: run `node prototype/src/build.mjs` once to create `prototype/demo/` (git-ignored), including the island `scene.vox` the spikes load. A throwaway three.js editor used to try the feel. Not the real build; mine it for ideas (chunking, greedy meshing, palette-texture recolor, `.vox` I/O), do not extend it.
 
 ## Keep the repo small
 

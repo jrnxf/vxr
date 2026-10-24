@@ -13,6 +13,7 @@ if [[ "$OPT" != "none" ]]; then
 fi
 for f in pkg/vxr_embed_spike_bg.wasm pkg/vxr_embed_spike.js; do brotli -q 11 -f -o "$f.br" "$f"; done
 brotli -q 11 -f -o pkg/voxel-scene.js.br web/voxel-scene.js
+[ -f ../../prototype/demo/scene.vox ] || node ../../prototype/src/build.mjs
 brotli -q 11 -f -o pkg/scene.vox.br ../../prototype/demo/scene.vox
 [[ -f web/poster.webp ]] || true
 size() { local raw br; raw=$(wc -c < "$1"); br=$(brotli -q 11 -c "$1" | wc -c); printf "%-28s raw %8d  br %7d\n" "$(basename "$1")" "$raw" "$br"; }
