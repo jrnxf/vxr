@@ -146,6 +146,11 @@ impl Shot {
         Ok(())
     }
 
+    /// Hold modifier keys from the next frame on, as the window would report them.
+    fn hold(&mut self, m: egui::Modifiers) {
+        self.frames_with(1, vec![egui::Event::ModifiersChanged(m)]);
+    }
+
     fn tool(&mut self, tool: Tool, shape: Shape) {
         (self.ed.ui.tool, self.ed.ui.shape) = (tool, shape);
     }
@@ -244,6 +249,7 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
 
     palette(&mut s, dir)?;
     brushes(dir)?;
+    selection(dir)?;
     render(&mut s, dir)?;
     materials(&mut s, dir)?;
 
@@ -406,6 +412,182 @@ fn brushes(dir: &Path) -> Result<(), String> {
     s.ed.pointer_moved(Some([mid[0] + 300.0, mid[1] + 100.0]));
     s.frames(4);
     s.save_png(&dir.join("app-2x-brushes.png"))
+}
+
+/// Where a point in map space lands on screen, in pixels.
+fn project(ed: &Editor, p: [f32; 3]) -> [f32; 2] {
+    let (w, h) = (ed.width as f32, ed.height as f32);
+    let c = ed.cam.view_proj(w / h) * glam::Vec4::new(p[0], p[1], p[2], 1.0);
+    [(c.x / c.w + 1.0) * 0.5 * w, (1.0 - c.y / c.w) * 0.5 * h]
+}
+
+/// Selection and transform on an empty scene with two blocks, so every count is exact: S,
+/// colour click with Shift and Alt, Escape, box select, a live move drag, the flyout's
+/// rotate, flip and loop, copy and paste at the pointer, fill, delete, Cmd-A, arrows, cut,
+/// and a whole-model flip, all through the pointer path, keys and egui clicks.
+fn selection(dir: &Path) -> Result<(), String> {
+    let mut s = Shot::new(Scene::new(NEW_SIZE), "Untitled", 2.0)?;
+    s.ed.ui.coach = false;
+    // Block A: 4 x 2 x 3 of slot 12 with one marker voxel of slot 13 in a top corner, so
+    // flips and loops show. Block B: 2 x 2 x 2 of slot 40, 12 cells along +x.
+    let mut cells = Vec::new();
+    for (x, y, z) in (50..54).flat_map(|x| (0..2).flat_map(move |y| (60..63).map(move |z| (x, y, z)))) {
+        cells.push(([x, y, z], if [x, y, z] == [50, 1, 60] { 13 } else { 12 }));
+    }
+    for (x, y, z) in (66..68).flat_map(|x| (0..2).flat_map(move |y| (60..62).map(move |z| (x, y, z)))) {
+        cells.push(([x, y, z], 40));
+    }
+    s.ed.scene.edit(cells);
+    s.ed.frame_scene();
+    s.frames(3);
+    let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    let none = egui::Modifiers::NONE;
+    let count = |s: &Shot| s.ed.scene.selected_count();
+    let bounds = |s: &Shot| s.ed.scene.selection_bounds().map(|(lo, hi)| (lo, [0, 1, 2].map(|a| hi[a] - lo[a] + 1)));
+
+    s.frames_with(2, vec![key(egui::Key::S, none)]);
+    check(
+        s.ed.ui.tool == Tool::Select && s.ed.ui.hits.contains_key("rotate-y"),
+        "S: select tool, selection flyout shown".into(),
+    )?;
+    let a_top = project(&s.ed, [51.5, 1.99, 61.5]);
+    let b_top = project(&s.ed, [66.5, 1.99, 60.5]);
+    s.stroke(a_top, &[]);
+    let n_a = count(&s);
+    s.hold(egui::Modifiers::SHIFT);
+    s.stroke(b_top, &[]);
+    let n_ab = count(&s);
+    s.hold(egui::Modifiers::ALT);
+    s.stroke(b_top, &[]);
+    let n_alt = count(&s);
+    s.hold(none);
+    check(
+        n_a == 23 && n_ab == 31 && n_alt == 23,
+        format!("click selects a colour ({n_a}), Shift adds ({n_ab}), Alt subtracts ({n_alt})"),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::Escape, none)]);
+    check(count(&s) == 0, "Escape deselects".into())?;
+
+    // Box select around block A only.
+    let corners = [
+        project(&s.ed, [49.0, 2.5, 59.0]),
+        project(&s.ed, [55.0, 2.5, 59.0]),
+        project(&s.ed, [49.0, -0.5, 64.0]),
+        project(&s.ed, [55.0, -0.5, 64.0]),
+    ];
+    let x0 = corners.iter().map(|c| c[0]).fold(f32::MAX, f32::min);
+    let x1 = corners.iter().map(|c| c[0]).fold(f32::MIN, f32::max);
+    let y0 = corners.iter().map(|c| c[1]).fold(f32::MAX, f32::min);
+    let y1 = corners.iter().map(|c| c[1]).fold(f32::MIN, f32::max);
+    s.ed.pointer_moved(Some([x0, y0]));
+    s.ed.button(Button::Left, true, false);
+    s.ed.pointer_moved(Some([(x0 + x1) / 2.0, (y0 + y1) / 2.0]));
+    s.ed.pointer_moved(Some([x1, y1]));
+    s.frames(1);
+    let shown = s.ed.ui.marquee.is_some();
+    s.ed.button(Button::Left, false, false);
+    check(shown && count(&s) == 24, format!("box select: the box shows while dragging, {} selected", count(&s)))?;
+
+    // Drag the selection 3 cells along +x on its top layer: live, then one undo step.
+    let v = s.voxels();
+    s.ed.pointer_moved(Some(a_top));
+    s.ed.button(Button::Left, true, false);
+    s.ed.pointer_moved(Some(project(&s.ed, [53.5, 1.5, 61.5])));
+    s.ed.pointer_moved(Some(project(&s.ed, [54.5, 1.5, 61.5])));
+    let live = (s.ed.span(), s.ed.scene.map.get(56, 0, 60));
+    s.ed.button(Button::Left, false, false);
+    let moved = bounds(&s);
+    check(
+        live == (Some(("MOVE", "3,0,0".into())), 12) && s.voxels() == v && moved == Some(([53, 0, 60], [4, 2, 3])),
+        format!("move drag: live {live:?}, selection now at {moved:?}"),
+    )?;
+    s.ed.undo();
+    check(bounds(&s) == Some(([50, 0, 60], [4, 2, 3])), "move: one undo step, selection back".into())?;
+
+    // The flyout: rotate Y turns 4 x 2 x 3 to 3 x 2 x 4 and takes the marker from
+    // (50, 1, 60) to (50, 1, 63); flip X takes it to (52, 1, 63), loop Z wraps it to (52, 1, 60).
+    let marker = |s: &Shot, p: [i32; 3]| s.ed.scene.map.get(p[0], p[1], p[2]) == 13;
+    s.ui_click("rotate-y")?;
+    let r = bounds(&s);
+    let turned = marker(&s, [50, 1, 63]);
+    s.ui_click("flip-x")?;
+    let flipped = marker(&s, [52, 1, 63]);
+    s.ui_click("loop-z")?;
+    let looped = marker(&s, [52, 1, 60]);
+    check(
+        r.map(|b| b.1) == Some([3, 2, 4]) && bounds(&s) == r && turned && flipped && looped && s.voxels() == v,
+        format!("flyout rotate Y {r:?}, flip X and loop Z move the marker: {turned} {flipped} {looped}"),
+    )?;
+    for _ in 0..3 {
+        s.ed.undo();
+    }
+
+    // Copy (the native clipboard event), then Cmd-V with the pointer over empty ground.
+    s.frames_with(2, vec![egui::Event::Copy]);
+    let ground = project(&s.ed, [52.5, 0.0, 75.5]);
+    s.ed.pointer_moved(Some(ground));
+    s.frames_with(2, vec![key(egui::Key::V, egui::Modifiers::COMMAND)]);
+    let pasted = bounds(&s);
+    check(
+        s.voxels() == v + 24 && count(&s) == 24 && pasted.is_some_and(|b| b.0[2] >= 70 && b.0[1] == 0),
+        format!("copy, then Cmd-V pastes at the pointer: {pasted:?}"),
+    )?;
+    s.ed.ui.slot = 5;
+    s.ui_click("fill")?;
+    check(s.ed.scene.map.counts[5] == 24, "fill paints the selection with the current colour".into())?;
+    s.frames_with(2, vec![key(egui::Key::Backspace, none)]);
+    check(s.voxels() == v && count(&s) == 0, "Backspace deletes the selection".into())?;
+
+    s.frames_with(2, vec![key(egui::Key::A, egui::Modifiers::COMMAND)]);
+    let all = count(&s);
+    s.ui_click("deselect")?;
+    check(all == 32 && count(&s) == 0, format!("Cmd-A selects all ({all}); the flyout's x deselects"))?;
+
+    s.stroke(a_top, &[]);
+    let before = bounds(&s);
+    s.frames_with(2, vec![key(egui::Key::ArrowRight, none)]);
+    let after = bounds(&s);
+    let step = before.zip(after).map(|(b, a)| [0, 1, 2].map(|k| a.0[k] - b.0[k]));
+    check(
+        step.is_some_and(|d| d.iter().map(|c| c.abs()).sum::<i32>() == 1 && d[1] == 0),
+        format!("arrow nudges the selection one cell along the ground ({step:?})"),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::ArrowUp, egui::Modifiers::SHIFT)]);
+    let up = bounds(&s).map(|b| b.0[1]);
+    check(up == Some(1), "Shift-Up lifts it one cell".into())?;
+    s.ed.undo();
+    s.ed.undo();
+
+    s.ui_click("cut")?;
+    let cut = s.voxels();
+    s.frames_with(2, vec![key(egui::Key::Z, egui::Modifiers::COMMAND)]);
+    check(cut == v - 23 && s.voxels() == v && count(&s) == 23, "cut, and Cmd-Z puts it back selected".into())?;
+
+    // Nothing selected: the flyout transforms the whole model.
+    s.frames_with(2, vec![key(egui::Key::Escape, none)]);
+    let mut before = Vec::new();
+    s.ed.scene.for_each_voxel(|p, c| before.push((p, c)));
+    s.ui_click("flip-x")?;
+    let a_now = s.ed.scene.map.get(66, 0, 60);
+    check(count(&s) == 0 && s.voxels() == v && a_now == 12, "whole-model flip X: block A lands where B was".into())?;
+    s.ed.undo();
+    let mut back = Vec::new();
+    s.ed.scene.for_each_voxel(|p, c| back.push((p, c)));
+    check(back == before, "undo restores the whole model".into())?;
+
+    // The screenshot: block A selected, a box being drawn over B.
+    s.stroke(a_top, &[]);
+    let (b0, b1) = (project(&s.ed, [64.0, 3.0, 58.0]), project(&s.ed, [70.0, -0.5, 64.0]));
+    s.ed.ui.slot = 40;
+    s.hold(egui::Modifiers::SHIFT);
+    s.ed.pointer_moved(Some(b0));
+    s.ed.button(Button::Left, true, false);
+    s.ed.pointer_moved(Some(b1));
+    s.frames(4);
+    s.save_png(&dir.join("app-2x-select.png"))?;
+    s.ed.button(Button::Left, false, false);
+    s.hold(none);
+    Ok(())
 }
 
 /// The live render corner: it shows, converges, follows an edit without restarting, and
@@ -656,9 +838,14 @@ fn frame_times(scene: &Path) -> Result<(), String> {
     let on = run(&mut s, true, true);
     let idle = run(&mut s, true, false);
     let (ms, measured) = s.ed.preview.sample_ms();
+    // Every voxel selected, so every hit pixel looks up the selection mask.
+    s.ed.scene.select_all();
+    let selected = run(&mut s, false, true);
+    s.ed.scene.deselect();
     println!(
         "info frame time, island at 3024x1964 (median, CPU + GPU): {off:.2} ms without the render corner, \
-         {on:.2} ms with it while editing, {idle:.2} ms idle; one 640x360 sample {ms:.2} ms ({})",
+         {on:.2} ms with it while editing, {idle:.2} ms idle, {selected:.2} ms with every voxel selected; \
+         one 640x360 sample {ms:.2} ms ({})",
         if measured { "timestamps" } else { "assumed" }
     );
     Ok(())

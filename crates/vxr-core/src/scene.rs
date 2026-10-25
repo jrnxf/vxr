@@ -5,14 +5,15 @@
 //! (x, y, z) is the vxr cell (x, z, -y). Map cell `p` is the world cell `p + origin`, so
 //! the map can start at zero while the scene keeps its file coordinates.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use vxr_vox::build::Builder;
 use vxr_vox::scene::Rule;
 use vxr_vox::{Document, Material};
 
 use crate::brickmap::{B, BRICK_VOXELS, BrickMap, EMPTY, MASK_WORDS};
-use crate::history::{Change, ColorChange, History, MaterialChange, Step};
+use crate::history::{Change, ColorChange, History, MaterialChange, SelectionChange, Step};
+use crate::select::Clip;
 
 /// Largest scene extent per axis, in voxels. The brick grid for 2048^3 is 64 MiB.
 pub const MAX_EXTENT: u32 = 2048;
@@ -39,6 +40,13 @@ pub struct Scene {
     source: Option<Document>,
     history: History,
     stroke: Option<Stroke>,
+    /// Selected map cells (see [`crate::select`]). Cells emptied since they were selected stay
+    /// in the set but are ignored.
+    pub(crate) selection: HashSet<[i32; 3]>,
+    /// Bumped on every selection change, so the renderer knows when to upload it again.
+    pub(crate) selection_version: u64,
+    /// What Copy or Cut took, for Paste.
+    pub clipboard: Option<Clip>,
 }
 
 /// The changes of the edit in progress: one entry per cell or palette slot, first old value
@@ -49,6 +57,8 @@ struct Stroke {
     index: HashMap<[i32; 3], usize>,
     colors: Vec<ColorChange>,
     materials: Vec<MaterialChange>,
+    /// The selection when the edit first changed it.
+    selection: Option<Vec<[i32; 3]>>,
 }
 
 pub fn vox_to_world(p: [i32; 3]) -> [i32; 3] {
@@ -76,6 +86,9 @@ impl Scene {
             source: None,
             history: History::default(),
             stroke: None,
+            selection: HashSet::new(),
+            selection_version: 0,
+            clipboard: None,
         }
     }
 
@@ -265,6 +278,16 @@ impl Scene {
         self.commit();
     }
 
+    /// Replace the selection inside the open edit (opening one if needed), so undo restores it.
+    pub(crate) fn put_selection(&mut self, cells: HashSet<[i32; 3]>) {
+        let s = self.stroke.get_or_insert_default();
+        if s.selection.is_none() {
+            s.selection = Some(self.selection.iter().copied().collect());
+        }
+        self.selection = cells;
+        self.selection_version += 1;
+    }
+
     /// Put back every cell the open edit changed, keeping the edit open (its colour and
     /// material changes stay). Shape drags redraw from scratch on each move this way.
     pub fn revert_voxels(&mut self) {
@@ -280,10 +303,15 @@ impl Scene {
     /// are dropped. Returns how many voxels changed.
     pub fn commit(&mut self) -> usize {
         let Some(s) = self.stroke.take() else { return 0 };
+        let selection = s.selection.and_then(|old| {
+            let same = old.len() == self.selection.len() && old.iter().all(|p| self.selection.contains(p));
+            (!same).then(|| Box::new(SelectionChange { old, new: self.selection.iter().copied().collect() }))
+        });
         let step = Step {
             voxels: s.changes.into_iter().filter(|c| c.old != c.new).collect(),
             colors: s.colors.into_iter().filter(|c| c.old != c.new).collect(),
             materials: s.materials.into_iter().filter(|c| c.old != c.new).collect(),
+            selection,
         };
         let n = step.voxels.len();
         if !step.is_empty() {
@@ -368,6 +396,10 @@ impl Scene {
         }
         for c in &step.materials {
             self.materials[c.index as usize] = if revert { c.old } else { c.new };
+        }
+        if let Some(c) = &step.selection {
+            self.selection = (if revert { &c.old } else { &c.new }).iter().copied().collect();
+            self.selection_version += 1;
         }
     }
 }

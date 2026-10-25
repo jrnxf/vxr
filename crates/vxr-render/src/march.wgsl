@@ -7,6 +7,7 @@ struct Camera {
     size: vec4<f32>,      // width, height, 1/width, 1/height
     sun: vec4<f32>,       // xyz direction toward the sun
     cursor: vec4<i32>,    // voxel under the cursor (map coordinates); w = 1 to highlight it
+    select: vec4<u32>,    // x = words in `sel`, 0 when nothing is selected
 };
 
 @group(0) @binding(0) var<uniform> cam: Camera;
@@ -15,6 +16,21 @@ struct Camera {
 // palette index | normal code << 8 | hit << 11, normal code = axis * 2 + (normal > 0).
 @group(0) @binding(2) var out_depth: texture_storage_2d<r32float, write>;
 @group(0) @binding(3) var out_info: texture_storage_2d<r32uint, write>;
+// The selection: one bit per voxel in the masks' layout (16 words per brick slot).
+@group(2) @binding(0) var<storage, read> sel: array<u32>;
+
+// Selection highlight, the UI's accent #8ea2ff in linear light.
+const SELECT_TINT: vec3<f32> = vec3<f32>(0.27, 0.36, 1.0);
+
+fn selected(v: vec3<i32>) -> bool {
+    if (cam.select.x == 0u) { return false; }
+    let brick = grid_at(v >> vec3<u32>(3u));
+    let l = vec3<u32>(v & vec3<i32>(7));
+    let local = l.x | (l.y << 3u) | (l.z << 6u);
+    let w = brick * 16u + (local >> 5u);
+    if (brick == 0xffffffffu || w >= cam.select.x) { return false; }
+    return ((sel[w] >> (local & 31u)) & 1u) != 0u;
+}
 
 override WRITE_GBUFFER: bool = false;
 override WG_X: u32 = 8u;
@@ -56,11 +72,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let diff = max(dot(n, cam.sun.xyz), 0.0);
         let amb = 0.32 + 0.10 * n.y;
         col = albedo * (amb + 0.85 * diff);
-        if (cam.cursor.w == 1) {
-            let voxel = vec3<i32>(floor(ro + d * h.t - n * 0.5));
-            if (all(voxel == cam.cursor.xyz)) {
-                col = mix(col, vec3<f32>(1.0), 0.35);
-            }
+        let hp = ro + d * h.t;
+        let voxel = vec3<i32>(floor(hp - n * 0.5));
+        if (selected(voxel)) {
+            // Tinted, with a brighter line along each voxel's edges so single cells read.
+            let f = fract(hp);
+            let e = min(min(f, 1.0 - f) + abs(n), vec3<f32>(1.0));
+            let edge = min(e.x, min(e.y, e.z)) < 0.07;
+            col = mix(col, SELECT_TINT * (amb + 0.85 * diff + 0.2), select(0.45, 0.8, edge));
+        }
+        if (cam.cursor.w == 1 && all(voxel == cam.cursor.xyz)) {
+            col = mix(col, vec3<f32>(1.0), 0.35);
         }
     } else {
         col = background(px);

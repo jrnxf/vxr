@@ -13,6 +13,8 @@ pub enum Tool {
     Erase,
     Paint,
     Pick,
+    /// Choose voxels for [`crate::select`]; presses do nothing to the scene.
+    Select,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -195,6 +197,9 @@ impl Scene {
 
     /// Press with a brush on a target.
     pub fn press(&mut self, brush: Brush, t: Target) -> Press {
+        if brush.tool == Tool::Select {
+            return Press::Nothing;
+        }
         if brush.tool == Tool::Pick {
             return if t.value != 0 { Press::Picked(t.value) } else { Press::Nothing };
         }

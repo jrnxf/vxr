@@ -140,8 +140,15 @@ mod icon {
     pub const CIRCLE_DOT: char = '\u{e345}';
     pub const GLOBE: char = '\u{e0e8}';
     pub const LOCK: char = '\u{e10b}';
+    pub const SELECT: char = '\u{e509}';
+    pub const PAINT_BUCKET: char = '\u{e2e6}';
+    pub const SCISSORS: char = '\u{e14e}';
+    pub const CLIPBOARD_PASTE: char = '\u{e3e8}';
+    pub const TRASH: char = '\u{e18e}';
+    pub const X: char = '\u{e1b2}';
 }
 
+pub use vxr_core::select::Transform;
 pub use vxr_core::tools::{Shape, Tool};
 
 /// What the UI asks the app to do this frame.
@@ -177,6 +184,18 @@ pub enum Action {
     CancelExport,
     /// For the host: an export finished; take its PNG from `Editor::exported`.
     Exported,
+    /// Move, rotate, flip or loop the selection, or the whole model when nothing is selected.
+    Transform(Transform),
+    SelectAll,
+    /// Select every voxel of the current colour.
+    SelectColor,
+    Deselect,
+    DeleteSelection,
+    /// Paint the selection with the current colour.
+    FillSelection,
+    Copy,
+    Cut,
+    Paste,
 }
 
 /// What the next swatch click does, armed from the colour editor or Cmd-K.
@@ -217,6 +236,8 @@ pub struct Stats {
     /// Size of the box being dragged, shown in place of the cursor.
     /// What a shape drag in progress spans: ("BOX", "4×1×3"), ("LINE", "12"), ("RADIUS", "5").
     pub span: Option<(&'static str, String)>,
+    /// How many voxels are selected.
+    pub selected: usize,
     /// The render corner's samples per pixel and whether it is still sampling, if shown.
     pub render: Option<(f32, bool)>,
     /// A render export in progress: its size, samples per pixel so far and the target.
@@ -263,6 +284,13 @@ pub struct Hybrid {
     pub hits: HashMap<String, Rect>,
     /// Top of the mirror button in the rail, where the axis flyout lines up.
     axes_y: f32,
+    /// Top of the select button in the rail, where the selection flyout lines up.
+    select_y: f32,
+    /// How many voxels are selected, and whether Copy or Cut has filled the clipboard.
+    pub selected: usize,
+    pub has_clip: bool,
+    /// The box being dragged with the select tool, in points.
+    pub marquee: Option<Rect>,
     /// Swatch being dragged with Cmd (swap) or Cmd+Shift (copy).
     drag_from: Option<u8>,
     /// The slot the swatch grid last scrolled to.
@@ -270,6 +298,8 @@ pub struct Hybrid {
     shift: bool,
     alt: bool,
     actions: Vec<Action>,
+    /// Arrow keys pressed this frame with a selection, for the editor to move it.
+    pub arrows: Vec<Key>,
     toast: Option<(String, f64)>,
 }
 
@@ -284,6 +314,34 @@ const COMMANDS: &[Command] = &[
     Command { label: "Erase", keys: &["E"], run: |h| h.tool = Tool::Erase },
     Command { label: "Paint", keys: &["P"], run: |h| h.tool = Tool::Paint },
     Command { label: "Pick color", keys: &["I"], run: |h| h.tool = Tool::Pick },
+    Command { label: "Select", keys: &["S"], run: |h| h.tool = Tool::Select },
+    Command { label: "Select all", keys: &["⌘", "A"], run: |h| h.actions.push(Action::SelectAll) },
+    Command { label: "Select color", keys: &[], run: |h| h.actions.push(Action::SelectColor) },
+    Command { label: "Deselect", keys: &["Esc"], run: |h| h.actions.push(Action::Deselect) },
+    Command { label: "Delete selection", keys: &["⌫"], run: |h| h.actions.push(Action::DeleteSelection) },
+    Command { label: "Fill selection", keys: &[], run: |h| h.actions.push(Action::FillSelection) },
+    Command { label: "Copy", keys: &["⌘", "C"], run: |h| h.actions.push(Action::Copy) },
+    Command { label: "Cut", keys: &["⌘", "X"], run: |h| h.actions.push(Action::Cut) },
+    Command { label: "Paste", keys: &["⌘", "V"], run: |h| h.actions.push(Action::Paste) },
+    Command { label: "Rotate X", keys: &[], run: |h| h.actions.push(Action::Transform(Transform::Rotate(0))) },
+    Command { label: "Rotate Y", keys: &[], run: |h| h.actions.push(Action::Transform(Transform::Rotate(1))) },
+    Command { label: "Rotate Z", keys: &[], run: |h| h.actions.push(Action::Transform(Transform::Rotate(2))) },
+    Command { label: "Flip X", keys: &[], run: |h| h.actions.push(Action::Transform(Transform::Flip(0))) },
+    Command { label: "Flip Y", keys: &[], run: |h| h.actions.push(Action::Transform(Transform::Flip(1))) },
+    Command { label: "Flip Z", keys: &[], run: |h| h.actions.push(Action::Transform(Transform::Flip(2))) },
+    Command { label: "Loop X", keys: &[], run: |h| h.actions.push(Action::Transform(Transform::Loop(0, 1))) },
+    Command { label: "Loop Y", keys: &[], run: |h| h.actions.push(Action::Transform(Transform::Loop(1, 1))) },
+    Command { label: "Loop Z", keys: &[], run: |h| h.actions.push(Action::Transform(Transform::Loop(2, 1))) },
+    Command {
+        label: "Move up",
+        keys: &["⇧", "↑"],
+        run: |h| h.actions.push(Action::Transform(Transform::Move([0, 1, 0]))),
+    },
+    Command {
+        label: "Move down",
+        keys: &["⇧", "↓"],
+        run: |h| h.actions.push(Action::Transform(Transform::Move([0, -1, 0]))),
+    },
     Command { label: "Voxel brush", keys: &["V"], run: |h| h.shape = Shape::Voxel },
     Command { label: "Box brush", keys: &["B"], run: |h| h.shape = Shape::Box },
     Command { label: "Face brush", keys: &["F"], run: |h| h.shape = Shape::Face },
@@ -340,11 +398,16 @@ impl Hybrid {
             sun_hex: String::new(),
             hits: HashMap::new(),
             axes_y: 0.0,
+            select_y: 0.0,
+            selected: 0,
+            has_clip: false,
+            marquee: None,
             drag_from: None,
             shown_slot: 28,
             shift: false,
             alt: false,
             actions: Vec::new(),
+            arrows: Vec::new(),
             toast: None,
         }
     }
@@ -359,9 +422,12 @@ impl Hybrid {
         (self.shift, self.alt)
     }
 
-    /// The tool a click uses now: Alt picks, Shift erases.
+    /// The tool a click uses now: Alt picks, Shift erases (with the select tool they
+    /// subtract from and add to the selection instead).
     pub fn effective_tool(&self) -> Tool {
-        if self.alt {
+        if self.tool == Tool::Select {
+            Tool::Select
+        } else if self.alt {
             Tool::Pick
         } else if self.shift && self.tool != Tool::Pick {
             Tool::Erase
@@ -440,13 +506,15 @@ impl Hybrid {
     }
 
     /// Escape: cancel an armed swap or copy, else close the colour editor or the Render panel,
-    /// else the coach card.
+    /// else deselect, else the coach card.
     fn escape(&mut self) {
         if self.slot_op.take().is_some() || self.color_edit.take().is_some() {
             return;
         }
         if self.render_panel {
             self.render_panel = false;
+        } else if self.selected > 0 {
+            self.actions.push(Action::Deselect);
         } else {
             self.coach = false;
         }
@@ -477,6 +545,8 @@ impl Hybrid {
         self.top_bar(ctx, screen);
         self.rail(ctx);
         self.axes(ctx);
+        self.selection_panel(ctx);
+        self.marquee(ctx);
         self.palette_panel(ctx, screen);
         self.color_editor(ctx, screen);
         if self.coach {
@@ -518,11 +588,50 @@ impl Hybrid {
             if i.consume_key(Modifiers::COMMAND, Key::S) {
                 self.actions.push(Action::Save);
             }
+            if i.consume_key(Modifiers::COMMAND, Key::A) {
+                self.actions.push(Action::SelectAll);
+            }
+            // Natively egui-winit turns Cmd-C, Cmd-X and Cmd-V into clipboard events (Paste
+            // only when the system clipboard has text); the browser page sends the keys.
+            let (mut copy, mut cut, mut paste) = (false, false, false);
+            i.events.retain(|e| match e {
+                egui::Event::Copy => !std::mem::replace(&mut copy, true),
+                egui::Event::Cut => !std::mem::replace(&mut cut, true),
+                egui::Event::Paste(_) => !std::mem::replace(&mut paste, true),
+                _ => true,
+            });
+            copy |= i.consume_key(Modifiers::COMMAND, Key::C);
+            cut |= i.consume_key(Modifiers::COMMAND, Key::X);
+            paste |= i.consume_key(Modifiers::COMMAND, Key::V);
+            for (on, a) in [(copy, Action::Copy), (cut, Action::Cut), (paste, Action::Paste)] {
+                if on {
+                    self.actions.push(a);
+                }
+            }
+            if self.selected > 0 {
+                for key in [Key::Delete, Key::Backspace] {
+                    if i.consume_key(Modifiers::NONE, key) {
+                        self.actions.push(Action::DeleteSelection);
+                    }
+                }
+            }
+            for (key, d) in [(Key::ArrowUp, 1), (Key::ArrowDown, -1)] {
+                if self.selected > 0 && i.consume_key(Modifiers::SHIFT, key) {
+                    self.actions.push(Action::Transform(Transform::Move([0, d, 0])));
+                }
+            }
+            // Arrows move along the ground; the editor turns them to match the view.
+            for key in [Key::ArrowLeft, Key::ArrowRight, Key::ArrowUp, Key::ArrowDown] {
+                if self.selected > 0 && i.consume_key(Modifiers::NONE, key) {
+                    self.arrows.push(key);
+                }
+            }
             for (key, f) in [
                 (Key::A, (|h: &mut Hybrid| h.tool = Tool::Add) as fn(&mut Hybrid)),
                 (Key::E, |h| h.tool = Tool::Erase),
                 (Key::P, |h| h.tool = Tool::Paint),
                 (Key::I, |h| h.tool = Tool::Pick),
+                (Key::S, |h| h.tool = Tool::Select),
                 (Key::V, |h| h.shape = Shape::Voxel),
                 (Key::B, |h| h.shape = Shape::Box),
                 (Key::F, |h| h.shape = Shape::Face),
@@ -624,7 +733,7 @@ impl Hybrid {
 
     // #rail
     fn rail(&mut self, ctx: &Context) {
-        let h = 6.0 + rail_label_h() + 4.0 * 42.0 + 11.0 + rail_label_h() + 5.0 * 42.0 + 11.0 + 3.0 * 42.0 + 6.0 - 2.0;
+        let h = 6.0 + rail_label_h() + 5.0 * 42.0 + 11.0 + rail_label_h() + 5.0 * 42.0 + 11.0 + 3.0 * 42.0 + 6.0 - 2.0;
         let rect = Rect::from_min_size(pos2(12.0, 68.0), vec2(52.0, h));
         Self::panel(ctx, "rail", rect, Order::Middle, |ui, rect| {
             let x = rect.left() + 6.0;
@@ -636,8 +745,16 @@ impl Hybrid {
                 (Tool::Erase, icon::ERASER, "E"),
                 (Tool::Paint, icon::PAINTBRUSH, "P"),
                 (Tool::Pick, icon::PIPETTE, "I"),
+                (Tool::Select, icon::SELECT, "S"),
             ] {
-                if tool_button(ui, pos2(x, y), ic, k, tool == t).clicked() {
+                if t == Tool::Select {
+                    self.select_y = y;
+                }
+                let r = tool_button(ui, pos2(x, y), ic, k, tool == t);
+                if t == Tool::Select {
+                    self.hits.insert("select".into(), r.rect);
+                }
+                if r.clicked() {
                     self.tool = t;
                 }
                 y += 42.0;
@@ -741,6 +858,136 @@ impl Hybrid {
         }
         if let Some(a) = clicked.1 {
             self.toggle_lock(a);
+        }
+    }
+
+    // The selection flyout beside the rail's select button, shown with the select tool or a
+    // selection: the count, ROTATE / FLIP / LOOP X Y Z (the whole model when nothing is
+    // selected) and fill, copy, cut, paste and delete. Built like the axis flyout.
+    fn selection_panel(&mut self, ctx: &Context) {
+        if self.tool != Tool::Select && self.selected == 0 {
+            return;
+        }
+        let rect = Rect::from_min_size(pos2(12.0 + 52.0 + 8.0, self.select_y - 6.0), vec2(162.0, 174.0));
+        let (selected, has_clip) = (self.selected, self.has_clip);
+        let mut run = Vec::new();
+        let mut hits = Vec::new();
+        Self::panel(ctx, "selection", rect, Order::Middle, |ui, rect| {
+            let hy = rect.top() + 18.0;
+            let g = ui.painter().layout_job(spaced("SELECTION", inter(9.0), FAINT, 0.72));
+            ui.painter().galley(pos2(rect.left() + 12.0, hy - g.size().y / 2.0), g, FAINT);
+            if selected > 0 {
+                let x = Rect::from_center_size(pos2(rect.right() - 19.0, hy), vec2(22.0, 22.0));
+                let resp = ui.interact(x, Id::unique("deselect"), Sense::click());
+                hits.push(("deselect".to_string(), x));
+                if resp.hovered() {
+                    ui.painter().rect_filled(x, CornerRadius::same(6), HOVER);
+                }
+                let c = if resp.hovered() { TEXT } else { MUTED };
+                ui.painter().text(x.center(), Align2::CENTER_CENTER, icon::X, icon_font(13.0), c);
+                ui.painter().text(
+                    pos2(x.left() - 4.0, hy),
+                    Align2::RIGHT_CENTER,
+                    group_thousands(selected as u64),
+                    mono(11.0),
+                    ACCENT,
+                );
+                if resp.clicked() {
+                    run.push(Action::Deselect);
+                }
+            } else {
+                ui.painter().text(
+                    pos2(rect.right() - 12.0, hy),
+                    Align2::RIGHT_CENTER,
+                    "whole model",
+                    inter(11.0),
+                    FAINT,
+                );
+            }
+            for (row, label) in ["ROTATE", "FLIP", "LOOP"].into_iter().enumerate() {
+                let cy = hy + 30.0 + row as f32 * 34.0;
+                let g = ui.painter().layout_job(spaced(label, inter(9.0), FAINT, 0.72));
+                ui.painter().galley(pos2(rect.left() + 12.0, cy - g.size().y / 2.0), g, FAINT);
+                for (a, name) in ["X", "Y", "Z"].into_iter().enumerate() {
+                    let c =
+                        Rect::from_min_size(pos2(rect.left() + 70.0 + a as f32 * 28.0, cy - 13.0), vec2(26.0, 26.0));
+                    let id = format!("{}-{}", label.to_lowercase(), name.to_lowercase());
+                    let resp = ui.interact(c, Id::unique(&id), Sense::click());
+                    hits.push((id, c));
+                    let hover = resp.hovered();
+                    let p = ui.painter();
+                    let border = if hover { Color32::from_white_alpha(64) } else { LINE2 };
+                    p.rect_stroke(c, CornerRadius::same(7), Stroke::new(1.0, border), StrokeKind::Inside);
+                    p.text(
+                        c.center(),
+                        Align2::CENTER_CENTER,
+                        name,
+                        mono_medium(11.5),
+                        if hover { TEXT } else { MUTED },
+                    );
+                    if resp.clicked() {
+                        run.push(Action::Transform(match row {
+                            0 => Transform::Rotate(a),
+                            1 => Transform::Flip(a),
+                            _ => Transform::Loop(a, 1),
+                        }));
+                    }
+                }
+            }
+            let cy = hy + 30.0 + 3.0 * 34.0 + 4.0;
+            ui.painter().line_segment(
+                [pos2(rect.left() + 10.0, cy - 20.5), pos2(rect.right() - 10.0, cy - 20.5)],
+                Stroke::new(1.0, LINE),
+            );
+            for (k, (glyph, id, action, on)) in [
+                (icon::PAINT_BUCKET, "fill", Action::FillSelection, selected > 0),
+                (icon::COPY, "copy-sel", Action::Copy, selected > 0),
+                (icon::SCISSORS, "cut", Action::Cut, selected > 0),
+                (icon::CLIPBOARD_PASTE, "paste", Action::Paste, has_clip),
+                (icon::TRASH, "delete", Action::DeleteSelection, selected > 0),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let c = Rect::from_min_size(pos2(rect.left() + 12.0 + k as f32 * 28.0, cy - 13.0), vec2(26.0, 26.0));
+                hits.push((id.to_string(), c));
+                let p = ui.painter().clone();
+                if !on {
+                    p.rect_stroke(c, CornerRadius::same(7), Stroke::new(1.0, LINE), StrokeKind::Inside);
+                    p.text(c.center(), Align2::CENTER_CENTER, glyph, icon_font(14.0), FAINT);
+                    continue;
+                }
+                let resp = ui.interact(c, Id::unique(id), Sense::click());
+                let hover = resp.hovered();
+                let danger = id == "delete";
+                let border = if hover { Color32::from_white_alpha(64) } else { LINE2 };
+                p.rect_stroke(c, CornerRadius::same(7), Stroke::new(1.0, border), StrokeKind::Inside);
+                let color = match (hover, danger) {
+                    (true, true) => DANGER,
+                    (true, false) => TEXT,
+                    _ => MUTED,
+                };
+                p.text(c.center(), Align2::CENTER_CENTER, glyph, icon_font(14.0), color);
+                if resp.clicked() {
+                    run.push(action);
+                }
+            }
+        });
+        self.hits.extend(hits);
+        self.actions.extend(run);
+    }
+
+    // The select tool's box while it is dragged: an accent outline over a faint accent fill.
+    fn marquee(&self, ctx: &Context) {
+        if let Some(r) = self.marquee {
+            let p = ctx.layer_painter(egui::LayerId::new(Order::Background, Id::unique("marquee")));
+            p.rect(
+                r,
+                CornerRadius::same(2),
+                Color32::from_rgba_unmultiplied(142, 162, 255, 26),
+                Stroke::new(1.0, ACCENT),
+                StrokeKind::Inside,
+            );
         }
     }
 
@@ -1320,6 +1567,7 @@ impl Hybrid {
             ("FPS", if s.fps > 0.0 { format!("{:.0}", s.fps) } else { "-".into() }, fps_color),
             ("FRAME", format!("{:.1}ms", s.frame_ms), TEXT),
             match &s.span {
+                _ if s.selected > 0 && s.span.is_none() => ("SELECTED", group_thousands(s.selected as u64), ACCENT),
                 Some((label, v)) => (*label, v.clone(), TEXT),
                 None => (
                     "CURSOR",
@@ -1584,7 +1832,9 @@ impl Hybrid {
             }
             (None, t, shape) => self.tool_hints(t, shape),
         };
-        if self.slot_op.is_none() {
+        if self.slot_op.is_none() && t == Tool::Select {
+            items.extend([("Shift", "add"), ("Alt", "subtract"), ("Right-drag", "orbit")]);
+        } else if self.slot_op.is_none() {
             items.extend([("Shift", "erase"), ("Alt", "pick"), ("Right-drag", "orbit")]);
             if t == Tool::Erase && self.shift {
                 let n = items.len();
@@ -1615,6 +1865,10 @@ impl Hybrid {
             (Tool::Erase, Shape::Sphere) => vec![("Drag", "carve a sphere"), ("C", "circle")],
             (Tool::Paint, Shape::Sphere) => vec![("Drag", "paint a sphere"), ("C", "circle")],
             (Tool::Pick, _) => vec![("Click", "take that color")],
+            (Tool::Select, _) if self.selected > 0 => {
+                vec![("Drag", "box select"), ("Drag selection", "move it"), ("Arrows", "nudge"), ("⌫", "delete")]
+            }
+            (Tool::Select, _) => vec![("Drag", "box select"), ("Click", "select that color")],
         }
     }
 

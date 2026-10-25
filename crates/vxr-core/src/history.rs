@@ -27,19 +27,28 @@ pub struct MaterialChange {
     pub new: Material,
 }
 
+/// The selection before and after a step that moved or changed it (map cells).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SelectionChange {
+    pub old: Vec<[i32; 3]>,
+    pub new: Vec<[i32; 3]>,
+}
+
 /// One undo step: the voxels, palette colours and materials a single action changed. A
 /// recolour has only colours, a swap of two slots has all three (the colours and materials
-/// swapped, and the voxels remapped to keep their look).
+/// swapped, and the voxels remapped to keep their look). Steps that move a selection (move,
+/// rotate, paste, delete) also record it, so undo puts the selection back with the voxels.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Step {
     pub voxels: Vec<Change>,
     pub colors: Vec<ColorChange>,
     pub materials: Vec<MaterialChange>,
+    pub selection: Option<Box<SelectionChange>>,
 }
 
 impl Step {
     pub fn is_empty(&self) -> bool {
-        self.voxels.is_empty() && self.colors.is_empty() && self.materials.is_empty()
+        self.voxels.is_empty() && self.colors.is_empty() && self.materials.is_empty() && self.selection.is_none()
     }
 }
 

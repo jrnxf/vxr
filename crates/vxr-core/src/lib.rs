@@ -4,12 +4,15 @@
 //!   dirty tracking for partial GPU uploads, and a CPU ray cast for picking.
 //! - [`history`]: undo and redo steps.
 //! - [`scene`]: a brick map with its palette and history, and `.vox` open and save.
+//! - [`select`]: the selection (box and colour), and move, copy, paste, delete, fill,
+//!   rotate, flip and loop of the selection or the whole model.
 //! - [`tools`]: the editing tools (add, erase, paint, pick with the voxel, box, face, line
 //!   and center brushes, mirror on three axes and axis lock), as presses, drags and releases.
 
 pub mod brickmap;
 pub mod history;
 pub mod scene;
+pub mod select;
 pub mod tools;
 
 pub use brickmap::BrickMap;

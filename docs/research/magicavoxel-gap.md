@@ -38,7 +38,7 @@ Feature names below follow the update log [S1] unless another source is given.
 | Mirror X, Y, Z | Per-axis mirror on every brush [S1 0.97] | done (M toggles; X, Y, Z chips in the axis flyout; x and z planes at world 0, y at the middle of the model's height) | P1 | sculpt |
 | Axis lock | Brush option "axis" [S1 0.97, 0.99.5.1] | done (K cycles X, Y, Z, off: drags stay on the plane across that axis) | P1 | sculpt |
 | Diagonal symmetry | Command `dia [axis]` [S1 0.98.1] | missing | P3 | - |
-| Region options | Brushes act on selected or unselected voxels only [S1 0.98.1, 0.99.5.1] | missing [5] | P2 | sculpt |
+| Region options | Brushes act on selected or unselected voxels only [S1 0.98.1, 0.99.5.1] | missing (selection is in [5]; brushes ignore it so far) | P2 | sculpt |
 | Replace colour and remove colour brushes | Act on every voxel of one colour [S1 0.98.1] | missing (paint face covers part) | P2 | palette |
 | Sculpt brushes | Applied to selected or unselected regions [S1 0.99.5.1] | missing | P3 | sculpt |
 | SDF brush | Box brush plus a voxel shader [S1 0.99.5.1] | missing (see Shaders) | P3 | - |
@@ -50,13 +50,13 @@ Feature names below follow the update log [S1] unless another source is given.
 
 | Feature | MagicaVoxel | vxr | Priority | Why |
 |---|---|---|---|---|
-| Box select | Shift adds, Shift+Alt subtracts [S1 0.98.1] | missing [5] | P1 | sculpt |
-| Rect (screen) select | Select voxels in a screen rectangle [S1 0.98.1] | missing | P2 | - |
-| Region select: same volume, face, colour | [S1 0.98.1]; select voxels by colour from the palette menu [S1 0.99.5] | missing [5] (by colour first) | P1 | palette |
-| Deselect, invert, select all | Edit->Select [S1 0.98.1] | missing [5] | P1 | - |
-| Copy, paste, delete, fill selection | [S1 0.98.1] | missing [5] | P1 | minutes |
-| Move selection | Move brush on selected voxels [S1 0.98.1]; Ctrl / Ctrl+Shift / Ctrl+Shift+Alt for 1, 2 or normal-axis moves [S1 0.99.7.2] | missing [5] | P1 | sculpt |
-| Flip, rotate 90, loop (shift) | Transform tools on the selection around its local center [S1 0.98.1] | missing [5] | P1 | minutes |
+| Box select | Shift adds, Shift+Alt subtracts [S1 0.98.1] | done [5] (a screen box through every depth; Shift adds, Alt subtracts) | P1 | sculpt |
+| Rect (screen) select | Select voxels in a screen rectangle [S1 0.98.1] | done [5] (the select tool's box) | P2 | - |
+| Region select: same volume, face, colour | [S1 0.98.1]; select voxels by colour from the palette menu [S1 0.99.5] | partial [5] (colour: click a voxel, or Cmd-K Select color; face and volume missing) | P1 | palette |
+| Deselect, invert, select all | Edit->Select [S1 0.98.1] | partial [5] (Cmd-A, Escape, the flyout's x; invert missing) | P1 | - |
+| Copy, paste, delete, fill selection | [S1 0.98.1] | done [5] (Cmd-C, Cmd-X, Cmd-V at the pointer, Backspace, fill with the current colour) | P1 | minutes |
+| Move selection | Move brush on selected voxels [S1 0.98.1]; Ctrl / Ctrl+Shift / Ctrl+Shift+Alt for 1, 2 or normal-axis moves [S1 0.99.7.2] | done [5] (drag on the pressed face's plane, live; arrows and Shift-Up/Down nudge) | P1 | sculpt |
+| Flip, rotate 90, loop (shift) | Transform tools on the selection around its local center [S1 0.98.1] | done [5] (selection, or the whole model with nothing selected) | P1 | minutes |
 | Scale and repeat | Console commands `scale`, `repeat` [S1 0.98] | missing | P3 | - |
 | Shear | Command `shear z 0.2 0.2` [S1 0.99.6.2] | missing | P3 | - |
 | Mask and texture with a pattern model | Modify->Mask/Texture [S1 0.99.6.2] | missing | P3 | - |
@@ -86,7 +86,7 @@ Feature names below follow the update log [S1] unless another source is given.
 | Copy and paste colours between palettes | [S1 0.99.7.1] | missing | P2 | palette |
 | Sort palette | `pal sort [+-hsvrgb]` [S1 0.99.2] | missing | P3 | palette |
 | Mask unused colours | `pal mask` [S1 0.97.1]; vxr shows dots on used colours | partial (used dots) | P3 | palette |
-| Select voxels by colour and colours by voxels | Palette menu [S1 0.99.5] | missing [5] | P1 | palette |
+| Select voxels by colour and colours by voxels | Palette menu [S1 0.99.5] | partial [5] (voxels by colour; colours by voxels missing) | P1 | palette |
 | Palette notes | A note per palette row, saved in NOTE [S1 0.99.5.1, S2] | missing (kept by lossless save [1]) | P3 | lossless |
 | Import and export palettes | IO panel, text and image [S1 0.99.5.1] | missing | P2 | palette |
 
@@ -194,4 +194,4 @@ Design note: `.vox` animation is a list of `nSHP` models with `_f` frame indices
 
 1. Lossless save [1] was the one blocking gap for anyone with existing files. It is done: saving an opened MagicaVoxel scene keeps its materials, layers, cameras and names.
 2. The palette [2] and the renderer [3] were the two loved features vxr lacked most visibly. Palette editing is done (picker, live recolour, swap and copy); multi-select, sorting and palette import/export remain. The live path-traced corner, the Render panel (sun, sky, exposure, depth of field, samples), PNG export and per-slot materials (diffuse, metal, glass, emissive, saved as MATL) are in; refraction, plastic and the newer blend and cloud types remain.
-3. Brushes [4] are in (line, center circle and sphere, mirror on X, Y and Z, axis lock); selection [5] closes the rest of the sculpting gap. After them, the world editor [8] matters most for MagicaVoxel scenes with many objects.
+3. Brushes [4] and selection [5] are in (line, center circle and sphere, mirror on X, Y and Z, axis lock; box and colour select, move, copy, paste, delete, fill, rotate, flip and loop), which closes the sculpting gap apart from region options and face or volume select. Next, the world editor [8] matters most for MagicaVoxel scenes with many objects.

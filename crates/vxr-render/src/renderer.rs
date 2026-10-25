@@ -17,6 +17,7 @@ struct CameraUniform {
     size: [f32; 4],
     sun: [f32; 4],
     cursor: [i32; 4],
+    select: [u32; 4],
 }
 
 pub struct Renderer {
@@ -35,6 +36,11 @@ pub struct Renderer {
     blit_layout: wgpu::BindGroupLayout,
     blit_group: wgpu::BindGroup,
     sampler: wgpu::Sampler,
+    /// The selection mask (see `march.wgsl`) and how many of its words are in use.
+    sel: wgpu::Buffer,
+    sel_layout: wgpu::BindGroupLayout,
+    sel_group: wgpu::BindGroup,
+    sel_words: u32,
 }
 
 impl Renderer {
@@ -70,10 +76,24 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let sel_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("selection"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let (sel, sel_group) = selection_buffer(device, &sel_layout, 16);
         let module = march_module(device, format!("{BRICKMAP_WGSL}\n{MARCH_WGSL}"));
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("march"),
-            bind_group_layouts: &[Some(&out_layout), Some(map_layout)],
+            bind_group_layouts: &[Some(&out_layout), Some(map_layout), Some(&sel_layout)],
             immediate_size: 0,
         });
         let constants = [
@@ -169,7 +189,24 @@ impl Renderer {
             blit_layout,
             blit_group: t.blit_group,
             sampler,
+            sel,
+            sel_layout,
+            sel_group,
+            sel_words: 0,
         }
+    }
+
+    /// Highlight the selection: one bit per voxel in the map's mask layout (16 words per
+    /// brick slot), as `vxr_core::Scene::selection_mask` builds it. Empty clears it.
+    pub fn set_selection(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, words: &[u32]) {
+        if words.len() as u64 * 4 > self.sel.size() {
+            let size = (words.len() as u64 * 4).next_power_of_two();
+            (self.sel, self.sel_group) = selection_buffer(device, &self.sel_layout, size);
+        }
+        if !words.is_empty() {
+            queue.write_buffer(&self.sel, 0, bytemuck::cast_slice(words));
+        }
+        self.sel_words = words.len() as u32;
     }
 
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
@@ -204,6 +241,7 @@ impl Renderer {
             size: [self.width as f32, self.height as f32, 1.0 / self.width as f32, 1.0 / self.height as f32],
             sun: [sun.x, sun.y, sun.z, 0.0],
             cursor: [c[0], c[1], c[2], cursor.is_some() as i32],
+            select: [self.sel_words, 0, 0, 0],
         };
         queue.write_buffer(&self.cam, 0, bytemuck::bytes_of(&u));
     }
@@ -220,6 +258,7 @@ impl Renderer {
         pass.set_pipeline(&self.march);
         pass.set_bind_group(0, &self.out_group, &[]);
         pass.set_bind_group(1, &map.bind_group, &[]);
+        pass.set_bind_group(2, &self.sel_group, &[]);
         pass.dispatch_workgroups(self.width.div_ceil(WORKGROUP.0), self.height.div_ceil(WORKGROUP.1), 1);
     }
 
@@ -315,6 +354,25 @@ impl Targets {
         });
         Self { color, depth, info, out_group, blit_group }
     }
+}
+
+fn selection_buffer(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    size: u64,
+) -> (wgpu::Buffer, wgpu::BindGroup) {
+    let buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("selection"),
+        size,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("selection"),
+        layout,
+        entries: &[wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() }],
+    });
+    (buf, group)
 }
 
 /// The march shader. Natively, wgpu's runtime checks (buffer bounds checks and the counter

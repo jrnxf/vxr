@@ -177,6 +177,51 @@ async () => {
   await key('k');
   await key('k');
   step('K again locks Y, Z, then off', st().lock === null);
+
+  // Selection and transform: S, colour click, Escape, box select, a live move drag, the
+  // flyout, copy and paste, Backspace and Cmd-A, each edit undone again.
+  await key('s');
+  step('S picks the select tool and shows the selection flyout', st().tool === 'Select' && window.vxr.hit('rotate-y').length === 2, st().tool);
+  await click(mx, my);
+  const byColor = st().selected;
+  step('a click selects every voxel of that color', byColor > 0 && st().voxels === s0.voxels, `${byColor}`);
+  await click(mx, my, { shiftKey: false, altKey: true });
+  step('Alt-click subtracts it again', st().selected === 0, `${st().selected}`);
+  await click(mx, my);
+  await key('Escape');
+  step('Escape deselects', st().selected === 0);
+  await drag(mx - 60, my - 40, mx + 60, my + 40);
+  const boxed = st().selected;
+  step('a box drag selects the voxels inside it', boxed > 0 && boxed !== byColor && same(bytes(), original), `${boxed}`);
+  ptr('pointermove', mx, my); await frames();
+  ptr('pointerdown', mx, my); await frames();
+  for (let i = 1; i <= 6; i++) { ptr('pointermove', mx + i * 8, my); await frames(1); }
+  const moving = st().span;
+  ptr('pointerup', mx + 48, my); await frames();
+  step('dragging the selection moves it live', moving && moving[0] === 'MOVE' && moving[1] !== '0,0,0' && !same(bytes(), original) && st().selected > 0, JSON.stringify(moving));
+  await key('z', cmd);
+  step('Cmd-Z puts the moved selection back', same(bytes(), original) && st().selected === boxed, `${st().selected}`);
+  await chip('rotate-y');
+  const turned = !same(bytes(), original);
+  await key('z', cmd);
+  await chip('flip-x');
+  const flipped = !same(bytes(), original);
+  await key('z', cmd);
+  step('the flyout rotates and flips the selection, one undo step each', turned && flipped && same(bytes(), original));
+  await key('c', cmd);
+  ptr('pointermove', mx - 150, my + 60); await frames();
+  await key('v', cmd);
+  step('Cmd-C, Cmd-V pastes a copy at the pointer, selected', st().hasClip && !same(bytes(), original) && st().selected > 0, JSON.stringify([st().hasClip, st().selected, st().voxels - s0.voxels]));
+  await key('z', cmd);
+  await click(mx, my);
+  const v0 = st().voxels;
+  await key('Backspace');
+  step('Backspace deletes the selection', st().voxels === v0 - byColor && st().selected === 0, `${v0} -> ${st().voxels}`);
+  await key('z', cmd);
+  await key('a', cmd);
+  step('Cmd-A selects every voxel', st().selected === st().voxels, `${st().selected}`);
+  await key('Escape');
+  await key('a');
   step('undo after every tool returns to the island', same(bytes(), original));
 
   // Camera.

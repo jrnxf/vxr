@@ -5,7 +5,8 @@
 use glam::Vec3;
 use vxr_core::Scene;
 use vxr_core::material::Material;
-use vxr_core::tools::{Brush, Gesture, Press, Shape, Target, plane_cell};
+use vxr_core::select::{Mode, MoveDrag, Transform};
+use vxr_core::tools::{Brush, Gesture, Press, Shape, Target, Tool, plane_cell};
 use vxr_render::{EditBox, Gpu, GpuMap, OrbitCamera, Preview, Renderer, brickmap_layout, gpu::now_ms};
 
 use crate::render::{EXPORT_SIZES, Export};
@@ -23,6 +24,19 @@ pub enum Button {
     Right,
     Middle,
 }
+
+/// A select tool drag that is not on the selection: a box in pixels from the press.
+#[derive(Clone, Copy, Debug)]
+struct Marquee {
+    start: [f32; 2],
+    end: [f32; 2],
+    /// What was under the press, for a click (no drag): select that colour.
+    target: Option<Target>,
+    mode: Mode,
+}
+
+/// Pointer travel, in pixels, below which a select press is a click.
+const CLICK_PX: f32 = 4.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum CamDrag {
@@ -51,6 +65,14 @@ pub struct Editor {
     pub height: u32,
     pub ppp: f32,
     gesture: Option<Gesture>,
+    /// The selection being dragged, or a box being drawn, with the select tool.
+    moving: Option<MoveDrag>,
+    /// Where the selection drag was pressed and on what: released without travel it is a
+    /// click, which selects that colour.
+    move_press: Option<([f32; 2], Target)>,
+    marquee: Option<Marquee>,
+    /// The selection version the renderer shows.
+    sel_shown: u64,
     cam_drag: Option<CamDrag>,
     /// Pointer position in pixels, if it is over the view.
     pointer: Option<[f32; 2]>,
@@ -111,6 +133,10 @@ impl Editor {
             height,
             ppp,
             gesture: None,
+            moving: None,
+            move_press: None,
+            marquee: None,
+            sel_shown: u64::MAX,
             cam_drag: None,
             pointer: None,
             cursor: None,
@@ -142,6 +168,9 @@ impl Editor {
         self.scene = scene;
         self.ui.scene_name = name.into();
         self.gesture = None;
+        self.moving = None;
+        self.marquee = None;
+        self.sel_shown = u64::MAX;
         self.cursor = None;
         self.frame_scene();
         Ok(())
@@ -205,6 +234,16 @@ impl Editor {
             return;
         }
         let (o, d) = self.ray(p);
+        if let Some(m) = &mut self.marquee {
+            m.end = p;
+            return;
+        }
+        if let Some(g) = &mut self.moving {
+            if let Some(c) = plane_cell(o, d, g.axis, g.layer) {
+                g.move_to(&mut self.scene, c);
+            }
+            return;
+        }
         if let Some(g) = &mut self.gesture {
             let cell = if g.on_plane() {
                 plane_cell(o, d, g.axis, g.layer)
@@ -223,15 +262,33 @@ impl Editor {
     pub fn button(&mut self, b: Button, pressed: bool, over_ui: bool) {
         self.last_input = now_ms();
         if !pressed {
-            if let Some(g) = self.gesture.take()
-                && b == Button::Left
-            {
-                g.release(&mut self.scene);
+            if b == Button::Left {
+                if let Some(g) = self.gesture.take() {
+                    g.release(&mut self.scene);
+                }
+                if let Some(g) = self.moving.take() {
+                    let still = g.offset == [0; 3];
+                    g.release(&mut self.scene);
+                    if let (true, Some((at, t)), Some(p)) = (still, self.move_press.take(), self.pointer)
+                        && (p[0] - at[0]).abs() < CLICK_PX
+                        && (p[1] - at[1]).abs() < CLICK_PX
+                    {
+                        self.scene.select_color(t.value, Mode::Replace);
+                    }
+                }
+                if let Some(m) = self.marquee.take() {
+                    self.finish_marquee(m);
+                }
             }
             self.cam_drag = None;
             return;
         }
-        if over_ui || self.gesture.is_some() || self.cam_drag.is_some() {
+        if over_ui
+            || self.gesture.is_some()
+            || self.moving.is_some()
+            || self.marquee.is_some()
+            || self.cam_drag.is_some()
+        {
             return;
         }
         let (shift, _) = self.ui.modifiers();
@@ -250,6 +307,10 @@ impl Editor {
         self.scene.commit();
         let Some(p) = self.pointer else { return };
         let (o, d) = self.ray(p);
+        if self.ui.tool == Tool::Select {
+            self.press_select(p, self.scene.target(o, d));
+            return;
+        }
         let Some(t) = self.scene.target(o, d) else { return };
         match self.scene.press(self.brush(), t) {
             Press::Picked(v) => {
@@ -259,6 +320,125 @@ impl Editor {
             }
             Press::Drag(g) => self.gesture = Some(g),
             Press::Done(_) | Press::Nothing => {}
+        }
+    }
+
+    /// How Shift and Alt combine a select press with the selection.
+    fn select_mode(&self) -> Mode {
+        match self.ui.modifiers() {
+            (true, _) => Mode::Add,
+            (_, true) => Mode::Subtract,
+            _ => Mode::Replace,
+        }
+    }
+
+    /// A select tool press: on a selected voxel it starts moving the selection on the plane
+    /// of the face pressed; anywhere else it starts a box (or, without a drag, a colour select).
+    fn press_select(&mut self, p: [f32; 2], t: Option<Target>) {
+        let mode = self.select_mode();
+        if mode == Mode::Replace
+            && let Some(t) = t.filter(|t| !t.ground && self.scene.is_selected(t.voxel))
+        {
+            let axis = t.normal.iter().position(|&n| n != 0).unwrap_or(1);
+            self.moving = self.scene.start_move(axis, t.voxel);
+            self.move_press = Some((p, t));
+            return;
+        }
+        self.marquee = Some(Marquee { start: p, end: p, target: t, mode });
+    }
+
+    fn finish_marquee(&mut self, m: Marquee) {
+        let (dx, dy) = (m.end[0] - m.start[0], m.end[1] - m.start[1]);
+        if dx.abs() < CLICK_PX && dy.abs() < CLICK_PX {
+            match m.target.filter(|t| !t.ground) {
+                Some(t) => self.scene.select_color(t.value, m.mode),
+                None if m.mode == Mode::Replace => self.scene.deselect(),
+                None => {}
+            }
+            return;
+        }
+        let cells = self.cells_in_rect(m.start, m.end);
+        self.scene.select(cells, m.mode);
+    }
+
+    /// Every voxel whose centre projects inside the screen box from `a` to `b` (pixels),
+    /// hidden ones included, as MagicaVoxel's box select does.
+    pub fn cells_in_rect(&self, a: [f32; 2], b: [f32; 2]) -> Vec<[i32; 3]> {
+        let (w, h) = (self.width as f32, self.height as f32);
+        let vp = self.cam.view_proj(w / h);
+        let (x0, x1) = (a[0].min(b[0]), a[0].max(b[0]));
+        let (y0, y1) = (a[1].min(b[1]), a[1].max(b[1]));
+        let mut out = Vec::new();
+        self.scene.for_each_voxel(|p, _| {
+            let c = vp * glam::Vec4::new(p[0] as f32 + 0.5, p[1] as f32 + 0.5, p[2] as f32 + 0.5, 1.0);
+            if c.w <= 0.0 {
+                return;
+            }
+            let (sx, sy) = ((c.x / c.w + 1.0) * 0.5 * w, (1.0 - c.y / c.w) * 0.5 * h);
+            if sx >= x0 && sx <= x1 && sy >= y0 && sy <= y1 {
+                out.push(p);
+            }
+        });
+        out
+    }
+
+    /// Where an arrow key moves the selection: one cell along the ground axis nearest to the
+    /// view's right (left and right arrows) or forward (up and down) direction.
+    fn arrow_offset(&self, key: egui::Key) -> [i32; 3] {
+        let f = self.cam.target - self.cam.eye();
+        let fwd = Vec3::new(f.x, 0.0, f.z);
+        let right = fwd.cross(Vec3::Y);
+        let snap = |v: Vec3| -> [i32; 3] {
+            if v.x.abs() >= v.z.abs() { [v.x.signum() as i32, 0, 0] } else { [0, 0, v.z.signum() as i32] }
+        };
+        let neg = |d: [i32; 3]| d.map(|c| -c);
+        match key {
+            egui::Key::ArrowRight => snap(right),
+            egui::Key::ArrowLeft => neg(snap(right)),
+            egui::Key::ArrowUp => snap(fwd),
+            _ => neg(snap(fwd)),
+        }
+    }
+
+    /// Run a selection action from the UI.
+    fn selection_action(&mut self, a: Action) {
+        self.gesture = None;
+        self.moving = None;
+        let s = &mut self.scene;
+        match a {
+            Action::Transform(t) => {
+                s.transform(t);
+            }
+            Action::SelectAll => s.select_all(),
+            Action::SelectColor => {
+                s.select_color(self.ui.slot, Mode::Replace);
+                self.ui.tool = Tool::Select;
+            }
+            Action::Deselect => s.deselect(),
+            Action::DeleteSelection => {
+                s.delete_selection();
+            }
+            Action::FillSelection => {
+                s.fill_selection(self.ui.slot);
+            }
+            Action::Copy | Action::Cut => {
+                let n = if a == Action::Copy { s.copy_selection() } else { s.cut_selection() };
+                if n > 0 {
+                    // A text stand-in on the system clipboard, so Cmd-V reaches the app natively.
+                    self.ctx.copy_text(format!("vxr: {n} voxels"));
+                    let verb = if a == Action::Copy { "Copied" } else { "Cut" };
+                    self.ui.toast(&self.ctx, format!("{verb} {n} voxels"));
+                }
+            }
+            Action::Paste => {
+                let at = self.cursor.map(|t| t.front());
+                if let Some(c) = s.paste_corner(at) {
+                    let n = s.paste(c);
+                    self.ui.tool = Tool::Select;
+                    self.ui.toast(&self.ctx, format!("Pasted {n} voxels"));
+                }
+            }
+            _ => {}
         }
     }
 
@@ -274,16 +454,22 @@ impl Editor {
 
     pub fn undo(&mut self) {
         self.gesture = None;
+        self.moving = None;
         self.scene.undo();
     }
 
     pub fn redo(&mut self) {
         self.gesture = None;
+        self.moving = None;
         self.scene.redo();
     }
 
     /// What a shape drag in progress spans, for the stats panel.
     pub fn span(&self) -> Option<(&'static str, String)> {
+        if let Some(m) = &self.moving {
+            let o = m.offset;
+            return Some(("MOVE", format!("{},{},{}", o[0], o[1], o[2])));
+        }
         self.gesture.as_ref().and_then(|g| {
             let (lo, hi) = g.extent();
             let d: [i32; 3] = std::array::from_fn(|a| hi[a] - lo[a] + 1);
@@ -317,6 +503,7 @@ impl Editor {
             frame_ms: frame_ms as f32,
             cursor,
             span,
+            selected: self.ui.selected,
             render,
             export,
             export_fits: self.export_fits,
@@ -339,6 +526,12 @@ impl Editor {
         self.ui.used = used(&self.scene);
         self.ui.can_undo = self.scene.history().can_undo();
         self.ui.can_redo = self.scene.history().can_redo();
+        self.ui.selected = self.scene.selected_count();
+        self.ui.has_clip = self.scene.clipboard.is_some();
+        self.ui.marquee = self.marquee.map(|m| {
+            let (a, b) = (m.start, m.end);
+            egui::Rect::from_two_pos(egui::pos2(a[0], a[1]), egui::pos2(b[0], b[1])) / self.ppp
+        });
         let stats = self.stats();
         let mut actions = Vec::new();
         let ui = &mut self.ui;
@@ -364,6 +557,15 @@ impl Editor {
                     self.scene.copy_color(from, to);
                     self.ui.toast(&self.ctx, format!("Copied slot {from} to slot {to}"));
                 }
+                Action::Transform(_)
+                | Action::SelectAll
+                | Action::SelectColor
+                | Action::Deselect
+                | Action::DeleteSelection
+                | Action::FillSelection
+                | Action::Copy
+                | Action::Cut
+                | Action::Paste => self.selection_action(a),
                 Action::ExportPng => self.start_export(),
                 Action::CancelExport => {
                     self.export = None;
@@ -371,6 +573,10 @@ impl Editor {
                 }
                 other => host.push(other),
             }
+        }
+        for key in std::mem::take(&mut self.ui.arrows) {
+            let d = self.arrow_offset(key);
+            self.selection_action(Action::Transform(Transform::Move(d)));
         }
         self.preview.lighting = self.ui.render.lighting(self.cam.distance);
         self.preview.max_spp = self.ui.render.samples();
@@ -435,7 +641,15 @@ impl Editor {
         if let Err(e) = self.map.upload_dirty(dev, queue, &mut self.scene.map, &self.scene.palette) {
             eprintln!("upload failed: {e}");
         }
-        let tint = if self.gesture.is_none() { self.cursor.filter(|t| !t.ground).map(|t| t.voxel) } else { None };
+        // The selection mask follows brick slots, which edits can move: upload it again after
+        // any edit while something is selected.
+        let sel = self.scene.selection_version();
+        if sel != self.sel_shown || (edit.is_some() && self.ui.selected > 0) {
+            self.sel_shown = sel;
+            self.renderer.set_selection(dev, queue, &self.scene.selection_mask());
+        }
+        let busy = self.gesture.is_some() || self.moving.is_some() || self.marquee.is_some();
+        let tint = if busy { None } else { self.cursor.filter(|t| !t.ground).map(|t| t.voxel) };
         self.renderer.set_camera(queue, &self.cam, tint);
         let mut enc = dev.create_command_encoder(&Default::default());
         // The preview's passes go first so they can be timed on their own (see preview.rs).

@@ -213,3 +213,51 @@ fn island_matches_cpu_raycast() {
     let cam = OrbitCamera::framing_aspect(f(lo), f(hi), W as f32 / H as f32);
     assert_matches(&v.values(&g, &map, &cam), &cpu_values(&scene.map, &cam), "island");
 }
+
+/// The selection mask tints the selected voxels blue and leaves the rest as they were.
+#[test]
+fn selection_tints_only_selected_voxels() {
+    let Some(g) = gpu() else { return };
+    let v = View::new(&g);
+    let mut renderer = v.renderer;
+    // Two grey 4^3 blocks side by side; select the left one.
+    let mut s = Scene::new([32, 16, 32]);
+    let block =
+        |x0: i32| (x0..x0 + 4).flat_map(move |x| (0..4).flat_map(move |y| (12..16).map(move |z| ([x, y, z], 8u8))));
+    s.edit(block(8).chain(block(18)));
+    s.select(block(8).map(|c| c.0), vxr_core::select::Mode::Replace);
+    let mut palette = [[128, 128, 128, 255]; 256];
+    palette[0] = [0; 4];
+    let map = GpuMap::new(&g.device, &g.queue, &v.layout, &s.map, &palette).unwrap();
+    let cam = camera_for(&s.map);
+    let draw = |r: &Renderer| {
+        r.set_camera(&g.queue, &cam, None);
+        let mut enc = g.device.create_command_encoder(&Default::default());
+        r.march(&mut enc, &map, None);
+        g.queue.submit([enc.finish()]);
+        pollster::block_on(read_texture(&g.device, &g.queue, &r.color))
+    };
+    let plain = draw(&renderer);
+    renderer.set_selection(&g.device, &g.queue, &s.selection_mask());
+    let lit = draw(&renderer);
+    // Which block each pixel shows, from the CPU ray cast.
+    let mut blue = [0usize; 2];
+    let mut changed = [0usize; 2];
+    let mut seen = [0usize; 2];
+    for y in 0..H {
+        for x in 0..W {
+            let (o, d) = cam.ray(x as f32 + 0.5, y as f32 + 0.5, W as f32, H as f32);
+            let Some(h) = s.map.raycast(o.to_array(), d.to_array(), 1e6) else { continue };
+            let k = usize::from(h.voxel[0] >= 18);
+            let i = ((y * W + x) * 4) as usize;
+            seen[k] += 1;
+            changed[k] += usize::from(plain[i..i + 3] != lit[i..i + 3]);
+            blue[k] += usize::from(lit[i + 2] > lit[i] + 30);
+        }
+    }
+    assert!(seen[0] > 50 && seen[1] > 50, "both blocks on screen: {seen:?}");
+    assert!(blue[0] * 10 >= seen[0] * 9, "the selected block is tinted: {blue:?} of {seen:?}");
+    assert!(changed[1] * 100 <= seen[1], "the other block is unchanged: {changed:?} of {seen:?}");
+    renderer.set_selection(&g.device, &g.queue, &[]);
+    assert_eq!(draw(&renderer), plain, "an empty mask clears the highlight");
+}
