@@ -28,6 +28,9 @@ pub struct Scene {
     /// Map layer the ground plane sits on: clicks that miss every voxel land here. It is the
     /// bottom of the opened model, or 0 in a new scene.
     pub floor: i32,
+    /// The file this scene was opened from. Saving applies the edits to it, so whatever
+    /// vxr does not edit (materials, layers, cameras, names, unknown chunks) is kept.
+    source: Option<Document>,
     history: History,
     stroke: Option<Stroke>,
 }
@@ -54,7 +57,15 @@ impl Scene {
         for (i, c) in palette.iter_mut().enumerate() {
             *c = vxr_vox::default_palette::DEFAULT_PALETTE[(i + 255) % 256];
         }
-        Scene { map: BrickMap::new(size), palette, origin: [0; 3], floor: 0, history: History::default(), stroke: None }
+        Scene {
+            map: BrickMap::new(size),
+            palette,
+            origin: [0; 3],
+            floor: 0,
+            source: None,
+            history: History::default(),
+            stroke: None,
+        }
     }
 
     /// Read a `.vox` file. Every instance in the scene graph is flattened into one map,
@@ -92,21 +103,39 @@ impl Scene {
             let m = s.to_map(p);
             s.map.set(m[0], m[1], m[2], c);
         }
+        s.source = Some(doc);
         Ok(s)
     }
 
-    /// Write a version 200 `.vox` file: the palette and every voxel, split into models of
-    /// at most 256^3. Materials, layers, cameras and the scene graph of an opened file are
-    /// not kept yet.
+    /// Write the scene as a `.vox` file. A scene opened from a file is saved losslessly:
+    /// the edits are applied to that file through [`Document::set_world`] and
+    /// [`Document::set_palette`], so every chunk they do not touch keeps its bytes. A new
+    /// scene is written as a fresh version 200 file, split into models of at most 256^3.
     pub fn to_vox(&self) -> Vec<u8> {
         let mut world = BTreeMap::new();
         self.for_each_voxel(|p, c| {
             world.insert(world_to_vox(self.to_world(p)), c);
         });
+        if let Some(doc) = &self.source
+            && let Some(bytes) = self.save_into(doc.clone(), &world)
+        {
+            return bytes;
+        }
         let mut b = Builder::new(200);
         b.palette = Some((0..256).map(|k| self.palette[(k + 1) % 256]).collect());
         b.add_world(&world);
         b.build().write()
+    }
+
+    fn save_into(&self, mut doc: Document, world: &BTreeMap<[i32; 3], u8>) -> Option<Vec<u8>> {
+        let file = doc.scene().ok()?;
+        for i in 1..=255u8 {
+            if file.color(i) != self.palette[i as usize] {
+                doc.set_palette(i, self.palette[i as usize]).ok()?;
+            }
+        }
+        doc.set_world(world).ok()?;
+        Some(doc.write())
     }
 
     pub fn to_map(&self, world: [i32; 3]) -> [i32; 3] {

@@ -105,6 +105,61 @@ fn prototype_island_opens_and_saves() {
     assert_eq!(again.palette, s.palette);
 }
 
+/// The generated fixtures that fit in a scene, plus the island when it has been built.
+fn files() -> Vec<(String, Vec<u8>)> {
+    let mut out: Vec<_> = vxr_vox::fixtures::all()
+        .into_iter()
+        .filter(|f| f.name != "20-far-positions")
+        .map(|f| (f.name.to_string(), f.builder.build().write()))
+        .collect();
+    let island = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../prototype/demo/scene.vox");
+    if let Ok(b) = std::fs::read(island) {
+        out.push(("island".into(), b));
+    }
+    out
+}
+
+#[test]
+fn saving_an_opened_file_without_edits_writes_it_back_byte_for_byte() {
+    for (name, bytes) in files() {
+        let s = Scene::from_vox(&bytes).unwrap();
+        assert!(s.to_vox() == bytes, "{name}");
+    }
+}
+
+#[test]
+fn open_edit_save_keeps_every_untouched_chunk() {
+    for (name, bytes) in files() {
+        let mut s = Scene::from_vox(&bytes).unwrap();
+        let mut cells = Vec::new();
+        s.for_each_voxel(|p, _| cells.push(p));
+        let n = cells.len();
+        s.edit([(cells[0], 0), (cells[n / 2], 33), (cells[n - 1], 0)]);
+        s.set_color(33, [1, 2, 3, 255]);
+        let expect = (world_voxels(&s), s.palette);
+
+        let saved = s.to_vox();
+        let again = Scene::from_vox(&saved).unwrap();
+        assert_eq!((world_voxels(&again), again.palette), expect, "{name}");
+
+        let before = vxr_vox::Document::read(&bytes).unwrap();
+        let after = vxr_vox::Document::read(&saved).unwrap();
+        let file = before.scene().unwrap();
+        let mut allowed: Vec<usize> = file.models.iter().map(|m| m.data_chunk).collect();
+        allowed.extend(before.raw.chunks.iter().position(|c| c.is(vxr_vox::chunk::RGBA)));
+        // Linked copies split off as new models, which shifts the chunks after the last
+        // model and repoints their nSHP. Compare everything else in order.
+        let (a, b) = (&before.raw.chunks, &after.raw.chunks);
+        let extra = b.len() - a.len();
+        let last = file.models.iter().map(|m| m.data_chunk).max().unwrap();
+        for (i, c) in a.iter().enumerate() {
+            let now = if i <= last { &b[i] } else { &b[i + extra] };
+            let ok = now == c || allowed.contains(&i) || (extra > 0 && c.is(vxr_vox::chunk::NSHP));
+            assert!(ok, "{name}: chunk {i} ({}) changed", vxr_vox::id_str(&c.id));
+        }
+    }
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: std::env::var("PROPTEST_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(200),

@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 vxr-core.workspace = true
+vxr-vox.workspace = true
 vxr-render.workspace = true
 glam.workspace = true
 egui = "0.37"

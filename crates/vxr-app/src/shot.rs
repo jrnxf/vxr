@@ -116,6 +116,7 @@ fn check(ok: bool, what: String) -> Result<(), String> {
 }
 
 pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
+    let path = scene;
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let load = || match scene {
         Some(p) => crate::native::open(p),
@@ -136,6 +137,10 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     let mid = [s.ed.width as f32 / 2.0, s.ed.height as f32 / 2.0];
     let v0 = s.voxels();
     println!("opened {name}: {v0} voxels");
+    let file = path.map(std::fs::read).transpose().map_err(|e| e.to_string())?;
+    if let Some(file) = &file {
+        check(s.ed.scene.to_vox() == *file, format!("save without edits: byte-identical ({} bytes)", file.len()))?;
+    }
 
     s.tool(Tool::Add, Shape::Voxel);
     let p = if v0 == 0 { mid } else { s.top_face_pixel(mid)? };
@@ -200,6 +205,17 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
         reopened.map.voxels == v4 && reopened.map.counts == s.ed.scene.map.counts,
         format!("save and reopen: {} voxels, same per-colour counts ({} bytes)", reopened.map.voxels, bytes.len()),
     )?;
+    if let Some(file) = &file {
+        // Lossless save: only model and scene graph chunks may change; the rest (palette,
+        // materials, layers, cameras, notes, unknown chunks) keep their bytes and order.
+        let other = |b: &[u8]| -> Result<Vec<vxr_vox::Chunk>, String> {
+            let raw = vxr_vox::RawFile::parse(b).map_err(|e| e.to_string())?;
+            let geometry = [b"SIZE", b"XYZI", b"TDCZ", b"nTRN", b"nGRP", b"nSHP"];
+            Ok(raw.chunks.into_iter().filter(|c| !geometry.iter().any(|id| c.is(id))).collect())
+        };
+        let kept = other(file)?;
+        check(other(&bytes)? == kept, format!("lossless save: {} other chunks byte-identical", kept.len()))?;
+    }
     s.ed.load(reopened, "edited.vox")?;
     s.tool(Tool::Add, Shape::Voxel);
     s.frames(2);

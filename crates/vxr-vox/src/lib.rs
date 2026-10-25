@@ -20,7 +20,7 @@ pub mod raw;
 pub mod scene;
 
 pub use bytes::Dict;
-pub use doc::Document;
+pub use doc::{Document, WorldSave};
 pub use raw::{Chunk, RawFile};
 pub use scene::{Affine, Instance, Scene};
 

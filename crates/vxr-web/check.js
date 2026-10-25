@@ -58,6 +58,20 @@ async () => {
   let s0 = st();
   step('starts with the island and the coach card', s0.voxels > 100000 && s0.coach && s0.name === 'island.vox', JSON.stringify(s0));
   const original = bytes();
+  const file = new Uint8Array(await (await fetch('scene.vox')).arrayBuffer());
+  step('saving the opened island unedited gives back its bytes', same(original, file), `${original.length} vs ${file.length}`);
+  // The chunks a lossless save must keep: everything but models and scene graph nodes.
+  const others = (b) => {
+    const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+    const out = [];
+    for (let at = 20; at + 12 <= b.length;) {
+      const id = String.fromCharCode(...b.slice(at, at + 4));
+      const end = at + 12 + v.getInt32(at + 4, true) + v.getInt32(at + 8, true);
+      if (!['SIZE', 'XYZI', 'TDCZ', 'nTRN', 'nGRP', 'nSHP'].includes(id)) out.push(b.slice(at, end).join(','));
+      at = end;
+    }
+    return out;
+  };
 
   // Add, undo, redo.
   await click(mx, my);
@@ -203,6 +217,8 @@ async () => {
     const saved = blob && new Uint8Array(await blob.arrayBuffer());
     const magic = saved && String.fromCharCode(...saved.slice(0, 4));
     step('Cmd-S downloads the scene as island.vox', magic === 'VOX ' && downloaded === 'island.vox', `${magic} ${downloaded}`);
+    const kept = others(file);
+    step('the saved edit keeps every other chunk of the file', saved && kept.length > 0 && kept.join('|') === others(saved).join('|'), `${kept.length} chunks`);
     blob = null;
     await click(354, 34);
     step('the Save button downloads too', !!blob);

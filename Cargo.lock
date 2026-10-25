@@ -3205,6 +3205,7 @@ dependencies = [
  "rfd",
  "vxr-core",
  "vxr-render",
+ "vxr-vox",
  "wgpu",
  "winit",
 ]

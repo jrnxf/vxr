@@ -97,7 +97,7 @@ Feature names below follow the update log [S1] unless another source is given.
 | Per-slot material | Matter->Sel per palette slot [S1 0.96.2] | missing [3] | P1 | render |
 | Diffuse, metal, glass, emissive | Plus plastic, roughness, IOR, attenuation, emission power [S1 0.96-0.98.2] | missing [3] | P1 | render |
 | Blend, SSS, media (cloud) | Unified material system [S1 0.99.6.2] | missing | P3 | render |
-| Saved to `.vox` MATL | [S1 0.98, S2] | missing [3]; MATL chunks of opened files are dropped on save until [1] | P1 | lossless, render |
+| Saved to `.vox` MATL | [S1 0.98, S2] | missing [3]; MATL chunks of opened files are kept by lossless save [1] | P1 | lossless, render |
 | Copy and paste materials | Ctrl+C/V [S1 0.99] | missing | P3 | - |
 
 ## Render
@@ -150,7 +150,7 @@ Feature names below follow the update log [S1] unless another source is given.
 | Feature | MagicaVoxel | vxr | Priority | Why |
 |---|---|---|---|---|
 | Open `.vox` (all versions, scene graph) | [S2] | done (every instance flattened, hidden ones included) | P1 | lossless |
-| Save `.vox` | [S2] | partial: writes a fresh v200 file with palette and voxels; materials, layers, cameras, names, notes and unknown chunks of an opened file are lost [1] | P1 | lossless |
+| Save `.vox` | [S2] | done [1]: lossless. An unedited save is byte-identical; edits re-encode only the edited models (plus the root group for new models), and every other chunk (materials, layers, cameras, names, notes, unknown chunks) keeps its bytes. An edited linked copy is split into its own model | P1 | lossless |
 | Choose what is saved | IO panel [S1 0.99.5.1] | missing | P3 | - |
 | Recover from a corrupted file | IO->File->Recover [S1 0.99.7.2] | missing | P3 | lossless |
 | OBJ with palette texture | Color-based simplification [S1 0.96.1] | missing [9] | P2 | - |
@@ -192,6 +192,6 @@ Design note: `.vox` animation is a list of `nSHP` models with `_f` frame indices
 
 ## Takeaways
 
-1. Lossless save [1] is the one blocking gap for anyone with existing files: today saving an opened MagicaVoxel scene drops its materials, layers, cameras and names.
+1. Lossless save [1] was the one blocking gap for anyone with existing files. It is done: saving an opened MagicaVoxel scene keeps its materials, layers, cameras and names.
 2. The palette [2] and the renderer [3] are the two loved features vxr lacks most visibly.
 3. Brushes [4] and selection [5] close the sculpting gap. After them, the world editor [8] matters most for MagicaVoxel scenes with many objects.
