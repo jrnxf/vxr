@@ -1071,6 +1071,31 @@ impl Editor {
         }
     }
 
+    /// The preview's size: 640x360 in the corner, one pixel per point of the view in the full
+    /// render view (half the pixels at 2x, so it converges in about the same time as the
+    /// corner per area of screen), or the corner's size when that would not fit the device.
+    fn preview_size(&self, full: bool) -> (u32, u32) {
+        let corner = (vxr_render::preview::PREVIEW_W, vxr_render::preview::PREVIEW_H);
+        if !full {
+            return corner;
+        }
+        let pt = |px: u32| ((px as f32 / self.ppp.max(1.0)).round() as u32).max(1);
+        let size = (pt(self.width), pt(self.height));
+        if Preview::fits(&self.gpu.device, size.0, size.1) { size } else { corner }
+    }
+
+    /// Make the preview again at `size`, keeping its settings; it restarts.
+    fn resize_preview(&mut self, size: (u32, u32)) {
+        let (dev, queue) = (&self.gpu.device, &self.gpu.queue);
+        let mut p = Preview::sized(dev, queue, &self.layout, &self.palette, self.gpu.timestamps, size);
+        p.set_materials(queue, &self.materials);
+        p.lighting = self.preview.lighting;
+        p.max_spp = self.preview.max_spp;
+        p.restarts = self.preview.restarts + 1;
+        self.preview = p;
+        self.preview_shown = false;
+    }
+
     /// Draw a frame; returns `Action::Exported` when an export finished this frame.
     fn draw(
         &mut self,
@@ -1124,6 +1149,11 @@ impl Editor {
         let mut enc = dev.create_command_encoder(&Default::default());
         // The preview's passes go first so they can be timed on their own (see preview.rs).
         let corner = self.ui.render_rect.filter(|_| self.ui.show_render);
+        let want = self.preview_size(corner.is_some() && self.ui.full_render);
+        if (self.preview.width, self.preview.height) != want {
+            self.resize_preview(want);
+        }
+        let (dev, queue) = (&self.gpu.device, &self.gpu.queue);
         if let Some(x) = &mut self.export {
             x.encode(queue, &mut enc, &self.map, edit);
         }
@@ -1139,10 +1169,15 @@ impl Editor {
         // This frame's edit went only to the export, so an edit while paused leaves the
         // corner stale until it restarts.
         self.preview_shown = corner.is_some() && !(paused && (edit.is_some() || !self.preview_shown));
-        self.renderer.march(&mut enc, &self.map, None);
+        // The full render view covers every pixel, so the voxel view under it is not drawn.
+        let full = corner.is_some() && self.ui.full_render;
+        if !full {
+            self.renderer.march(&mut enc, &self.map, None);
+        }
         if let Some(r) = corner {
             let px = [r.left() * ppp, r.top() * ppp, r.width() * ppp, r.height() * ppp];
-            self.preview.composite_into(dev, queue, &mut enc, &self.renderer.color, px, crate::ui::R as f32 * ppp);
+            let radius = if full { 0.0 } else { crate::ui::R as f32 * ppp };
+            self.preview.composite_into(dev, queue, &mut enc, &self.renderer.color, px, radius);
         }
         self.renderer.blit(&mut enc, view, None);
         let jobs = self.ctx.tessellate(shapes, ppp);

@@ -104,7 +104,7 @@ Feature names below follow the update log [S1] unless another source is given.
 
 | Feature | MagicaVoxel | vxr | Priority | Why |
 |---|---|---|---|---|
-| Interactive path tracer | Progressive GPU path tracing [S1] | partial [3]: the live corner runs in the app and the browser (640x360, A-trous denoise, 3 ms per frame while editing, 12 ms idle); no full-view render mode or click-to-swap yet | P1 | render |
+| Interactive path tracer | Progressive GPU path tracing [S1] | done [3]: the live corner runs in the app and the browser (640x360, A-trous denoise, 3 ms per frame while editing, 12 ms idle); a click on it, its maximize chip or Cmd-K swaps it into the whole view at one pixel per point, and Escape swaps it back | P1 | render |
 | Sun direction and colour, sky | Atmospheric sky with Rayleigh and Mie, sun disk [S1 0.99.1, 0.99.2] | done [3]: Render panel sun direction, height, colour and strength, sky light, a Show sky toggle and a Physical sky toggle (single Rayleigh and Mie scattering that follows the sun's height, reddening at sunset, with the sun disk behind the scene) over the default gradient sky | P1 | render |
 | Exposure, gamma, tone mapping, vignette | Post->E, Camera->G, ACES [S1 0.97.3, 0.98.1] | done [3]: exposure in stops, gamma and vignette in the Render panel (none restarts the trace) and ACES tone mapping | P1 | render |
 | Depth of field, bokeh | Click to set focus; bladed bokeh [S1 0.98.1, 0.99.1] | partial [3]: thin-lens depth of field with blur and focus sliders (round bokeh); no click to focus or bladed bokeh | P2 | render |

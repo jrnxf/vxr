@@ -155,6 +155,8 @@ mod icon {
     pub const FOLDER: char = '\u{e0d7}';
     pub const LINK: char = '\u{e102}';
     pub const FILE_OUTPUT: char = '\u{e0c8}';
+    pub const MAXIMIZE_2: char = '\u{e113}';
+    pub const MINIMIZE_2: char = '\u{e11b}';
 }
 
 pub use vxr_core::select::{Region, Transform};
@@ -374,8 +376,13 @@ pub struct Hybrid {
     pub slot_op: Option<SlotOp>,
     /// Show the live path-traced render corner.
     pub show_render: bool,
-    /// Where the render corner's image goes this frame, in points.
+    /// Where the render corner's image goes this frame, in points: the corner, or the whole
+    /// view in the full render view.
     pub render_rect: Option<Rect>,
+    /// The path-traced image fills the view instead of the corner.
+    pub full_render: bool,
+    /// The corner's place, which the Render panel lines up with in both views.
+    render_dock: Option<Rect>,
     /// The Render panel is open, and what it edits.
     pub render_panel: bool,
     pub render: RenderSettings,
@@ -560,8 +567,16 @@ const COMMANDS: &[Command] = &[
     Command { label: "Edit material", keys: &[], run: |h| h.open_material_edit() },
     Command { label: "Swap color with…", keys: &[], run: |h| h.slot_op = Some(SlotOp::Swap) },
     Command { label: "Copy color to…", keys: &[], run: |h| h.slot_op = Some(SlotOp::Copy) },
-    Command { label: "Toggle render preview", keys: &[], run: |h| h.show_render = !h.show_render },
+    Command {
+        label: "Toggle render preview",
+        keys: &[],
+        run: |h| {
+            h.show_render = !h.show_render;
+            h.full_render = false;
+        },
+    },
     Command { label: "Render settings", keys: &["R"], run: |h| h.toggle_render_panel() },
+    Command { label: "Full render view", keys: &[], run: |h| h.toggle_full_render() },
     Command { label: "Export PNG", keys: &[], run: |h| h.actions.push(Action::ExportPng) },
     Command { label: "Export OBJ", keys: &[], run: |h| h.actions.push(Action::ExportObj) },
     Command { label: "Export PNG slices", keys: &[], run: |h| h.actions.push(Action::ExportSlices) },
@@ -592,6 +607,8 @@ impl Hybrid {
             slot_op: None,
             show_render: true,
             render_rect: None,
+            full_render: false,
+            render_dock: None,
             render_panel: false,
             render: RenderSettings::default(),
             sun_hex: String::new(),
@@ -751,6 +768,12 @@ impl Hybrid {
         }
     }
 
+    /// Swap the path-traced image between the corner and the whole view (it shows the corner).
+    pub fn toggle_full_render(&mut self) {
+        self.full_render = !self.full_render;
+        self.show_render = true;
+    }
+
     /// Open or close the Bounds panel, its fields showing the current size.
     pub fn toggle_bounds_panel(&mut self) {
         self.bounds_panel = match self.bounds_panel {
@@ -760,7 +783,8 @@ impl Hybrid {
     }
 
     /// Escape: cancel an armed swap or copy, else close the colour editor, the Bounds panel,
-    /// the View flyout or the Render panel, else deselect, else the coach card.
+    /// the View flyout or the Render panel, else leave the full render view, else deselect,
+    /// else the coach card.
     /// Where flyouts beside the rail start: right of the rail, or of the scene tree when it shows.
     fn flyout_x(&self) -> f32 {
         12.0 + 52.0 + 8.0 + if self.tree.is_empty() { 0.0 } else { TREE_W + 8.0 }
@@ -796,6 +820,8 @@ impl Hybrid {
         }
         if self.render_panel {
             self.render_panel = false;
+        } else if self.full_render {
+            self.full_render = false;
         } else if self.selected > 0 {
             self.actions.push(Action::Deselect);
         } else {
@@ -2561,59 +2587,98 @@ impl Hybrid {
     // The live render corner (direction D, pin 4: right:1%, bottom:12%, width:24%, a label
     // chip at .5em). The editor writes the path-traced image into the rect under the UI, so the
     // panel has a border but no fill. 16:9, the preview's own shape, and it sits above #history.
+    // A click on it swaps the image into the whole view (MagicaVoxel's Render tab); there the
+    // chips stay where the corner's bottom edge was and the view takes the pointer as usual.
     fn render_corner(&mut self, ctx: &Context, screen: Rect, s: &Stats) {
         self.render_rect = None;
+        self.render_dock = None;
         let mut open = false;
+        let mut swap = false;
         let Some((spp, live)) = s.render.filter(|_| self.show_render) else { return };
         let w = 320.0;
         let size = vec2(w, (w * 9.0 / 16.0).round());
-        let rect = Rect::from_min_size(
+        let corner = Rect::from_min_size(
             pos2(screen.right() - 12.0 - size.x, screen.bottom() - 12.0 - 40.0 - 10.0 - size.y),
             size,
         );
+        let full = self.full_render;
+        let rect = if full { screen } else { corner };
         self.render_rect = Some(rect);
+        self.render_dock = Some(corner);
         self.hits.insert("render".into(), rect);
-        Area::new(Id::unique("render")).fade_in(false).order(Order::Middle).fixed_pos(rect.min).constrain(false).show(
+        let label = match s.export {
+            Some(((w, h), done, of)) => format!("Exporting {w}×{h} · {:.0}/{of} spp", done.floor()),
+            None => format!("Path trace · {:.0} spp{}", spp.floor(), if live { " · live" } else { "" }),
+        };
+        let g = ctx.fonts_mut(|f| f.layout_no_wrap(label, inter_medium(11.0), TEXT));
+        let chip_size = g.size() + vec2(16.0, 6.0);
+        // The chips' row: the corner's top, or its bottom edge in the full view.
+        let top = if full { corner.bottom() - 8.0 - chip_size.y } else { corner.top() + 8.0 };
+        let row = Rect::from_min_max(pos2(corner.left(), top - 8.0), pos2(corner.right(), top + chip_size.y + 8.0));
+        let area = if full { row } else { corner };
+        Area::new(Id::unique("render")).fade_in(false).order(Order::Middle).fixed_pos(area.min).constrain(false).show(
             ctx,
             |ui| {
-                ui.allocate_rect(rect, Sense::hover());
+                if full {
+                    // Only the chips' row keeps the pointer from the view.
+                    ui.allocate_rect(row, Sense::hover());
+                } else {
+                    // Click-to-swap; the chips below are on top of it.
+                    let r = ui.allocate_rect(corner, Sense::click());
+                    swap |= r.clicked();
+                    if r.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    ui.painter().rect_stroke(
+                        corner,
+                        CornerRadius::same(R),
+                        Stroke::new(1.0, LINE2),
+                        StrokeKind::Inside,
+                    );
+                }
+                let chip = Rect::from_min_size(pos2(corner.left() + 8.0, top), chip_size);
                 let p = ui.painter();
-                p.rect_stroke(rect, CornerRadius::same(R), Stroke::new(1.0, LINE2), StrokeKind::Inside);
-                let label = match s.export {
-                    Some(((w, h), done, of)) => format!("Exporting {w}×{h} · {:.0}/{of} spp", done.floor()),
-                    None => format!("Path trace · {:.0} spp{}", spp.floor(), if live { " · live" } else { "" }),
-                };
-                let g = ui.painter().layout_no_wrap(label, inter_medium(11.0), TEXT);
-                let chip = Rect::from_min_size(rect.min + vec2(8.0, 8.0), g.size() + vec2(16.0, 6.0));
                 p.rect_filled(chip, CornerRadius::same(6), Color32::from_black_alpha(140));
                 p.galley(chip.min + vec2(8.0, 3.0), g, TEXT);
-                // The Render panel's button, a chip at the other corner.
-                let b =
-                    Rect::from_min_size(pos2(rect.right() - 8.0 - 26.0, rect.top() + 8.0), vec2(26.0, chip.height()));
-                let r = ui.interact(b, Id::unique("render-settings"), Sense::click());
-                let on = self.render_panel;
-                let fill = if r.hovered() { Color32::from_black_alpha(190) } else { Color32::from_black_alpha(140) };
-                let p = ui.painter();
-                p.rect_filled(b, CornerRadius::same(6), fill);
-                if on {
-                    p.rect_filled(b, CornerRadius::same(6), ACCENT_BG);
+                // The Render panel's button and the swap button, chips at the other corner.
+                let b = Rect::from_min_size(pos2(corner.right() - 8.0 - 26.0, top), vec2(26.0, chip.height()));
+                let f = b.translate(vec2(-26.0 - 4.0, 0.0));
+                let glyph = if full { icon::MINIMIZE_2 } else { icon::MAXIMIZE_2 };
+                for (rect, id, glyph, on) in
+                    [(f, "render-full", glyph, false), (b, "render-settings", icon::APERTURE, self.render_panel)]
+                {
+                    let r = ui.interact(rect, Id::unique(id), Sense::click());
+                    let fill =
+                        if r.hovered() { Color32::from_black_alpha(190) } else { Color32::from_black_alpha(140) };
+                    let p = ui.painter();
+                    p.rect_filled(rect, CornerRadius::same(6), fill);
+                    if on {
+                        p.rect_filled(rect, CornerRadius::same(6), ACCENT_BG);
+                    }
+                    let c = if on {
+                        ACCENT
+                    } else if r.hovered() {
+                        TEXT
+                    } else {
+                        MUTED
+                    };
+                    p.text(rect.center(), Align2::CENTER_CENTER, glyph, icon_font(13.0), c);
+                    if r.clicked() {
+                        if id == "render-full" {
+                            swap = true;
+                        } else {
+                            open = true;
+                        }
+                    }
+                    self.hits.insert(id.into(), rect);
                 }
-                let c = if on {
-                    ACCENT
-                } else if r.hovered() {
-                    TEXT
-                } else {
-                    MUTED
-                };
-                p.text(b.center(), Align2::CENTER_CENTER, icon::APERTURE, icon_font(13.0), c);
-                if r.clicked() {
-                    open = true;
-                }
-                self.hits.insert("render-settings".into(), b);
             },
         );
         if open {
             self.toggle_render_panel();
+        }
+        if swap {
+            self.toggle_full_render();
         }
     }
 
@@ -2626,8 +2691,8 @@ impl Hybrid {
         let w = 232.0;
         let row = 34.0;
         let h = 12.0 + 15.0 + 10.0 + 9.0 * row + 28.0 + 8.0 + 28.0 + 12.0 + 2.0 * (14.0 + 28.0 + 10.0) + 32.0 + 12.0;
-        let right = self.render_rect.map_or(screen.right() - 12.0 - 232.0, |r| r.left()) - 8.0;
-        let bottom = self.render_rect.map_or(screen.bottom() - 62.0, |r| r.bottom());
+        let right = self.render_dock.map_or(screen.right() - 12.0 - 232.0, |r| r.left()) - 8.0;
+        let bottom = self.render_dock.map_or(screen.bottom() - 62.0, |r| r.bottom());
         let rect = Rect::from_min_size(pos2(right - w, (bottom - h).max(68.0)), vec2(w, h));
         let mut rs = self.render.clone();
         let mut hits = Vec::new();
@@ -3397,5 +3462,22 @@ mod tests {
         assert_eq!(super::group_thousands(145064), "145,064");
         assert_eq!(super::group_thousands(999), "999");
         assert_eq!(super::group_thousands(1_000_000), "1,000,000");
+    }
+
+    #[test]
+    fn the_full_render_view_swaps_and_escape_backs_out_in_order() {
+        let mut h = super::Hybrid::new([[0; 4]; 256], [false; 256], "test");
+        h.show_render = false;
+        h.toggle_full_render();
+        assert!(h.full_render && h.show_render, "it shows the render too");
+        h.toggle_render_panel();
+        h.escape();
+        assert!(!h.render_panel && h.full_render, "Escape closes the Render panel first");
+        h.escape();
+        assert!(!h.full_render && h.show_render, "then swaps back to the corner");
+        h.toggle_full_render();
+        let hide = super::COMMANDS.iter().find(|c| c.label == "Toggle render preview").unwrap();
+        (hide.run)(&mut h);
+        assert!(!h.show_render && !h.full_render, "hiding the render leaves the full view");
     }
 }

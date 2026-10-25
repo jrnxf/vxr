@@ -1648,6 +1648,7 @@ fn render(s: &mut Shot, dir: &Path) -> Result<(), String> {
     )?;
     s.ed.undo();
 
+    full_render(s, dir)?;
     render_panel(s, dir)?;
 
     let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
@@ -1657,6 +1658,95 @@ fn render(s: &mut Shot, dir: &Path) -> Result<(), String> {
     check(!s.ed.ui.show_render && !s.ed.ui.hits.contains_key("render"), "Cmd-K hides the render corner".into())?;
     s.ed.ui.show_render = true;
     s.frames(2);
+    Ok(())
+}
+
+/// The full render view: a click on the corner swaps the path-traced image into the whole
+/// view at one pixel per point, edits still reach it without a restart, and its chip, Cmd-K
+/// and Escape swap it back to the 640x360 corner.
+fn full_render(s: &mut Shot, dir: &Path) -> Result<(), String> {
+    let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    let points = (s.ed.width as f32 / s.ed.ppp, s.ed.height as f32 / s.ed.ppp);
+    let size = (points.0.round() as u32, points.1.round() as u32);
+    s.ui_click("render")?;
+    let rect = s.ed.ui.hits.get("render").copied().unwrap_or(egui::Rect::NOTHING);
+    check(
+        s.ed.ui.full_render
+            && (s.ed.preview.width, s.ed.preview.height) == size
+            && rect.width() == points.0
+            && rect.height() == points.1,
+        format!(
+            "a click on the corner fills the view: a {}x{} preview over {:.0}x{:.0} points",
+            s.ed.preview.width,
+            s.ed.preview.height,
+            rect.width(),
+            rect.height()
+        ),
+    )?;
+    for _ in 0..400 {
+        s.frames(1);
+        if s.ed.preview.samples() >= 8.0 {
+            break;
+        }
+    }
+    let spp = s.ed.preview.samples();
+    // The middle of the view on screen is the middle of the preview image.
+    let (dev, queue) = (&s.ed.gpu.device, &s.ed.gpu.queue);
+    let img = pollster::block_on(s.ed.preview.read(dev, queue));
+    let screen = pollster::block_on(read_texture(dev, queue, &s.target));
+    // Mean colour of a 32-point square at the middle, in the image and on screen (BGRA).
+    let mean = |px: &[u8], w: u32, h: u32, scale: u32, bgr: bool| {
+        let mut sum = [0u64; 3];
+        let n = 32 * scale;
+        for y in h / 2 - n / 2..h / 2 + n / 2 {
+            for x in w / 2 - n / 2..w / 2 + n / 2 {
+                let i = ((y * w + x) * 4) as usize;
+                for c in 0..3 {
+                    sum[c] += px[i + if bgr { 2 - c } else { c }] as u64;
+                }
+            }
+        }
+        sum.map(|v| (v / (n * n) as u64) as u8)
+    };
+    let ppp = s.ed.ppp.round() as u32;
+    let (rgb, bgr) = (mean(&img, size.0, size.1, 1, false), mean(&screen, s.ed.width, s.ed.height, ppp, true));
+    let near = (0..3).all(|i| (rgb[i] as i32 - bgr[i] as i32).abs() <= 4);
+    check(
+        spp >= 8.0 && near,
+        format!(
+            "the full view converges ({spp:.0} spp) and shows the preview: {rgb:?} in the image, {bgr:?} on screen"
+        ),
+    )?;
+    s.save_png(&dir.join("app-2x-render-full.png"))?;
+    let restarts = s.ed.preview.restarts;
+    let before = s.voxels();
+    s.tool(Tool::Add, Shape::Voxel);
+    let mid = [s.ed.width as f32 / 2.0, s.ed.height as f32 / 2.0];
+    let p = s.top_face_pixel(mid)?;
+    s.stroke(p, &[]);
+    s.frames(1);
+    check(
+        s.voxels() == before + 1 && s.ed.preview.restarts == restarts && s.ed.preview.last_rows > 0,
+        "an edit in the full view adds its voxel and resets only nearby pixels".into(),
+    )?;
+    s.ed.undo();
+    s.ui_click("render-full")?;
+    s.frames(1);
+    let corner = (s.ed.preview.width, s.ed.preview.height);
+    let back = s.ed.ui.hits.get("render").map(|r| r.width());
+    check(
+        !s.ed.ui.full_render && corner == (640, 360) && back == Some(320.0),
+        format!("its chip swaps back to the corner: a {}x{} preview", corner.0, corner.1),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("full render".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    let on = s.ed.ui.full_render && s.ed.preview.width == size.0;
+    s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+    check(
+        on && !s.ed.ui.full_render && s.ed.preview.width == 640,
+        "Cmd-K Full render view fills the view and Escape swaps back".into(),
+    )?;
     Ok(())
 }
 
@@ -2094,10 +2184,13 @@ fn frame_times(scene: &Path) -> Result<(), String> {
     s.ed.cam.snap(vxr_render::View::Iso);
     let iso = run(&mut s, true, true);
     s.ed.cam.ortho = false;
+    s.ed.ui.full_render = true;
+    let full = run(&mut s, true, true);
+    s.ed.ui.full_render = false;
     println!(
         "info frame time, island at 3024x1964 (median, CPU + GPU): {off:.2} ms without the render corner, \
          {on:.2} ms with it while editing, {idle:.2} ms idle, {selected:.2} ms with every voxel selected, \
-         {iso:.2} ms isometric with the render corner; one 640x360 sample {ms:.2} ms ({})",
+         {iso:.2} ms isometric with the render corner, {full:.2} ms in the full render view while editing; one 640x360 sample {ms:.2} ms ({})",
         if measured { "timestamps" } else { "assumed" }
     );
     Ok(())

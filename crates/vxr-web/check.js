@@ -595,6 +595,32 @@ async () => {
     await frames(2);
     step('and shows it again', st().render.shown);
 
+    // The full render view: a click on the corner swaps the path-traced image into the whole
+    // view at one pixel per point; its chip, Cmd-K and Escape swap it back.
+    {
+      const corner = window.vxr.hit('render');
+      await click(corner[0], corner[1]);
+      await frames(2);
+      const full = st().render;
+      const fill = window.vxr.hit('render');
+      const want = [Math.round(st().size[0] / st().ppp), Math.round(st().size[1] / st().ppp)];
+      step('a click on the corner fills the view', full.full && full.size[0] === want[0] && full.size[1] === want[1] && Math.abs(fill[0] - want[0] / 2) <= 1 && Math.abs(fill[1] - want[1] / 2) <= 1, JSON.stringify({ full, want, fill }));
+      for (let i = 0; i < 300 && st().render.spp < 4; i++) await frames(1);
+      step('the full view converges', st().render.spp >= 4, JSON.stringify(st().render));
+      const chip = window.vxr.hit('render-full');
+      await click(chip[0], chip[1]);
+      await frames(2);
+      step('its chip swaps back to the 640x360 corner', !st().render.full && st().render.size[0] === 640 && st().render.size[1] === 360, JSON.stringify(st().render));
+      await key('k', cmd);
+      for (const ch of 'full render') await key(ch);
+      await key('Enter');
+      await frames(2);
+      const on = st().render.full;
+      await key('Escape');
+      await frames(2);
+      step('Cmd-K Full render view fills the view and Escape swaps back', on && !st().render.full && st().render.size[0] === 640, JSON.stringify(st().render));
+    }
+
     // The Render panel: R opens it, the sliders and buttons reach the path tracer, Export PNG
     // downloads a PNG at the chosen size, Escape closes it.
     const hit = (name) => { const h = window.vxr.hit(name); return h.length ? h : null; };
