@@ -54,7 +54,11 @@ fn select_by_box_and_colour_with_modes() {
 fn erased_voxels_leave_the_selection() {
     let mut s = scene();
     s.select_color(3, Mode::Replace);
-    s.edit([([O, O, O], 0), ([O + 1, O, O], 0)]);
+    assert_eq!(s.selected_count(), 4);
+    s.put([O, O, O], 0);
+    assert_eq!(s.selected_count(), 3, "the count follows an open edit");
+    s.put([O + 1, O, O], 0);
+    s.commit();
     assert_eq!(sel(&s), vec![[O, O, O + 1], [O + 2, O, O]]);
     s.edit([([O, O, O], 4)]);
     assert!(!s.is_selected([O, O, O]), "a voxel added where one was erased is not selected");

@@ -47,6 +47,8 @@ pub struct Scene {
     pub(crate) selection: HashSet<[i32; 3]>,
     /// Bumped on every selection change, so the renderer knows when to upload it again.
     pub(crate) selection_version: u64,
+    /// [`Scene::selected_count`] at (`selection_version`, `map.fills`).
+    pub(crate) selected_cache: std::cell::Cell<Option<(u64, u64, usize)>>,
     /// What Copy or Cut took, for Paste.
     pub clipboard: Option<Clip>,
 }
@@ -90,6 +92,7 @@ impl Scene {
             stroke: None,
             selection: HashSet::new(),
             selection_version: 0,
+            selected_cache: Default::default(),
             clipboard: None,
         }
     }

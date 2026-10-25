@@ -71,8 +71,8 @@ pub struct Editor {
     /// click, which selects that colour.
     move_press: Option<([f32; 2], Target)>,
     marquee: Option<Marquee>,
-    /// The selection version the renderer shows.
-    sel_shown: u64,
+    /// The selection version and `map.fills` the renderer's selection mask was built at.
+    sel_shown: (u64, u64),
     cam_drag: Option<CamDrag>,
     /// Pointer position in pixels, if it is over the view.
     pointer: Option<[f32; 2]>,
@@ -136,7 +136,7 @@ impl Editor {
             moving: None,
             move_press: None,
             marquee: None,
-            sel_shown: u64::MAX,
+            sel_shown: (u64::MAX, 0),
             cam_drag: None,
             pointer: None,
             cursor: None,
@@ -170,7 +170,7 @@ impl Editor {
         self.gesture = None;
         self.moving = None;
         self.marquee = None;
-        self.sel_shown = u64::MAX;
+        self.sel_shown = (u64::MAX, 0);
         self.cursor = None;
         self.frame_scene();
         Ok(())
@@ -643,10 +643,10 @@ impl Editor {
         if let Err(e) = self.map.upload_dirty(dev, queue, &mut self.scene.map, &self.scene.palette) {
             eprintln!("upload failed: {e}");
         }
-        // The selection mask follows brick slots, which edits can move: upload it again after
-        // any edit while something is selected.
-        let sel = self.scene.selection_version();
-        if sel != self.sel_shown || (edit.is_some() && self.ui.selected > 0) {
+        // The selection mask follows brick slots, which only move when cells fill or empty:
+        // build it again then while something is selected, not on a repaint.
+        let sel = (self.scene.selection_version(), self.scene.map.fills);
+        if sel.0 != self.sel_shown.0 || (sel != self.sel_shown && self.ui.selected > 0) {
             self.sel_shown = sel;
             self.renderer.set_selection(dev, queue, &self.scene.selection_mask());
         }

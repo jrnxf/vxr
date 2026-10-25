@@ -27,6 +27,8 @@ pub struct BrickMap {
     pub pal: Vec<u8>,
     pub free: Vec<u32>,
     pub voxels: u64,
+    /// Bumped whenever a cell turns filled or empty (not when it only changes colour).
+    pub fills: u64,
     /// Voxels per palette index; `counts[0]` is unused.
     pub counts: [u32; 256],
     track: bool,
@@ -64,6 +66,7 @@ impl BrickMap {
             dirty_bricks: Vec::new(),
             dirty_cells: Vec::new(),
             dirty_box: None,
+            fills: 0,
         }
     }
 
@@ -155,6 +158,9 @@ impl BrickMap {
             return false;
         }
         *slot = v;
+        if old == 0 || v == 0 {
+            self.fills += 1;
+        }
         if old != 0 {
             self.counts[old as usize] -= 1;
         }

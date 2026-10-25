@@ -86,9 +86,18 @@ impl Scene {
         self.selection.contains(&p) && self.map.get(p[0], p[1], p[2]) != 0
     }
 
-    /// How many voxels are selected.
+    /// How many voxels are selected. Counted again only after the selection changes or a
+    /// cell fills or empties, so calling it every frame is cheap.
     pub fn selected_count(&self) -> usize {
-        self.selection().count()
+        let key = (self.selection_version, self.map.fills);
+        if let Some((v, f, n)) = self.selected_cache.get()
+            && (v, f) == key
+        {
+            return n;
+        }
+        let n = self.selection().count();
+        self.selected_cache.set(Some((key.0, key.1, n)));
+        n
     }
 
     /// Changes whenever the selection does.
