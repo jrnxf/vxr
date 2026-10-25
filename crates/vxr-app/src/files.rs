@@ -1,10 +1,10 @@
-//! Model exports as files: OBJ with its `.mtl` and palette texture, and a stored (not
-//! compressed) zip to hand several files to a browser as one download.
+//! Model exports as files: OBJ with its `.mtl` and palette texture, PNG slices, and a
+//! stored (not compressed) zip to hand several files to a browser as one download.
 
 use std::collections::BTreeMap;
 
 use vxr_core::Scene;
-use vxr_core::export::{TEXTURE_W, obj};
+use vxr_core::export::{TEXTURE_W, obj, slices};
 
 use crate::render::png;
 
@@ -28,6 +28,27 @@ pub fn obj_files(scene: &Scene, stem: &str) -> Result<(Vec<File>, usize), String
         (format!("{stem}.png"), png(TEXTURE_W, 1, &o.texture)?),
     ];
     Ok((files, o.quads))
+}
+
+/// The largest PNG slices image, in pixels (256 MiB of RGBA, which a browser tab can hold).
+const SLICES_MAX: u64 = 1 << 26;
+
+/// The PNG slices of what the view shows (the edited model's bounds, or the world's), as
+/// one PNG: every layer from the bottom up, side by side. Returns the PNG, its size and the
+/// number of layers.
+pub fn slices_png(scene: &Scene) -> Result<(Vec<u8>, [u32; 2], u32), String> {
+    let size = scene.bounds().size;
+    if scene.map.counts[1..].iter().all(|&n| n == 0) {
+        return Err("the scene is empty".into());
+    }
+    let pixels = size.iter().map(|&n| n as u64).product::<u64>();
+    if pixels > SLICES_MAX {
+        return Err(format!("{}×{}×{} is too large for one image", size[0], size[1], size[2]));
+    }
+    let mut cells = Vec::new();
+    scene.for_each_voxel(|p, c| cells.push((p, c)));
+    let s = slices(size, cells, &scene.palette);
+    Ok((png(s.width, s.height, &s.rgba)?, [s.width, s.height], s.layers))
 }
 
 /// CRC-32 (IEEE), as zip stores it.
@@ -134,5 +155,15 @@ mod tests {
         assert!(String::from_utf8_lossy(&files[0].1).contains("mtllib rock.mtl"));
         assert!(String::from_utf8_lossy(&files[1].1).contains("map_Kd rock.png"));
         assert_eq!(&files[2].1[1..4], b"PNG");
+    }
+
+    #[test]
+    fn slices_png_is_one_strip_of_layers_and_skips_an_empty_scene() {
+        let mut s = Scene::new([4, 3, 5]);
+        assert!(slices_png(&s).is_err());
+        s.edit([([1, 1, 1], 3)]);
+        let (bytes, size, layers) = slices_png(&s).unwrap();
+        assert_eq!((size, layers), ([12, 5], 3));
+        assert_eq!(&bytes[1..4], b"PNG");
     }
 }

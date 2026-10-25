@@ -66,6 +66,16 @@ async () => {
     }
     return files;
   };
+  // A PNG slices download's size and how many of its pixels hold a voxel (not transparent).
+  const slicePixels = async (blob) => {
+    const img = await createImageBitmap(blob, { premultiplyAlpha: 'none', colorSpaceConversion: 'none' });
+    const c = new OffscreenCanvas(img.width, img.height).getContext('2d');
+    c.drawImage(img, 0, 0);
+    const px = c.getImageData(0, 0, img.width, img.height).data;
+    let filled = 0;
+    for (let i = 3; i < px.length; i += 4) filled += px[i] !== 0;
+    return { w: img.width, h: img.height, filled };
+  };
   await frames(10);
   let s0 = st();
   step('starts with the island and the coach card', s0.voxels > 100000 && s0.coach && s0.name === 'island.vox', JSON.stringify(s0));
@@ -576,6 +586,22 @@ async () => {
       await key('Enter');
       await frames();
       step('Cmd-K Export OBJ downloads it too', zipName === 'island-obj.zip', `${zipName}`);
+      // PNG slices: one PNG of every layer side by side, from the row and from Cmd-K.
+      zipBlob = null; zipName = null;
+      await click(...hit('export'));
+      await click(...hit('export-slices'));
+      await frames();
+      const b = st().bounds;
+      const sl = zipBlob ? await slicePixels(zipBlob) : null;
+      step('its PNG slices row downloads island-slices.png: every layer side by side, every voxel a pixel',
+        zipName === 'island-slices.png' && !st().exportMenu && sl && sl.w === b[0] * b[1] && sl.h === b[2] && sl.filled === st().voxels,
+        `${zipName} ${sl && `${sl.w}x${sl.h} ${sl.filled} pixels`} ${b} ${st().voxels} voxels`);
+      zipName = null;
+      await key('k', cmd);
+      for (const ch of 'export png slices') await key(ch);
+      await key('Enter');
+      await frames();
+      step('Cmd-K Export PNG slices downloads it too', zipName === 'island-slices.png', `${zipName}`);
     } finally {
       URL.createObjectURL = realUrl;
       HTMLAnchorElement.prototype.click = realA;
@@ -677,6 +703,15 @@ async () => {
       const obj = files['22-world.obj'] ? new TextDecoder().decode(files['22-world.obj']) : '';
       const header = obj.match(/^# vxr OBJ export: (\d+) voxels/);
       step('in world mode Export OBJ downloads 22-world-obj.zip with every shown object', downloaded === '22-world-obj.zip' && header && +header[1] === w0.voxels, `${downloaded} ${header && header[0]} ${w0.voxels}`);
+    }
+    blob = null; downloaded = null;
+    await key('k', cmd);
+    for (const ch of 'export png slices') await key(ch);
+    await key('Enter');
+    await frames();
+    {
+      const sl = blob ? await slicePixels(blob) : null;
+      step('in world mode Export PNG slices downloads 22-world-slices.png with every shown voxel', downloaded === '22-world-slices.png' && sl && sl.filled === w0.voxels, `${downloaded} ${sl && sl.filled} ${w0.voxels}`);
     }
     // A point on an object near the middle: a click there picks it and edits nothing.
     let at = null;

@@ -6,6 +6,9 @@
 //! is at Y = 0, so a prop drops onto the ground in a game engine. Texel `i - 1` holds the
 //! colour of voxel index `i`, as in MagicaVoxel's palette images and OBJ export, and every
 //! vertex of a quad takes the UV of its texel's centre.
+//!
+//! PNG slices lay the model's horizontal layers side by side in one image, the bottom layer
+//! on the left, as MagicaVoxel's slice export lays out its layers in a strip.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write;
@@ -166,4 +169,34 @@ pub fn obj(voxels: &BTreeMap<[i32; 3], u8>, palette: &[[u8; 4]; 256], name: &str
         texture.extend_from_slice(&palette[(t + 1) % 256]);
     }
     Obj { obj, mtl, texture, quads: quads.len(), vertices: vertex.len() }
+}
+
+/// PNG slices: every horizontal layer of a model, side by side in one RGBA image.
+pub struct Slices {
+    pub width: u32,
+    pub height: u32,
+    /// How many layers (the model's height), each `width / layers` pixels wide.
+    pub layers: u32,
+    /// `width` x `height` RGBA pixels; empty cells are transparent.
+    pub rgba: Vec<u8>,
+}
+
+/// The slices of a model of `size` voxels holding `voxels` (map cell to palette index; cells
+/// outside `0..size` are skipped), coloured by `palette`. Layer `y` is the tile from column
+/// `y * size[0]`, seen from above: X runs right and Z down, so the front (+Z) is at the
+/// bottom. Each tile is `size[0]` by `size[2]` pixels, one per cell.
+pub fn slices(size: [u32; 3], voxels: impl IntoIterator<Item = ([i32; 3], u8)>, palette: &[[u8; 4]; 256]) -> Slices {
+    let [sx, sy, sz] = size.map(|n| n as usize);
+    let width = sx * sy;
+    let mut rgba = vec![0; width * sz * 4];
+    for (p, c) in voxels {
+        if c == 0 || (0..3).any(|a| p[a] < 0 || p[a] as u32 >= size[a]) {
+            continue;
+        }
+        let [x, y, z] = p.map(|n| n as usize);
+        let at = (z * width + y * sx + x) * 4;
+        let [r, g, b, _] = palette[c as usize];
+        rgba[at..at + 4].copy_from_slice(&[r, g, b, 255]);
+    }
+    Slices { width: width as u32, height: sz as u32, layers: sy as u32, rgba }
 }

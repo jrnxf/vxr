@@ -1632,7 +1632,7 @@ fn visible_faces(voxels: &std::collections::BTreeMap<[i32; 3], u8>) -> usize {
 /// host does) cover the model's visible faces, natively in model mode and on 22-world's
 /// shown objects in world mode.
 fn export(s: &mut Shot, dir: &Path) -> Result<(), String> {
-    use vxr_app::files::obj_files;
+    use vxr_app::files::{obj_files, slices_png};
     let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
     s.ed.ui.coach = false;
     s.ui_click("export")?;
@@ -1672,6 +1672,47 @@ fn export(s: &mut Shot, dir: &Path) -> Result<(), String> {
     s.frames_with(1, vec![egui::Event::Text("export obj".into())]);
     s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
     check(s.host.contains(&Action::ExportObj), "Cmd-K Export OBJ asks the host too".into())?;
+    s.host.clear();
+    s.ui_click("export")?;
+    s.ui_click("export-slices")?;
+    check(
+        s.host.contains(&Action::ExportSlices) && !s.ed.ui.export_menu,
+        "its PNG slices row asks the host to export and closes the menu".into(),
+    )?;
+    s.host.clear();
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("export png slices".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    check(s.host.contains(&Action::ExportSlices), "Cmd-K Export PNG slices asks the host too".into())?;
+
+    // The slices the native host writes: one tile per layer, every voxel at its cell.
+    let decode = |bytes: &[u8]| -> Result<(u32, u32, Vec<u8>), String> {
+        let mut r = png::Decoder::new(std::io::Cursor::new(bytes)).read_info().map_err(|e| e.to_string())?;
+        let mut px = vec![0; r.output_buffer_size().unwrap_or(0)];
+        let info = r.next_frame(&mut px).map_err(|e| e.to_string())?;
+        Ok((info.width, info.height, px))
+    };
+    let (png_bytes, _, layers) = slices_png(&s.ed.scene)?;
+    std::fs::write(dir.join(s.ed.slices_name()), &png_bytes).map_err(|e| e.to_string())?;
+    let (w, h, px) = decode(&png_bytes)?;
+    let size = s.ed.scene.bounds().size;
+    let (mut n, mut right) = (0usize, 0usize);
+    s.ed.scene.for_each_voxel(|p, c| {
+        let at = (p[2] as usize * w as usize + p[1] as usize * size[0] as usize + p[0] as usize) * 4;
+        let [r, g, b, _] = s.ed.scene.palette[c as usize];
+        n += 1;
+        right += (px[at..at + 4] == [r, g, b, 255]) as usize;
+    });
+    let filled = px.chunks(4).filter(|p| p[3] != 0).count();
+    check(
+        (w, h, layers) == (size[0] * size[1], size[2], size[1]) && right == n && filled == n,
+        format!(
+            "{}: {layers} layers of {}×{} side by side ({w}×{h}), all {n} voxels at their cells",
+            s.ed.slices_name(),
+            size[0],
+            size[2]
+        ),
+    )?;
 
     // What the native host writes, and what it holds.
     let stem = s.ed.export_stem();
@@ -1732,6 +1773,10 @@ fn export(s: &mut Shot, dir: &Path) -> Result<(), String> {
             all.len() - shown.len()
         ),
     )?;
+    let (png_bytes, _, _) = slices_png(&w.ed.scene)?;
+    let (_, _, px) = decode(&png_bytes)?;
+    let filled = px.chunks(4).filter(|p| p[3] != 0).count();
+    check(filled == shown.len(), format!("in world mode 22-world-slices.png holds its {filled} shown voxels"))?;
     Ok(())
 }
 

@@ -121,6 +121,10 @@ function tick(now) {
       const zip = app.export_obj();
       if (zip.length) download(zip, app.obj_name(), 'application/zip');
     }
+    else if (a === 'slices') {
+      const png = app.export_slices();
+      if (png.length) download(png, app.slices_name(), 'image/png');
+    }
     else if (a === 'exported') download(app.take_export(), app.export_name(), 'image/png');
   }
   const c = app.cursor();

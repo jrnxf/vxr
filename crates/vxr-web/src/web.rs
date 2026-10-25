@@ -1,6 +1,6 @@
 use vxr_app::Editor;
 use vxr_app::editor::{Button, NEW_SIZE};
-use vxr_app::files::{obj_files, zip};
+use vxr_app::files::{obj_files, slices_png, zip};
 use vxr_app::ui::{Action, FontBytes};
 use vxr_core::Scene;
 use vxr_render::Gpu;
@@ -194,7 +194,7 @@ impl App {
     }
 
     /// Draw a frame at `time` seconds. Returns what the page must do: "open", "save", "embed",
-    /// "obj" (download `export_obj`) or "exported" (a render export is ready: `take_export`).
+    /// "obj" (download `export_obj`), "slices" (download `export_slices`) or "exported" (a render export is ready: `take_export`).
     pub fn frame(&mut self, time: f64) -> Vec<String> {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
@@ -225,6 +225,7 @@ impl App {
                 Action::Save => Some("save".into()),
                 Action::Embed => Some("embed".into()),
                 Action::ExportObj => Some("obj".into()),
+                Action::ExportSlices => Some("slices".into()),
                 Action::Exported => Some("exported".into()),
                 _ => None,
             })
@@ -266,6 +267,23 @@ impl App {
     /// The file name for the OBJ export's zip.
     pub fn obj_name(&self) -> String {
         format!("{}-obj.zip", self.editor.export_stem())
+    }
+
+    /// The PNG slices export, or empty with a toast when there is nothing to export.
+    pub fn export_slices(&mut self) -> Vec<u8> {
+        let ctx = self.editor.ctx.clone();
+        match slices_png(&self.editor.scene) {
+            Ok((png, _, _)) => png,
+            Err(e) => {
+                self.editor.ui.toast(&ctx, format!("Could not export: {e}"));
+                Vec::new()
+            }
+        }
+    }
+
+    /// The file name for the PNG slices export.
+    pub fn slices_name(&self) -> String {
+        self.editor.slices_name()
     }
 
     /// The file name for the render export.

@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use vxr_app::Editor;
 use vxr_app::editor::{Button, NEW_SIZE};
-use vxr_app::files::obj_files;
+use vxr_app::files::{obj_files, slices_png};
 use vxr_app::ui::Action;
 use vxr_core::Scene;
 use vxr_render::Gpu;
@@ -174,6 +174,24 @@ impl State {
                 match written {
                     Ok(quads) => {
                         self.editor.ui.toast(&ctx, format!("Exported {stem}.obj, .mtl and .png ({quads} quads)"))
+                    }
+                    Err(e) => self.editor.ui.toast(&ctx, format!("Could not export: {e}")),
+                }
+            }
+            Action::ExportSlices => {
+                let Some(path) = rfd::FileDialog::new()
+                    .add_filter("PNG", &["png"])
+                    .set_file_name(self.editor.slices_name())
+                    .save_file()
+                else {
+                    return;
+                };
+                let written = slices_png(&self.editor.scene).and_then(|(png, size, layers)| {
+                    std::fs::write(&path, png).map(|_| (size, layers)).map_err(|e| e.to_string())
+                });
+                match written {
+                    Ok(([w, h], layers)) => {
+                        self.editor.ui.toast(&ctx, format!("Exported {} ({layers} layers, {w}×{h})", file_name(&path)))
                     }
                     Err(e) => self.editor.ui.toast(&ctx, format!("Could not export: {e}")),
                 }

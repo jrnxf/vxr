@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use vxr_core::Scene;
-use vxr_core::export::{Quad, obj, quads};
+use vxr_core::export::{Quad, obj, quads, slices};
 
 /// The generated fixtures, plus the island when it has been built.
 fn files() -> Vec<(String, Vec<u8>)> {
@@ -162,5 +162,40 @@ fn every_file_exports_a_mesh_covering_its_visible_faces() {
         if name == "island" {
             assert!(qs.len() * 3 < area as usize, "island: {} quads for {area} faces", qs.len());
         }
+    }
+}
+
+#[test]
+fn slices_lay_the_layers_side_by_side_from_the_bottom() {
+    let mut palette = [[0, 0, 0, 255]; 256];
+    palette[3] = [200, 10, 20, 255];
+    palette[7] = [1, 2, 3, 255];
+    // A 3x2x4 model: one voxel on the bottom layer, one on the top, one outside it.
+    let s = slices([3, 2, 4], [([2, 0, 1], 3), ([0, 1, 3], 7), ([3, 0, 0], 3)], &palette);
+    assert_eq!((s.width, s.height, s.layers), (6, 4, 2));
+    let px = |x: usize, y: usize| &s.rgba[(y * 6 + x) * 4..(y * 6 + x) * 4 + 4];
+    assert_eq!(px(2, 1), [200, 10, 20, 255]);
+    assert_eq!(px(3, 3), [1, 2, 3, 255]);
+    assert_eq!(s.rgba.chunks(4).filter(|p| p[3] != 0).count(), 2);
+}
+
+#[test]
+fn slices_hold_every_voxel_of_every_fixture_and_the_island() {
+    for (name, bytes) in files() {
+        let Ok(scene) = Scene::from_vox(&bytes) else { continue };
+        let size = scene.bounds().size;
+        let mut cells = Vec::new();
+        scene.for_each_voxel(|p, c| cells.push((p, c)));
+        let s = slices(size, cells, &scene.palette);
+        assert_eq!((s.width, s.height), (size[0] * size[1], size[2]), "{name}");
+        let size = size.map(|n| n as i32);
+        let mut n = 0;
+        scene.for_each_voxel(|p, c| {
+            let at = ((p[2] * size[0] * size[1] + p[1] * size[0] + p[0]) * 4) as usize;
+            let [r, g, b, _] = scene.palette[c as usize];
+            assert_eq!(s.rgba[at..at + 4], [r, g, b, 255], "{name} {p:?}");
+            n += 1;
+        });
+        assert_eq!(s.rgba.chunks(4).filter(|p| p[3] != 0).count(), n, "{name}");
     }
 }

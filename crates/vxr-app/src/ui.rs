@@ -174,6 +174,8 @@ pub enum Action {
     Embed,
     /// Export what the view shows as OBJ with its palette texture (the host writes the files).
     ExportObj,
+    /// Export the model's layers side by side as one PNG (the host writes the file).
+    ExportSlices,
     /// Show `rgba` in palette slot `slot` now, inside the open colour edit.
     Recolor {
         slot: u8,
@@ -529,6 +531,7 @@ const COMMANDS: &[Command] = &[
     Command { label: "Render settings", keys: &["R"], run: |h| h.toggle_render_panel() },
     Command { label: "Export PNG", keys: &[], run: |h| h.actions.push(Action::ExportPng) },
     Command { label: "Export OBJ", keys: &[], run: |h| h.actions.push(Action::ExportObj) },
+    Command { label: "Export PNG slices", keys: &[], run: |h| h.actions.push(Action::ExportSlices) },
 ];
 
 impl Hybrid {
@@ -1332,6 +1335,7 @@ impl Hybrid {
         let rows = [
             ("export-render", icon::IMAGE_DOWN, "Render PNG", "R"),
             ("export-obj", icon::BOX, "OBJ with palette texture", ".obj .mtl .png"),
+            ("export-slices", icon::LAYERS, "PNG slices", ".png"),
         ];
         let rect = Rect::from_min_size(
             pos2(self.export_x, 12.0 + 44.0 + 6.0),
@@ -1382,7 +1386,8 @@ impl Hybrid {
                     self.toggle_render_panel();
                 }
             }
-            Some(_) => self.actions.push(Action::ExportObj),
+            Some(1) => self.actions.push(Action::ExportObj),
+            Some(_) => self.actions.push(Action::ExportSlices),
             None => {}
         }
         if run.is_some() || outside {

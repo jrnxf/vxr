@@ -971,6 +971,11 @@ impl Editor {
         if n.is_empty() { "vxr" } else { n }.to_string()
     }
 
+    /// The file name for the PNG slices export: the scene's name with `-slices.png`.
+    pub fn slices_name(&self) -> String {
+        format!("{}-slices.png", self.export_stem())
+    }
+
     /// The file name for a render export: the scene's name with `-render.png`.
     pub fn export_name(&self) -> String {
         format!("{}-render.png", self.export_stem())
