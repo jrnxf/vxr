@@ -4,11 +4,13 @@
 //!   independent of the window. The native host is `src/main.rs`.
 //! - [`ui::Hybrid`]: the Hybrid UI (direction D), drawn with egui.
 //! - [`color`]: hex, RGB and HSV for the palette editor.
+//! - [`files`]: OBJ export files, and a zip to download several files at once.
 //! - [`fonts`]: loading the UI fonts.
 //! - [`render`]: the Render panel's settings and the PNG render export.
 
 pub mod color;
 pub mod editor;
+pub mod files;
 pub mod fonts;
 pub mod render;
 pub mod ui;

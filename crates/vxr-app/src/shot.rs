@@ -6,7 +6,7 @@ use std::path::Path;
 
 use vxr_app::Editor;
 use vxr_app::editor::{Button, NEW_SIZE};
-use vxr_app::ui::{Shape, Tool};
+use vxr_app::ui::{Action, Shape, Tool};
 use vxr_core::Scene;
 use vxr_render::Gpu;
 use vxr_render::gpu::read_texture;
@@ -20,6 +20,8 @@ struct Shot {
     target: wgpu::Texture,
     /// egui time in seconds, so double clicks and drags see time move forward.
     time: f64,
+    /// What the editor asked its host to do (open, save, export), oldest first.
+    host: Vec<Action>,
 }
 
 impl Shot {
@@ -42,7 +44,7 @@ impl Shot {
             view_formats: &[],
         });
         let ed = Editor::new(gpu, scene, name, FORMAT, (w, h), ppp, crate::native::fonts())?;
-        Ok(Self { ed, target, time: 0.0 })
+        Ok(Self { ed, target, time: 0.0, host: Vec::new() })
     }
 
     /// Draw `n` frames (egui needs a couple to lay out and upload fonts).
@@ -63,7 +65,8 @@ impl Shot {
                 ..Default::default()
             };
             input.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point = Some(self.ed.ppp);
-            self.ed.frame(input, &view);
+            let (host, _) = self.ed.frame(input, &view);
+            self.host.extend(host);
         }
     }
 
@@ -256,6 +259,7 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     scene_tree(dir)?;
     render(&mut s, dir)?;
     materials(&mut s, dir)?;
+    export(&mut s, dir)?;
 
     // Save, reopen and compare.
     let bytes = s.ed.scene.to_vox();
@@ -1582,6 +1586,152 @@ fn render_panel(s: &mut Shot, dir: &Path) -> Result<(), String> {
     check(!s.ed.ui.render_panel, "Escape closes the Render panel".into())?;
     s.ed.ui.render = Default::default();
     s.frames(2);
+    Ok(())
+}
+
+/// The OBJ text's vertex and face counts and its faces' total area (each face a rectangle).
+fn obj_stats(obj: &str) -> Result<(usize, usize, f64), String> {
+    let v: Vec<[f64; 3]> = obj
+        .lines()
+        .filter_map(|l| l.strip_prefix("v "))
+        .map(|l| {
+            let n: Vec<f64> = l.split(' ').filter_map(|x| x.parse().ok()).collect();
+            [n[0], n[1], n[2]]
+        })
+        .collect();
+    let (mut faces, mut area) = (0, 0.0);
+    for f in obj.lines().filter_map(|l| l.strip_prefix("f ")) {
+        let c: Vec<usize> = f.split(' ').filter_map(|c| c.split('/').next()?.parse().ok()).collect();
+        let p = |k: usize| v.get(c.get(k)?.checked_sub(1)?).copied();
+        let (Some(a), Some(b), Some(d)) = (p(0), p(1), p(3)) else { return Err(format!("bad face: {f}")) };
+        let (e1, e2) = ([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [d[0] - a[0], d[1] - a[1], d[2] - a[2]]);
+        let n = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+        area += (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+        faces += 1;
+    }
+    Ok((v.len(), faces, area))
+}
+
+/// Faces of `voxels` with an empty cell beside them.
+fn visible_faces(voxels: &std::collections::BTreeMap<[i32; 3], u8>) -> usize {
+    let mut n = 0;
+    for p in voxels.keys() {
+        for a in 0..3 {
+            for d in [-1, 1] {
+                let mut q = *p;
+                q[a] += d;
+                n += !voxels.contains_key(&q) as usize;
+            }
+        }
+    }
+    n
+}
+
+/// The top bar's Export menu and the OBJ export: the menu opens, closes and opens the Render
+/// panel, its OBJ row and Cmd-K ask the host to export, and the files (written as the native
+/// host does) cover the model's visible faces, natively in model mode and on 22-world's
+/// shown objects in world mode.
+fn export(s: &mut Shot, dir: &Path) -> Result<(), String> {
+    use vxr_app::files::obj_files;
+    let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    s.ed.ui.coach = false;
+    s.ui_click("export")?;
+    s.frames(2);
+    check(
+        s.ed.ui.export_menu && s.ed.ui.hits.contains_key("export-obj") && s.ed.ui.hits.contains_key("export-render"),
+        "the top bar's Export button opens the Export menu".into(),
+    )?;
+    s.save_png(&dir.join("app-2x-export.png"))?;
+    s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+    let escaped = !s.ed.ui.export_menu;
+    s.ui_click("export")?;
+    let mid = egui::pos2(s.ed.width as f32 / s.ed.ppp / 2.0, s.ed.height as f32 / s.ed.ppp / 2.0);
+    let voxels = s.voxels();
+    s.ui_drag(mid, mid, egui::Modifiers::NONE);
+    check(
+        escaped && !s.ed.ui.export_menu && s.voxels() == voxels,
+        "Escape closes it, and so does a click outside it, which edits nothing".into(),
+    )?;
+    if s.voxels() != voxels {
+        s.ed.undo();
+    }
+    s.ui_click("export")?;
+    s.ui_click("export-render")?;
+    check(s.ed.ui.render_panel && !s.ed.ui.export_menu, "its Render PNG row opens the Render panel".into())?;
+    s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+
+    s.host.clear();
+    s.ui_click("export")?;
+    s.ui_click("export-obj")?;
+    check(
+        s.host.contains(&Action::ExportObj) && !s.ed.ui.export_menu,
+        "its OBJ row asks the host to export and closes the menu".into(),
+    )?;
+    s.host.clear();
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("export obj".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    check(s.host.contains(&Action::ExportObj), "Cmd-K Export OBJ asks the host too".into())?;
+
+    // What the native host writes, and what it holds.
+    let stem = s.ed.export_stem();
+    let (files, quads) = obj_files(&s.ed.scene, &stem)?;
+    let out = dir.join("obj");
+    std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
+    for (name, bytes) in &files {
+        std::fs::write(out.join(name), bytes).map_err(|e| e.to_string())?;
+    }
+    let obj = String::from_utf8_lossy(&files[0].1).into_owned();
+    let mtl = String::from_utf8_lossy(&files[1].1).into_owned();
+    let (nv, nf, area) = obj_stats(&obj)?;
+    let mut shown = std::collections::BTreeMap::new();
+    s.ed.scene.for_each_voxel(|p, c| {
+        shown.insert(p, c);
+    });
+    let faces = visible_faces(&shown);
+    check(
+        nf == quads && area as usize == faces && quads * 2 < faces,
+        format!(
+            "{stem}.obj: {nv} vertices, {quads} quads covering all {faces} visible faces of {} voxels",
+            shown.len()
+        ),
+    )?;
+    let mut r = png::Decoder::new(std::io::Cursor::new(&files[2].1)).read_info().map_err(|e| e.to_string())?;
+    let mut tex = vec![0; r.output_buffer_size().unwrap_or(0)];
+    let info = r.next_frame(&mut tex).map_err(|e| e.to_string())?;
+    let slot = (1..256).find(|&i| s.ed.scene.map.counts[i] > 0).unwrap_or(1);
+    check(
+        (info.width, info.height) == (256, 1)
+            && tex[(slot - 1) * 4..slot * 4] == s.ed.scene.palette[slot]
+            && obj.contains(&format!("mtllib {stem}.mtl"))
+            && mtl.contains(&format!("map_Kd {stem}.png")),
+        format!("{stem}.png is the 256×1 palette (texel {} is slot {slot}), named by {stem}.mtl", slot - 1),
+    )?;
+    println!("wrote {}", out.display());
+
+    // World mode exports every shown object; a hidden one is left out.
+    let bytes = vxr_vox::fixtures::all()
+        .into_iter()
+        .find(|f| f.name == "22-world")
+        .ok_or("no 22-world fixture")?
+        .builder
+        .build()
+        .write();
+    let mut w = Shot::new(Scene::from_vox(&bytes)?, "22-world.vox", 1.0)?;
+    w.frames(2);
+    let all = w.ed.scene.world_voxels(false);
+    let shown = w.ed.scene.world_voxels(true);
+    let (files, quads) = obj_files(&w.ed.scene, &w.ed.export_stem())?;
+    let (_, nf, area) = obj_stats(&String::from_utf8_lossy(&files[0].1))?;
+    check(
+        nf == quads && area as usize == visible_faces(&shown) && shown.len() < all.len(),
+        format!(
+            "in world mode 22-world.obj covers its {} shown voxels' {} faces ({} hidden left out)",
+            shown.len(),
+            visible_faces(&shown),
+            all.len() - shown.len()
+        ),
+    )?;
     Ok(())
 }
 

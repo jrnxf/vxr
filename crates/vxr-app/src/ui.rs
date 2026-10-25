@@ -152,6 +152,7 @@ mod icon {
     pub const EYE_OFF: char = '\u{e0bb}';
     pub const FOLDER: char = '\u{e0d7}';
     pub const LINK: char = '\u{e102}';
+    pub const FILE_OUTPUT: char = '\u{e0c8}';
 }
 
 pub use vxr_core::select::Transform;
@@ -171,6 +172,8 @@ pub enum Action {
     /// Orthographic (true) or perspective projection.
     Ortho(bool),
     Embed,
+    /// Export what the view shows as OBJ with its palette texture (the host writes the files).
+    ExportObj,
     /// Show `rgba` in palette slot `slot` now, inside the open colour edit.
     Recolor {
         slot: u8,
@@ -370,6 +373,10 @@ pub struct Hybrid {
     pub view: Option<View>,
     /// The View flyout beside the rail's view button is open.
     pub view_panel: bool,
+    /// The Export menu under the top bar's Export button is open.
+    pub export_menu: bool,
+    /// Left edge of the top bar's Export button, where the Export menu lines up.
+    export_x: f32,
     /// Guides drawn in the view: the ground grid, the ground plane and the bounds frame.
     pub grid: bool,
     pub ground: bool,
@@ -521,6 +528,7 @@ const COMMANDS: &[Command] = &[
     Command { label: "Toggle render preview", keys: &[], run: |h| h.show_render = !h.show_render },
     Command { label: "Render settings", keys: &["R"], run: |h| h.toggle_render_panel() },
     Command { label: "Export PNG", keys: &[], run: |h| h.actions.push(Action::ExportPng) },
+    Command { label: "Export OBJ", keys: &[], run: |h| h.actions.push(Action::ExportObj) },
 ];
 
 impl Hybrid {
@@ -553,6 +561,8 @@ impl Hybrid {
             ortho: false,
             view: None,
             view_panel: false,
+            export_menu: false,
+            export_x: 0.0,
             grid: true,
             ground: true,
             frame: true,
@@ -714,7 +724,7 @@ impl Hybrid {
         if self.slot_op.take().is_some() || self.color_edit.take().is_some() || self.bounds_panel.take().is_some() {
             return;
         }
-        if std::mem::take(&mut self.view_panel) {
+        if std::mem::take(&mut self.view_panel) || std::mem::take(&mut self.export_menu) {
             return;
         }
         if self.render_panel {
@@ -755,6 +765,7 @@ impl Hybrid {
         self.selection_panel(ctx);
         self.bounds_panel(ctx);
         self.view_panel(ctx);
+        self.export_menu(ctx);
         self.marquee(ctx);
         self.palette_panel(ctx, screen);
         self.color_editor(ctx, screen);
@@ -949,6 +960,13 @@ impl Hybrid {
             x += 4.0;
             if tbtn(ui, &mut x, cy, Some(icon::DOWNLOAD), "Save .vox", "save", true).clicked() {
                 self.actions.push(Action::Save);
+            }
+            x += 4.0;
+            self.export_x = x;
+            let r = tbtn_on(ui, &mut x, cy, Some(icon::FILE_OUTPUT), "Export", "export", true, self.export_menu);
+            self.hits.insert("export".into(), r.rect);
+            if r.clicked() {
+                self.export_menu = !self.export_menu;
             }
             // Right side, laid out from the right edge.
             let embed_label =
@@ -1302,6 +1320,73 @@ impl Hybrid {
             false
         } else {
             out.lost_focus()
+        }
+    }
+
+    // The Export menu under the top bar's Export button: one row per export, each with what
+    // it writes. A row runs its export and closes the menu; so do Escape and a click outside.
+    fn export_menu(&mut self, ctx: &Context) {
+        if !self.export_menu {
+            return;
+        }
+        let rows = [
+            ("export-render", icon::IMAGE_DOWN, "Render PNG", "R"),
+            ("export-obj", icon::BOX, "OBJ with palette texture", ".obj .mtl .png"),
+        ];
+        let rect = Rect::from_min_size(
+            pos2(self.export_x, 12.0 + 44.0 + 6.0),
+            vec2(340.0, 36.0 + 34.0 * rows.len() as f32 + 6.0),
+        );
+        let mut run = None;
+        let mut hits = Vec::new();
+        Self::panel(ctx, "export-menu", rect, Order::Foreground, |ui, rect| {
+            let hy = rect.top() + 18.0;
+            let g = ui.painter().layout_job(spaced("EXPORT", inter(9.0), FAINT, 0.72));
+            ui.painter().galley(pos2(rect.left() + 12.0, hy - g.size().y / 2.0), g, FAINT);
+            for (k, (id, glyph, label, hint)) in rows.into_iter().enumerate() {
+                let r = Rect::from_min_size(
+                    pos2(rect.left() + 6.0, rect.top() + 36.0 + 34.0 * k as f32),
+                    vec2(rect.width() - 12.0, 32.0),
+                );
+                let resp = ui.interact(r, Id::unique(id), Sense::click());
+                hits.push((id.to_string(), r));
+                let p = ui.painter();
+                let color = if resp.hovered() {
+                    p.rect_filled(r, CornerRadius::same(7), HOVER);
+                    TEXT
+                } else {
+                    MUTED
+                };
+                let cy = r.center().y;
+                p.text(pos2(r.left() + 16.0, cy), Align2::CENTER_CENTER, glyph, icon_font(15.0), color);
+                p.text(pos2(r.left() + 32.0, cy), Align2::LEFT_CENTER, label, inter(13.0), TEXT);
+                if hint.len() == 1 {
+                    kbd(ui, pos2(r.right() - 8.0, cy), hint, true);
+                } else {
+                    ui.painter().text(pos2(r.right() - 8.0, cy), Align2::RIGHT_CENTER, hint, mono(10.5), FAINT);
+                }
+                if resp.clicked() {
+                    run = Some(k);
+                }
+            }
+        });
+        self.hits.extend(hits);
+        let button = self.hits.get("export").copied().unwrap_or(Rect::NOTHING);
+        let outside = ctx.input(|i| {
+            i.pointer.any_pressed()
+                && i.pointer.interact_pos().is_some_and(|p| !rect.contains(p) && !button.contains(p))
+        });
+        match run {
+            Some(0) => {
+                if !self.render_panel {
+                    self.toggle_render_panel();
+                }
+            }
+            Some(_) => self.actions.push(Action::ExportObj),
+            None => {}
+        }
+        if run.is_some() || outside {
+            self.export_menu = false;
         }
     }
 
@@ -2833,6 +2918,21 @@ fn tbtn(
     id: &str,
     enabled: bool,
 ) -> egui::Response {
+    tbtn_on(ui, x, cy, glyph, label, id, enabled, false)
+}
+
+/// A top bar button, drawn hovered while `on` (its menu is open).
+#[allow(clippy::too_many_arguments)]
+fn tbtn_on(
+    ui: &mut Ui,
+    x: &mut f32,
+    cy: f32,
+    glyph: Option<char>,
+    label: &str,
+    id: &str,
+    enabled: bool,
+    on: bool,
+) -> egui::Response {
     let g = (!label.is_empty()).then(|| ui.painter().layout_no_wrap(label.into(), inter(13.0), MUTED));
     let w = 20.0
         + glyph.map_or(0.0, |_| 16.0)
@@ -2843,7 +2943,7 @@ fn tbtn(
     let resp = ui.interact(r, Id::unique(("tbtn", id)), sense);
     let p = ui.painter();
     let mut color = MUTED;
-    if enabled && resp.hovered() {
+    if enabled && (resp.hovered() || on) {
         p.rect_filled(r, CornerRadius::same(8), HOVER);
         color = TEXT;
     }

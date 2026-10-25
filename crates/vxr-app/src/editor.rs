@@ -965,10 +965,15 @@ impl Editor {
         }
     }
 
+    /// The scene's name without `.vox`, to name exports by.
+    pub fn export_stem(&self) -> String {
+        let n = self.ui.scene_name.trim_end_matches(".vox").trim_end_matches(".VOX");
+        if n.is_empty() { "vxr" } else { n }.to_string()
+    }
+
     /// The file name for a render export: the scene's name with `-render.png`.
     pub fn export_name(&self) -> String {
-        let n = self.ui.scene_name.trim_end_matches(".vox").trim_end_matches(".VOX");
-        format!("{}-render.png", if n.is_empty() { "vxr" } else { n })
+        format!("{}-render.png", self.export_stem())
     }
 
     /// Start a PNG export of the corner's view with the Render panel's settings.

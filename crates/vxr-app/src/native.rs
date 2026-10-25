@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use vxr_app::Editor;
 use vxr_app::editor::{Button, NEW_SIZE};
+use vxr_app::files::obj_files;
 use vxr_app::ui::Action;
 use vxr_core::Scene;
 use vxr_render::Gpu;
@@ -154,6 +155,29 @@ impl State {
                 }
             }
             Action::Embed => self.editor.ui.toast(&ctx, "The embed export is not built yet"),
+            Action::ExportObj => {
+                let Some(path) = rfd::FileDialog::new()
+                    .add_filter("OBJ", &["obj"])
+                    .set_file_name(format!("{}.obj", self.editor.export_stem()))
+                    .save_file()
+                else {
+                    return;
+                };
+                let stem = path.file_stem().map_or("vxr".into(), |s| s.to_string_lossy().into_owned());
+                let dir = path.parent().map(|d| d.to_path_buf()).unwrap_or_default();
+                let written = obj_files(&self.editor.scene, &stem).and_then(|(files, quads)| {
+                    for (name, bytes) in files {
+                        std::fs::write(dir.join(name), bytes).map_err(|e| e.to_string())?;
+                    }
+                    Ok(quads)
+                });
+                match written {
+                    Ok(quads) => {
+                        self.editor.ui.toast(&ctx, format!("Exported {stem}.obj, .mtl and .png ({quads} quads)"))
+                    }
+                    Err(e) => self.editor.ui.toast(&ctx, format!("Could not export: {e}")),
+                }
+            }
             Action::Exported => {
                 let Some((png, (w, h))) = self.editor.exported.take() else { return };
                 let Some(path) = rfd::FileDialog::new()

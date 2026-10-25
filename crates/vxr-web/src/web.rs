@@ -1,5 +1,6 @@
 use vxr_app::Editor;
 use vxr_app::editor::{Button, NEW_SIZE};
+use vxr_app::files::{obj_files, zip};
 use vxr_app::ui::{Action, FontBytes};
 use vxr_core::Scene;
 use vxr_render::Gpu;
@@ -192,8 +193,8 @@ impl App {
         .into()
     }
 
-    /// Draw a frame at `time` seconds. Returns what the page must do: "open", "save", "embed"
-    /// or "exported" (a render export is ready: `take_export`).
+    /// Draw a frame at `time` seconds. Returns what the page must do: "open", "save", "embed",
+    /// "obj" (download `export_obj`) or "exported" (a render export is ready: `take_export`).
     pub fn frame(&mut self, time: f64) -> Vec<String> {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
@@ -223,6 +224,7 @@ impl App {
                 Action::Open => Some("open".into()),
                 Action::Save => Some("save".into()),
                 Action::Embed => Some("embed".into()),
+                Action::ExportObj => Some("obj".into()),
                 Action::Exported => Some("exported".into()),
                 _ => None,
             })
@@ -248,6 +250,24 @@ impl App {
         self.editor.exported.take().map(|(png, _)| png).unwrap_or_default()
     }
 
+    /// The OBJ export (`.obj`, `.mtl` and palette `.png`) zipped into one download, or empty
+    /// with a toast when there is nothing to export.
+    pub fn export_obj(&mut self) -> Vec<u8> {
+        let ctx = self.editor.ctx.clone();
+        match obj_files(&self.editor.scene, &self.editor.export_stem()) {
+            Ok((files, _)) => zip(&files),
+            Err(e) => {
+                self.editor.ui.toast(&ctx, format!("Could not export: {e}"));
+                Vec::new()
+            }
+        }
+    }
+
+    /// The file name for the OBJ export's zip.
+    pub fn obj_name(&self) -> String {
+        format!("{}-obj.zip", self.editor.export_stem())
+    }
+
     /// The file name for the render export.
     pub fn export_name(&self) -> String {
         self.editor.export_name()
@@ -264,7 +284,7 @@ impl App {
         let e = &self.editor;
         let (c, h) = (&e.cam, e.scene.history());
         format!(
-            r#"{{"voxels":{},"tool":"{:?}","shape":"{:?}","mirror":{},"mirrorAxes":[{},{},{}],"lock":{},"span":{},"selected":{},"hasClip":{},"bounds":[{},{},{}],"boundsPanel":{},"slot":{},"colorEdit":{},"slotOp":"{:?}","undo":{},"redo":{},"cmdk":{},"coach":{},"name":{:?},"size":[{},{}],"ppp":{},"cam":[{},{},{},{},{},{}],"ortho":{},"view":{},"viewPanel":{},"guides":[{},{},{}],"mode":"{}","objects":{},"models":{},"picked":{},"tree":[{}],"treeOn":{},"layers":[{}],"layerOn":{},"render":{{"shown":{},"spp":{},"rows":{},"restarts":{},"timestamps":{},"panel":{},"maxSpp":{},"exposure":{},"aperture":{},"sky":{},"export":{}}}}}"#,
+            r#"{{"voxels":{},"tool":"{:?}","shape":"{:?}","mirror":{},"mirrorAxes":[{},{},{}],"lock":{},"span":{},"selected":{},"hasClip":{},"bounds":[{},{},{}],"boundsPanel":{},"slot":{},"colorEdit":{},"slotOp":"{:?}","undo":{},"redo":{},"cmdk":{},"coach":{},"name":{:?},"size":[{},{}],"ppp":{},"cam":[{},{},{},{},{},{}],"ortho":{},"view":{},"viewPanel":{},"exportMenu":{},"guides":[{},{},{}],"mode":"{}","objects":{},"models":{},"picked":{},"tree":[{}],"treeOn":{},"layers":[{}],"layerOn":{},"render":{{"shown":{},"spp":{},"rows":{},"restarts":{},"timestamps":{},"panel":{},"maxSpp":{},"exposure":{},"aperture":{},"sky":{},"export":{}}}}}"#,
             e.scene.map.voxels,
             e.ui.tool,
             e.ui.shape,
@@ -300,6 +320,7 @@ impl App {
             c.ortho,
             c.view().map_or("null".into(), |v| format!("\"{}\"", v.name())),
             e.ui.view_panel,
+            e.ui.export_menu,
             e.ui.grid,
             e.ui.ground,
             e.ui.frame,

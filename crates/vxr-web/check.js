@@ -54,6 +54,18 @@ async () => {
   // The island's middle at 1280x800: a surface voxel, away from the panels.
   const [mx, my] = [640, 430];
 
+  // The files of a stored (uncompressed) zip, by name, as bytes.
+  const unzip = (z) => {
+    const v = new DataView(z.buffer, z.byteOffset, z.byteLength);
+    const files = {};
+    for (let at = 0; at + 30 <= z.length && v.getUint32(at, true) === 0x04034b50;) {
+      const [len, nl, el] = [v.getUint32(at + 18, true), v.getUint16(at + 26, true), v.getUint16(at + 28, true)];
+      const name = String.fromCharCode(...z.slice(at + 30, at + 30 + nl));
+      files[name] = z.slice(at + 30 + nl + el, at + 30 + nl + el + len);
+      at += 30 + nl + el + len;
+    }
+    return files;
+  };
   await frames(10);
   let s0 = st();
   step('starts with the island and the coach card', s0.voxels > 100000 && s0.coach && s0.name === 'island.vox', JSON.stringify(s0));
@@ -523,6 +535,53 @@ async () => {
     step('Escape closes the Render panel', !st().render.panel && st().render.maxSpp === 1024 && near(st().render.exposure, 1), JSON.stringify(st().render));
     step('the render steps leave the file as it was', same(bytes(), original));
 
+    // The Export menu and the OBJ export: the top bar's Export button opens the menu, Escape
+    // and a click outside close it, its Render PNG row opens the Render panel, and its OBJ row
+    // and Cmd-K download island-obj.zip holding the .obj, .mtl and 256x1 palette .png.
+    await click(...hit('export'));
+    step('the Export button opens the Export menu', st().exportMenu && !!hit('export-obj') && !!hit('export-render'));
+    await key('Escape');
+    const escaped = !st().exportMenu;
+    await click(...hit('export'));
+    await click(1000, 34);
+    step('Escape and a click outside close it', escaped && !st().exportMenu);
+    await click(...hit('export'));
+    await click(...hit('export-render'));
+    step('its Render PNG row opens the Render panel', st().render.panel && !st().exportMenu);
+    await key('Escape');
+    let zipBlob = null, zipName = null;
+    URL.createObjectURL = (b) => { zipBlob = b; return realUrl.call(URL, b); };
+    HTMLAnchorElement.prototype.click = function () { zipName = this.download; };
+    try {
+      await click(...hit('export'));
+      await click(...hit('export-obj'));
+      await frames();
+      const files = zipBlob ? unzip(new Uint8Array(await zipBlob.arrayBuffer())) : {};
+      const text = (n) => (files[n] ? new TextDecoder().decode(files[n]) : '');
+      const obj = text('island.obj');
+      const quads = obj.split('\n').filter((l) => l.startsWith('f ')).length;
+      const header = obj.match(/^# vxr OBJ export: (\d+) voxels, (\d+) quads/);
+      const png = files['island.png'];
+      const pv = png && new DataView(png.buffer, png.byteOffset);
+      step('its OBJ row downloads island-obj.zip: island.obj, island.mtl and island.png',
+        zipName === 'island-obj.zip' && Object.keys(files).join(',') === 'island.obj,island.mtl,island.png' && !st().exportMenu,
+        `${zipName} ${Object.keys(files)}`);
+      step('island.obj holds every voxel as greedy quads and names its .mtl, which names the 256x1 palette .png',
+        header && +header[1] === st().voxels && +header[2] === quads && quads > 1000 && obj.includes('mtllib island.mtl')
+          && text('island.mtl').includes('map_Kd island.png') && pv.getUint32(16) === 256 && pv.getUint32(20) === 1,
+        `${header && header[0]} ${quads} faces, ${st().voxels} voxels`);
+      zipName = null;
+      await key('k', cmd);
+      for (const ch of 'export obj') await key(ch);
+      await key('Enter');
+      await frames();
+      step('Cmd-K Export OBJ downloads it too', zipName === 'island-obj.zip', `${zipName}`);
+    } finally {
+      URL.createObjectURL = realUrl;
+      HTMLAnchorElement.prototype.click = realA;
+    }
+    step('the export steps leave the file as it was', same(bytes(), original));
+
     // Materials: Cmd-K "Edit material", the type buttons and sliders, the render restarts,
     // the download carries MATL chunks, and undo gives back the file.
     const mat = (slot) => Array.from(window.vxr.material(slot));
@@ -607,6 +666,18 @@ async () => {
     await frames(6);
     const w0 = st();
     step('a file of several objects opens in world mode', w0.mode === 'world' && w0.objects === 6 && same(bytes(), worldFile), JSON.stringify(w0));
+    // In world mode the OBJ export holds every shown object (the hidden ones are left out).
+    blob = null; downloaded = null;
+    await key('k', cmd);
+    for (const ch of 'export obj') await key(ch);
+    await key('Enter');
+    await frames();
+    {
+      const files = blob ? unzip(new Uint8Array(await blob.arrayBuffer())) : {};
+      const obj = files['22-world.obj'] ? new TextDecoder().decode(files['22-world.obj']) : '';
+      const header = obj.match(/^# vxr OBJ export: (\d+) voxels/);
+      step('in world mode Export OBJ downloads 22-world-obj.zip with every shown object', downloaded === '22-world-obj.zip' && header && +header[1] === w0.voxels, `${downloaded} ${header && header[0]} ${w0.voxels}`);
+    }
     // A point on an object near the middle: a click there picks it and edits nothing.
     let at = null;
     for (const [dx, dy] of [[0, 0], [0, 30], [-40, 20], [40, 20], [0, 60], [-80, 40], [80, 40]]) {

@@ -153,7 +153,7 @@ Feature names below follow the update log [S1] unless another source is given.
 | Save `.vox` | [S2] | done [1]: lossless. An unedited save is byte-identical; edits re-encode only the edited models (plus the root group for new models), and every other chunk (materials, layers, cameras, names, notes, unknown chunks) keeps its bytes. An edited linked copy is split into its own model | P1 | lossless |
 | Choose what is saved | IO panel [S1 0.99.5.1] | missing | P3 | - |
 | Recover from a corrupted file | IO->File->Recover [S1 0.99.7.2] | missing | P3 | lossless |
-| OBJ with palette texture | Color-based simplification [S1 0.96.1] | missing [9] | P2 | - |
+| OBJ with palette texture | Color-based simplification [S1 0.96.1] | done [9] (the top bar's Export menu or Cmd-K: what the view shows as greedy quads of one colour, a 256x1 palette PNG and its `.mtl`, bottom centre at the origin; three files beside each other natively, one zip download in the browser; materials not written) | P2 | - |
 | PLY (marching cubes) | [S1 0.97.1] | missing | P3 | - |
 | Qubicle `.qb` | [S1 0.97.2] | missing | P3 | - |
 | Slices, cubes, point clouds | [S1 0.99.3]; `o slice` exports a volume as one image [S1 0.98.1] | missing [9] (PNG slices) | P2 | - |
