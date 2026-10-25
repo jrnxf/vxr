@@ -1,0 +1,13 @@
+[package]
+name = "vxr-vox"
+description = "Lossless two-layer MagicaVoxel .vox codec: raw chunks plus a semantic scene"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Pure-Rust zlib, only for Teardown's TDCZ chunks.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+
+[dev-dependencies]
+proptest = { version = "1", default-features = false, features = ["std"] }

@@ -6,9 +6,19 @@ fast voxel scenes: an open-source voxel scene editor (Rust, wgpu) with a one-tag
 
 - Rust core on wgpu (Metal, Vulkan, DX12, WebGPU in the browser). Desktop first; the browser build and the embed come from the same code. No server.
 - UI drawn in Rust with egui (picked by test 3, see `docs/decisions.md`) so the Hybrid UI runs native and in the browser.
-- No real build yet. The Phase 2 spikes in `spikes/` build through `spikes/dev <command>` (a Nix dev shell with Rust, the wasm32 target, wasm-bindgen, wasm-opt and twiggy; `spikes/dev --fuzz` adds nightly and cargo-fuzz). Wrap timed GPU runs in `spikes/gpu-lock` so benchmarks never share the GPU.
+- The real build is the Cargo workspace at the root (Phase 3, in progress). Run everything through `./dev <command>`, a Nix dev shell (`nix/flake.nix`: Rust with the wasm32 target, wasm-bindgen, wasm-opt, twiggy, brotli).
+- The Phase 2 spikes in `spikes/` build separately through `spikes/dev <command>` (`spikes/dev --fuzz` adds nightly and cargo-fuzz). Wrap timed GPU runs in `spikes/gpu-lock` so benchmarks never share the GPU.
+
+## Build and test
+
+- `./dev cargo test`: unit and property tests (brick map, undo/redo, `.vox` round-trip). Run `node prototype/src/build.mjs` first so the island tests run instead of skipping. `PROPTEST_CASES=<n>` sets the property test size.
+- `./dev cargo clippy --all-targets -- -D warnings` and `./dev cargo fmt --check` must be clean.
+- `./dev cargo build --target wasm32-unknown-unknown` checks the browser target.
+- Fixtures are generated in tests (`vxr_vox::fixtures`), never committed as `.vox` files.
 
 ## Where things live
+
+- `crates/vxr-vox`: the `.vox` codec (from `spikes/vox`). `crates/vxr-core`: the editable scene (brick map, undo/redo, `.vox` open and save), no GPU.
 
 - `docs/plan.md`: what to research and test next, in order. Ask the owner before starting each phase.
 - `docs/decisions.md`: every settled decision and why. Update it when a decision changes; do not duplicate it here.

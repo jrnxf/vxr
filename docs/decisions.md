@@ -56,6 +56,14 @@ Phase 1 picks from `docs/research/recommendation.md`, now confirmed or changed b
 - Longer multi-core fuzzing before the embed reads files from strangers.
 - Licence (still open from `docs/market-research.md`).
 
+## Phase 3 app
+
+- **Workspace:** `crates/vxr-vox` (the Phase 2 codec, unchanged apart from the crate name), `crates/vxr-core` (the scene with no GPU, so it tests fast and builds for wasm32), then a renderer and the app on top. Nothing depends on `spikes/`.
+- **Axes:** vxr is y-up; a MagicaVoxel voxel at (x, y, z) is the vxr cell (x, z, -y). The brick map starts at zero and the scene keeps an `origin`, so files keep their coordinates.
+- **Opening a file** flattens every instance (hidden ones too) into one brick map with 16 voxels of free space on each side, up to 2048 voxels per axis. Instancing in the editor is later work.
+- **Saving** writes a fresh version 200 file (palette plus voxels, split into 256^3 models). It does not yet keep an opened file's materials, layers, cameras or scene graph; the lossless path is to apply edits through `vxr_vox::Document` instead.
+- **Undo** stores each action as the cells it changed (old and new value) or the palette slot it recoloured, with no cap. The brick map keeps a voxel count per palette slot, so the used-colour dots need no rescan.
+
 ## What the prototype proved
 
 `prototype/` is a throwaway three.js editor (see the README). Findings worth keeping:

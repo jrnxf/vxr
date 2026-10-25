@@ -2,7 +2,7 @@
 
 fast voxel scenes
 
-Early stage. Nothing here is the real build yet.
+Early stage. The real build (a Rust workspace in `crates/`) has started: the `.vox` codec and the editable scene, with tests. The desktop editor comes next.
 
 ## What is here
 

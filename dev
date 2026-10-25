@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Run a command inside the vxr dev shell (Rust with wasm32, wasm-bindgen, wasm-opt):
+#   ./dev cargo test
+set -euo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
+exec nix develop "path:$here/nix#default" -c "$@"

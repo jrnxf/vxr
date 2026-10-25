@@ -2,3 +2,5 @@
 prototype/demo/
 # Scratch space for downloaded references and local evidence; never committed.
 .scratch/
+# Cargo build output.
+/target/
