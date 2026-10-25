@@ -29,9 +29,9 @@ Feature names below follow the update log [S1] unless another source is given.
 |---|---|---|---|---|
 | Attach, erase, paint actions | Attach/Erase/Paint on every brush [S1 0.98.1] | done (add, erase, paint; Shift erases, Alt picks) | P1 | sculpt |
 | Pick colour from a voxel | Alt-click; Alt+drag picks from the screen [S1 0.99] | done (pick tool and Alt) | P1 | palette |
-| Voxel brush (V) with size | Cube, sphere, square, disc, surface; keys 1-9 set size; Ctrl+Alt+drag resizes [S1 0.97.1, 0.99.5.1] | partial (single voxel and drag-on-plane; no size, no sphere or surface shape) | P1 | sculpt |
+| Voxel brush (V) with size | Cube, sphere, square, disc, surface; keys 1-9 set size; Ctrl+Alt+drag resizes [S1 0.97.1, 0.99.5.1] | done (sizes 1 to 16 as a cube grown from the face: `-` `=`, the size flyout from V again, Cmd-K; drags on the plane; no sphere or surface shape, which the center brush covers in part) | P1 | sculpt |
 | Face brush (F) | Extrude or peel a connected face by dragging, several modes [S1 0.97] | done (click extrudes or peels the whole face, paint fills it) | P1 | sculpt, minutes |
-| Box brush (B) | Drag a rectangle, resizable with a gizmo, Enter commits [S1 0.99.5.1] | partial (drag a rectangle; no gizmo or height drag) | P1 | minutes |
+| Box brush (B) | Drag a rectangle, resizable with a gizmo, Enter commits [S1 0.99.5.1] | done (drag a rectangle, then the pointer sets its height until a click or Enter places it, Escape drops it; no gizmo) | P1 | minutes |
 | Line brush (L) | Line, square and circle in one geometry mode since 0.99.6.2 [S1 0.99.6.2] | done (L: drag a line on the drag plane, shown live) | P1 | sculpt |
 | Center brush (C) | Square or circle from a center point, even diameters [S1 0.97, 0.97.1] | done (C: circle on the drag plane from its center, C again for a sphere; no square or even diameters) | P1 | sculpt |
 | Pattern brush (P) | Stamp a pattern made from a selection, rotate and offset it [S1 0.98.1] | missing | P2 | minutes |
@@ -52,8 +52,8 @@ Feature names below follow the update log [S1] unless another source is given.
 |---|---|---|---|---|
 | Box select | Shift adds, Shift+Alt subtracts [S1 0.98.1] | done [5] (a screen box through every depth; Shift adds, Alt subtracts) | P1 | sculpt |
 | Rect (screen) select | Select voxels in a screen rectangle [S1 0.98.1] | done [5] (the select tool's box) | P2 | - |
-| Region select: same volume, face, colour | [S1 0.98.1]; select voxels by colour from the palette menu [S1 0.99.5] | partial [5] (colour: click a voxel, or Cmd-K Select color; face and volume missing) | P1 | palette |
-| Deselect, invert, select all | Edit->Select [S1 0.98.1] | partial [5] (Cmd-A, Escape, the flyout's x; invert missing) | P1 | - |
+| Region select: same volume, face, colour | [S1 0.98.1]; select voxels by colour from the palette menu [S1 0.99.5] | done [5] (a select click takes the colour, the connected face of that colour or the connected volume: the flyout's Color / Face / Volume row or Cmd-K; Cmd-K Select color takes the current colour) | P1 | palette |
+| Deselect, invert, select all | Edit->Select [S1 0.98.1] | done [5] (Cmd-A or the flyout's All, Escape or the flyout's x, Cmd-Shift-I or the flyout's Invert) | P1 | - |
 | Copy, paste, delete, fill selection | [S1 0.98.1] | done [5] (Cmd-C, Cmd-X, Cmd-V at the pointer, Backspace, fill with the current colour) | P1 | minutes |
 | Move selection | Move brush on selected voxels [S1 0.98.1]; Ctrl / Ctrl+Shift / Ctrl+Shift+Alt for 1, 2 or normal-axis moves [S1 0.99.7.2] | done [5] (drag on the pressed face's plane, live; arrows and Shift-Up/Down nudge) | P1 | sculpt |
 | Flip, rotate 90, loop (shift) | Transform tools on the selection around its local center [S1 0.98.1] | done [5] (selection, or the whole model with nothing selected) | P1 | minutes |
@@ -67,9 +67,9 @@ Feature names below follow the update log [S1] unless another source is given.
 | Feature | MagicaVoxel | vxr | Priority | Why |
 |---|---|---|---|---|
 | Model size up to 256^3 | Canvas size per object [S1 0.99.5] | done, and past it: one sparse map up to 2048 voxels per axis, split into 256^3 models on save | P1 | - |
-| Resize model bounds | Crop tool resizes the canvas live [S1 0.99.5.1] | missing [6] | P2 | - |
-| Crop to content and fit | Fit sizes several objects [S1 0.99.5.1] | missing [6] | P2 | - |
-| Hollow and fill | Edit tools (also in vengi [S4]) | missing [6] | P2 | sculpt |
+| Resize model bounds | Crop tool resizes the canvas live [S1 0.99.5.1] | done [6] (Resize… in the selection flyout opens a Bounds panel with X, Y and Z fields; keeps the bottom and the centre; one undo step; saved as the object's model size [8]) | P2 | - |
+| Crop to content and fit | Fit sizes several objects [S1 0.99.5.1] | partial [6] (Crop in the selection flyout and Cmd-K fits the bounds to the voxels; saved as the object's model size [8]; fitting several objects at once waits for the world UI) | P2 | - |
+| Hollow and fill | Edit tools (also in vengi [S4]) | done [6] (selection flyout and Cmd-K: Hollow keeps the voxels seen from outside, Fill inside fills enclosed space; the selection or the whole model) | P2 | sculpt |
 | Boolean operations | Groups and objects [S1 0.99.6.2] | missing | P3 | - |
 | Statistics | `log`: model count, scene size, voxels per colour [S1 0.99.6.2] | partial (voxel count in the header; per-colour count kept in the brick map, not shown) | P3 | - |
 | Auto-save and crash recovery | Every 25 steps to `cache/`, recover from `backup.vox` [S1 0.99, FAQ] | missing | P2 | - |
@@ -86,7 +86,7 @@ Feature names below follow the update log [S1] unless another source is given.
 | Copy and paste colours between palettes | [S1 0.99.7.1] | missing | P2 | palette |
 | Sort palette | `pal sort [+-hsvrgb]` [S1 0.99.2] | missing | P3 | palette |
 | Mask unused colours | `pal mask` [S1 0.97.1]; vxr shows dots on used colours | partial (used dots) | P3 | palette |
-| Select voxels by colour and colours by voxels | Palette menu [S1 0.99.5] | partial [5] (voxels by colour; colours by voxels missing) | P1 | palette |
+| Select voxels by colour and colours by voxels | Palette menu [S1 0.99.5] | partial [5] (voxels by colour; colours by voxels waits for multi-select colours, the P2 row above: until the palette can hold more than one colour there is nothing to select them into; see `docs/decisions.md`) | P1 | palette |
 | Palette notes | A note per palette row, saved in NOTE [S1 0.99.5.1, S2] | missing (kept by lossless save [1]) | P3 | lossless |
 | Import and export palettes | IO panel, text and image [S1 0.99.5.1] | missing | P2 | palette |
 
@@ -95,7 +95,7 @@ Feature names below follow the update log [S1] unless another source is given.
 | Feature | MagicaVoxel | vxr | Priority | Why |
 |---|---|---|---|---|
 | Per-slot material | Matter->Sel per palette slot [S1 0.96.2] | done [3]: the colour editor's Material tab and Cmd-K "Edit material", one undo step per change; swap and copy carry it | P1 | render |
-| Diffuse, metal, glass, emissive | Plus plastic, roughness, IOR, attenuation, emission power [S1 0.96-0.98.2] | partial [3]: the four types with roughness, metalness, transparency, refractive index (reflection only: glass is thin, no bending), emission and power, path traced in the corner and export; no plastic, specular or attenuation | P1 | render |
+| Diffuse, metal, glass, emissive | Plus plastic, roughness, IOR, attenuation, emission power [S1 0.96-0.98.2] | done [3]: diffuse, metal, plastic, glass and emissive with roughness, metalness, specular (plastic's clear coat), transparency, refractive index (reflection only: glass is thin, no bending), attenuation (Beer-Lambert through the glass crossed), emission and power, path traced in the corner and export; plastic is saved as MagicaVoxel's `_metal` with `_plastic` 1 | P1 | render |
 | Blend, SSS, media (cloud) | Unified material system [S1 0.99.6.2] | missing | P3 | render |
 | Saved to `.vox` MATL | [S1 0.98, S2] | done [3]: edits change only that slot's MATL keys of its type; unknown keys and unedited slots keep their bytes; new scenes write MATL for non-diffuse slots | P1 | lossless, render |
 | Copy and paste materials | Ctrl+C/V [S1 0.99] | missing | P3 | - |
@@ -104,9 +104,9 @@ Feature names below follow the update log [S1] unless another source is given.
 
 | Feature | MagicaVoxel | vxr | Priority | Why |
 |---|---|---|---|---|
-| Interactive path tracer | Progressive GPU path tracing [S1] | partial [3]: the live corner runs in the app and the browser (640x360, A-trous denoise, 3 ms per frame while editing, 12 ms idle); no full-view render mode or click-to-swap yet | P1 | render |
-| Sun direction and colour, sky | Atmospheric sky with Rayleigh and Mie, sun disk [S1 0.99.1, 0.99.2] | partial [3]: Render panel sun direction, height, colour and strength, sky light and a sky backdrop toggle over a gradient sky; no physical sky or sun disk | P1 | render |
-| Exposure, gamma, tone mapping, vignette | Post->E, Camera->G, ACES [S1 0.97.3, 0.98.1] | partial [3]: exposure in stops (no restart) and ACES tone mapping; no gamma or vignette controls | P1 | render |
+| Interactive path tracer | Progressive GPU path tracing [S1] | done [3]: the live corner runs in the app and the browser (640x360, A-trous denoise, 3 ms per frame while editing, 12 ms idle); a click on it, its maximize chip or Cmd-K swaps it into the whole view at one pixel per point, and Escape swaps it back | P1 | render |
+| Sun direction and colour, sky | Atmospheric sky with Rayleigh and Mie, sun disk [S1 0.99.1, 0.99.2] | done [3]: Render panel sun direction, height, colour and strength, sky light, a Show sky toggle and a Physical sky toggle (single Rayleigh and Mie scattering that follows the sun's height, reddening at sunset, with the sun disk behind the scene) over the default gradient sky | P1 | render |
+| Exposure, gamma, tone mapping, vignette | Post->E, Camera->G, ACES [S1 0.97.3, 0.98.1] | done [3]: exposure in stops, gamma and vignette in the Render panel (none restarts the trace) and ACES tone mapping | P1 | render |
 | Depth of field, bokeh | Click to set focus; bladed bokeh [S1 0.98.1, 0.99.1] | partial [3]: thin-lens depth of field with blur and focus sliders (round bokeh); no click to focus or bladed bokeh | P2 | render |
 | Bloom | [S1 0.98.2, 0.99.1] | missing | P3 | render |
 | Fog and volumetrics | [S1 0.97.5, 0.99.4.1] | missing | P3 | render |
@@ -124,10 +124,10 @@ Feature names below follow the update log [S1] unless another source is given.
 | Orbit, pan, zoom | Right-drag, middle-drag or Space+drag, wheel or Z+drag [S1 0.99, FAQ] | done (right-drag orbit, Shift+right or middle pan, wheel zoom) | P1 | minutes |
 | Frame the model | Hotkey 4 recenters [S1 0.99] | done (`.`) | P1 | minutes |
 | Set rotation center on a voxel | X+click [S1 0.99.3] | missing | P2 | sculpt |
-| Perspective, orthographic, isometric | Camera modes [S1 0.97.1] | missing [7] (perspective only) | P1 | - |
-| View cube and axis snap views | 26 standard views, hotkey 5 for face views [S1 0.99] | missing [7] | P2 | - |
-| Grid and ground | Frame grids with spacing, infinite ground [S1 0.98.1, 0.97.5] | missing [7] | P2 | minutes |
-| Bounding box display | Select on any of the six bounding box faces [S1 0.98.1] | missing [7] | P2 | - |
+| Perspective, orthographic, isometric | Camera modes [S1 0.97.1] | done [7] (View flyout, O, 0) | P1 | - |
+| View cube and axis snap views | 26 standard views, hotkey 5 for face views [S1 0.99] | partial [7] (six side views and isometric on 0 to 6 and the View flyout; no 26-view cube) | P2 | - |
+| Grid and ground | Frame grids with spacing, infinite ground [S1 0.98.1, 0.97.5] | done [7] (a voxel grid on the ground inside the bounds and a ground that fades into the background; View flyout, G, Cmd-K; no grid spacing setting) | P2 | minutes |
+| Bounding box display | Select on any of the six bounding box faces [S1 0.98.1] | partial [7] (the bounds frame is drawn, faint where voxels hide it; View flyout, Cmd-K; no face selection on it) | P2 | - |
 | Save and load views | 7/8, F5/F7, camera slots [S1 0.99, 0.99.6.2] | missing (cameras kept by lossless save [1]) | P3 | - |
 | Camera control panel | FOV, position, pitch/yaw/roll [S1 0.99.6.2, 0.99.6.4] | missing | P3 | - |
 | Free (fly) camera | Pers/Free modes [S1 0.97.5, 0.99.6.4] | missing | P3 | - |
@@ -136,12 +136,12 @@ Feature names below follow the update log [S1] unless another source is given.
 
 | Feature | MagicaVoxel | vxr | Priority | Why |
 |---|---|---|---|---|
-| Multiple objects per scene | Tab switches model and world editors [S1 0.99] | partial: every model of an opened file is flattened into one editable map; no objects [8] | P1 | lossless |
-| Move, rotate, flip objects | Gizmo, explicit position, 90 degree rotate gizmo [S1 0.99, 0.99.7.0, 0.99.7.2] | missing [8] | P2 | - |
-| Groups | Enter and leave with Tab or double-click [S1 0.99, 0.99.5.1] | missing [8] | P2 | - |
-| References (instances) and duplicates | Shift+drag; Ref-R converts [S1 0.99, 0.99.5.1] | missing [8] | P2 | - |
-| Layers: show, hide, name, colour, sort | Layer panel [S1 0.99.6.4, 0.99.7.1] | missing [8] | P2 | - |
-| Scene outline panel | Rename, hide, reorder, multi-select [S1 0.99.6.4] | missing [8] (decisions: the tree appears once a second object exists) | P2 | - |
+| Multiple objects per scene | Tab switches model and world editors [S1 0.99] | done: files open as separate objects (world mode with several, model mode with one); Tab and Cmd-K switch between editing one model (edits reach every linked copy) and the world, undo follows edits across modes, and saving writes models, nodes and layers losslessly; in world mode a click picks an object, a drag or the arrows move it, Cmd-D duplicates it, Cmd-Shift-D makes a linked copy and Backspace deletes it; a scene tree beside the rail lists every object and group from the second object; groups are picked from the tree, moved, copied, made (Cmd-G) and taken apart (Cmd-Shift-G); layers are listed under the tree, shown, hidden, named, added and assigned [8] | P1 | lossless |
+| Move, rotate, flip objects | Gizmo, explicit position, 90 degree rotate gizmo [S1 0.99, 0.99.7.0, 0.99.7.2] | partial [8] (move objects and groups: drag on the face plane, arrows and Shift-Up/Down, one undo step each; rotate and flip objects missing) | P2 | - |
+| Groups | Enter and leave with Tab or double-click [S1 0.99, 0.99.5.1] | done [8] (a group row picks the group; a drag on one of its objects, the arrows, Cmd-D, Cmd-Shift-D, Backspace, H and rename act on the whole group; Cmd-G wraps the picked node in a new group, Cmd-Shift-G ungroups in place; Tab edits its first object; one undo step each, saved losslessly; grouping several objects at once waits for multi-select) | P2 | - |
+| References (instances) and duplicates | Shift+drag; Ref-R converts [S1 0.99, 0.99.5.1] | done [8] (Cmd-D duplicate with its own model, Cmd-Shift-D linked copy sharing it, placed beside the original; Cmd-K; saved losslessly) | P2 | - |
+| Layers: show, hide, name, colour, sort | Layer panel [S1 0.99.6.4, 0.99.7.1] | partial [8] (a LAYERS list under the scene tree in world mode: every layer with its object count; the eye shows and hides it, a double-click or Cmd-K renames, + or Cmd-K adds one, a click puts the picked object or group on it, Cmd-K hides the picked object's layer; one undo step each, saved as `LAYR` and nTRN layer ids. Layer colour is kept losslessly but not editable, and sort is a Windows-only 0.99.7 feature: both wait for a user asking) | P2 | - |
+| Scene outline panel | Rename, hide, reorder, multi-select [S1 0.99.6.4] | partial [8] (beside the rail from the second object: objects and groups indented, model sizes, linked copies marked; a row click picks an object or group or edits an object, the eye and H hide and show, a double-click or Cmd-K renames, one undo step each; reorder and multi-select missing) | P2 | - |
 | Pattern library | Drag assets in, match palettes [S1 0.99.6.4] | missing | P3 | minutes |
 | Copy and paste transforms | [S1 0.99.7.0] | missing | P3 | - |
 
@@ -149,14 +149,14 @@ Feature names below follow the update log [S1] unless another source is given.
 
 | Feature | MagicaVoxel | vxr | Priority | Why |
 |---|---|---|---|---|
-| Open `.vox` (all versions, scene graph) | [S2] | done (every instance flattened, hidden ones included) | P1 | lossless |
+| Open `.vox` (all versions, scene graph) | [S2] | done (every object opens separately with its groups, linked copies and layers, hidden ones included) [8] | P1 | lossless |
 | Save `.vox` | [S2] | done [1]: lossless. An unedited save is byte-identical; edits re-encode only the edited models (plus the root group for new models), and every other chunk (materials, layers, cameras, names, notes, unknown chunks) keeps its bytes. An edited linked copy is split into its own model | P1 | lossless |
 | Choose what is saved | IO panel [S1 0.99.5.1] | missing | P3 | - |
 | Recover from a corrupted file | IO->File->Recover [S1 0.99.7.2] | missing | P3 | lossless |
-| OBJ with palette texture | Color-based simplification [S1 0.96.1] | missing [9] | P2 | - |
+| OBJ with palette texture | Color-based simplification [S1 0.96.1] | done [9] (the top bar's Export menu or Cmd-K: what the view shows as greedy quads of one colour, a 256x1 palette PNG and its `.mtl`, bottom centre at the origin; three files beside each other natively, one zip download in the browser; materials not written) | P2 | - |
 | PLY (marching cubes) | [S1 0.97.1] | missing | P3 | - |
 | Qubicle `.qb` | [S1 0.97.2] | missing | P3 | - |
-| Slices, cubes, point clouds | [S1 0.99.3]; `o slice` exports a volume as one image [S1 0.98.1] | missing [9] (PNG slices) | P2 | - |
+| Slices, cubes, point clouds | [S1 0.99.3]; `o slice` exports a volume as one image [S1 0.98.1] | partial [9]: PNG slices done (the Export menu or Cmd-K: every layer of what the view shows as one PNG, side by side from the bottom, a download in the browser); cubes and point clouds missing | P2 | - |
 | Isometric sprites | Export->iso [S1 0.96.1] | missing | P3 | - |
 | Baked AO mesh | Export->bake [S1 0.97.2] | missing | P3 | - |
 | Import images | JPEG import, drag in sprites [S1 0.99.5, 0.99.7.2] | missing | P3 | - |

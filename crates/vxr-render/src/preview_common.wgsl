@@ -3,7 +3,7 @@
 
 struct Frame {
     inv_vp: mat4x4<f32>,
-    eye: vec4<f32>,
+    eye: vec4<f32>,      // w = 0: orthographic
     size: vec4<f32>,     // width, height, 1/width, 1/height
     sun: vec4<f32>,      // xyz toward the sun, w = cos of the sun's angular radius
     sun_col: vec4<f32>,  // sun irradiance (linear rgb), w = exposure
@@ -13,15 +13,17 @@ struct Frame {
     cap_hi: vec4<f32>,
     // x: 1 = restart (camera moved), 2 = edit this frame; y: history cap after an edit;
     // z: frame counter (random seed); w: 1 = denoise on, 2 = sky backdrop, 4 = depth of field
-    // (samples stored with their own hit's colour, not demodulated)
+    // (samples stored with their own hit's colour, not demodulated), 8 = physical sky
     flags: vec4<u32>,
     cam_r: vec4<f32>,    // camera right, w = lens radius (voxels, 0 = pinhole)
     cam_u: vec4<f32>,    // camera up, w = focus distance along the view direction
     cam_f: vec4<f32>,    // view direction, w = sky light intensity
+    post: vec4<f32>,     // x = 2.2 / display gamma, y = vignette strength
 };
 
 const SKY_BACKDROP: u32 = 2u;
 const DOF: u32 = 4u;
+const PHYSICAL_SKY: u32 = 8u;
 
 struct Dispatch {
     row0: u32,  // first row of this trace dispatch
@@ -51,6 +53,14 @@ fn camera_ray(px: vec2<f32>) -> vec3<f32> {
     let pn = frame.inv_vp * vec4<f32>(ndc, 0.0, 1.0);
     let pf = frame.inv_vp * vec4<f32>(ndc, 1.0, 1.0);
     return normalize(pf.xyz / pf.w - pn.xyz / pn.w);
+}
+
+// Where the ray through a pixel starts: the eye in perspective, the near plane in orthographic.
+fn camera_origin(px: vec2<f32>) -> vec3<f32> {
+    if (frame.eye.w != 0.0) { return frame.eye.xyz; }
+    let ndc = vec2<f32>(px.x * frame.size.z * 2.0 - 1.0, 1.0 - px.y * frame.size.w * 2.0);
+    let pn = frame.inv_vp * vec4<f32>(ndc, 0.0, 1.0);
+    return pn.xyz / pn.w;
 }
 
 // Normal from the packed code: axis * 2 + (normal is positive).

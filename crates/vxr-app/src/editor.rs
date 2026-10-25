@@ -4,13 +4,14 @@
 
 use glam::Vec3;
 use vxr_core::Scene;
+use vxr_core::history::At;
 use vxr_core::material::Material;
 use vxr_core::select::{Mode, MoveDrag, Transform};
 use vxr_core::tools::{Brush, Gesture, Press, Shape, Target, Tool, plane_cell};
-use vxr_render::{EditBox, Gpu, GpuMap, OrbitCamera, Preview, Renderer, brickmap_layout, gpu::now_ms};
+use vxr_render::{EditBox, Gpu, GpuMap, Guides, OrbitCamera, Preview, Renderer, brickmap_layout, gpu::now_ms};
 
 use crate::render::{EXPORT_SIZES, Export};
-use crate::ui::{Action, FontBytes, Hybrid, Stats};
+use crate::ui::{Action, FontBytes, Hybrid, LayerRow, Named, Stats, TreeRow};
 
 /// Input quiet for this long raises the preview's budget (spikes/preview/RESULTS.md).
 const IDLE_MS: f64 = 300.0;
@@ -38,6 +39,18 @@ struct Marquee {
 /// Pointer travel, in pixels, below which a select press is a click.
 const CLICK_PX: f32 = 4.0;
 
+/// An object being dragged in world mode, on the plane across `axis` through the pressed
+/// voxel. In world cells, since the world map moves under it as the object does.
+#[derive(Clone, Copy, Debug)]
+struct WorldDrag {
+    /// The node moved: the object pressed, or the picked group holding it.
+    object: usize,
+    axis: usize,
+    start: [i32; 3],
+    /// How far the object has been moved so far.
+    offset: [i32; 3],
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum CamDrag {
     Orbit,
@@ -49,7 +62,7 @@ pub struct Editor {
     pub scene: Scene,
     layout: wgpu::BindGroupLayout,
     map: GpuMap,
-    renderer: Renderer,
+    pub renderer: Renderer,
     /// The live path-traced preview in the corner.
     pub preview: Preview,
     /// Whether the preview drew last frame and is up to date (showing it again restarts it).
@@ -71,6 +84,7 @@ pub struct Editor {
     /// click, which selects that colour.
     move_press: Option<([f32; 2], Target)>,
     marquee: Option<Marquee>,
+    world_drag: Option<WorldDrag>,
     /// The selection version and `map.fills` the renderer's selection mask was built at.
     sel_shown: (u64, u64),
     cam_drag: Option<CamDrag>,
@@ -91,6 +105,10 @@ pub struct Editor {
     pub exported: Option<(Vec<u8>, (u32, u32))>,
     /// Export sizes this GPU can render.
     export_fits: [bool; 4],
+    /// The scene's map replacements and origin the GPU map was built at (see `Scene::reshapes`).
+    shape: (u64, [i32; 3]),
+    /// The object last edited, where Tab goes back to from world mode.
+    last_object: Option<usize>,
 }
 
 impl Editor {
@@ -136,6 +154,7 @@ impl Editor {
             moving: None,
             move_press: None,
             marquee: None,
+            world_drag: None,
             sel_shown: (u64::MAX, 0),
             cam_drag: None,
             pointer: None,
@@ -148,7 +167,10 @@ impl Editor {
             export: None,
             exported: None,
             export_fits: [false; 4],
+            shape: (0, [0; 3]),
+            last_object: None,
         };
+        e.shape = (e.scene.reshapes(), e.scene.origin);
         e.export_fits = EXPORT_SIZES.map(|(w, h)| Preview::fits(&e.gpu.device, w, h));
         e.frame_scene();
         Ok(e)
@@ -165,11 +187,14 @@ impl Editor {
         self.preview.set_materials(&self.gpu.queue, &self.materials);
         self.preview.restart();
         self.export = None;
+        self.shape = (scene.reshapes(), scene.origin);
         self.scene = scene;
+        self.last_object = None;
         self.ui.scene_name = name.into();
         self.gesture = None;
         self.moving = None;
         self.marquee = None;
+        self.world_drag = None;
         self.sel_shown = (u64::MAX, 0);
         self.cursor = None;
         self.frame_scene();
@@ -182,7 +207,8 @@ impl Editor {
         (self.width, self.height, self.ppp) = (width, height, ppp);
     }
 
-    /// Frame the model (or the floor of an empty scene), like MagicaVoxel's `.`.
+    /// Frame the model (or the floor of an empty scene), like MagicaVoxel's `.`. Keeps the
+    /// projection, and the angle when the camera is at a snap view.
     pub fn frame_scene(&mut self) {
         let (lo, hi) = match self.scene.map.occupied_bounds() {
             Some(b) => b,
@@ -193,7 +219,14 @@ impl Editor {
             }
         };
         let v = |a: [u32; 3]| Vec3::new(a[0] as f32, a[1] as f32, a[2] as f32);
-        self.cam = OrbitCamera::framing_aspect(v(lo), v(hi), self.width as f32 / self.height as f32);
+        let aspect = self.width as f32 / self.height as f32;
+        let (ortho, view) = (self.cam.ortho, self.cam.view());
+        self.cam = OrbitCamera::framing_aspect(v(lo), v(hi), aspect);
+        self.cam.ortho = ortho;
+        if let Some(view) = view {
+            self.cam.snap(view);
+            self.cam.fit(v(lo), v(hi), aspect, 0.9);
+        }
     }
 
     /// What the pointer is over, if anything.
@@ -213,6 +246,7 @@ impl Editor {
             mirror: self.ui.mirror_axes(),
             lock: self.ui.lock,
             color: self.ui.slot,
+            size: self.ui.size,
         }
     }
 
@@ -238,6 +272,10 @@ impl Editor {
             m.end = p;
             return;
         }
+        if let Some(g) = self.world_drag {
+            self.drag_object(g, o, d);
+            return;
+        }
         if let Some(g) = &mut self.moving {
             if let Some(c) = plane_cell(o, d, g.axis, g.layer) {
                 g.move_to(&mut self.scene, c);
@@ -245,6 +283,12 @@ impl Editor {
             return;
         }
         if let Some(g) = &mut self.gesture {
+            if g.lifting {
+                if let Some(h) = g.lift_cell(o, d) {
+                    g.lift_to(&mut self.scene, h);
+                }
+                return;
+            }
             let cell = if g.on_plane() {
                 plane_cell(o, d, g.axis, g.layer)
             } else {
@@ -263,8 +307,14 @@ impl Editor {
         self.last_input = now_ms();
         if !pressed {
             if b == Button::Left {
-                if let Some(g) = self.gesture.take() {
-                    g.release(&mut self.scene);
+                if let Some(mut g) = self.gesture.take() {
+                    // A box's base is drawn: its height follows the pointer until a click.
+                    g.lift();
+                    if g.lifting {
+                        self.gesture = Some(g);
+                    } else {
+                        g.release(&mut self.scene);
+                    }
                 }
                 if let Some(g) = self.moving.take() {
                     let still = g.offset == [0; 3];
@@ -273,20 +323,28 @@ impl Editor {
                         && (p[0] - at[0]).abs() < CLICK_PX
                         && (p[1] - at[1]).abs() < CLICK_PX
                     {
-                        self.scene.select_color(t.value, Mode::Replace);
+                        self.scene.select_region(&t, self.ui.region, Mode::Replace);
                     }
                 }
                 if let Some(m) = self.marquee.take() {
                     self.finish_marquee(m);
                 }
+                if self.world_drag.take().is_some() {
+                    self.scene.commit();
+                }
             }
             self.cam_drag = None;
             return;
         }
+        if b == Button::Left && self.lifting() {
+            self.place_box();
+            return;
+        }
         if over_ui
-            || self.gesture.is_some()
+            || self.gesture.as_ref().is_some_and(|g| !g.lifting)
             || self.moving.is_some()
             || self.marquee.is_some()
+            || self.world_drag.is_some()
             || self.cam_drag.is_some()
         {
             return;
@@ -307,6 +365,10 @@ impl Editor {
         self.scene.commit();
         let Some(p) = self.pointer else { return };
         let (o, d) = self.ray(p);
+        if self.scene.at() == At::World {
+            self.press_world(self.scene.target(o, d));
+            return;
+        }
         if self.ui.tool == Tool::Select {
             self.press_select(p, self.scene.target(o, d));
             return;
@@ -323,6 +385,120 @@ impl Editor {
         }
     }
 
+    /// Whether a box brush's height follows the pointer, waiting for a click or Enter.
+    pub fn lifting(&self) -> bool {
+        self.gesture.as_ref().is_some_and(|g| g.lifting)
+    }
+
+    /// Place the box whose height is being set, as one undo step with its base.
+    pub fn place_box(&mut self) {
+        if let Some(g) = self.gesture.take_if(|g| g.lifting) {
+            g.release(&mut self.scene);
+        }
+    }
+
+    /// Drop the box whose height is being set, base and all (Escape).
+    pub fn cancel_box(&mut self) {
+        if self.gesture.take_if(|g| g.lifting).is_some() {
+            self.scene.revert_voxels();
+            self.scene.commit();
+        }
+    }
+
+    /// A press in world mode, with any tool: pick the object under it and start dragging it
+    /// on the plane of the face pressed, or pick nothing. A press on an object of the picked
+    /// group keeps the group picked and drags the whole group.
+    fn press_world(&mut self, t: Option<Target>) {
+        let t = t.filter(|t| !t.ground);
+        let object = t.and_then(|t| self.scene.object_at(t.voxel)).map(|o| {
+            let group = self.scene.picked().filter(|&p| self.scene.world().unwrap().model_of(p).is_none());
+            group.filter(|&g| self.scene.world().unwrap().objects_under(g).contains(&o)).unwrap_or(o)
+        });
+        self.scene.pick(object);
+        if let (Some(t), Some(object)) = (t, object) {
+            let axis = t.normal.iter().position(|&n| n != 0).unwrap_or(1);
+            self.world_drag = Some(WorldDrag { object, axis, start: self.scene.to_world(t.voxel), offset: [0; 3] });
+        }
+    }
+
+    /// Move the object being dragged to where the ray crosses its drag plane, as part of one
+    /// undo step, and keep the camera on the same world point as the world map moves.
+    fn drag_object(&mut self, g: WorldDrag, o: [f32; 3], d: [f32; 3]) {
+        let layer = g.start[g.axis] - self.scene.origin[g.axis];
+        let Some(c) = plane_cell(o, d, g.axis, layer) else { return };
+        let q = self.scene.to_world(c);
+        let mut offset: [i32; 3] = std::array::from_fn(|a| q[a] - g.start[a]);
+        offset[g.axis] = 0;
+        let step: [i32; 3] = std::array::from_fn(|a| offset[a] - g.offset[a]);
+        if step == [0; 3] || self.scene.put_world(|w| w.move_by(g.object, step)).is_none() {
+            return;
+        }
+        self.world_drag = Some(WorldDrag { offset, ..g });
+        if self.scene.reshapes() != self.shape.0 {
+            self.reshaped();
+        }
+    }
+
+    /// A selection action in world mode, where it acts on the picked object: arrows and
+    /// Move nudge it, Delete removes it, Deselect and Escape pick nothing. Voxel actions
+    /// say to Tab into an object first.
+    fn world_action(&mut self, a: Action) {
+        let picked = self.scene.picked();
+        let s = &mut self.scene;
+        match (a, picked) {
+            (Action::Deselect, _) => {
+                s.pick(None);
+            }
+            (Action::Transform(Transform::Move(d)), Some(i)) => {
+                if s.edit_world(|w| w.move_by(i, d)).is_none() {
+                    self.ui.toast(&self.ctx, "No room in the scene for that");
+                }
+            }
+            (Action::DeleteSelection, Some(i)) => {
+                let name = node_name(s.world().unwrap(), i);
+                if s.edit_world(|w| w.remove(i)) == Some(true) {
+                    self.ui.toast(&self.ctx, format!("Deleted {name}"));
+                }
+            }
+            (Action::Duplicate { linked }, Some(i)) => match s.edit_world(|w| w.duplicate(i, linked)).flatten() {
+                Some(c) => {
+                    s.pick(Some(c));
+                    let name = node_name(s.world().unwrap(), i);
+                    let what = if linked { "Linked copy of" } else { "Duplicated" };
+                    self.ui.toast(&self.ctx, format!("{what} {name}"));
+                }
+                None => self.ui.toast(&self.ctx, "No room in the scene for that"),
+            },
+            (Action::Group, Some(i)) => {
+                if let Some(g) = s.edit_world(|w| w.group(&[i])).flatten() {
+                    s.pick(Some(g));
+                    let msg =
+                        format!("Grouped {} as {}", node_name(s.world().unwrap(), i), node_name(s.world().unwrap(), g));
+                    self.ui.toast(&self.ctx, msg);
+                }
+            }
+            (Action::Ungroup, Some(g)) => {
+                let w = s.world().unwrap();
+                let (name, first) = (node_name(w, g), w.tree.children(g).first().copied());
+                if w.model_of(g).is_some() {
+                    self.ui.toast(&self.ctx, "Pick a group to ungroup it");
+                } else if s.edit_world(|w| w.ungroup(g)) == Some(true) {
+                    s.pick(first);
+                    self.ui.toast(&self.ctx, format!("Ungrouped {name}"));
+                }
+            }
+            (
+                Action::Duplicate { .. }
+                | Action::Transform(Transform::Move(_))
+                | Action::DeleteSelection
+                | Action::Group
+                | Action::Ungroup,
+                None,
+            ) => self.ui.toast(&self.ctx, "Click an object to pick it first"),
+            _ => self.ui.toast(&self.ctx, "Tab into an object to edit its voxels"),
+        }
+    }
+
     /// How Shift and Alt combine a select press with the selection.
     fn select_mode(&self) -> Mode {
         match self.ui.modifiers() {
@@ -333,7 +509,8 @@ impl Editor {
     }
 
     /// A select tool press: on a selected voxel it starts moving the selection on the plane
-    /// of the face pressed; anywhere else it starts a box (or, without a drag, a colour select).
+    /// of the face pressed; anywhere else it starts a box (or, without a drag, selects the
+    /// colour, face or volume clicked).
     fn press_select(&mut self, p: [f32; 2], t: Option<Target>) {
         let mode = self.select_mode();
         if mode == Mode::Replace
@@ -351,7 +528,7 @@ impl Editor {
         let (dx, dy) = (m.end[0] - m.start[0], m.end[1] - m.start[1]);
         if dx.abs() < CLICK_PX && dy.abs() < CLICK_PX {
             match m.target.filter(|t| !t.ground) {
-                Some(t) => self.scene.select_color(t.value, m.mode),
+                Some(t) => self.scene.select_region(&t, self.ui.region, m.mode),
                 None if m.mode == Mode::Replace => self.scene.deselect(),
                 None => {}
             }
@@ -385,8 +562,9 @@ impl Editor {
     /// Where an arrow key moves the selection: one cell along the ground axis nearest to the
     /// view's right (left and right arrows) or forward (up and down) direction.
     fn arrow_offset(&self, key: egui::Key) -> [i32; 3] {
-        let f = self.cam.target - self.cam.eye();
-        let fwd = Vec3::new(f.x, 0.0, f.z);
+        // From the yaw, so a view straight down still has a forward direction.
+        let (sy, cy) = self.cam.yaw.sin_cos();
+        let fwd = Vec3::new(-sy, 0.0, -cy);
         let right = fwd.cross(Vec3::Y);
         let snap = |v: Vec3| -> [i32; 3] {
             if v.x.abs() >= v.z.abs() { [v.x.signum() as i32, 0, 0] } else { [0, 0, v.z.signum() as i32] }
@@ -404,6 +582,11 @@ impl Editor {
     fn selection_action(&mut self, a: Action) {
         self.gesture = None;
         self.moving = None;
+        if self.scene.at() == At::World {
+            self.world_drag = None;
+            self.scene.commit();
+            return self.world_action(a);
+        }
         let s = &mut self.scene;
         match a {
             Action::Transform(t) => {
@@ -412,6 +595,7 @@ impl Editor {
                 }
             }
             Action::SelectAll => s.select_all(),
+            Action::InvertSelection => s.invert_selection(),
             Action::SelectColor => {
                 s.select_color(self.ui.slot, Mode::Replace);
                 self.ui.tool = Tool::Select;
@@ -422,6 +606,37 @@ impl Editor {
             }
             Action::FillSelection => {
                 s.fill_selection(self.ui.slot);
+            }
+            Action::Hollow => {
+                let n = s.hollow();
+                let msg = if n > 0 { format!("Hollowed: removed {n} voxels") } else { "Nothing to hollow".into() };
+                self.ui.toast(&self.ctx, msg);
+            }
+            Action::FillInterior => {
+                let n = s.fill_interior(self.ui.slot);
+                let msg = if n > 0 { format!("Filled {n} enclosed cells") } else { "No enclosed space to fill".into() };
+                self.ui.toast(&self.ctx, msg);
+            }
+            Action::Resize(size) => match s.resize(size) {
+                Some(n) => {
+                    let msg = format!("Bounds {}×{}×{}", size[0], size[1], size[2]);
+                    let msg = if n > 0 { format!("{msg}: erased {n} voxels outside") } else { msg };
+                    self.ui.toast(&self.ctx, msg);
+                }
+                None => self
+                    .ui
+                    .toast(&self.ctx, format!("Bounds go from 1 to {} on each axis", vxr_core::scene::MAX_EXTENT)),
+            },
+            Action::Crop => {
+                let msg = if s.crop() {
+                    let b = s.bounds().size;
+                    format!("Cropped to {}×{}×{}", b[0], b[1], b[2])
+                } else if s.map.voxels == 0 {
+                    "Nothing to crop to".into()
+                } else {
+                    "Already cropped".into()
+                };
+                self.ui.toast(&self.ctx, msg);
             }
             Action::Copy | Action::Cut => {
                 let n = if a == Action::Copy { s.copy_selection() } else { s.cut_selection() };
@@ -440,6 +655,7 @@ impl Editor {
                     self.ui.toast(&self.ctx, format!("Pasted {n} voxels"));
                 }
             }
+            Action::Group | Action::Ungroup => self.ui.toast(&self.ctx, "Tab to the world to group objects"),
             _ => {}
         }
     }
@@ -449,7 +665,7 @@ impl Editor {
         self.last_input = now_ms();
         let hit = self.pointer.and_then(|p| {
             let (o, d) = self.ray(p);
-            self.scene.map.raycast(o, d, 1e5).map(|h| (Vec3::from(d), h.t))
+            self.scene.map.raycast(o, d, 1e5).map(|h| Vec3::from(o) + Vec3::from(d) * h.t)
         });
         self.cam.zoom(notches, hit);
     }
@@ -457,17 +673,23 @@ impl Editor {
     pub fn undo(&mut self) {
         self.gesture = None;
         self.moving = None;
+        self.world_drag = None;
         self.scene.undo();
     }
 
     pub fn redo(&mut self) {
         self.gesture = None;
         self.moving = None;
+        self.world_drag = None;
         self.scene.redo();
     }
 
     /// What a shape drag in progress spans, for the stats panel.
     pub fn span(&self) -> Option<(&'static str, String)> {
+        if let Some(g) = &self.world_drag {
+            let o = g.offset;
+            return Some(("MOVE", format!("{},{},{}", o[0], o[1], o[2])));
+        }
         if let Some(m) = &self.moving {
             let o = m.offset;
             return Some(("MOVE", format!("{},{},{}", o[0], o[1], o[2])));
@@ -515,6 +737,19 @@ impl Editor {
     /// Run the UI, apply what it asked for, and draw a frame onto `view`. Returns the actions
     /// the host handles (open, save, embed) and egui's platform output.
     pub fn frame(&mut self, input: egui::RawInput, view: &wgpu::TextureView) -> (Vec<Action>, egui::PlatformOutput) {
+        let mut input = input;
+        // Tab switches between the world and a model. egui would move keyboard focus with it
+        // before the UI could consume it, so it never reaches egui unless a field is typing.
+        let mut tabs = 0;
+        if !self.ctx.egui_wants_keyboard_input() {
+            input.events.retain(|e| match e {
+                egui::Event::Key { key: egui::Key::Tab, pressed, modifiers, .. } if modifiers.is_none() => {
+                    tabs += *pressed as usize;
+                    false
+                }
+                _ => true,
+            });
+        }
         let now = now_ms();
         if !input.events.is_empty() {
             self.last_input = now;
@@ -530,6 +765,19 @@ impl Editor {
         self.ui.can_redo = self.scene.history().can_redo();
         self.ui.selected = self.scene.selected_count();
         self.ui.has_clip = self.scene.clipboard.is_some();
+        self.ui.bounds = self.scene.bounds().size;
+        self.ui.world = self.scene.at() == At::World;
+        self.ui.lifting = self.lifting();
+        self.ui.picked = self.scene.picked().map(|i| node_name(self.scene.world().unwrap(), i));
+        self.ui.picked_node = self.scene.picked();
+        self.ui.tree = tree_rows(&self.scene);
+        self.ui.layers = layer_rows(&self.scene);
+        self.ui.layer_on = self.scene.picked().zip(self.scene.world()).map(|(i, w)| w.tree.nodes[i].layer);
+        self.ui.tree_on = match self.scene.at() {
+            At::Object(i) => Some(i),
+            _ => self.scene.picked(),
+        };
+        (self.ui.ortho, self.ui.view) = (self.cam.ortho, self.cam.view());
         self.ui.marquee = self.marquee.map(|m| {
             let (a, b) = (m.start, m.end);
             egui::Rect::from_two_pos(egui::pos2(a[0], a[1]), egui::pos2(b[0], b[1])) / self.ppp
@@ -539,11 +787,18 @@ impl Editor {
         let ui = &mut self.ui;
         let out = self.ctx.run_ui(input, |u| actions = ui.ui(u.ctx(), &stats));
         let mut host = Vec::new();
+        actions.extend(std::iter::repeat_n(Action::ToggleWorld, tabs));
+        // Any other command places a box whose height is being set first.
+        if actions.iter().any(|a| *a != Action::CancelBox) {
+            self.place_box();
+        }
         for a in actions {
             match a {
                 Action::Undo => self.undo(),
                 Action::Redo => self.redo(),
                 Action::Frame => self.frame_scene(),
+                Action::Snap(v) => self.cam.snap(v),
+                Action::Ortho(on) => self.cam.ortho = on,
                 Action::Recolor { slot, rgba } => self.scene.put_color(slot, rgba),
                 Action::SetMaterial { slot, material } => self.scene.put_material(slot, material),
                 Action::CommitColor => {
@@ -561,13 +816,38 @@ impl Editor {
                 }
                 Action::Transform(_)
                 | Action::SelectAll
+                | Action::InvertSelection
                 | Action::SelectColor
                 | Action::Deselect
                 | Action::DeleteSelection
                 | Action::FillSelection
+                | Action::Hollow
+                | Action::FillInterior
+                | Action::Resize(_)
+                | Action::Crop
                 | Action::Copy
                 | Action::Cut
-                | Action::Paste => self.selection_action(a),
+                | Action::Paste
+                | Action::Duplicate { .. }
+                | Action::Group
+                | Action::Ungroup => self.selection_action(a),
+                Action::ToggleWorld => self.toggle_world(),
+                Action::PickNode(i) => self.pick_node(i),
+                Action::SetHidden(i, hidden) => self.set_hidden(i, hidden),
+                Action::ToggleHidden => match (self.scene.picked(), self.scene.world()) {
+                    (Some(i), Some(w)) => self.set_hidden(i, !w.tree.nodes[i].hidden),
+                    _ => self.ui.toast(&self.ctx, "Pick an object in the world to hide it"),
+                },
+                Action::SetLayer(id) => self.put_on_layer(id),
+                Action::SetLayerHidden(id, hidden) => self.set_layer_hidden(id, hidden),
+                Action::ToggleLayer => match self.ui.layer_on.and_then(|id| self.ui.layers.iter().find(|l| l.id == id))
+                {
+                    Some(l) => self.set_layer_hidden(l.id, !l.hidden),
+                    None => self.ui.toast(&self.ctx, "Pick an object in the world to hide its layer"),
+                },
+                Action::AddLayer => self.add_layer(),
+                Action::PlaceBox => self.place_box(),
+                Action::CancelBox => self.cancel_box(),
                 Action::ExportPng => self.start_export(),
                 Action::CancelExport => {
                     self.export = None;
@@ -575,6 +855,11 @@ impl Editor {
                 }
                 other => host.push(other),
             }
+        }
+        match self.ui.renamed.take() {
+            Some((Named::Node(i), name)) => self.rename(i, &name),
+            Some((Named::Layer(id), name)) => self.rename_layer(id, &name),
+            None => {}
         }
         for key in std::mem::take(&mut self.ui.arrows) {
             let d = self.arrow_offset(key);
@@ -588,10 +873,159 @@ impl Editor {
         (host, out.platform_output)
     }
 
+    /// Tab: show the world of every object, or go back to editing the last object's model
+    /// (the first object's if none was edited yet).
+    pub fn toggle_world(&mut self) {
+        self.gesture = None;
+        self.moving = None;
+        self.marquee = None;
+        self.world_drag = None;
+        let s = &mut self.scene;
+        let msg = match (s.at(), s.world()) {
+            (_, None) => "A new scene is one model".to_string(),
+            (At::World, Some(w)) => {
+                let objects = w.objects();
+                // A picked group edits its first object.
+                let picked = s.picked().and_then(|p| w.objects_under(p).first().copied());
+                let i = picked.or(self.last_object.filter(|i| objects.contains(i))).or(objects.first().copied());
+                match i {
+                    Some(i) if s.edit_object(i) => format!("Editing {}", object_name(s.world().unwrap(), i)),
+                    _ => "No object to edit".into(),
+                }
+            }
+            (at, Some(_)) => {
+                if s.show_world() {
+                    if let At::Object(i) = at {
+                        self.last_object = Some(i);
+                        s.pick(Some(i));
+                    }
+                    let n = s.world().unwrap().objects().len();
+                    format!("World: {n} object{}", if n == 1 { "" } else { "s" })
+                } else {
+                    format!("The world is over {} voxels on an axis", vxr_core::scene::MAX_EXTENT)
+                }
+            }
+        };
+        self.ui.toast(&self.ctx, msg);
+    }
+
+    /// A scene tree row was clicked: pick the object in world mode, or edit its model.
+    pub fn pick_node(&mut self, i: usize) {
+        let s = &mut self.scene;
+        match s.at() {
+            At::World => {
+                s.pick(Some(i));
+            }
+            At::Object(k) if k != i => {
+                self.gesture = None;
+                self.moving = None;
+                self.marquee = None;
+                if s.edit_object(i) {
+                    self.last_object = Some(i);
+                    let msg = format!("Editing {}", object_name(s.world().unwrap(), i));
+                    self.ui.toast(&self.ctx, msg);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Hide or show tree node `i` in world mode, as one undo step.
+    pub fn set_hidden(&mut self, i: usize, hidden: bool) {
+        let Some(w) = self.scene.world() else { return };
+        let name = node_name(w, i);
+        let msg = if self.scene.edit_world(|w| w.set_hidden(i, hidden)).is_none() {
+            "Tab to the world to hide objects".to_string()
+        } else if hidden {
+            format!("Hid {name}")
+        } else {
+            format!("Showing {name}")
+        };
+        self.ui.toast(&self.ctx, msg);
+    }
+
+    /// Name tree node `i` (an empty name clears it), as one undo step, in world mode.
+    pub fn rename(&mut self, i: usize, name: &str) {
+        let name = name.trim();
+        let Some(w) = self.scene.world() else { return };
+        let new = (!name.is_empty()).then_some(name);
+        if w.tree.nodes.get(i).is_none_or(|n| n.name.as_deref() == new.map(str::as_bytes)) {
+            return;
+        }
+        if self.scene.edit_world(|w| w.set_name(i, new)).is_some() {
+            let msg = format!("Renamed to {}", node_name(self.scene.world().unwrap(), i));
+            self.ui.toast(&self.ctx, msg);
+        }
+    }
+
+    /// Put the picked object or group on layer `id`, as one undo step, in world mode.
+    pub fn put_on_layer(&mut self, id: i32) {
+        let Some(w) = self.scene.world() else { return };
+        let msg = match self.scene.picked() {
+            Some(i) if w.tree.nodes[i].layer == id => return,
+            Some(i) => {
+                let name = node_name(w, i);
+                self.scene.edit_world(|w| w.put_on_layer(i, id));
+                format!("Moved {name} to {}", layer_name(self.scene.world().unwrap(), id))
+            }
+            None => "Pick an object to move it to a layer".into(),
+        };
+        self.ui.toast(&self.ctx, msg);
+    }
+
+    /// Hide or show layer `id`, as one undo step, in world mode.
+    pub fn set_layer_hidden(&mut self, id: i32, hidden: bool) {
+        let Some(w) = self.scene.world() else { return };
+        let name = layer_name(w, id);
+        let msg = if self.scene.edit_world(|w| w.set_layer_hidden(id, hidden)).is_none() {
+            "Tab to the world to hide layers".to_string()
+        } else if hidden {
+            format!("Hid layer {name}")
+        } else {
+            format!("Showing layer {name}")
+        };
+        self.ui.toast(&self.ctx, msg);
+    }
+
+    /// Add a layer named "layer N", as one undo step, in world mode.
+    pub fn add_layer(&mut self) {
+        let Some(w) = self.scene.world() else { return };
+        let name = format!("layer {}", w.layers().iter().map(|l| l.id + 1).max().unwrap_or(0));
+        let msg = match self.scene.edit_world(|w| w.add_layer(&name)) {
+            Some(_) => format!("Added {name}"),
+            None => "Tab to the world to add layers".into(),
+        };
+        self.ui.toast(&self.ctx, msg);
+    }
+
+    /// Name layer `id` (an empty name clears it), as one undo step, in world mode.
+    pub fn rename_layer(&mut self, id: i32, name: &str) {
+        let name = name.trim();
+        let Some(w) = self.scene.world() else { return };
+        let new = (!name.is_empty()).then_some(name);
+        if w.layers().iter().find(|l| l.id == id).is_none_or(|l| l.name.as_deref() == new.map(str::as_bytes)) {
+            return;
+        }
+        if self.scene.edit_world(|w| w.set_layer_name(id, new)).is_some() {
+            let msg = format!("Renamed layer to {}", layer_name(self.scene.world().unwrap(), id));
+            self.ui.toast(&self.ctx, msg);
+        }
+    }
+
+    /// The scene's name without `.vox`, to name exports by.
+    pub fn export_stem(&self) -> String {
+        let n = self.ui.scene_name.trim_end_matches(".vox").trim_end_matches(".VOX");
+        if n.is_empty() { "vxr" } else { n }.to_string()
+    }
+
+    /// The file name for the PNG slices export: the scene's name with `-slices.png`.
+    pub fn slices_name(&self) -> String {
+        format!("{}-slices.png", self.export_stem())
+    }
+
     /// The file name for a render export: the scene's name with `-render.png`.
     pub fn export_name(&self) -> String {
-        let n = self.ui.scene_name.trim_end_matches(".vox").trim_end_matches(".VOX");
-        format!("{}-render.png", if n.is_empty() { "vxr" } else { n })
+        format!("{}-render.png", self.export_stem())
     }
 
     /// Start a PNG export of the corner's view with the Render panel's settings.
@@ -615,6 +1049,53 @@ impl Editor {
         }
     }
 
+    /// The scene replaced its map (a resize or crop, or their undo): upload the new one and
+    /// keep the camera on the same world point, so the view does not jump.
+    fn reshaped(&mut self) {
+        let old = self.shape.1;
+        self.shape = (self.scene.reshapes(), self.scene.origin);
+        let d: [i32; 3] = std::array::from_fn(|a| old[a] - self.scene.origin[a]);
+        self.cam.target += Vec3::new(d[0] as f32, d[1] as f32, d[2] as f32);
+        let (dev, queue) = (&self.gpu.device, &self.gpu.queue);
+        match GpuMap::new(dev, queue, &self.layout, &self.scene.map, &self.scene.palette) {
+            Ok(m) => self.map = m,
+            Err(e) => eprintln!("upload failed: {e}"),
+        }
+        self.scene.map.take_dirty();
+        self.scene.map.take_dirty_box();
+        self.sel_shown = (u64::MAX, 0);
+        self.cursor = None;
+        self.preview.restart();
+        if self.export.take().is_some() {
+            self.ui.toast(&self.ctx, "Export cancelled: the scene changed");
+        }
+    }
+
+    /// The preview's size: 640x360 in the corner, one pixel per point of the view in the full
+    /// render view (half the pixels at 2x, so it converges in about the same time as the
+    /// corner per area of screen), or the corner's size when that would not fit the device.
+    fn preview_size(&self, full: bool) -> (u32, u32) {
+        let corner = (vxr_render::preview::PREVIEW_W, vxr_render::preview::PREVIEW_H);
+        if !full {
+            return corner;
+        }
+        let pt = |px: u32| ((px as f32 / self.ppp.max(1.0)).round() as u32).max(1);
+        let size = (pt(self.width), pt(self.height));
+        if Preview::fits(&self.gpu.device, size.0, size.1) { size } else { corner }
+    }
+
+    /// Make the preview again at `size`, keeping its settings; it restarts.
+    fn resize_preview(&mut self, size: (u32, u32)) {
+        let (dev, queue) = (&self.gpu.device, &self.gpu.queue);
+        let mut p = Preview::sized(dev, queue, &self.layout, &self.palette, self.gpu.timestamps, size);
+        p.set_materials(queue, &self.materials);
+        p.lighting = self.preview.lighting;
+        p.max_spp = self.preview.max_spp;
+        p.restarts = self.preview.restarts + 1;
+        self.preview = p;
+        self.preview_shown = false;
+    }
+
     /// Draw a frame; returns `Action::Exported` when an export finished this frame.
     fn draw(
         &mut self,
@@ -623,6 +1104,9 @@ impl Editor {
         textures: egui::TexturesDelta,
         view: &wgpu::TextureView,
     ) -> Option<Action> {
+        if self.scene.reshapes() != self.shape.0 {
+            self.reshaped();
+        }
         let (dev, queue) = (&self.gpu.device, &self.gpu.queue);
         if self.scene.palette != self.palette {
             self.palette = self.scene.palette;
@@ -650,12 +1134,26 @@ impl Editor {
             self.sel_shown = sel;
             self.renderer.set_selection(dev, queue, &self.scene.selection_mask());
         }
-        let busy = self.gesture.is_some() || self.moving.is_some() || self.marquee.is_some();
+        let busy =
+            self.gesture.is_some() || self.moving.is_some() || self.marquee.is_some() || self.world_drag.is_some();
         let tint = if busy { None } else { self.cursor.filter(|t| !t.ground).map(|t| t.voxel) };
+        self.renderer.guides = Guides {
+            bounds: self.scene.map.size_voxels(),
+            floor: self.scene.floor,
+            grid: self.ui.grid,
+            ground: self.ui.ground,
+            frame: self.ui.frame,
+            line: ppp,
+        };
         self.renderer.set_camera(queue, &self.cam, tint);
         let mut enc = dev.create_command_encoder(&Default::default());
         // The preview's passes go first so they can be timed on their own (see preview.rs).
         let corner = self.ui.render_rect.filter(|_| self.ui.show_render);
+        let want = self.preview_size(corner.is_some() && self.ui.full_render);
+        if (self.preview.width, self.preview.height) != want {
+            self.resize_preview(want);
+        }
+        let (dev, queue) = (&self.gpu.device, &self.gpu.queue);
         if let Some(x) = &mut self.export {
             x.encode(queue, &mut enc, &self.map, edit);
         }
@@ -671,10 +1169,15 @@ impl Editor {
         // This frame's edit went only to the export, so an edit while paused leaves the
         // corner stale until it restarts.
         self.preview_shown = corner.is_some() && !(paused && (edit.is_some() || !self.preview_shown));
-        self.renderer.march(&mut enc, &self.map, None);
+        // The full render view covers every pixel, so the voxel view under it is not drawn.
+        let full = corner.is_some() && self.ui.full_render;
+        if !full {
+            self.renderer.march(&mut enc, &self.map, None);
+        }
         if let Some(r) = corner {
             let px = [r.left() * ppp, r.top() * ppp, r.width() * ppp, r.height() * ppp];
-            self.preview.composite_into(dev, queue, &mut enc, &self.renderer.color, px, crate::ui::R as f32 * ppp);
+            let radius = if full { 0.0 } else { crate::ui::R as f32 * ppp };
+            self.preview.composite_into(dev, queue, &mut enc, &self.renderer.color, px, radius);
         }
         self.renderer.blit(&mut enc, view, None);
         let jobs = self.ctx.tessellate(shapes, ppp);
@@ -732,4 +1235,165 @@ fn used(scene: &Scene) -> [bool; 256] {
         u[i] = *c > 0;
     }
     u
+}
+
+/// An object's name, or "object N" (its place among the objects) when it has none.
+pub fn object_name(w: &vxr_core::World, i: usize) -> String {
+    match &w.tree.nodes[i].name {
+        Some(n) => String::from_utf8_lossy(n).into_owned(),
+        None => format!("object {}", w.objects().iter().position(|&k| k == i).map_or(i, |k| k + 1)),
+    }
+}
+
+/// A tree node's name: its own, or "object N" / "group N" by its place among its kind.
+pub fn node_name(w: &vxr_core::World, i: usize) -> String {
+    match (&w.tree.nodes[i].name, w.model_of(i)) {
+        (Some(n), _) => String::from_utf8_lossy(n).into_owned(),
+        (None, Some(_)) => object_name(w, i),
+        (None, None) => {
+            let groups: Vec<usize> = w.tree.order().into_iter().skip(1).filter(|&k| w.model_of(k).is_none()).collect();
+            format!("group {}", groups.iter().position(|&k| k == i).map_or(i, |k| k + 1))
+        }
+    }
+}
+
+/// A layer's name: its own, or "layer N" by its id.
+pub fn layer_name(w: &vxr_core::World, id: i32) -> String {
+    match w.layers().into_iter().find(|l| l.id == id).and_then(|l| l.name) {
+        Some(n) => String::from_utf8_lossy(&n).into_owned(),
+        None => format!("layer {id}"),
+    }
+}
+
+/// The LAYERS list under the scene tree: every layer by id with its object count, whenever
+/// the tree shows.
+pub fn layer_rows(s: &Scene) -> Vec<LayerRow> {
+    let Some(w) = s.world() else { return Vec::new() };
+    let objects = w.objects();
+    if objects.len() < 2 {
+        return Vec::new();
+    }
+    w.layers()
+        .into_iter()
+        .map(|l| LayerRow {
+            id: l.id,
+            name: layer_name(w, l.id),
+            objects: objects.iter().filter(|&&i| w.tree.nodes[i].layer == l.id).count(),
+            hidden: l.hidden,
+        })
+        .collect()
+}
+
+/// The scene tree's rows: every node under the root in tree order, once there are two
+/// objects or more (none otherwise, so a single model stays clean).
+pub fn tree_rows(s: &Scene) -> Vec<TreeRow> {
+    let Some(w) = s.world() else { return Vec::new() };
+    let objects = w.objects();
+    if objects.len() < 2 {
+        return Vec::new();
+    }
+    let parents = w.tree.parents();
+    let mut users = vec![0; w.models.len()];
+    for &i in &objects {
+        if let Some(m) = w.model_of(i) {
+            users[m] += 1;
+        }
+    }
+    w.tree
+        .order()
+        .into_iter()
+        .skip(1)
+        .map(|i| {
+            let (mut depth, mut k) = (0, parents[i]);
+            while let Some(p) = k {
+                depth += parents[p].is_some() as usize;
+                k = parents[p];
+            }
+            let model = w.model_of(i);
+            // The model being edited lives in the scene's map until it is stored back.
+            let size = match (model, s.at()) {
+                (Some(_), At::Object(e)) if w.model_of(e) == model => s.bounds().size,
+                (Some(m), _) => w.models[m].size_voxels(),
+                (None, _) => [0; 3],
+            };
+            TreeRow {
+                node: i,
+                depth,
+                name: node_name(w, i),
+                group: model.is_none(),
+                linked: model.map_or(0, |m| users[m]),
+                size,
+                hidden: w.tree.nodes[i].hidden,
+                shown: w.shown(i),
+                layer: w.tree.nodes[i].layer,
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture(name: &str) -> Scene {
+        let f = vxr_vox::fixtures::all().into_iter().find(|f| f.name == name).unwrap();
+        Scene::from_vox(&f.builder.build().write()).unwrap()
+    }
+
+    #[test]
+    fn tree_rows_show_from_the_second_object() {
+        assert!(tree_rows(&Scene::new(NEW_SIZE)).is_empty());
+        assert!(tree_rows(&fixture("01-single-voxel")).is_empty());
+        let mut s = fixture("22-world");
+        let rows = tree_rows(&s);
+        let names: Vec<_> = rows.iter().map(|r| (r.name.as_str(), r.depth, r.group)).collect();
+        assert_eq!(
+            names,
+            [
+                ("slab", 0, false),
+                ("trees", 0, true),
+                ("tree a", 1, false),
+                ("tree b", 1, false),
+                ("grove", 1, true),
+                ("tree c", 2, false),
+                ("gem", 0, false),
+                ("lost gem", 0, false),
+            ]
+        );
+        let row = |rows: &[TreeRow], n: &str| rows.iter().find(|r| r.name == n).unwrap().clone();
+        assert_eq!(row(&rows, "tree c").linked, 3);
+        assert_eq!(row(&rows, "slab").size, [8, 1, 8]);
+        assert!(row(&rows, "lost gem").hidden && !row(&rows, "gem").hidden && !row(&rows, "gem").shown);
+        // Hiding a group hides the rows under it; unnamed nodes get names by their kind.
+        let (trees, slab) = (row(&rows, "trees").node, row(&rows, "slab").node);
+        s.edit_world(|w| {
+            w.set_hidden(trees, true);
+            w.set_name(trees, None);
+            w.set_name(slab, None);
+        });
+        let rows = tree_rows(&s);
+        assert!(!row(&rows, "tree a").shown && !row(&rows, "group 1").shown);
+        assert_eq!(rows[0].name, "object 1");
+        // The model being edited reports the scene's bounds.
+        assert!(s.edit_object(slab));
+        s.set_bounds([0, 0, 0], [8, 3, 8]);
+        assert_eq!(tree_rows(&s)[0].size, [8, 3, 8]);
+    }
+
+    #[test]
+    fn layer_rows_list_every_layer_with_its_objects() {
+        assert!(layer_rows(&fixture("01-single-voxel")).is_empty());
+        let mut s = fixture("22-world");
+        let rows: Vec<_> = layer_rows(&s).into_iter().map(|l| (l.id, l.name, l.objects, l.hidden)).collect();
+        assert_eq!(
+            rows,
+            [(0, "ground".into(), 2, false), (1, "trees".into(), 3, false), (2, "secret".into(), 1, true)]
+        );
+        // A layer an object is on without a LAYR entry is listed by its id.
+        let gem = tree_rows(&s).into_iter().find(|r| r.name == "gem").unwrap().node;
+        s.edit_world(|w| w.put_on_layer(gem, 5));
+        let last = layer_rows(&s).pop().unwrap();
+        assert_eq!((last.id, last.name.as_str(), last.objects), (5, "layer 5", 1));
+        assert_eq!(tree_rows(&s).iter().find(|r| r.node == gem).unwrap().layer, 5);
+    }
 }

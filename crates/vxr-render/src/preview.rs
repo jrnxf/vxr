@@ -8,10 +8,11 @@
 //!   measured cost per row. Without timestamps a conservative fixed cost per row is assumed.
 //! - Edits reset only the pixels whose primary or sun ray crosses the edited box; a camera move
 //!   restarts the whole image. Recolours need no reset (radiance is stored demodulated),
-//!   unless a slot is metal or glass: those pixels are stored in colour, so they restart.
+//!   unless a slot is metal, plastic or glass: those pixels are stored in colour, so they restart.
 //! - Materials per palette slot ([`Preview::set_materials`]): diffuse, metal (glossy, with a
-//!   sun highlight), glass (Fresnel reflection, or straight through with a tint: thin glass,
-//!   no bending) and emissive.
+//!   sun highlight), plastic (diffuse under a clear glossy coat), glass (Fresnel reflection, or
+//!   straight through with a tint that deepens with the distance crossed: thin glass, no
+//!   bending) and emissive.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -69,6 +70,7 @@ struct FrameU {
     cam_r: [f32; 4],
     cam_u: [f32; 4],
     cam_f: [f32; 4],
+    post: [f32; 4],
 }
 
 #[repr(C)]
@@ -111,12 +113,20 @@ pub struct Lighting {
     pub sun_dir: Vec3,
     /// Sun irradiance, linear RGB.
     pub sun_color: Vec3,
-    /// Sky light, times the built-in sky gradient.
+    /// Sky light, times the built-in sky (the gradient or the physical sky).
     pub sky: f32,
     /// Show the sky behind the scene instead of the editor's backdrop.
     pub sky_backdrop: bool,
-    /// Linear exposure. Changing it alone re-resolves the image without a restart.
+    /// The physical sky (scattered sunlight that follows the sun's height, with the sun disk
+    /// shown behind the scene) instead of the fixed gradient.
+    pub physical_sky: bool,
+    /// Linear exposure. Changing it, the gamma or the vignette alone re-resolves the image
+    /// without a restart.
     pub exposure: f32,
+    /// Display gamma: 2.2 is the plain sRGB image, higher is brighter in the mid-tones.
+    pub gamma: f32,
+    /// How much the corners darken: 0 is none, 1 takes the corners to black.
+    pub vignette: f32,
     /// Lens radius in voxels; 0 is a pinhole (no depth of field).
     pub aperture: f32,
     /// Distance in voxels from the eye to the plane in focus; 0 or less focuses on the orbit
@@ -131,7 +141,10 @@ impl Default for Lighting {
             sun_color: Vec3::new(3.0, 2.85, 2.6),
             sky: 1.0,
             sky_backdrop: false,
+            physical_sky: false,
             exposure: 1.0,
+            gamma: 2.2,
+            vignette: 0.0,
             aperture: 0.0,
             focus: 0.0,
         }
@@ -238,8 +251,9 @@ pub struct Preview {
     cs_layout: wgpu::BindGroupLayout,
     cs_rect: wgpu::Buffer,
     sampler: wgpu::Sampler,
-    last_key: Option<[f32; 17]>,
-    last_exposure: f32,
+    last_key: Option<[f32; 19]>,
+    /// Exposure, gamma and vignette of the last resolve.
+    last_post: [f32; 3],
     /// Sampling stops at this many samples per pixel until something changes.
     pub max_spp: u32,
     cursor: u32,
@@ -256,13 +270,14 @@ pub struct Preview {
     pub last_rows: u32,
 }
 
-/// One slot's material as the trace shader reads it (`mats` in preview_trace.wgsl).
-fn material_params(m: &Material) -> [f32; 4] {
+/// One slot's material as the trace shader reads it: two vec4s (`mats` in preview_trace.wgsl).
+fn material_params(m: &Material) -> [[f32; 4]; 2] {
     match m.kind {
-        Kind::Diffuse => [0.0; 4],
-        Kind::Metal => [1.0, m.rough, m.metal, 0.0],
-        Kind::Glass => [2.0, m.rough, m.ior, m.trans],
-        Kind::Emit => [3.0, 0.0, m.radiance(), 0.0],
+        Kind::Diffuse => [[0.0; 4]; 2],
+        Kind::Metal => [[1.0, m.rough, m.metal, 0.0], [0.0; 4]],
+        Kind::Glass => [[2.0, m.rough, m.ior, m.trans], [m.att, 0.0, 0.0, 0.0]],
+        Kind::Emit => [[3.0, 0.0, m.radiance(), 0.0], [0.0; 4]],
+        Kind::Plastic => [[4.0, m.rough, m.spec, 0.0], [0.0; 4]],
     }
 }
 
@@ -345,7 +360,7 @@ impl Preview {
         let fa = buf("preview filter a", n * 16, st);
         let fb = buf("preview filter b", n * 16, st);
         let pal_buf = buf("preview palette", 256 * 16, un);
-        let mat_buf = buf("preview materials", 256 * 16, un);
+        let mat_buf = buf("preview materials", 256 * 32, un);
         let out_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("preview out"),
             size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
@@ -502,7 +517,7 @@ impl Preview {
             cs_rect,
             sampler,
             last_key: None,
-            last_exposure: 1.0,
+            last_post: [1.0, 2.2, 0.0],
             max_spp: MAX_SPP,
             cursor: 0,
             frame_counter: 0,
@@ -518,20 +533,20 @@ impl Preview {
             last_rows: 0,
         };
         queue.write_buffer(&me.pal_buf, 0, bytemuck::cast_slice(&palette_linear(palette)));
-        queue.write_buffer(&me.mat_buf, 0, &[0u8; 256 * 16]);
+        queue.write_buffer(&me.mat_buf, 0, &[0u8; 256 * 32]);
         me
     }
 
     /// Set the material of every palette slot (index 0 is unused). Restarts sampling.
     pub fn set_materials(&mut self, queue: &wgpu::Queue, materials: &[Material; 256]) {
-        let params: Vec<[f32; 4]> = materials.iter().map(material_params).collect();
+        let params: Vec<[[f32; 4]; 2]> = materials.iter().map(material_params).collect();
         queue.write_buffer(&self.mat_buf, 0, bytemuck::cast_slice(&params));
-        self.has_specular = materials[1..].iter().any(|m| matches!(m.kind, Kind::Metal | Kind::Glass));
+        self.has_specular = materials[1..].iter().any(|m| matches!(m.kind, Kind::Metal | Kind::Glass | Kind::Plastic));
         self.force_restart = true;
     }
 
     /// Recolor: rewrite the preview's palette copy (the map's palette is written separately).
-    /// Instant, except with depth of field or a metal or glass slot, which restart.
+    /// Instant, except with depth of field or a metal, plastic or glass slot, which restart.
     pub fn set_palette(&mut self, queue: &wgpu::Queue, palette: &[[u8; 4]; 256]) {
         queue.write_buffer(&self.pal_buf, 0, bytemuck::cast_slice(&palette_linear(palette)));
         if self.lighting.dof() || self.has_specular {
@@ -560,7 +575,7 @@ impl Preview {
         (self.budget.ms_per_row * self.height as f64, self.budget.learnt)
     }
 
-    fn key(&self, cam: &OrbitCamera) -> [f32; 17] {
+    fn key(&self, cam: &OrbitCamera) -> [f32; 19] {
         let l = &self.lighting;
         [
             cam.target.x,
@@ -570,6 +585,7 @@ impl Preview {
             cam.pitch,
             cam.distance,
             cam.fov_y,
+            cam.ortho as u8 as f32,
             l.sun_dir.x,
             l.sun_dir.y,
             l.sun_dir.z,
@@ -578,6 +594,7 @@ impl Preview {
             l.sun_color.z,
             l.sky,
             l.sky_backdrop as u8 as f32,
+            l.physical_sky as u8 as f32,
             l.aperture,
             l.focus,
         ]
@@ -591,14 +608,14 @@ impl Preview {
         let (lo, hi) = edit.map(|e| (e.lo, e.hi)).unwrap_or((Vec3::ZERO, Vec3::ZERO));
         let m = Vec3::splat(CAP_MARGIN);
         let v4 = |v: Vec3| [v.x, v.y, v.z, 0.0];
-        let fwd = (cam.target - eye).normalize_or(Vec3::NEG_Z);
-        let right = fwd.cross(Vec3::Y).normalize_or(Vec3::X);
-        let up = right.cross(fwd);
+        let (fwd, right, up) = cam.basis();
         let l = &self.lighting;
-        let focus = if l.focus > 0.0 { l.focus } else { cam.distance };
+        // The focus distance is from the orbit eye; orthographic rays start further back.
+        let behind = if cam.ortho { (cam.view_eye() - eye).length() } else { 0.0 };
+        let focus = if l.focus > 0.0 { l.focus } else { cam.distance } + behind;
         let u = FrameU {
             inv_vp: vp.inverse().to_cols_array_2d(),
-            eye: [eye.x, eye.y, eye.z, 1.0],
+            eye: [eye.x, eye.y, eye.z, if cam.ortho { 0.0 } else { 1.0 }],
             size: [self.width as f32, self.height as f32, 1.0 / self.width as f32, 1.0 / self.height as f32],
             sun: [sun.x, sun.y, sun.z, 0.9995],
             sun_col: [c.x, c.y, c.z, self.lighting.exposure],
@@ -606,10 +623,16 @@ impl Preview {
             edit_hi: v4(hi),
             cap_lo: v4(lo - m),
             cap_hi: v4(hi + m),
-            flags: [flags, HIST_CAP, self.frame_counter, 1 | (l.sky_backdrop as u32) << 1 | (l.dof() as u32) << 2],
+            flags: [
+                flags,
+                HIST_CAP,
+                self.frame_counter,
+                1 | (l.sky_backdrop as u32) << 1 | (l.dof() as u32) << 2 | (l.physical_sky as u32) << 3,
+            ],
             cam_r: [right.x, right.y, right.z, l.aperture.max(0.0)],
             cam_u: [up.x, up.y, up.z, focus],
             cam_f: [fwd.x, fwd.y, fwd.z, l.sky.max(0.0)],
+            post: [2.2 / l.gamma.max(0.1), l.vignette.clamp(0.0, 1.0), 0.0, 0.0],
         };
         queue.write_buffer(&self.frame_buf, 0, bytemuck::bytes_of(&u));
     }
@@ -665,8 +688,10 @@ impl Preview {
         let restart = self.force_restart || self.last_key != Some(key) || (edit.is_some() && self.lighting.dof());
         self.force_restart = false;
         self.last_key = Some(key);
-        let exposure = self.lighting.exposure != self.last_exposure;
-        self.last_exposure = self.lighting.exposure;
+        let l = &self.lighting;
+        let post = [l.exposure, l.gamma, l.vignette];
+        let exposure = post != self.last_post;
+        self.last_post = post;
         if restart {
             self.cursor = 0;
             self.restarts += 1;
@@ -676,7 +701,7 @@ impl Preview {
         }
         let reset_pass = restart || edit.is_some();
         // Converged and nothing changed: keep the image, skip all work.
-        // A new exposure alone only needs the resolve.
+        // A new exposure, gamma or vignette alone only needs the resolve.
         let converged = self.converged();
         if !reset_pass && converged && !exposure {
             self.last_rows = 0;

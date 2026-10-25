@@ -449,6 +449,43 @@ pub fn all() -> Vec<Fixture> {
     });
     add("21-frm-base-transform", "One marker whose node has a base translation _frm_t = (30, 0, 0) and keyframes at (0,0,0) on frame 0 and (0,20,0) on frame 10. ogt_vox (and we) place it at x = 30 when not animating; records what MagicaVoxel does.".into(), b);
 
+    // 22: a world: named objects, a nested group, linked copies of one model and layers.
+    let mut b = builder(200);
+    b.layers = vec![
+        Dict::default().with("_name", "ground"),
+        Dict::default().with("_name", "trees").with("_color", "0 255 0"),
+        Dict::default().with("_name", "secret").with("_hidden", "1"),
+    ];
+    let slab = b.model([8, 8, 1], (0..64).map(|i| [(i % 8) as u8, (i / 8) as u8, 0, GREY]).collect());
+    let tree = b.model([3, 3, 5], {
+        let mut v: Vec<[u8; 4]> = (0..3).map(|z| [1, 1, z as u8, BROWN]).collect();
+        v.extend((0..9).map(|i| [(i % 3) as u8, (i / 3) as u8, 3, GREEN]));
+        v.push([1, 1, 4, GREEN]);
+        v
+    });
+    let gem = b.model([1, 1, 1], vec![[0, 0, 0, MAGENTA]]);
+    b.root.push(SceneNode::shape(slab, None, [0, 0, 0]).named("slab"));
+    b.root.push(
+        SceneNode::group(
+            None,
+            [0, 0, 3],
+            vec![
+                SceneNode::shape(tree, None, [-2, -2, 0]).named("tree a").on_layer(1),
+                SceneNode::shape(tree, Some(rot_z90()), [2, 2, 0]).named("tree b").on_layer(1),
+                SceneNode::group(
+                    None,
+                    [2, -2, 0],
+                    vec![SceneNode::shape(tree, None, [0, 0, 0]).named("tree c").on_layer(1)],
+                )
+                .named("grove"),
+            ],
+        )
+        .named("trees"),
+    );
+    b.root.push(SceneNode::shape(gem, None, [-3, 3, 1]).named("gem").on_layer(2));
+    b.root.push(SceneNode::shape(gem, None, [3, -3, 1]).named("lost gem").hidden());
+    add("22-world", "A grey 8 x 8 slab named slab; a group named trees, 3 up, holding three linked copies of one tree model (tree a at (-2, -2), tree b turned 90 degrees at (2, 2), and tree c inside a nested group named grove at (2, -2)), all on the trees layer; a magenta gem on the hidden secret layer and a hidden lost gem.".into(), b);
+
     out
 }
 

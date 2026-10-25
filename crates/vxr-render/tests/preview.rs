@@ -130,6 +130,22 @@ fn preview_matches_geometry_and_converges() {
 }
 
 #[test]
+fn orthographic_preview_matches_geometry() {
+    let Some(g) = gpu() else { return };
+    let scene = red_scene();
+    let mut rig = Rig::new(g, &scene);
+    for view in [vxr_render::View::Iso, vxr_render::View::Top] {
+        rig.cam.snap(view);
+        rig.cam.ortho = true;
+        rig.frames(30, None);
+        let cpu = cpu_values(&scene.map, &rig.cam);
+        assert!(cpu.iter().any(|&v| v != 0), "{view:?}: nothing in view");
+        let m = mismatch(&rig.image(), &cpu);
+        assert!(m < 0.01, "{view:?}: {:.2}% of pixels disagree with the CPU ray cast", m * 100.0);
+    }
+}
+
+#[test]
 fn edits_and_recolours_update_without_a_restart() {
     let Some(g) = gpu() else { return };
     let mut scene = red_scene();
@@ -232,6 +248,122 @@ fn exposure_re_resolves_without_a_restart_and_stops_at_max_spp() {
     let b = mean_luma(&hits(rig.image()));
     assert_eq!(rig.preview.restarts, restarts, "an exposure change restarted the preview");
     assert!(b < a * 0.8, "two stops down did not darken the image: {a:.1} -> {b:.1}");
+}
+
+#[test]
+fn gamma_and_vignette_re_resolve_without_a_restart() {
+    let Some(g) = gpu() else { return };
+    let scene = red_scene();
+    let mut rig = Rig::new(g, &scene);
+    rig.preview.max_spp = 8;
+    rig.frames(40, None);
+    let a = rig.image();
+    let restarts = rig.preview.restarts;
+    // A higher display gamma lifts the mid-tones.
+    rig.preview.lighting.gamma = 3.0;
+    rig.frames(1, None);
+    let b = rig.image();
+    assert_eq!(rig.preview.restarts, restarts, "a gamma change restarted the preview");
+    assert!(
+        mean_luma(&b) > mean_luma(&a) * 1.1,
+        "gamma 3 did not brighten: {:.1} -> {:.1}",
+        mean_luma(&a),
+        mean_luma(&b)
+    );
+    // A full vignette darkens the outer ring and leaves the middle as it was.
+    rig.preview.lighting.gamma = 2.2;
+    rig.preview.lighting.vignette = 1.0;
+    rig.frames(1, None);
+    let c = rig.image();
+    assert_eq!(rig.preview.restarts, restarts, "a vignette change restarted the preview");
+    let (w, h) = (PREVIEW_W as f32, PREVIEW_H as f32);
+    let ring = |img: &[u8], lo: f32, hi: f32| -> Vec<u8> {
+        img.as_chunks::<4>()
+            .0
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| {
+                let (x, y) = ((*i as u32 % PREVIEW_W) as f32 + 0.5, (*i as u32 / PREVIEW_W) as f32 + 0.5);
+                let d = (x / w - 0.5).powi(2) + (y / h - 0.5).powi(2);
+                (lo..hi).contains(&d)
+            })
+            .flat_map(|(_, p)| *p)
+            .collect()
+    };
+    let (outer_a, outer_c) = (mean_luma(&ring(&a, 0.3, 1.0)), mean_luma(&ring(&c, 0.3, 1.0)));
+    let (mid_a, mid_c) = (mean_luma(&ring(&a, 0.0, 0.002)), mean_luma(&ring(&c, 0.0, 0.002)));
+    assert!(outer_c < outer_a * 0.5, "the vignette did not darken the corners: {outer_a:.1} -> {outer_c:.1}");
+    assert!((mid_c - mid_a).abs() < mid_a * 0.02 + 0.5, "the vignette changed the middle: {mid_a:.1} -> {mid_c:.1}");
+}
+
+#[test]
+fn physical_sky_follows_the_sun_and_shows_its_disk() {
+    let Some(g) = gpu() else { return };
+    let scene = red_scene();
+    let mut rig = Rig::new(g, &scene);
+    // Nearly level, so the top of the view sees the sky above the horizon.
+    rig.cam.pitch = 0.1;
+    let cpu = cpu_values(&scene.map, &rig.cam);
+    // Mean colour and luma of the miss pixels looking up (the sky) or down (its ground).
+    let ups: Vec<bool> = (0..PREVIEW_H)
+        .flat_map(|y| (0..PREVIEW_W).map(move |x| (x, y)))
+        .map(|(x, y)| rig.cam.ray(x as f32 + 0.5, y as f32 + 0.5, PREVIEW_W as f32, PREVIEW_H as f32).1.y > 0.05)
+        .collect();
+    let sky = |img: &[u8]| -> ([f64; 3], f64) {
+        let px: Vec<&[u8; 4]> = img
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(cpu.iter().zip(&ups))
+            .filter(|(_, (v, up))| **v == 0 && **up)
+            .map(|(p, _)| p)
+            .collect();
+        let n = px.len() as f64;
+        let c = [0, 1, 2].map(|k| px.iter().map(|p| p[k] as f64).sum::<f64>() / n);
+        (c, c[0] * 0.2126 + c[1] * 0.7152 + c[2] * 0.0722)
+    };
+    rig.preview.lighting.sky_backdrop = true;
+    rig.frames(30, None);
+    let (_, gradient) = sky(&rig.image());
+    // The default sun's physical sky is about as bright as the gradient, and blue.
+    let restarts = rig.preview.restarts;
+    rig.preview.lighting.physical_sky = true;
+    rig.frames(30, None);
+    assert!(rig.preview.restarts > restarts, "turning the physical sky on did not restart the preview");
+    let (high, luma) = sky(&rig.image());
+    eprintln!("gradient sky luma {gradient:.1}, physical {luma:.1} {high:.0?}");
+    assert!(luma > gradient * 0.6 && luma < gradient * 1.5, "physical sky luma {luma:.1}, gradient {gradient:.1}");
+    assert!(high[2] > high[0] * 1.15, "a high sun's sky is not blue: {high:.0?}");
+    // A low sun reddens it.
+    rig.preview.lighting.sun_dir = glam::Vec3::new(0.97, 0.06, 0.2);
+    rig.frames(30, None);
+    let (low, _) = sky(&rig.image());
+    eprintln!("low sun sky {low:.0?}");
+    assert!(low[0] / low[2] > high[0] / high[2] * 1.3, "a low sun did not redden the sky: {high:.0?} -> {low:.0?}");
+    // The sun disk shows on a miss pixel looking straight at the sun, and only in the
+    // physical sky.
+    let (x, y) = (0..PREVIEW_H)
+        .flat_map(|y| (0..PREVIEW_W).map(move |x| (x, y)))
+        .find(|&(x, y)| {
+            (x, y) > (PREVIEW_W / 2, PREVIEW_H / 6) && cpu[(y * PREVIEW_W + x) as usize] == 0 && {
+                let (_, d) = rig.cam.ray(x as f32 + 0.5, y as f32 + 0.5, PREVIEW_W as f32, PREVIEW_H as f32);
+                d.y > 0.1
+            }
+        })
+        .expect("a sky pixel above the horizon");
+    let (_, d) = rig.cam.ray(x as f32 + 0.5, y as f32 + 0.5, PREVIEW_W as f32, PREVIEW_H as f32);
+    rig.preview.lighting.sun_dir = d;
+    let at = |img: &[u8]| {
+        let p = img.as_chunks::<4>().0[(y * PREVIEW_W + x) as usize];
+        p[0] as f64 * 0.2126 + p[1] as f64 * 0.7152 + p[2] as f64 * 0.0722
+    };
+    rig.frames(30, None);
+    let disk = at(&rig.image());
+    rig.preview.lighting.physical_sky = false;
+    rig.frames(30, None);
+    let plain = at(&rig.image());
+    eprintln!("pixel ({x}, {y}) toward the sun: disk {disk:.0}, gradient {plain:.0}");
+    assert!(disk > 245.0 && disk > plain + 20.0, "no sun disk at ({x}, {y}): {disk:.0} (gradient {plain:.0})");
 }
 
 #[test]
@@ -343,6 +475,12 @@ fn materials_emit_reflect_and_let_light_through() {
     assert_eq!(rig.preview.restarts, restarts + 1, "a material change restarts");
     let glass = mean_of(&rig.image(), &cpu, 2);
     assert!(glass[0] > glass[2] * 1.3, "clear glass shows the red under it: {glass:?}");
+    // Attenuation: the same clear glass takes on its pale blue along the two voxels crossed.
+    mats[2].att = 1.0;
+    rig.preview.set_materials(&rig.g.queue, &mats);
+    rig.frames(60, None);
+    let deep = mean_of(&rig.image(), &cpu, 2);
+    assert!(deep[0] < glass[0] * 0.85, "attenuated glass absorbs more red: {deep:?} vs {glass:?}");
     let restarts = rig.preview.restarts;
     rig.preview.set_palette(&rig.g.queue, &scene.palette);
     rig.frames(1, None);
@@ -357,12 +495,28 @@ fn materials_emit_reflect_and_let_light_through() {
     let metal = mean_of(&rig.image(), &cpu, 2);
     assert!(metal[2] > metal[0] * 1.1, "the mirror reflects the sky: {metal:?}");
 
+    // Plastic: pure red under a clear coat reflects the blue sky that matte red cannot show.
+    scene.set_color(2, [255, 0, 0, 255]);
+    rig.map.set_palette(&rig.g.queue, &scene.palette);
+    rig.preview.set_palette(&rig.g.queue, &scene.palette);
+    let mut plastic = |spec: f32| {
+        mats[2] = Material { kind: Kind::Plastic, rough: 0.0, spec, ..Material::default() };
+        rig.preview.set_materials(&rig.g.queue, &mats);
+        rig.frames(60, None);
+        mean_of(&rig.image(), &cpu, 2)
+    };
+    let (matte, coat) = (plastic(0.0), plastic(1.0));
+    assert!(matte[2] < 3.0, "plastic without specular is matte red: {matte:?}");
+    assert!(coat[2] > matte[2] + 3.0, "the coat reflects the sky: {coat:?} vs {matte:?}");
+
     // Emissive: slot 1 glows far brighter than when lit by the sun alone.
     mats[2] = Material::default();
     mats[1] = Material { kind: Kind::Emit, emit: 1.0, flux: 3.0, ..Material::default() };
     rig.preview.set_materials(&rig.g.queue, &mats);
     rig.frames(60, None);
     let emit = mean_of(&rig.image(), &cpu, 1);
-    eprintln!("mean colours: diffuse {diffuse:?}, glass {glass:?}, metal {metal:?}, emissive {emit:?}");
+    eprintln!(
+        "mean colours: diffuse {diffuse:?}, glass {glass:?}, attenuated {deep:?}, metal {metal:?}, plastic {matte:?} to {coat:?}, emissive {emit:?}"
+    );
     assert!(emit[0] > diffuse.0[0] + 20.0, "emissive red is brighter: {emit:?} vs {:?}", diffuse.0);
 }

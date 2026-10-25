@@ -1,5 +1,6 @@
 //! The selection and what can be done with it, as in MagicaVoxel's select mode: select by
-//! box or by colour (replace, add or subtract), then move, copy, cut, paste, delete or fill
+//! box, or by clicking a voxel to take its colour, its face or its volume (replace, add or
+//! subtract), then move, copy, cut, paste, delete or fill
 //! it, and rotate 90 degrees, flip or loop (shift with wrap-around) it. With nothing selected
 //! the transforms apply to the whole model. Every change to voxels is one undo step that
 //! also records the selection, so undo puts both back. Choosing what is selected is not an
@@ -8,6 +9,7 @@
 use std::collections::HashSet;
 
 use crate::Scene;
+use crate::tools::Target;
 
 /// How a new selection combines with the current one (click, Shift-click, Alt-click).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -15,6 +17,17 @@ pub enum Mode {
     Replace,
     Add,
     Subtract,
+}
+
+/// What a select click on a voxel takes, as MagicaVoxel's region select: every voxel of its
+/// colour, the connected face of its colour it is on (as the face brush), or every voxel
+/// connected to it through faces, whatever their colour.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Region {
+    #[default]
+    Color,
+    Face,
+    Volume,
 }
 
 /// A transform of the selection, or of the whole model when nothing is selected.
@@ -143,9 +156,60 @@ impl Scene {
         self.select(cells, mode);
     }
 
+    /// Select what a click on target `t` takes with `region`. Not an undo step.
+    pub fn select_region(&mut self, t: &Target, region: Region, mode: Mode) {
+        if t.ground {
+            return;
+        }
+        match region {
+            Region::Color => self.select_color(t.value, mode),
+            Region::Face => {
+                let cells = self.face_region(t);
+                self.select(cells, mode);
+            }
+            Region::Volume => {
+                let cells = self.volume(t.voxel);
+                self.select(cells, mode);
+            }
+        }
+    }
+
+    /// Every voxel connected to `p` through faces, whatever its colour.
+    pub fn volume(&self, p: [i32; 3]) -> Vec<[i32; 3]> {
+        let filled = |p: [i32; 3]| self.map.get(p[0], p[1], p[2]) != 0;
+        let mut seen = HashSet::new();
+        let (mut out, mut stack) = (Vec::new(), vec![p]);
+        while let Some(p) = stack.pop() {
+            if !filled(p) || !seen.insert(p) {
+                continue;
+            }
+            out.push(p);
+            for a in 0..3 {
+                for d in [1, -1] {
+                    let mut q = p;
+                    q[a] += d;
+                    stack.push(q);
+                }
+            }
+        }
+        out
+    }
+
     pub fn select_all(&mut self) {
         let mut cells = Vec::new();
         self.for_each_voxel(|p, _| cells.push(p));
+        self.select(cells, Mode::Replace);
+    }
+
+    /// Select every voxel that is not selected and drop the ones that are (with nothing
+    /// selected, every voxel). Not an undo step.
+    pub fn invert_selection(&mut self) {
+        let mut cells = Vec::new();
+        self.for_each_voxel(|p, _| {
+            if !self.selection.contains(&p) {
+                cells.push(p);
+            }
+        });
         self.select(cells, Mode::Replace);
     }
 
@@ -157,7 +221,7 @@ impl Scene {
     }
 
     /// The voxels a transform works on: the selection, or every voxel when nothing is selected.
-    fn subject(&self) -> (Vec<([i32; 3], u8)>, bool) {
+    pub(crate) fn subject(&self) -> (Vec<([i32; 3], u8)>, bool) {
         let mut out: Vec<_> = self.selection().map(|p| (p, self.map.get(p[0], p[1], p[2]))).collect();
         if !out.is_empty() {
             return (out, true);

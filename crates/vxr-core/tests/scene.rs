@@ -7,11 +7,7 @@ use vxr_vox::build::Builder;
 use vxr_vox::scene::Rule;
 
 fn world_voxels(s: &Scene) -> BTreeMap<[i32; 3], u8> {
-    let mut out = BTreeMap::new();
-    s.for_each_voxel(|p, c| {
-        out.insert(s.to_world(p), c);
-    });
-    out
+    s.world_voxels(false)
 }
 
 #[test]
@@ -212,6 +208,12 @@ fn saving_an_opened_file_without_edits_writes_it_back_byte_for_byte() {
 fn open_edit_save_keeps_every_untouched_chunk() {
     for (name, bytes) in files() {
         let mut s = Scene::from_vox(&bytes).unwrap();
+        // Edit the largest object's model.
+        if let Some(w) = s.world()
+            && let Some(&i) = w.objects().iter().max_by_key(|&&i| w.models[w.model_of(i).unwrap()].voxels)
+        {
+            s.edit_object(i);
+        }
         let mut cells = Vec::new();
         s.for_each_voxel(|p, _| cells.push(p));
         let n = cells.len();

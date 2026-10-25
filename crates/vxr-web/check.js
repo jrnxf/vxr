@@ -54,6 +54,28 @@ async () => {
   // The island's middle at 1280x800: a surface voxel, away from the panels.
   const [mx, my] = [640, 430];
 
+  // The files of a stored (uncompressed) zip, by name, as bytes.
+  const unzip = (z) => {
+    const v = new DataView(z.buffer, z.byteOffset, z.byteLength);
+    const files = {};
+    for (let at = 0; at + 30 <= z.length && v.getUint32(at, true) === 0x04034b50;) {
+      const [len, nl, el] = [v.getUint32(at + 18, true), v.getUint16(at + 26, true), v.getUint16(at + 28, true)];
+      const name = String.fromCharCode(...z.slice(at + 30, at + 30 + nl));
+      files[name] = z.slice(at + 30 + nl + el, at + 30 + nl + el + len);
+      at += 30 + nl + el + len;
+    }
+    return files;
+  };
+  // A PNG slices download's size and how many of its pixels hold a voxel (not transparent).
+  const slicePixels = async (blob) => {
+    const img = await createImageBitmap(blob, { premultiplyAlpha: 'none', colorSpaceConversion: 'none' });
+    const c = new OffscreenCanvas(img.width, img.height).getContext('2d');
+    c.drawImage(img, 0, 0);
+    const px = c.getImageData(0, 0, img.width, img.height).data;
+    let filled = 0;
+    for (let i = 3; i < px.length; i += 4) filled += px[i] !== 0;
+    return { w: img.width, h: img.height, filled };
+  };
   await frames(10);
   let s0 = st();
   step('starts with the island and the coach card', s0.voxels > 100000 && s0.coach && s0.name === 'island.vox', JSON.stringify(s0));
@@ -118,6 +140,33 @@ async () => {
   await drag(mx - 40, my, mx + 40, my + 20);
   s = st();
   step('B box drag adds a box', s.shape === 'Box' && s.voxels > s0.voxels + 10, `${s0.voxels} -> ${s.voxels}`);
+  // The box's height follows the pointer until a click, Enter or Cmd-K places it; Escape drops it.
+  const based = s.voxels;
+  ptr('pointermove', mx + 40, my - 100); await frames();
+  s = st();
+  step('then moving up lifts the box live', s.lifting && s.voxels > based && s.span?.[0] === 'BOX', `${based} -> ${s.voxels}, ${JSON.stringify(s.span)}`);
+  await key('Escape');
+  s = st();
+  step('Escape drops the lifted box', !s.lifting && same(bytes(), original), `${s.voxels}`);
+  await drag(mx - 40, my, mx + 40, my + 20);
+  ptr('pointermove', mx + 40, my - 100); await frames();
+  const lifted = st().voxels;
+  await click(mx + 40, my - 100);
+  s = st();
+  step('a click places the lifted box', !s.lifting && s.voxels === lifted && lifted > based, `${lifted}`);
+  await key('z', cmd);
+  step('box and height are one undo step', same(bytes(), original));
+  await drag(mx - 40, my, mx + 40, my + 20);
+  await key('Enter');
+  s = st();
+  step('Enter places it one layer high', !s.lifting && s.voxels === based, `${s.voxels}`);
+  await key('z', cmd);
+  await drag(mx - 40, my, mx + 40, my + 20);
+  await key('k', cmd);
+  for (const ch of 'place box') await key(ch);
+  await key('Enter');
+  s = st();
+  step('Cmd-K Place box places it', !s.lifting && s.voxels === based && !s.cmdk, `${s.voxels}`);
   await key('z', cmd);
   await key('f');
   await click(mx, my);
@@ -166,6 +215,14 @@ async () => {
   // Mirror axes from the flyout, and the axis lock.
   await key('m');
   const chip = async (name) => { const h = window.vxr.hit(name); if (h.length) await click(h[0], h[1]); return h.length > 0; };
+  const at = (name) => { const h = window.vxr.hit(name); return h.length ? h : null; };
+  const clickAt = async (name) => { const h = at(name); if (h) await click(h[0], h[1]); return !!h; };
+  const typeInto = async (name, text) => {
+    await clickAt(name);
+    await key('a', cmd);
+    for (const ch of text) await key(ch);
+    await key('Enter');
+  };
   const shown = await chip('mirror-y');
   step('the mirror flyout adds Y', shown && JSON.stringify(st().mirrorAxes) === '[true,true,false]', JSON.stringify(st().mirrorAxes));
   await chip('mirror-x');
@@ -178,8 +235,46 @@ async () => {
   await key('k');
   step('K again locks Y, Z, then off', st().lock === null);
 
+  // The voxel brush's size: V again opens its flyout, + and -, the keys and Cmd-K, a size 3
+  // add and erase on the island, each one undo step; back to 1 and Escape closes it.
+  const before = bytes();
+  await key('v');
+  step('V again opens the size flyout', st().shape === 'Voxel' && st().sizePanel && !!at('size-plus'), JSON.stringify(st().sizePanel));
+  await chip('size-plus');
+  await chip('size-plus');
+  step('the flyout + steps the size', st().brushSize === 3, `${st().brushSize}`);
+  await key('-');
+  const down = st().brushSize;
+  await key('=');
+  step('- and = step the size', down === 2 && st().brushSize === 3, `${down} ${st().brushSize}`);
+  await key('k', cmd);
+  for (const ch of 'smaller brush') await key(ch);
+  await key('Enter');
+  const smaller = st().brushSize;
+  await key('=');
+  step('Cmd-K "Smaller brush"', smaller === 2 && st().brushSize === 3, `${smaller}`);
+  let n0 = st().voxels;
+  await click(mx, my);
+  const added = st().voxels - n0;
+  await key('z', cmd);
+  step('a size 3 click adds up to a 3x3x3 cube as one undo step', added > 9 && added <= 27 && same(bytes(), before), `${added}`);
+  await key('e');
+  n0 = st().voxels;
+  await click(mx, my);
+  const erased = n0 - st().voxels;
+  await key('z', cmd);
+  step('a size 3 erase takes up to 27 voxels into the face as one undo step', erased > 9 && erased <= 27 && same(bytes(), before), `${erased}`);
+  await key('a');
+  await chip('size-minus');
+  await chip('size-minus');
+  await key('-');
+  const one = st().brushSize;
+  await key('Escape');
+  step('- stops at 1 and Escape closes the size flyout', one === 1 && !st().sizePanel && !at('size-plus'), `${one}`);
+
   // Selection and transform: S, colour click, Escape, box select, a live move drag, the
-  // flyout, copy and paste, Backspace and Cmd-A, each edit undone again.
+  // flyout, copy and paste, Backspace and Cmd-A, hollow and fill inside, crop and resize, each
+  // edit undone again.
   await key('s');
   step('S picks the select tool and shows the selection flyout', st().tool === 'Select' && window.vxr.hit('rotate-y').length === 2, st().tool);
   await click(mx, my);
@@ -220,9 +315,146 @@ async () => {
   await key('z', cmd);
   await key('a', cmd);
   step('Cmd-A selects every voxel', st().selected === st().voxels, `${st().selected}`);
+  // Invert: everything inverts to nothing, nothing to everything (the flyout's Invert), one
+  // colour's voxels to the rest (Cmd-K); none of it edits the file.
+  await key('I', { metaKey: true, shiftKey: true });
+  const inverted = st().selected;
+  await chip('invert');
+  step('Cmd-Shift-I inverts all to none, the flyout\'s Invert none to all', inverted === 0 && st().selected === st().voxels, `${inverted} ${st().selected}`);
+  await click(mx, my);
+  await key('k', cmd);
+  for (const ch of 'invert selection') await key(ch);
+  await key('Enter');
+  step('Cmd-K Invert selection selects every voxel but the clicked colour, with no edit', st().selected === st().voxels - byColor && same(bytes(), original), `${st().selected} of ${st().voxels}, ${byColor}`);
   await key('Escape');
+  // Region select: the flyout's Face takes the clicked face of its colour, Cmd-K Click
+  // selects volume every voxel connected to it, Color the colour again; no edit.
+  await chip('click-face');
+  await click(mx, my);
+  const face = [st().region, st().selected];
+  await key('k', cmd);
+  for (const ch of 'click selects volume') await key(ch);
+  await key('Enter');
+  await click(mx, my);
+  const volume = [st().region, st().selected];
+  await chip('click-color');
+  await click(mx, my);
+  step('a click selects the face, the volume (Cmd-K) or the colour, with no edit', face[0] === 'Face' && face[1] > 0 && face[1] <= byColor && volume[0] === 'Volume' && volume[1] >= face[1] && st().region === 'Color' && st().selected === byColor && same(bytes(), original), JSON.stringify([face, volume, st().selected, byColor]));
+  await key('Escape');
+  // Model tools on the whole island: hollow, fill inside, one undo step each.
+  const solid = st().voxels;
+  const hollowed = await chip('hollow') && st().voxels;
+  step('the flyout hollows the model', hollowed > 0 && hollowed < solid, `${solid} -> ${hollowed}`);
+  await chip('fill-in');
+  const refilled = st().voxels;
+  step('fill inside fills what the shell encloses', refilled >= solid, `${hollowed} -> ${refilled}`);
+  await key('z', cmd);
+  await key('z', cmd);
+  step('hollow and fill inside are one undo step each', same(bytes(), original), `${st().voxels}`);
+  // Crop to content and resize through the Bounds panel, one undo step each. The island
+  // opens at its model's exact size, so first grow it 20 cells on X (10 on each side) for
+  // crop to take off again.
+  const fitted = st().bounds;
+  await chip('resize');
+  await typeInto('bounds-x', String(fitted[0] + 20));
+  await key('Escape');
+  const bounds0 = st().bounds;
+  const grown = bytes();
+  step('the Bounds panel grows the island', bounds0[0] === fitted[0] + 20 && st().voxels === solid, `${fitted} -> ${bounds0}`);
+  await chip('crop');
+  const bounds1 = st().bounds;
+  step('the flyout crops the bounds to the island', bounds1.every((v, i) => v === fitted[i]) && st().voxels === solid, `${bounds0} -> ${bounds1}`);
+  step('crop keeps every voxel: the save is the original bytes again', same(bytes(), original));
+  await key('z', cmd);
+  step('crop is one undo step', st().bounds.join() === bounds0.join(), `${st().bounds}`);
+  step('Resize… opens the Bounds panel', (await chip('resize')) && st().boundsPanel && !!at('bounds-x'));
+  await typeInto('bounds-x', String(bounds0[0] - 40));
+  const narrowed = st().voxels;
+  step('the X field resizes the bounds and erases what falls outside', st().bounds[0] === bounds0[0] - 40 && narrowed < solid, `${st().bounds} ${solid} -> ${narrowed}`);
+  await key('z', cmd);
+  step('resize is one undo step', same(bytes(), grown) && st().bounds.join() === bounds0.join(), `${st().bounds}`);
+  await key('Escape');
+  step('Escape closes the Bounds panel', !st().boundsPanel);
+  await key('k', cmd);
+  for (const ch of 'crop to content') await key(ch);
+  await key('Enter');
+  const bounds2 = st().bounds;
+  await key('z', cmd);
+  step('Cmd-K crops to content, and undo restores the bounds', bounds2.join() === bounds1.join() && st().bounds.join() === bounds0.join(), `${bounds2}`);
+  await key('z', cmd);
+  step('undoing the grow gives back the opened island', same(bytes(), original) && st().bounds.join() === fitted.join());
   await key('a');
   step('undo after every tool returns to the island', same(bytes(), original));
+
+  // Camera and view: the View flyout, orthographic, the six side views by key, an edit from
+  // the top orthographic view, isometric, O, Cmd-K, then back to perspective and framed.
+  step('the view button opens the View flyout', (await chip('view')) && st().viewPanel && !!at('view-front'));
+  await chip('view-ortho');
+  step('Ortho turns orthographic on', st().ortho && st().view === null, JSON.stringify(st().cam));
+  const sideViews = [['1', 'Front'], ['2', 'Back'], ['3', 'Left'], ['4', 'Right'], ['6', 'Bottom'], ['5', 'Top']];
+  const seen = [];
+  for (const [k, name] of sideViews) { await key(k); seen.push(st().view); }
+  step('keys 1 to 6 snap to the side views', seen.join() === sideViews.map((v) => v[1]).join(), seen.join());
+  const vTop = st().voxels;
+  await click(640, 400);
+  const vAdded = st().voxels;
+  await key('z', cmd);
+  step('a click from the top orthographic view adds a voxel, undo removes it', vAdded === vTop + 1 && same(bytes(), original), `${vTop} -> ${vAdded}`);
+  await chip('view-iso');
+  step('Iso: orthographic isometric', st().ortho && st().view === 'Isometric', `${st().view}`);
+  await key('o');
+  const oOff = !st().ortho;
+  await key('o');
+  step('O toggles orthographic', oOff && st().ortho);
+  await key('k', cmd);
+  for (const ch of 'front view') await key(ch);
+  await key('Enter');
+  step("Cmd-K 'Front view'", st().view === 'Front', `${st().view}`);
+  await key('0');
+  step('0 snaps to isometric', st().view === 'Isometric' && st().ortho);
+  await chip('view-persp');
+  step('Persp: back to perspective', !st().ortho && st().view === null);
+  // Guides: grid, ground and bounds on by default; the flyout, G and Cmd-K toggle them.
+  step('the grid, ground and bounds show by default', st().guides.join() === 'true,true,true', JSON.stringify(st().guides));
+  const guideFlips = [];
+  for (const [n, i] of [['view-grid', 0], ['view-ground', 1], ['view-bounds', 2]]) {
+    await chip(n);
+    const off = !st().guides[i];
+    await chip(n);
+    guideFlips.push(off && st().guides[i]);
+  }
+  step("the flyout's Grid, Ground and Bounds buttons hide and show them", guideFlips.every(Boolean), guideFlips.join());
+  await key('g');
+  const gridOff = !st().guides[0];
+  await key('g');
+  step('G toggles the grid', gridOff && st().guides[0]);
+  await key('k', cmd);
+  for (const ch of 'show bounds') await key(ch);
+  await key('Enter');
+  const boundsOff = !st().guides[2];
+  await key('k', cmd);
+  for (const ch of 'show bounds') await key(ch);
+  await key('Enter');
+  step("Cmd-K 'Show bounds' hides and shows the bounds", boundsOff && st().guides[2]);
+  await key('Escape');
+  step('Escape closes the View flyout', !st().viewPanel);
+
+  // World mode: the island is one object, so Tab shows the same voxels as the world and back.
+  const m0 = st();
+  await key('Tab');
+  const inWorld = st();
+  await key('Tab');
+  step('Tab shows the world and goes back to the model',
+    m0.mode === 'object' && inWorld.mode === 'world' && inWorld.voxels === m0.voxels && st().mode === 'object',
+    `${m0.mode} ${inWorld.mode} ${st().mode}`);
+  await key('k', cmd);
+  for (const ch of 'world mode') await key(ch);
+  await key('Enter');
+  const cmdWorld = st().mode;
+  await key('Tab');
+  step("Cmd-K 'World mode / edit model'; switching adds no undo step",
+    cmdWorld === 'world' && st().mode === 'object' && st().undo === m0.undo);
+  await key('.');
 
   // Camera.
   let a = st();
@@ -286,15 +518,7 @@ async () => {
   await key('v');
 
   // Palette editing, clicking the drawn UI where the editor says each part is.
-  const at = (name) => { const h = window.vxr.hit(name); return h.length ? h : null; };
-  const clickAt = async (name) => { const h = at(name); if (h) await click(h[0], h[1]); return !!h; };
   const col = (slot) => Array.from(window.vxr.color(slot));
-  const typeInto = async (name, text) => {
-    await clickAt(name);
-    await key('a', cmd);
-    for (const ch of text) await key(ch);
-    await key('Enter');
-  };
   let used = 1;
   for (let i = 1; i < 256; i++) if (col(i)[4] > col(used)[4]) used = i;
   while (st().slot > used) await key('[');
@@ -371,6 +595,32 @@ async () => {
     await frames(2);
     step('and shows it again', st().render.shown);
 
+    // The full render view: a click on the corner swaps the path-traced image into the whole
+    // view at one pixel per point; its chip, Cmd-K and Escape swap it back.
+    {
+      const corner = window.vxr.hit('render');
+      await click(corner[0], corner[1]);
+      await frames(2);
+      const full = st().render;
+      const fill = window.vxr.hit('render');
+      const want = [Math.round(st().size[0] / st().ppp), Math.round(st().size[1] / st().ppp)];
+      step('a click on the corner fills the view', full.full && full.size[0] === want[0] && full.size[1] === want[1] && Math.abs(fill[0] - want[0] / 2) <= 1 && Math.abs(fill[1] - want[1] / 2) <= 1, JSON.stringify({ full, want, fill }));
+      for (let i = 0; i < 300 && st().render.spp < 4; i++) await frames(1);
+      step('the full view converges', st().render.spp >= 4, JSON.stringify(st().render));
+      const chip = window.vxr.hit('render-full');
+      await click(chip[0], chip[1]);
+      await frames(2);
+      step('its chip swaps back to the 640x360 corner', !st().render.full && st().render.size[0] === 640 && st().render.size[1] === 360, JSON.stringify(st().render));
+      await key('k', cmd);
+      for (const ch of 'full render') await key(ch);
+      await key('Enter');
+      await frames(2);
+      const on = st().render.full;
+      await key('Escape');
+      await frames(2);
+      step('Cmd-K Full render view fills the view and Escape swaps back', on && !st().render.full && st().render.size[0] === 640, JSON.stringify(st().render));
+    }
+
     // The Render panel: R opens it, the sliders and buttons reach the path tracer, Export PNG
     // downloads a PNG at the chosen size, Escape closes it.
     const hit = (name) => { const h = window.vxr.hit(name); return h.length ? h : null; };
@@ -380,6 +630,17 @@ async () => {
     await drag(ex[0], ex[1], ex[0] - 120, ex[1]);
     step('the exposure slider sets -3 EV', Math.abs(st().render.exposure - 0.125) < 1e-3, JSON.stringify(st().render));
     await click(ex[0], ex[1]);
+    const restarts = st().render.restarts;
+    const ga = hit('rs-gamma');
+    await drag(ga[0], ga[1], ga[0] + 120, ga[1]);
+    const vi = hit('rs-vignette');
+    await drag(vi[0], vi[1], vi[0] + 120, vi[1]);
+    const post = st().render;
+    step('the gamma and vignette sliders reach the preview without a restart', near(post.gamma, 3) && near(post.vignette, 1) && post.restarts === restarts, JSON.stringify(post));
+    // The track is 206 points wide around the centre, so 2.2 (60% along) is 20.6 right of it.
+    await click(ga[0] + 20.6, ga[1]);
+    await drag(vi[0], vi[1], vi[0] - 120, vi[1]);
+    step('and set back', Math.abs(st().render.gamma - 2.2) < 0.02 && st().render.vignette === 0, JSON.stringify(st().render));
     await click(...hit('rs-spp0'));
     await click(...hit('rs-size0'));
     step('Samples 64 stops the corner at 64 spp', st().render.maxSpp === 64, JSON.stringify(st().render));
@@ -387,6 +648,12 @@ async () => {
     const skyOn = st().render.sky;
     await click(...hit('rs-sky-backdrop'));
     step('the sky backdrop toggles', skyOn && !st().render.sky);
+    const skyRestarts = st().render.restarts;
+    await click(...hit('rs-physical-sky'));
+    await frames(2);
+    const phys = st().render;
+    await click(...hit('rs-physical-sky'));
+    step('the physical sky toggles and restarts the corner', phys.physicalSky && phys.restarts > skyRestarts && !st().render.physicalSky, JSON.stringify(phys));
     const realUrl = URL.createObjectURL;
     const realA = HTMLAnchorElement.prototype.click;
     let png = null, pngName = null;
@@ -410,6 +677,69 @@ async () => {
     step('Escape closes the Render panel', !st().render.panel && st().render.maxSpp === 1024 && near(st().render.exposure, 1), JSON.stringify(st().render));
     step('the render steps leave the file as it was', same(bytes(), original));
 
+    // The Export menu and the OBJ export: the top bar's Export button opens the menu, Escape
+    // and a click outside close it, its Render PNG row opens the Render panel, and its OBJ row
+    // and Cmd-K download island-obj.zip holding the .obj, .mtl and 256x1 palette .png.
+    await click(...hit('export'));
+    step('the Export button opens the Export menu', st().exportMenu && !!hit('export-obj') && !!hit('export-render'));
+    await key('Escape');
+    const escaped = !st().exportMenu;
+    await click(...hit('export'));
+    await click(1000, 34);
+    step('Escape and a click outside close it', escaped && !st().exportMenu);
+    await click(...hit('export'));
+    await click(...hit('export-render'));
+    step('its Render PNG row opens the Render panel', st().render.panel && !st().exportMenu);
+    await key('Escape');
+    let zipBlob = null, zipName = null;
+    URL.createObjectURL = (b) => { zipBlob = b; return realUrl.call(URL, b); };
+    HTMLAnchorElement.prototype.click = function () { zipName = this.download; };
+    try {
+      await click(...hit('export'));
+      await click(...hit('export-obj'));
+      await frames();
+      const files = zipBlob ? unzip(new Uint8Array(await zipBlob.arrayBuffer())) : {};
+      const text = (n) => (files[n] ? new TextDecoder().decode(files[n]) : '');
+      const obj = text('island.obj');
+      const quads = obj.split('\n').filter((l) => l.startsWith('f ')).length;
+      const header = obj.match(/^# vxr OBJ export: (\d+) voxels, (\d+) quads/);
+      const png = files['island.png'];
+      const pv = png && new DataView(png.buffer, png.byteOffset);
+      step('its OBJ row downloads island-obj.zip: island.obj, island.mtl and island.png',
+        zipName === 'island-obj.zip' && Object.keys(files).join(',') === 'island.obj,island.mtl,island.png' && !st().exportMenu,
+        `${zipName} ${Object.keys(files)}`);
+      step('island.obj holds every voxel as greedy quads and names its .mtl, which names the 256x1 palette .png',
+        header && +header[1] === st().voxels && +header[2] === quads && quads > 1000 && obj.includes('mtllib island.mtl')
+          && text('island.mtl').includes('map_Kd island.png') && pv.getUint32(16) === 256 && pv.getUint32(20) === 1,
+        `${header && header[0]} ${quads} faces, ${st().voxels} voxels`);
+      zipName = null;
+      await key('k', cmd);
+      for (const ch of 'export obj') await key(ch);
+      await key('Enter');
+      await frames();
+      step('Cmd-K Export OBJ downloads it too', zipName === 'island-obj.zip', `${zipName}`);
+      // PNG slices: one PNG of every layer side by side, from the row and from Cmd-K.
+      zipBlob = null; zipName = null;
+      await click(...hit('export'));
+      await click(...hit('export-slices'));
+      await frames();
+      const b = st().bounds;
+      const sl = zipBlob ? await slicePixels(zipBlob) : null;
+      step('its PNG slices row downloads island-slices.png: every layer side by side, every voxel a pixel',
+        zipName === 'island-slices.png' && !st().exportMenu && sl && sl.w === b[0] * b[1] && sl.h === b[2] && sl.filled === st().voxels,
+        `${zipName} ${sl && `${sl.w}x${sl.h} ${sl.filled} pixels`} ${b} ${st().voxels} voxels`);
+      zipName = null;
+      await key('k', cmd);
+      for (const ch of 'export png slices') await key(ch);
+      await key('Enter');
+      await frames();
+      step('Cmd-K Export PNG slices downloads it too', zipName === 'island-slices.png', `${zipName}`);
+    } finally {
+      URL.createObjectURL = realUrl;
+      HTMLAnchorElement.prototype.click = realA;
+    }
+    step('the export steps leave the file as it was', same(bytes(), original));
+
     // Materials: Cmd-K "Edit material", the type buttons and sliders, the render restarts,
     // the download carries MATL chunks, and undo gives back the file.
     const mat = (slot) => Array.from(window.vxr.material(slot));
@@ -431,6 +761,14 @@ async () => {
     const em = hit('mat-flux');
     await drag(em[0], em[1], em[0] + 150, em[1]);
     step('Emit and its power slider', mat(slot)[0] === 3 && mat(slot)[6] === 4, `${mat(slot)}`);
+    await click(...hit('mt4'));
+    const sp = hit('mat-spec');
+    await drag(sp[0], sp[1], sp[0] - 150, sp[1]);
+    step('Plastic and its specular slider', mat(slot)[0] === 4 && mat(slot)[7] === 0, `${mat(slot)}`);
+    await click(...hit('mt2'));
+    const at = hit('mat-att');
+    await drag(at[0], at[1], at[0] + 150, at[1]);
+    step('Glass and its attenuation slider', mat(slot)[0] === 2 && mat(slot)[8] === 1, `${mat(slot)}`);
     const saved = bytes();
     let matl = 0;
     for (let i = 0; i + 4 <= saved.length; i++) if (saved[i] === 77 && saved[i + 1] === 65 && saved[i + 2] === 84 && saved[i + 3] === 76) matl++;
@@ -481,6 +819,222 @@ async () => {
     await frames(10);
     s = st();
     step('a broken file keeps the scene', s.name === 'saved.vox' && s.voxels === s0.voxels + 1);
+
+    // World mode on the generated 22-world file (several objects, groups, linked copies):
+    // pick, drag, undo, nudge, duplicate, linked copy, delete, Escape, Cmd-K, and a save
+    // that keeps every other chunk, then undo back to the file's bytes.
+    const worldFile = new Uint8Array(await (await fetch('__fixtures/22-world.vox')).arrayBuffer());
+    const wdt = new DataTransfer();
+    wdt.items.add(new File([worldFile], '22-world.vox'));
+    input.files = wdt.files;
+    input.dispatchEvent(new Event('change'));
+    for (let i = 0; i < 60 && st().name !== '22-world.vox'; i++) await frames(1);
+    await frames(6);
+    const w0 = st();
+    step('a file of several objects opens in world mode', w0.mode === 'world' && w0.objects === 6 && same(bytes(), worldFile), JSON.stringify(w0));
+    // In world mode the OBJ export holds every shown object (the hidden ones are left out).
+    blob = null; downloaded = null;
+    await key('k', cmd);
+    for (const ch of 'export obj') await key(ch);
+    await key('Enter');
+    await frames();
+    {
+      const files = blob ? unzip(new Uint8Array(await blob.arrayBuffer())) : {};
+      const obj = files['22-world.obj'] ? new TextDecoder().decode(files['22-world.obj']) : '';
+      const header = obj.match(/^# vxr OBJ export: (\d+) voxels/);
+      step('in world mode Export OBJ downloads 22-world-obj.zip with every shown object', downloaded === '22-world-obj.zip' && header && +header[1] === w0.voxels, `${downloaded} ${header && header[0]} ${w0.voxels}`);
+    }
+    blob = null; downloaded = null;
+    await key('k', cmd);
+    for (const ch of 'export png slices') await key(ch);
+    await key('Enter');
+    await frames();
+    {
+      const sl = blob ? await slicePixels(blob) : null;
+      step('in world mode Export PNG slices downloads 22-world-slices.png with every shown voxel', downloaded === '22-world-slices.png' && sl && sl.filled === w0.voxels, `${downloaded} ${sl && sl.filled} ${w0.voxels}`);
+    }
+    // A point on an object near the middle: a click there picks it and edits nothing.
+    let at = null;
+    for (const [dx, dy] of [[0, 0], [0, 30], [-40, 20], [40, 20], [0, 60], [-80, 40], [80, 40]]) {
+      await click(640 + dx, 400 + dy);
+      if (st().picked) { at = [640 + dx, 400 + dy]; break; }
+    }
+    s = st();
+    step('a click in world mode picks an object and edits nothing', !!at && s.selected > 0 && s.voxels === w0.voxels && !s.undo, JSON.stringify(s));
+    if (at) {
+      const name = st().picked;
+      await drag(at[0], at[1], at[0] + 90, at[1] + 10);
+      s = st();
+      step('a drag moves the picked object', s.picked === name && s.undo && !same(bytes(), worldFile), JSON.stringify(s));
+      const moved = bytes();
+      await key('z', cmd);
+      step('one undo puts it back', same(bytes(), worldFile) && st().picked === name);
+      await key('z', { metaKey: true, shiftKey: true });
+      step('redo moves it again', same(bytes(), moved));
+      await key('ArrowRight');
+      step('an arrow nudges the picked object', !same(bytes(), moved) && st().voxels === w0.voxels);
+      await key('d', cmd);
+      s = st();
+      step('Cmd-D duplicates it with its own model and picks the copy', s.objects === 7 && s.models === w0.models + 1 && !!s.picked, JSON.stringify(s));
+      await key('d', { metaKey: true, shiftKey: true });
+      s = st();
+      step('Cmd-Shift-D makes a linked copy sharing the model', s.objects === 8 && s.models === w0.models + 1, JSON.stringify(s));
+      await key('Backspace');
+      s = st();
+      step('Backspace deletes the picked object', s.objects === 7 && s.picked === null && s.selected === 0, JSON.stringify(s));
+      await click(...at);
+      const had = st().picked;
+      await key('Escape');
+      step('Escape picks nothing', !!had && st().picked === null);
+      await click(...at);
+      await key('k', cmd);
+      for (const ch of 'duplicate object') await key(ch);
+      await key('Enter');
+      step("Cmd-K 'Duplicate object'", st().objects === 8, JSON.stringify(st()));
+      const edited = bytes();
+      step('the edited world keeps every other chunk of the file', others(edited).join('|') === others(worldFile).join('|'));
+      for (let i = 0; i < 20 && st().undo; i++) await key('z', cmd);
+      step('every world edit undone gives back the file', same(bytes(), worldFile) && st().objects === 6, JSON.stringify(st()));
+    }
+
+    // The scene tree: rows, a row click picks, the eye and H hide, a double-click renames
+    // (Escape cancels), and in model mode a row click edits that object.
+    const rows = st().tree;
+    const node = (name) => (st().tree.find((r) => r.name === name) || {}).node;
+    const treeC = rows.find((r) => r.name === 'tree c');
+    step('the scene tree shows every object and group', rows.length === 8 && !!treeC && treeC.depth === 2 && treeC.linked === 3 && rows.some((r) => r.name === 'lost gem' && r.hidden), JSON.stringify(rows));
+    const slab = node('slab');
+    await chip(`tree-${slab}`);
+    step('a tree row click picks its object', st().picked === 'slab' && st().treeOn === slab, JSON.stringify(st()));
+    const t0 = st().voxels;
+    await chip(`tree-eye-${slab}`);
+    s = st();
+    step('the row eye hides the object as one undo step', s.voxels === t0 - 64 && s.undo, JSON.stringify(s));
+    await key('z', cmd);
+    step('undo shows it again', st().voxels === t0 && same(bytes(), worldFile));
+    await key('h');
+    const hHid = st().voxels === t0 - 64;
+    await key('h');
+    step('H hides and shows the picked object', hHid && st().voxels === t0);
+    const pause = () => new Promise((r) => setTimeout(r, 400));
+    // Two presses one frame apart, so they stay inside egui's 0.3 s double-click window even
+    // when headless Chrome draws slowly (two whole clicks are nine frames apart).
+    const dbl = async (name) => {
+      await pause();
+      const h = window.vxr.hit(name);
+      if (!h.length) return;
+      ptr('pointermove', h[0], h[1]); await frames();
+      for (const type of ['pointerdown', 'pointerup', 'pointerdown', 'pointerup']) { ptr(type, h[0], h[1]); await frames(1); }
+      await frames();
+    };
+    await dbl(`tree-${slab}`);
+    const field = window.vxr.hit('tree-rename').length > 0;
+    await key('a', cmd);
+    for (const ch of 'floor') await key(ch);
+    await key('Enter');
+    step('a double-click on a row renames it', field && node('floor') === slab, JSON.stringify(st().tree));
+    await key('z', cmd);
+    step('the rename is one undo step', node('slab') === slab && same(bytes(), worldFile));
+    await dbl(`tree-${slab}`);
+    await key('x');
+    await key('Escape');
+    step('Escape cancels a rename', node('slab') === slab && st().picked === 'slab' && window.vxr.hit('tree-rename').length === 0);
+
+    // Groups: a group row picks the group, a drag on one of its objects and the arrows move
+    // it whole, Cmd-D copies it, Cmd-Shift-G ungroups, Cmd-G and Cmd-K 'Ungroup' wrap an
+    // object and take it out again, Tab edits the group's first object.
+    const trees = node('trees');
+    await pause();
+    await chip(`tree-${trees}`);
+    s = st();
+    step('a group row picks the group and selects its objects', s.picked === 'trees' && s.treeOn === trees && s.selected > 0, JSON.stringify(s));
+    let groupDrag = false;
+    for (const [dx, dy] of [[0, 0], [0, 30], [-40, 20], [40, 20], [0, 60], [-80, 40], [80, 40], [-40, -20], [40, -20]]) {
+      await pause();
+      await chip(`tree-${trees}`);
+      await drag(640 + dx, 400 + dy, 640 + dx + 90, 400 + dy + 10);
+      if (st().picked === 'trees' && !same(bytes(), worldFile)) { groupDrag = true; break; }
+      if (st().undo) await key('z', cmd);
+    }
+    step('a drag on an object of the picked group moves the group', groupDrag, JSON.stringify(st()));
+    await key('z', cmd);
+    step('the group drag is one undo step', same(bytes(), worldFile) && st().picked === 'trees');
+    await key('ArrowRight');
+    step('an arrow nudges the picked group', !same(bytes(), worldFile) && st().picked === 'trees');
+    await key('z', cmd);
+    await key('d', cmd);
+    s = st();
+    step('Cmd-D copies the group and its objects', s.objects === 9 && s.tree.length === 13, JSON.stringify(s));
+    await key('z', cmd);
+    await pause();
+    await chip(`tree-${trees}`);
+    await key('g', { metaKey: true, shiftKey: true });
+    s = st();
+    step('Cmd-Shift-G ungroups the picked group', s.tree.length === 7 && s.picked === 'tree a' && node('trees') === undefined, JSON.stringify(s));
+    await key('z', cmd);
+    step('ungrouping is one undo step', st().tree.length === 8 && same(bytes(), worldFile));
+    await pause();
+    await chip(`tree-${slab}`);
+    await key('g', cmd);
+    s = st();
+    const wrapped = s.tree.find((r) => r.node === slab);
+    step('Cmd-G puts the picked object into a new group', s.tree.length === 9 && s.picked === 'group 1' && wrapped && wrapped.depth === 1, JSON.stringify(s));
+    await key('k', cmd);
+    for (const ch of 'ungroup') await key(ch);
+    await key('Enter');
+    step("Cmd-K 'Ungroup' takes it out again", st().tree.length === 8 && st().picked === 'slab', JSON.stringify(st()));
+    for (let i = 0; i < 2; i++) await key('z', cmd);
+    step('every group edit undone gives back the file', same(bytes(), worldFile), JSON.stringify(st()));
+
+    // Layers: the LAYERS list, a layer's eye, a layer row click moving the picked object onto
+    // it, a double-click rename, + and Cmd-K 'New layer', one undo step each.
+    const layers = () => st().layers.map((l) => [l.id, l.name, l.objects, l.hidden].join(':')).join(',');
+    step('the LAYERS list shows the file layers', layers() === '0:ground:2:false,1:trees:3:false,2:secret:1:true' && window.vxr.hit('layer-add').length > 0, layers());
+    const l0 = st().voxels;
+    await chip('layer-eye-2');
+    step("a layer's eye shows the secret layer's gem", st().voxels === l0 + 1 && !st().layers[2].hidden, layers());
+    await key('z', cmd);
+    step('showing a layer is one undo step', st().voxels === l0 && same(bytes(), worldFile));
+    await pause();
+    await chip(`tree-${slab}`);
+    const onGround = st().layerOn === 0;
+    await chip('layer-1');
+    s = st();
+    step('a layer row click puts the picked object on that layer', onGround && s.layerOn === 1 && s.tree.find((r) => r.node === slab).layer === 1 && s.layers[1].objects === 4, layers());
+    await chip('layer-eye-1');
+    step('hiding that layer hides the object', st().voxels < l0 - 64, `${st().voxels}`);
+    await key('z', cmd);
+    await key('z', cmd);
+    step('moving to a layer and hiding it undo one step each', same(bytes(), worldFile) && st().layerOn === 0);
+    await dbl('layer-0');
+    const layerField = window.vxr.hit('tree-rename').length > 0;
+    await key('a', cmd);
+    for (const ch of 'floor') await key(ch);
+    await key('Enter');
+    step('a double-click renames a layer', layerField && st().layers[0].name === 'floor', layers());
+    await key('z', cmd);
+    await chip('layer-add');
+    const plus = st().layers.length === 4 && st().layers[3].name === 'layer 3';
+    await key('k', cmd);
+    for (const ch of 'new layer') await key(ch);
+    await key('Enter');
+    step("+ and Cmd-K 'New layer' add layers", plus && st().layers.length === 5, layers());
+    for (let i = 0; i < 2; i++) await key('z', cmd);
+    step('every layer edit undone gives back the file', same(bytes(), worldFile) && st().layers.length === 3, layers());
+    await pause();
+    await chip(`tree-${trees}`);
+    await key('Tab');
+    step('Tab with a group picked edits its first object', st().mode === 'object' && st().treeOn === node('tree a'), JSON.stringify(st()));
+    await key('Tab');
+    await pause();
+    await chip(`tree-${slab}`);
+    await key('Tab');
+    const treeA = node('tree a');
+    await chip(`tree-${treeA}`);
+    s = st();
+    step('in model mode a tree row click edits that object', s.mode === 'object' && s.treeOn === treeA, JSON.stringify(s));
+    await key('Tab');
+    step('the tree leaves the file as it was', same(bytes(), worldFile) && st().mode === 'world');
   } finally {
     input.click = realClick;
     URL.createObjectURL = realUrl;

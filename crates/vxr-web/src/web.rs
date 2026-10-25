@@ -1,5 +1,6 @@
 use vxr_app::Editor;
 use vxr_app::editor::{Button, NEW_SIZE};
+use vxr_app::files::{obj_files, slices_png, zip};
 use vxr_app::ui::{Action, FontBytes};
 use vxr_core::Scene;
 use vxr_render::Gpu;
@@ -192,8 +193,8 @@ impl App {
         .into()
     }
 
-    /// Draw a frame at `time` seconds. Returns what the page must do: "open", "save", "embed"
-    /// or "exported" (a render export is ready: `take_export`).
+    /// Draw a frame at `time` seconds. Returns what the page must do: "open", "save", "embed",
+    /// "obj" (download `export_obj`), "slices" (download `export_slices`) or "exported" (a render export is ready: `take_export`).
     pub fn frame(&mut self, time: f64) -> Vec<String> {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
@@ -223,6 +224,8 @@ impl App {
                 Action::Open => Some("open".into()),
                 Action::Save => Some("save".into()),
                 Action::Embed => Some("embed".into()),
+                Action::ExportObj => Some("obj".into()),
+                Action::ExportSlices => Some("slices".into()),
                 Action::Exported => Some("exported".into()),
                 _ => None,
             })
@@ -248,6 +251,41 @@ impl App {
         self.editor.exported.take().map(|(png, _)| png).unwrap_or_default()
     }
 
+    /// The OBJ export (`.obj`, `.mtl` and palette `.png`) zipped into one download, or empty
+    /// with a toast when there is nothing to export.
+    pub fn export_obj(&mut self) -> Vec<u8> {
+        let ctx = self.editor.ctx.clone();
+        match obj_files(&self.editor.scene, &self.editor.export_stem()) {
+            Ok((files, _)) => zip(&files),
+            Err(e) => {
+                self.editor.ui.toast(&ctx, format!("Could not export: {e}"));
+                Vec::new()
+            }
+        }
+    }
+
+    /// The file name for the OBJ export's zip.
+    pub fn obj_name(&self) -> String {
+        format!("{}-obj.zip", self.editor.export_stem())
+    }
+
+    /// The PNG slices export, or empty with a toast when there is nothing to export.
+    pub fn export_slices(&mut self) -> Vec<u8> {
+        let ctx = self.editor.ctx.clone();
+        match slices_png(&self.editor.scene) {
+            Ok((png, _, _)) => png,
+            Err(e) => {
+                self.editor.ui.toast(&ctx, format!("Could not export: {e}"));
+                Vec::new()
+            }
+        }
+    }
+
+    /// The file name for the PNG slices export.
+    pub fn slices_name(&self) -> String {
+        self.editor.slices_name()
+    }
+
     /// The file name for the render export.
     pub fn export_name(&self) -> String {
         self.editor.export_name()
@@ -264,7 +302,7 @@ impl App {
         let e = &self.editor;
         let (c, h) = (&e.cam, e.scene.history());
         format!(
-            r#"{{"voxels":{},"tool":"{:?}","shape":"{:?}","mirror":{},"mirrorAxes":[{},{},{}],"lock":{},"span":{},"selected":{},"hasClip":{},"slot":{},"colorEdit":{},"slotOp":"{:?}","undo":{},"redo":{},"cmdk":{},"coach":{},"name":{:?},"size":[{},{}],"ppp":{},"cam":[{},{},{},{},{},{}],"render":{{"shown":{},"spp":{},"rows":{},"restarts":{},"timestamps":{},"panel":{},"maxSpp":{},"exposure":{},"aperture":{},"sky":{},"export":{}}}}}"#,
+            r#"{{"voxels":{},"tool":"{:?}","shape":"{:?}","mirror":{},"mirrorAxes":[{},{},{}],"lock":{},"brushSize":{},"sizePanel":{},"lifting":{},"span":{},"selected":{},"region":"{:?}","hasClip":{},"bounds":[{},{},{}],"boundsPanel":{},"slot":{},"colorEdit":{},"slotOp":"{:?}","undo":{},"redo":{},"cmdk":{},"coach":{},"name":{:?},"size":[{},{}],"ppp":{},"cam":[{},{},{},{},{},{}],"ortho":{},"view":{},"viewPanel":{},"exportMenu":{},"guides":[{},{},{}],"mode":"{}","objects":{},"models":{},"picked":{},"tree":[{}],"treeOn":{},"layers":[{}],"layerOn":{},"render":{{"shown":{},"spp":{},"rows":{},"restarts":{},"timestamps":{},"panel":{},"full":{},"size":[{},{}],"maxSpp":{},"exposure":{},"gamma":{},"vignette":{},"aperture":{},"sky":{},"physicalSky":{},"export":{}}}}}"#,
             e.scene.map.voxels,
             e.ui.tool,
             e.ui.shape,
@@ -273,9 +311,17 @@ impl App {
             e.ui.mirror_on[1],
             e.ui.mirror_on[2],
             e.ui.lock.map_or("null".into(), |a| format!("\"{}\"", ["X", "Y", "Z"][a])),
+            e.ui.size,
+            e.ui.size_panel,
+            e.lifting(),
             e.span().map_or("null".into(), |(l, v)| format!("[\"{l}\",\"{v}\"]")),
             e.scene.selected_count(),
+            e.ui.region,
             e.scene.clipboard.is_some(),
+            e.scene.bounds().size[0],
+            e.scene.bounds().size[1],
+            e.scene.bounds().size[2],
+            e.ui.bounds_panel.is_some(),
             e.ui.slot,
             e.ui.color_edit.is_some(),
             e.ui.slot_op,
@@ -293,16 +339,58 @@ impl App {
             c.yaw,
             c.pitch,
             c.distance,
+            c.ortho,
+            c.view().map_or("null".into(), |v| format!("\"{}\"", v.name())),
+            e.ui.view_panel,
+            e.ui.export_menu,
+            e.ui.grid,
+            e.ui.ground,
+            e.ui.frame,
+            match e.scene.at() {
+                vxr_core::history::At::World => "world",
+                vxr_core::history::At::Object(_) => "object",
+                vxr_core::history::At::Map => "model",
+            },
+            e.scene.world().map_or(1, |w| w.objects().len()),
+            e.scene.world().map_or(1, |w| w.models.len()),
+            e.scene
+                .picked()
+                .and_then(|i| e.scene.world().map(|w| vxr_app::editor::node_name(w, i)))
+                .map_or("null".into(), |n| format!("{n:?}")),
+            e.ui.tree
+                .iter()
+                .map(|r| format!(
+                    r#"{{"node":{},"name":{:?},"depth":{},"group":{},"linked":{},"hidden":{},"shown":{},"layer":{}}}"#,
+                    r.node, r.name, r.depth, r.group, r.linked, r.hidden, r.shown, r.layer
+                ))
+                .collect::<Vec<_>>()
+                .join(","),
+            e.ui.tree_on.map_or("null".into(), |n| n.to_string()),
+            e.ui.layers
+                .iter()
+                .map(|l| format!(
+                    r#"{{"id":{},"name":{:?},"objects":{},"hidden":{}}}"#,
+                    l.id, l.name, l.objects, l.hidden
+                ))
+                .collect::<Vec<_>>()
+                .join(","),
+            e.ui.layer_on.map_or("null".into(), |n| n.to_string()),
             e.ui.render_rect.is_some() && e.ui.show_render,
             e.preview.samples(),
             e.preview.last_rows,
             e.preview.restarts,
             e.gpu.timestamps,
             e.ui.render_panel,
+            e.ui.full_render && e.ui.show_render,
+            e.preview.width,
+            e.preview.height,
             e.preview.max_spp,
             e.preview.lighting.exposure,
+            e.preview.lighting.gamma,
+            e.preview.lighting.vignette,
             e.preview.lighting.aperture,
             e.preview.lighting.sky_backdrop,
+            e.preview.lighting.physical_sky,
             e.export.as_ref().map_or("null".into(), |x| format!("{:?}", x.progress().0)),
         )
     }
@@ -313,12 +401,13 @@ impl App {
         vec![c[0] as u32, c[1] as u32, c[2] as u32, c[3] as u32, self.editor.scene.map.counts[slot as usize]]
     }
 
-    /// The material of palette slot `slot`: type (0 diffuse, 1 metal, 2 glass, 3 emit),
-    /// roughness, metalness, refractive index, transparency, emission and power.
+    /// The material of palette slot `slot`: type (0 diffuse, 1 metal, 2 glass, 3 emit,
+    /// 4 plastic), roughness, metalness, refractive index, transparency, emission, power,
+    /// specular and attenuation.
     pub fn material(&self, slot: u8) -> Vec<f32> {
         let m = self.editor.scene.materials[slot as usize];
         let kind = vxr_core::material::Kind::ALL.iter().position(|&k| k == m.kind).unwrap_or(0);
-        vec![kind as f32, m.rough, m.metal, m.ior, m.trans, m.emit, m.flux]
+        vec![kind as f32, m.rough, m.metal, m.ior, m.trans, m.emit, m.flux, m.spec, m.att]
     }
 
     /// The middle of a named part of the UI in CSS pixels (see `Hybrid::hits`), or an empty

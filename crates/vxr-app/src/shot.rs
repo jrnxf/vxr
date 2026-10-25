@@ -6,7 +6,7 @@ use std::path::Path;
 
 use vxr_app::Editor;
 use vxr_app::editor::{Button, NEW_SIZE};
-use vxr_app::ui::{Shape, Tool};
+use vxr_app::ui::{Action, Region, Shape, Tool};
 use vxr_core::Scene;
 use vxr_render::Gpu;
 use vxr_render::gpu::read_texture;
@@ -20,6 +20,8 @@ struct Shot {
     target: wgpu::Texture,
     /// egui time in seconds, so double clicks and drags see time move forward.
     time: f64,
+    /// What the editor asked its host to do (open, save, export), oldest first.
+    host: Vec<Action>,
 }
 
 impl Shot {
@@ -42,7 +44,7 @@ impl Shot {
             view_formats: &[],
         });
         let ed = Editor::new(gpu, scene, name, FORMAT, (w, h), ppp, crate::native::fonts())?;
-        Ok(Self { ed, target, time: 0.0 })
+        Ok(Self { ed, target, time: 0.0, host: Vec::new() })
     }
 
     /// Draw `n` frames (egui needs a couple to lay out and upload fonts).
@@ -63,7 +65,8 @@ impl Shot {
                 ..Default::default()
             };
             input.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point = Some(self.ed.ppp);
-            self.ed.frame(input, &view);
+            let (host, _) = self.ed.frame(input, &view);
+            self.host.extend(host);
         }
     }
 
@@ -208,6 +211,7 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     s.stroke(p, &[[60.0, 20.0], [120.0, 40.0]]);
     let v2 = s.voxels();
     check(v2 > v1, format!("add box drag: {v1} -> {v2}"))?;
+    s.ed.place_box();
 
     s.tool(Tool::Paint, Shape::Face);
     s.ed.ui.slot = 12;
@@ -249,9 +253,16 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
 
     palette(&mut s, dir)?;
     brushes(dir)?;
+    brush_size(dir)?;
+    box_height(dir)?;
     selection(dir)?;
+    model_tools(dir)?;
+    views(dir)?;
+    world(dir)?;
+    scene_tree(dir)?;
     render(&mut s, dir)?;
     materials(&mut s, dir)?;
+    export(&mut s, dir)?;
 
     // Save, reopen and compare.
     let bytes = s.ed.scene.to_vox();
@@ -388,6 +399,7 @@ fn brushes(dir: &Path) -> Result<(), String> {
         }
     });
     let b = (lo, hi);
+    s.ed.place_box();
     check(
         s.ed.ui.lock == Some(0) && s.ed.ui.hits.contains_key("lock-x") && lo[0] == hi[0] && hi[1] > lo[1],
         format!("K locks X: a box drag builds a wall across x ({b:?})"),
@@ -412,6 +424,204 @@ fn brushes(dir: &Path) -> Result<(), String> {
     s.ed.pointer_moved(Some([mid[0] + 300.0, mid[1] + 100.0]));
     s.frames(4);
     s.save_png(&dir.join("app-2x-brushes.png"))
+}
+
+/// The voxel brush's size: V again opens the size flyout, its buttons, - and =, Cmd-K, a
+/// cube added on the ground and one erased into a face, each one undo step.
+fn brush_size(dir: &Path) -> Result<(), String> {
+    let mut s = Shot::new(Scene::new(NEW_SIZE), "Untitled", 2.0)?;
+    s.frames(3);
+    let mid = [s.ed.width as f32 / 2.0, s.ed.height as f32 / 2.0];
+    let k = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    let none = egui::Modifiers::NONE;
+    s.ed.ui.coach = false;
+    s.tool(Tool::Add, Shape::Box);
+    s.frames_with(2, vec![k(egui::Key::V, none)]);
+    let closed = !s.ed.ui.hits.contains_key("size-plus");
+    s.frames_with(2, vec![k(egui::Key::V, none)]);
+    check(
+        s.ed.ui.shape == Shape::Voxel && closed && s.ed.ui.hits.contains_key("size-plus"),
+        "V picks the voxel brush, V again opens its size flyout".into(),
+    )?;
+    s.ui_click("size-plus")?;
+    s.ui_click("size-plus")?;
+    check(s.ed.ui.size == 3, format!("the flyout's + steps the size to {}", s.ed.ui.size))?;
+    s.frames_with(2, vec![k(egui::Key::Minus, none)]);
+    let down = s.ed.ui.size;
+    s.frames_with(2, vec![k(egui::Key::Equals, none)]);
+    check(down == 2 && s.ed.ui.size == 3, format!("- and = step it ({down}, then {})", s.ed.ui.size))?;
+    s.frames_with(2, vec![k(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("smaller brush".into())]);
+    s.frames_with(2, vec![k(egui::Key::Enter, none)]);
+    let cmdk = s.ed.ui.size;
+    s.frames_with(2, vec![k(egui::Key::Equals, none)]);
+    check(cmdk == 2 && s.ed.ui.size == 3, "Cmd-K 'Smaller brush'".into())?;
+
+    // Size 3 on the ground: a 3x3x3 cube standing on it, one undo step.
+    s.stroke(mid, &[]);
+    let (mut lo, mut hi) = ([i32::MAX; 3], [i32::MIN; 3]);
+    s.ed.scene.for_each_voxel(|p, _| {
+        for a in 0..3 {
+            (lo[a], hi[a]) = (lo[a].min(p[a]), hi[a].max(p[a]));
+        }
+    });
+    let cube = (0..3).all(|a| hi[a] - lo[a] == 2) && lo[1] == 0;
+    check(s.voxels() == 27 && cube, format!("a size 3 click on the ground adds a 3x3x3 cube ({lo:?} to {hi:?})"))?;
+    s.ed.undo();
+    let undone = s.voxels();
+    s.ed.redo();
+    check(undone == 0 && s.voxels() == 27, "one undo step, and redo".into())?;
+
+    // Size 2 erase into the cube's top face takes the 2x2x2 cells there that are filled.
+    s.frames_with(2, vec![k(egui::Key::Minus, none)]);
+    s.ed.ui.tool = Tool::Erase;
+    // The middle of the top face of the cube's middle column: x and z reach one cell further
+    // on the high side, so all 8 cells are inside the cube.
+    let c = [lo[0] + 1, hi[1], lo[2] + 1];
+    let at = project(&s.ed, [c[0] as f32 + 0.5, c[1] as f32 + 1.0, c[2] as f32 + 0.5]);
+    s.ed.pointer_moved(Some(at));
+    let aimed = s.ed.cursor().is_some_and(|t| t.voxel == c && t.normal == [0, 1, 0]);
+    s.stroke(at, &[]);
+    let gone = |x: i32, y: i32, z: i32| s.ed.scene.map.get(x, y, z) == 0;
+    check(
+        aimed && s.voxels() == 27 - 8 && gone(c[0] + 1, c[1] - 1, c[2] + 1) && !gone(c[0] - 1, c[1], c[2]),
+        format!("a size 2 erase on the top face takes the 2x2x2 cells under it ({} left)", s.voxels()),
+    )?;
+    s.ed.undo();
+    check(s.voxels() == 27, "erase: one undo step".into())?;
+
+    // The screenshot: the cube with the flyout open at size 3.
+    s.ed.ui.tool = Tool::Add;
+    s.frames_with(2, vec![k(egui::Key::Equals, none)]);
+    s.ed.pointer_moved(Some([mid[0] + 200.0, mid[1] + 60.0]));
+    s.frames(4);
+    s.save_png(&dir.join("app-2x-size.png"))?;
+
+    // - back to 1 (- stops there), then Escape closes the flyout.
+    s.ui_click("size-minus")?;
+    s.ui_click("size-minus")?;
+    s.frames_with(2, vec![k(egui::Key::Minus, none)]);
+    let open = s.ed.ui.hits.contains_key("size-plus");
+    s.frames_with(2, vec![k(egui::Key::Escape, none)]);
+    check(
+        s.ed.ui.size == 1 && open && !s.ed.ui.hits.contains_key("size-plus"),
+        "- steps back to 1 and stops; Escape closes the flyout".into(),
+    )
+}
+
+/// The bounds of every voxel, inclusive, and whether they fill that box exactly.
+fn solid_box(s: &Shot) -> ([i32; 3], [i32; 3], bool) {
+    let (mut lo, mut hi) = ([i32::MAX; 3], [i32::MIN; 3]);
+    s.ed.scene.for_each_voxel(|p, _| {
+        for a in 0..3 {
+            (lo[a], hi[a]) = (lo[a].min(p[a]), hi[a].max(p[a]));
+        }
+    });
+    let cells: i64 = (0..3).map(|a| (hi[a] - lo[a] + 1).max(0) as i64).product();
+    (lo, hi, s.voxels() > 0 && cells == s.voxels() as i64)
+}
+
+/// The box brush's height: a drag draws the base, then the pointer lifts it live until a
+/// click, Enter or Cmd-K places it (one undo step with its base) or Escape drops it; erase
+/// pushes a base down into a box.
+fn box_height(dir: &Path) -> Result<(), String> {
+    let mut s = Shot::new(Scene::new(NEW_SIZE), "Untitled", 2.0)?;
+    s.frames(3);
+    let mid = [s.ed.width as f32 / 2.0, s.ed.height as f32 / 2.0];
+    let k = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    let none = egui::Modifiers::NONE;
+    s.ed.ui.coach = false;
+    s.tool(Tool::Add, Shape::Voxel);
+    s.frames_with(2, vec![k(egui::Key::B, none)]);
+    let end = [mid[0] + 160.0, mid[1] + 40.0];
+    s.stroke(mid, &[[80.0, 20.0], [160.0, 40.0]]);
+    s.frames(1);
+    let (lo, hi, solid) = solid_box(&s);
+    let base = s.voxels();
+    check(
+        s.ed.ui.shape == Shape::Box && s.ed.ui.lifting && solid && lo[1] == 0 && hi[1] == 0 && base > 4,
+        format!("B: a drag draws the base and lets go into its height ({base} voxels, {lo:?} to {hi:?})"),
+    )?;
+    s.ed.pointer_moved(Some([end[0], end[1] - 160.0]));
+    s.frames(1);
+    let (lo2, hi2, solid) = solid_box(&s);
+    let high = hi2[1] + 1;
+    let span = s.ed.span().map(|(_, v)| v).unwrap_or_default();
+    check(
+        solid
+            && lo2 == lo
+            && high > 1
+            && s.voxels() == base * high as u64
+            && span.split('×').nth(1) == Some(&*high.to_string()),
+        format!("moving up lifts it live: {high} layers, {} voxels, BOX {span}", s.voxels()),
+    )?;
+    s.save_png(&dir.join("app-2x-box.png"))?;
+    s.ed.pointer_moved(Some(end));
+    check(s.voxels() == base, format!("back down to where it let go: one layer ({})", s.voxels()))?;
+    s.ed.pointer_moved(Some([end[0], end[1] - 160.0]));
+    s.stroke([end[0], end[1] - 160.0], &[]);
+    let placed = s.voxels();
+    check(!s.ed.lifting() && placed == base * high as u64, format!("a click places it ({placed} voxels)"))?;
+    s.ed.undo();
+    let undone = s.voxels();
+    s.ed.redo();
+    check(undone == 0 && s.voxels() == placed, "base and height are one undo step, and redo".into())?;
+
+    // Escape drops a box, base and all; Enter and Cmd-K 'Place box' place one.
+    let beside = [mid[0] - 300.0, mid[1] + 160.0];
+    s.stroke(beside, &[[60.0, 20.0]]);
+    s.ed.pointer_moved(Some([beside[0] + 60.0, beside[1] - 100.0]));
+    s.frames(1);
+    let lifted = s.voxels() > placed;
+    s.frames_with(2, vec![k(egui::Key::Escape, none)]);
+    s.ed.undo();
+    check(
+        lifted && !s.ed.lifting() && s.voxels() == 0,
+        format!("Escape drops a lifted box, leaving no undo step ({} after one undo)", s.voxels()),
+    )?;
+    s.ed.redo();
+    s.stroke(beside, &[[60.0, 20.0]]);
+    s.ed.pointer_moved(Some([beside[0] + 60.0, beside[1] - 100.0]));
+    s.frames_with(2, vec![k(egui::Key::Enter, none)]);
+    let entered = s.voxels();
+    s.ed.undo();
+    check(
+        entered > placed && s.voxels() == placed && !s.ed.lifting(),
+        format!("Enter places it, one undo step ({entered} voxels)"),
+    )?;
+    s.stroke(beside, &[[60.0, 20.0]]);
+    s.frames_with(2, vec![k(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("place box".into())]);
+    s.frames_with(2, vec![k(egui::Key::Enter, none)]);
+    let flat = s.voxels() - placed;
+    s.ed.undo();
+    check(
+        !s.ed.lifting() && flat > 0 && s.voxels() == placed,
+        format!("Cmd-K 'Place box' places it one layer high ({flat} voxels)"),
+    )?;
+
+    // Erase: a base on the placed box's top, pushed down to the ground, clears that column.
+    s.ed.ui.tool = Tool::Erase;
+    let (lo, hi, _) = solid_box(&s);
+    let a = [lo[0] + 1, hi[1], lo[2]];
+    let b = [lo[0] + 2, hi[1], lo[2] + 1];
+    let at = |c: [i32; 3]| [c[0] as f32 + 0.5, c[1] as f32 + 1.0, c[2] as f32 + 0.5];
+    // The far corner is aimed at its cell's middle, where the drag plane crosses it.
+    let pa = project(&s.ed, at(a));
+    let pb = project(&s.ed, [b[0] as f32 + 0.5, b[1] as f32 + 0.5, b[2] as f32 + 0.5]);
+    s.stroke(pa, &[[pb[0] - pa[0], pb[1] - pa[1]]]);
+    let top_only = placed - s.voxels();
+    let floor = project(&s.ed, [b[0] as f32 + 0.5, 0.2, b[2] as f32 + 0.5]);
+    s.ed.pointer_moved(Some(floor));
+    s.stroke(floor, &[]);
+    let gone = placed - s.voxels();
+    let hole = (0..=hi[1]).all(|y| s.ed.scene.map.get(a[0], y, a[2]) == 0 && s.ed.scene.map.get(b[0], y, b[2]) == 0);
+    check(
+        top_only == 4 && gone == 4 * (hi[1] + 1) as u64 && hole,
+        format!("erase: a 2x2 base on top ({top_only}), pushed down, clears the {gone} cells under it"),
+    )?;
+    s.ed.undo();
+    check(s.voxels() == placed, "erase: one undo step".into())
 }
 
 /// Where a point in map space lands on screen, in pixels.
@@ -543,6 +753,61 @@ fn selection(dir: &Path) -> Result<(), String> {
     s.ui_click("deselect")?;
     check(all == 32 && count(&s) == 0, format!("Cmd-A selects all ({all}); the flyout's x deselects"))?;
 
+    // Invert: nothing selected inverts to every voxel, a colour's voxels to the rest, and
+    // the flyout's All selects every voxel again. None of it is an undo step.
+    let saved = s.ed.scene.to_vox();
+    s.ui_click("invert")?;
+    let whole = count(&s);
+    s.frames_with(2, vec![key(egui::Key::I, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT)]);
+    check(
+        whole == 32 && count(&s) == 0,
+        format!("the flyout's Invert selects every voxel ({whole}), Cmd-Shift-I none"),
+    )?;
+    s.stroke(a_top, &[]);
+    let color = count(&s);
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("invert selection".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, none)]);
+    let rest = count(&s);
+    s.ui_click("select-all")?;
+    check(
+        color > 0 && rest == 32 - color && count(&s) == 32 && s.ed.scene.to_vox() == saved,
+        format!(
+            "Cmd-K Invert selection turns one colour's {color} voxels into the other {rest}; All selects 32; no edit"
+        ),
+    )?;
+    s.ui_click("deselect")?;
+
+    // Region select: the flyout's Face takes block A's top layer of its colour (12 cells,
+    // less the marker), Cmd-K Click selects volume all of block A and not B (24), Shift adds
+    // B's volume, and Color goes back to the colour (23). None of it is an edit.
+    s.ui_click("click-face")?;
+    s.stroke(a_top, &[]);
+    let face = (s.ed.ui.region, count(&s), bounds(&s));
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("click selects volume".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, none)]);
+    s.stroke(a_top, &[]);
+    let volume = (s.ed.ui.region, count(&s));
+    s.hold(egui::Modifiers::SHIFT);
+    s.stroke(b_top, &[]);
+    s.hold(none);
+    let both = count(&s);
+    s.ui_click("click-color")?;
+    s.stroke(a_top, &[]);
+    check(
+        face == (Region::Face, 11, Some(([50, 1, 60], [4, 1, 3])))
+            && volume == (Region::Volume, 24)
+            && both == 32
+            && count(&s) == 23
+            && s.ed.scene.to_vox() == saved,
+        format!(
+            "a click selects the face {face:?}, Cmd-K the volume {volume:?}, Shift adds ({both}), Color the colour ({}); no edit",
+            count(&s)
+        ),
+    )?;
+    s.ui_click("deselect")?;
+
     s.stroke(a_top, &[]);
     let before = bounds(&s);
     s.frames_with(2, vec![key(egui::Key::ArrowRight, none)]);
@@ -590,6 +855,767 @@ fn selection(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Model tools on an empty scene with one 5^3 cube, so every count is exact: the selection
+/// flyout's hollow and fill (whole model), Cmd-K 'Fill inside', crop to content (flyout and
+/// Cmd-K) and resize through the Bounds panel's fields, one undo step each. Writes
+/// `app-2x-bounds.png` with the Bounds panel open.
+fn model_tools(dir: &Path) -> Result<(), String> {
+    let mut s = Shot::new(Scene::new(NEW_SIZE), "Untitled", 2.0)?;
+    s.ed.ui.coach = false;
+    let mut cells = Vec::new();
+    for (x, y, z) in (60..65).flat_map(|x| (0..5).flat_map(move |y| (60..65).map(move |z| (x, y, z)))) {
+        cells.push(([x, y, z], 12));
+    }
+    s.ed.scene.edit(cells);
+    s.ed.frame_scene();
+    s.frames(3);
+    let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    s.frames_with(2, vec![key(egui::Key::S, egui::Modifiers::NONE)]);
+    s.ui_click("hollow")?;
+    let hollowed = (s.voxels(), s.ed.scene.map.get(62, 2, 62));
+    check(hollowed == (98, 0), format!("flyout hollow: the 3^3 core goes ({hollowed:?})"))?;
+    s.frames_with(2, vec![key(egui::Key::Z, egui::Modifiers::COMMAND)]);
+    check(s.voxels() == 125, "hollow is one undo step".into())?;
+    s.ui_click("hollow")?;
+    s.ed.ui.slot = 7;
+    s.ui_click("fill-in")?;
+    check(
+        s.voxels() == 125 && s.ed.scene.map.counts[7] == 27,
+        format!("flyout fill: the enclosed core fills with the current colour ({})", s.ed.scene.map.counts[7]),
+    )?;
+    s.ed.undo();
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("fill inside".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    let filled = s.ed.scene.map.counts[7];
+    s.ed.undo();
+    s.ed.undo();
+    check(
+        filled == 27 && s.voxels() == 125 && s.ed.scene.map.counts[12] == 125,
+        "Cmd-K 'Fill inside'; undo back to the solid cube".into(),
+    )?;
+
+    // Crop: the bounds fit the cube, the cube stays where it is in the world, and the view
+    // does not jump (the voxel under the middle of the view is the same world cell).
+    let mid = [s.ed.width as f32 / 2.0, s.ed.height as f32 / 2.0];
+    let under = |s: &mut Shot| {
+        s.ed.pointer_moved(Some(mid));
+        s.ed.cursor().filter(|t| !t.ground).map(|t| s.ed.scene.to_world(t.voxel))
+    };
+    let (before, world) = (under(&mut s), s.ed.scene.to_world([60, 0, 60]));
+    s.ui_click("crop")?;
+    let b = s.ed.scene.bounds();
+    check(
+        b.size == [5, 5, 5] && b.lo == world && s.voxels() == 125,
+        format!("flyout crop: the bounds fit the cube ({:?} at {:?})", b.size, b.lo),
+    )?;
+    check(before.is_some() && under(&mut s) == before, format!("the view holds still across the crop ({before:?})"))?;
+    s.frames_with(2, vec![key(egui::Key::Z, egui::Modifiers::COMMAND)]);
+    let b = s.ed.scene.bounds();
+    check(b.size == [128, 128, 128] && s.voxels() == 125 && under(&mut s) == before, "crop is one undo step".into())?;
+    // Resize through the Bounds panel: 3 wide keeps the middle three columns of the cube.
+    s.ui_click("resize")?;
+    check(
+        s.ed.ui.bounds_panel.is_some() && s.ed.ui.hits.contains_key("bounds-x"),
+        "Resize… opens the Bounds panel".into(),
+    )?;
+    s.type_into("bounds-x", "3")?;
+    let b = s.ed.scene.bounds();
+    check(
+        b.size == [3, 128, 128] && s.voxels() == 75,
+        format!("the X field resizes to 3, erasing what falls outside ({:?}, {} voxels)", b.size, s.voxels()),
+    )?;
+    s.frames(2);
+    s.save_png(&dir.join("app-2x-bounds.png"))?;
+    s.frames_with(2, vec![key(egui::Key::Z, egui::Modifiers::COMMAND)]);
+    check(s.ed.scene.bounds().size == [128; 3] && s.voxels() == 125, "resize is one undo step".into())?;
+    s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+    check(s.ed.ui.bounds_panel.is_none(), "Escape closes the Bounds panel".into())?;
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("crop to content".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    let cropped = s.ed.scene.bounds().size;
+    s.ed.undo();
+    s.frames(1);
+    check(
+        cropped == [5, 5, 5] && s.ed.scene.bounds().size == [128; 3] && s.voxels() == 125,
+        "Cmd-K 'Crop to content' and its undo".into(),
+    )?;
+    Ok(())
+}
+
+/// The world: a file of several objects opens in world mode, where voxels cannot be edited;
+/// Tab edits an object's model and goes back, Cmd-K does the same, and undo goes back into
+/// the model it edits.
+fn world(dir: &Path) -> Result<(), String> {
+    use vxr_core::history::At;
+    let bytes = vxr_vox::fixtures::all()
+        .into_iter()
+        .find(|f| f.name == "22-world")
+        .ok_or("no 22-world fixture")?
+        .builder
+        .build()
+        .write();
+    let mut s = Shot::new(Scene::from_vox(&bytes)?, "22-world.vox", 2.0)?;
+    s.ed.ui.coach = false;
+    s.frames(3);
+    let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    let tab = |s: &mut Shot| s.frames_with(2, vec![key(egui::Key::Tab, egui::Modifiers::NONE)]);
+    let world = s.ed.scene.world().ok_or("no world")?;
+    let (objects, shown) = (world.objects(), world.world_voxels(true).len() as u64);
+    check(
+        s.ed.scene.at() == At::World && s.voxels() == shown,
+        format!("a file of {} objects opens in world mode, showing {shown} voxels", objects.len()),
+    )?;
+    s.tool(Tool::Add, Shape::Voxel);
+    let mid = [s.ed.width as f32 / 2.0, s.ed.height as f32 / 2.0];
+    let p = s.top_face_pixel(mid)?;
+    s.stroke(p, &[]);
+    check(s.voxels() == shown && !s.ed.scene.history().can_undo(), "a click in world mode edits no voxel".into())?;
+    s.frames(1);
+    let picked = s.ed.scene.picked();
+    check(
+        picked.is_some() && s.ed.scene.selected_count() > 0 && s.ed.ui.picked.is_some(),
+        format!("the click picks {} and shows it selected", s.ed.ui.picked.clone().unwrap_or_default()),
+    )?;
+    s.frames(2);
+    s.save_png(&dir.join("app-2x-world.png"))?;
+
+    tab(&mut s);
+    let first = picked.ok_or("nothing picked")?;
+    let w = s.ed.scene.world().ok_or("no world")?;
+    let m = w.model_of(first).ok_or("not an object")?;
+    let model = w.models[m].voxels;
+    // A linked copy's edit shows on every shown copy of its model.
+    let copies = w.objects().into_iter().filter(|&i| w.model_of(i) == Some(m) && w.shown(i)).count() as u64;
+    check(
+        s.ed.scene.at() == At::Object(first) && s.voxels() == model,
+        format!("Tab edits the picked object's model ({model} voxels)"),
+    )?;
+    s.ed.frame_scene();
+    s.frames(2);
+    // The slab is one voxel tall and its bounds are its model's size, so erase rather than add.
+    s.tool(Tool::Erase, Shape::Voxel);
+    let p = s.top_face_pixel(mid)?;
+    s.stroke(p, &[]);
+    check(s.voxels() == model - 1, "an erase in model mode".into())?;
+    tab(&mut s);
+    check(
+        s.ed.scene.at() == At::World && s.voxels() == shown - copies,
+        format!("Tab shows the world with the edit ({} voxels, {:?})", s.voxels(), s.ed.scene.at()),
+    )?;
+    tab(&mut s);
+    check(s.ed.scene.at() == At::Object(first), "Tab goes back to the model last edited".into())?;
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("world mode".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    check(s.ed.scene.at() == At::World, "Cmd-K 'World mode / edit model'".into())?;
+    s.frames_with(2, vec![key(egui::Key::Z, egui::Modifiers::COMMAND)]);
+    check(
+        s.ed.scene.at() == At::Object(first) && s.voxels() == model && s.ed.scene.to_vox() == bytes,
+        "undo goes back into the model and the save is byte-identical again".into(),
+    )?;
+
+    // World mode: pick, drag, nudge, duplicate, linked copy, delete, all through the
+    // pointer path and keys.
+    tab(&mut s);
+    check(
+        s.ed.scene.at() == At::World && s.ed.scene.picked() == Some(first),
+        "leaving a model picks it in the world".into(),
+    )?;
+    s.frames(2);
+    let p = s.top_face_pixel(mid)?;
+    s.stroke(p, &[]);
+    let o = s.ed.scene.picked().ok_or("the click picked nothing")?;
+    let place = |s: &Shot, i| s.ed.scene.world().and_then(|w| w.placement(i)).ok_or("no placement");
+    let before = place(&s, o)?;
+    s.stroke(p, &[[20.0, 0.0], [40.0, 4.0], [70.0, 10.0]]);
+    let after = place(&s, o)?;
+    check(
+        after.1 == before.1 && after.0[1] == before.0[1] && after.0 != before.0 && s.ed.scene.picked() == Some(o),
+        format!("a drag moves the object on its top face's plane ({:?} to {:?})", before.0, after.0),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::Z, egui::Modifiers::COMMAND)]);
+    let undone = place(&s, o)? == before;
+    s.frames_with(2, vec![key(egui::Key::Z, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT)]);
+    check(undone && place(&s, o)? == after, "the drag is one undo step, and redo puts it back".into())?;
+    s.frames_with(2, vec![key(egui::Key::ArrowRight, egui::Modifiers::NONE)]);
+    let n = place(&s, o)?;
+    let d: i32 = (0..3).map(|a| (n.0[a] - after.0[a]).abs()).sum();
+    check(d == 1 && n.0[1] == after.0[1], "an arrow nudges the picked object one cell along the ground".into())?;
+    s.frames_with(2, vec![key(egui::Key::ArrowUp, egui::Modifiers::SHIFT)]);
+    check(place(&s, o)?.0[1] == n.0[1] + 1, "Shift-Up raises it one cell".into())?;
+    let counts = |s: &Shot| s.ed.scene.world().map_or((0, 0), |w| (w.objects().len(), w.models.len()));
+    let (n0, m0) = counts(&s);
+    s.frames_with(2, vec![key(egui::Key::D, egui::Modifiers::COMMAND)]);
+    let dup = s.ed.scene.picked().ok_or("no pick after duplicate")?;
+    let (pd, po) = (place(&s, dup)?, place(&s, o)?);
+    check(
+        counts(&s) == (n0 + 1, m0 + 1) && dup != o && pd.0[0] == po.0[0] + po.1[0] as i32 + 1 && pd.1 == po.1,
+        "Cmd-D duplicates the object beside itself with its own model, and picks the copy".into(),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::D, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT)]);
+    let link = s.ed.scene.picked().ok_or("no pick after linked copy")?;
+    let w = s.ed.scene.world().ok_or("no world")?;
+    check(
+        counts(&s) == (n0 + 2, m0 + 1) && link != dup && w.model_of(link) == w.model_of(dup),
+        "Cmd-Shift-D makes a linked copy sharing the model".into(),
+    )?;
+    tab(&mut s);
+    check(s.ed.scene.at() == At::Object(link), "Tab edits the picked object's model".into())?;
+    tab(&mut s);
+    s.frames_with(2, vec![key(egui::Key::Backspace, egui::Modifiers::NONE)]);
+    s.frames(1);
+    check(
+        counts(&s).0 == n0 + 1 && s.ed.scene.picked().is_none() && s.ed.ui.picked.is_none(),
+        "Backspace deletes the picked object".into(),
+    )?;
+    s.stroke(p, &[]);
+    let had = s.ed.scene.picked().is_some();
+    s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+    check(had && s.ed.scene.picked().is_none() && s.ed.scene.selected_count() == 0, "Escape picks nothing".into())?;
+    s.stroke(p, &[]);
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("duplicate object".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    check(counts(&s).0 == n0 + 2, "Cmd-K 'Duplicate object'".into())?;
+    s.frames(2);
+    s.save_png(&dir.join("app-2x-world-edit.png"))?;
+    let saved = s.ed.scene.to_vox();
+    let again = Scene::from_vox(&saved)?;
+    check(
+        again.world_voxels(false) == s.ed.scene.world_voxels(false),
+        "the edited world saves and reopens the same".into(),
+    )?;
+    while s.ed.scene.undo() {}
+    check(s.ed.scene.to_vox() == bytes, "every world edit undone: byte-identical save".into())?;
+    Ok(())
+}
+
+/// The scene tree on the generated `22-world` file: its rows and indentation, flyouts moved
+/// beside it, a row click picks, the eye and H hide and show (one undo step each), a
+/// double-click and Cmd-K rename (Escape cancels), and in model mode a row click edits that
+/// object. A single model shows no tree.
+fn scene_tree(dir: &Path) -> Result<(), String> {
+    use vxr_app::editor::{node_name, tree_rows};
+    use vxr_core::history::At;
+    let fixture =
+        |name: &str| vxr_vox::fixtures::all().into_iter().find(|f| f.name == name).map(|f| f.builder.build().write());
+    let bytes = fixture("22-world").ok_or("no 22-world fixture")?;
+    let single = Scene::from_vox(&fixture("01-single-voxel").ok_or("no 01-single-voxel fixture")?)?;
+    check(
+        tree_rows(&single).is_empty() && tree_rows(&Scene::new(NEW_SIZE)).is_empty(),
+        "a single model or a new scene shows no scene tree".into(),
+    )?;
+    let mut s = Shot::new(Scene::from_vox(&bytes)?, "22-world.vox", 2.0)?;
+    s.ed.ui.coach = false;
+    s.frames(3);
+    let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    let node = |s: &Shot, name: &str| {
+        let w = s.ed.scene.world().unwrap();
+        (0..w.tree.nodes.len()).find(|&i| node_name(w, i) == name).ok_or(format!("no node {name}"))
+    };
+    let rows = s.ed.ui.tree.clone();
+    let (tree_c, grove) = (node(&s, "tree c")?, node(&s, "grove")?);
+    let row = |n| rows.iter().find(|r| r.node == n);
+    check(
+        rows.len() == 8
+            && row(tree_c).is_some_and(|r| r.depth == 2 && r.linked == 3)
+            && row(grove).is_some_and(|r| r.group && r.depth == 1)
+            && row(node(&s, "lost gem")?).is_some_and(|r| r.hidden && !r.shown)
+            && row(node(&s, "gem")?).is_some_and(|r| !r.hidden && !r.shown)
+            && rows.iter().all(|r| s.ed.ui.hits.contains_key(&format!("tree-{}", r.node))),
+        format!("22-world shows a scene tree of {} rows: groups indented, linked copies, hidden rows", rows.len()),
+    )?;
+    let tree_right = rows.iter().map(|r| s.ed.ui.hits[&format!("tree-{}", r.node)].right()).fold(0.0, f32::max);
+    s.ui_click("view")?;
+    let flyout = s.ed.ui.hits.get("view-persp").map(|r| r.left()).unwrap_or(0.0);
+    s.ui_click("view")?;
+    check(flyout > tree_right, "the View flyout opens beside the scene tree, not over it".into())?;
+
+    let slab = node(&s, "slab")?;
+    let slab_voxels = s.ed.scene.world().unwrap().extent(slab).is_some();
+    s.ui_click(&format!("tree-{slab}"))?;
+    check(
+        slab_voxels && s.ed.scene.picked() == Some(slab) && s.ed.ui.tree_on == Some(slab),
+        "a row click picks its object".into(),
+    )?;
+    let v0 = s.voxels();
+    s.ui_click(&format!("tree-eye-{slab}"))?;
+    let hidden = s.ed.scene.world().unwrap().tree.nodes[slab].hidden;
+    check(hidden && s.voxels() == v0 - 64, format!("the row's eye hides the slab ({v0} to {} voxels)", s.voxels()))?;
+    s.frames(2);
+    s.save_png(&dir.join("app-2x-tree.png"))?;
+    s.frames_with(2, vec![key(egui::Key::Z, egui::Modifiers::COMMAND)]);
+    let undone = s.voxels() == v0;
+    s.frames_with(2, vec![key(egui::Key::Z, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT)]);
+    check(undone && s.voxels() == v0 - 64, "hiding is one undo step, and redo hides it again".into())?;
+    s.ui_click(&format!("tree-eye-{slab}"))?;
+    check(s.voxels() == v0, "the eye shows it again".into())?;
+    s.frames_with(2, vec![key(egui::Key::H, egui::Modifiers::NONE)]);
+    let h_hid = s.voxels() == v0 - 64;
+    s.frames_with(2, vec![key(egui::Key::H, egui::Modifiers::NONE)]);
+    check(h_hid && s.voxels() == v0, "H hides and shows the picked object".into())?;
+
+    // Rename: double-click, type, Enter; Escape cancels; Cmd-K opens the field too.
+    let name_of = |s: &Shot, n: usize| node_name(s.ed.scene.world().unwrap(), n);
+    // Half a second after the last click, so egui does not count a triple click.
+    s.frames(30);
+    s.ui_click(&format!("tree-{slab}"))?;
+    s.ui_click(&format!("tree-{slab}"))?;
+    let field = s.ed.ui.hits.contains_key("tree-rename");
+    s.frames_with(1, vec![key(egui::Key::A, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("floor".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    check(
+        field && name_of(&s, slab) == "floor" && !s.ed.ui.hits.contains_key("tree-rename"),
+        format!("a double-click renames the row ({})", name_of(&s, slab)),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::Z, egui::Modifiers::COMMAND)]);
+    check(name_of(&s, slab) == "slab", "renaming is one undo step".into())?;
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("rename object".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    let opened = s.ed.ui.hits.contains_key("tree-rename");
+    s.frames_with(1, vec![egui::Event::Text(" x".into())]);
+    s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+    check(
+        opened
+            && name_of(&s, slab) == "slab"
+            && !s.ed.ui.hits.contains_key("tree-rename")
+            && s.ed.scene.picked() == Some(slab),
+        "Cmd-K 'Rename object' opens the field, and Escape cancels it".into(),
+    )?;
+
+    groups(&mut s, &bytes, dir)?;
+    layers(&mut s, &bytes, dir)?;
+    s.frames(30);
+    s.ui_click(&format!("tree-{slab}"))?;
+
+    // Model mode: the edited object's row is on, and a row click edits another object.
+    s.frames_with(2, vec![key(egui::Key::Tab, egui::Modifiers::NONE)]);
+    let editing = s.ed.scene.at() == At::Object(slab) && s.ed.ui.tree_on == Some(slab);
+    let tree_a = node(&s, "tree a")?;
+    s.ui_click(&format!("tree-{tree_a}"))?;
+    check(
+        editing && s.ed.scene.at() == At::Object(tree_a) && s.ed.ui.tree_on == Some(tree_a),
+        "in model mode a row click edits that object's model".into(),
+    )?;
+    while s.ed.scene.undo() {}
+    check(s.ed.scene.to_vox() == bytes, "every tree edit undone: byte-identical save".into())?;
+    Ok(())
+}
+
+/// Groups in world mode on 22-world: a group row picks the group, a drag on one of its
+/// objects and the arrows move the whole group, Cmd-D copies it, Cmd-Shift-G ungroups it,
+/// Cmd-G and Cmd-K "Ungroup" wrap an object in a group and take it out again, and Tab edits
+/// the group's first object. Leaves the world with every group edit undone.
+fn groups(s: &mut Shot, bytes: &[u8], dir: &Path) -> Result<(), String> {
+    use vxr_app::editor::node_name;
+    use vxr_core::history::At;
+    let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    let cmd = egui::Modifiers::COMMAND;
+    let node = |s: &Shot, name: &str| {
+        let w = s.ed.scene.world().unwrap();
+        (0..w.tree.nodes.len()).find(|&i| node_name(w, i) == name).ok_or(format!("no node {name}"))
+    };
+    let trees = node(s, "trees")?;
+    let members = s.ed.scene.world().unwrap().objects_under(trees);
+    let places = |s: &Shot| -> Vec<[i32; 3]> {
+        let w = s.ed.scene.world().unwrap();
+        members.iter().map(|&i| w.placement(i).map_or([0; 3], |p| p.0)).collect()
+    };
+    let shifted = |a: &[[i32; 3]], b: &[[i32; 3]]| -> Option<[i32; 3]> {
+        let d: [i32; 3] = std::array::from_fn(|k| b[0][k] - a[0][k]);
+        a.iter().zip(b).all(|(p, q)| (0..3).all(|k| q[k] - p[k] == d[k])).then_some(d)
+    };
+    let shown: usize = {
+        let w = s.ed.scene.world().unwrap();
+        let mut n = 0;
+        for &i in members.iter().filter(|&&i| w.shown(i)) {
+            w.for_each_object_voxel(i, |_, _| n += 1);
+        }
+        n
+    };
+
+    s.frames(30);
+    s.ui_click(&format!("tree-{trees}"))?;
+    s.frames(1);
+    check(
+        s.ed.scene.picked() == Some(trees)
+            && s.ed.ui.tree_on == Some(trees)
+            && s.ed.scene.selected_count() == shown
+            && members.len() == 3,
+        format!("a group row picks the group: its {} objects' {shown} voxels show selected", members.len()),
+    )?;
+    s.frames(2);
+    s.save_png(&dir.join("app-2x-group.png"))?;
+
+    // A drag on one of the group's objects moves the whole group, as one undo step.
+    let (w, h) = (s.ed.width as f32, s.ed.height as f32);
+    let mut at = None;
+    'find: for y in (0..40).map(|k| h * (0.15 + k as f32 * 0.0175)) {
+        for x in (0..60).map(|k| w * (0.2 + k as f32 * 0.01)) {
+            s.ed.pointer_moved(Some([x, y]));
+            let hit = s.ed.cursor().filter(|t| !t.ground && t.normal == [0, 1, 0]);
+            if hit.and_then(|t| s.ed.scene.object_at(t.voxel)).is_some_and(|o| members.contains(&o)) {
+                at = Some([x, y]);
+                break 'find;
+            }
+        }
+    }
+    let at = at.ok_or("no top face of the trees group in view")?;
+    let before = places(s);
+    s.stroke(at, &[[20.0, 0.0], [40.0, 4.0], [70.0, 10.0]]);
+    let after = places(s);
+    let d = shifted(&before, &after);
+    check(
+        s.ed.scene.picked() == Some(trees) && d.is_some_and(|d| d != [0; 3] && d[1] == 0),
+        format!("a drag on a tree of the picked group moves the whole group ({d:?})"),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
+    check(places(s) == before, "the group drag is one undo step".into())?;
+    s.frames_with(2, vec![key(egui::Key::ArrowRight, egui::Modifiers::NONE)]);
+    let d = shifted(&before, &places(s));
+    check(
+        d.is_some_and(|d| d.iter().map(|k| k.abs()).sum::<i32>() == 1 && d[1] == 0),
+        "an arrow nudges every object of the picked group one cell".into(),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
+
+    // Cmd-D copies the group with all its objects.
+    let objects = |s: &Shot| s.ed.scene.world().unwrap().objects().len();
+    let n0 = objects(s);
+    s.frames_with(2, vec![key(egui::Key::D, cmd)]);
+    let copy = s.ed.scene.picked().filter(|&c| c != trees);
+    let copied = copy.is_some_and(|c| s.ed.scene.world().unwrap().objects_under(c).len() == members.len());
+    check(copied && objects(s) == n0 + members.len(), "Cmd-D copies the picked group and every object in it".into())?;
+    s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
+
+    // Cmd-Shift-G ungroups: one row fewer, the objects stay where they show.
+    let world = s.ed.scene.world_voxels(false);
+    s.frames(30);
+    s.ui_click(&format!("tree-{trees}"))?;
+    let rows = s.ed.ui.tree.len();
+    s.frames_with(2, vec![key(egui::Key::G, cmd | egui::Modifiers::SHIFT)]);
+    check(
+        s.ed.ui.tree.len() == rows - 1
+            && !s.ed.ui.tree.iter().any(|r| r.node == trees)
+            && s.ed.scene.picked() == Some(members[0])
+            && s.ed.scene.world_voxels(false) == world,
+        "Cmd-Shift-G ungroups the picked group in place and picks its first object".into(),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
+    check(
+        s.ed.ui.tree.len() == rows && s.ed.ui.tree.iter().any(|r| r.node == trees && r.group),
+        "ungrouping is one undo step".into(),
+    )?;
+
+    // Cmd-G wraps the slab in a group of its own; Cmd-K "Ungroup" takes it out again.
+    let slab = node(s, "slab")?;
+    s.frames(30);
+    s.ui_click(&format!("tree-{slab}"))?;
+    s.frames_with(2, vec![key(egui::Key::G, cmd)]);
+    let g = s.ed.scene.picked().filter(|&g| g != slab);
+    let wrapped = g.is_some_and(|g| s.ed.scene.world().unwrap().tree.children(g) == [slab]);
+    let row = g.and_then(|g| s.ed.ui.tree.iter().find(|r| r.node == g).cloned());
+    let slab_row = s.ed.ui.tree.iter().find(|r| r.node == slab).cloned();
+    check(
+        wrapped
+            && s.ed.ui.tree.len() == rows + 1
+            && row.is_some_and(|r| r.group && r.depth == 0)
+            && slab_row.is_some_and(|r| r.depth == 1)
+            && s.ed.scene.world_voxels(false) == world,
+        "Cmd-G puts the picked object into a new group, in place, and picks the group".into(),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::K, cmd)]);
+    s.frames_with(1, vec![egui::Event::Text("ungroup".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    check(
+        s.ed.ui.tree.len() == rows && s.ed.scene.picked() == Some(slab),
+        "Cmd-K 'Ungroup' takes it out again".into(),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
+    s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
+
+    // Tab with a group picked edits the group's first object.
+    s.frames(30);
+    s.ui_click(&format!("tree-{trees}"))?;
+    s.frames_with(2, vec![key(egui::Key::Tab, egui::Modifiers::NONE)]);
+    let editing = s.ed.scene.at() == At::Object(members[0]);
+    s.frames_with(2, vec![key(egui::Key::Tab, egui::Modifiers::NONE)]);
+    check(
+        editing && s.ed.scene.at() == At::World && s.ed.scene.to_vox() == bytes,
+        "Tab with a group picked edits its first object; every group edit undone gives the file".into(),
+    )?;
+    Ok(())
+}
+
+/// Layers in world mode on 22-world: the LAYERS list under the tree, a layer's eye, a layer
+/// row click putting the picked object on it, a double-click rename, + and Cmd-K "New layer",
+/// Cmd-K "Hide or show layer", one undo step each, and no list in model mode. Leaves the
+/// world with every layer edit undone.
+fn layers(s: &mut Shot, bytes: &[u8], dir: &Path) -> Result<(), String> {
+    use vxr_app::editor::node_name;
+    let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    let cmd = egui::Modifiers::COMMAND;
+    let node = |s: &Shot, name: &str| {
+        let w = s.ed.scene.world().unwrap();
+        (0..w.tree.nodes.len()).find(|&i| node_name(w, i) == name).ok_or(format!("no node {name}"))
+    };
+    let list = |s: &Shot| -> Vec<(i32, String, usize, bool)> {
+        s.ed.ui.layers.iter().map(|l| (l.id, l.name.clone(), l.objects, l.hidden)).collect()
+    };
+    let cmdk = |s: &mut Shot, text: &str| {
+        s.frames_with(2, vec![key(egui::Key::K, cmd)]);
+        s.frames_with(1, vec![egui::Event::Text(text.into())]);
+        s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    };
+    s.frames(2);
+    let want = [(0, "ground".into(), 2, false), (1, "trees".into(), 3, false), (2, "secret".into(), 1, true)];
+    let tree_bottom =
+        s.ed.ui.tree.iter().map(|r| s.ed.ui.hits[&format!("tree-{}", r.node)].bottom()).fold(0.0, f32::max);
+    check(
+        list(s) == want
+            && (0..3).all(|id| s.ed.ui.hits.get(&format!("layer-{id}")).is_some_and(|r| r.top() > tree_bottom))
+            && s.ed.ui.hits.contains_key("layer-add"),
+        format!("the LAYERS list under the tree shows 22-world's layers ({:?})", list(s)),
+    )?;
+
+    // The eye shows the hidden secret layer and its gem, as one undo step.
+    let v0 = s.voxels();
+    s.ui_click("layer-eye-2")?;
+    let gem = node(s, "gem")?;
+    check(
+        s.voxels() == v0 + 1 && s.ed.scene.world().unwrap().shown(gem) && !s.ed.ui.layers[2].hidden,
+        "a layer's eye shows the hidden secret layer and its gem".into(),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
+    let undone = s.voxels() == v0;
+    s.frames_with(2, vec![key(egui::Key::Z, cmd | egui::Modifiers::SHIFT)]);
+    check(undone && s.voxels() == v0 + 1, "showing a layer is one undo step, and redo shows it again".into())?;
+
+    // A layer row click puts the picked object on that layer; hiding the layer hides it.
+    let slab = node(s, "slab")?;
+    s.frames(30);
+    s.ui_click(&format!("tree-{slab}"))?;
+    let on_ground = s.ed.ui.layer_on == Some(0);
+    s.ui_click("layer-1")?;
+    let row = s.ed.ui.tree.iter().find(|r| r.node == slab).cloned();
+    check(
+        on_ground
+            && s.ed.ui.layer_on == Some(1)
+            && row.is_some_and(|r| r.layer == 1)
+            && s.ed.ui.layers[1].objects == 4
+            && s.ed.ui.layers[0].objects == 1,
+        "a layer row click puts the picked slab on the trees layer".into(),
+    )?;
+    s.frames(2);
+    s.save_png(&dir.join("app-2x-layers.png"))?;
+    let v1 = s.voxels();
+    s.ui_click("layer-eye-1")?;
+    let w = s.ed.scene.world().unwrap();
+    let hidden_all = w.objects().iter().filter(|&&i| w.tree.nodes[i].layer == 1).all(|&i| !w.shown(i));
+    check(
+        hidden_all && s.voxels() < v1 - 64,
+        format!("hiding the trees layer hides the slab and the trees ({v1} to {} voxels)", s.voxels()),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
+    s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
+    check(
+        s.voxels() == v1 && s.ed.ui.layer_on == Some(0) && list(s)[1].2 == 3,
+        "hiding a layer and moving an object to it are one undo step each".into(),
+    )?;
+
+    // Cmd-K "Hide or show layer" hides the picked object's layer.
+    cmdk(s, "hide or show layer");
+    let hid = s.ed.ui.layers[0].hidden && !s.ed.scene.world().unwrap().shown(slab);
+    s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
+    check(hid && !s.ed.ui.layers[0].hidden, "Cmd-K 'Hide or show layer' hides the picked object's layer".into())?;
+
+    // A double-click renames a layer; Enter keeps the name.
+    s.frames(30);
+    s.ui_click("layer-0")?;
+    s.ui_click("layer-0")?;
+    let field = s.ed.ui.hits.contains_key("tree-rename");
+    s.frames_with(1, vec![key(egui::Key::A, cmd)]);
+    s.frames_with(1, vec![egui::Event::Text("floor".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    check(
+        field && list(s)[0].1 == "floor" && s.ed.ui.layer_on == Some(0),
+        format!("a double-click renames the layer ({}), and leaves the slab on it", list(s)[0].1),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
+    check(list(s)[0].1 == "ground", "renaming a layer is one undo step".into())?;
+
+    // + and Cmd-K "New layer" add layers.
+    s.ui_click("layer-add")?;
+    let added = list(s).last().is_some_and(|l| l.0 == 3 && l.1 == "layer 3" && l.2 == 0);
+    cmdk(s, "new layer");
+    check(
+        added && list(s).len() == 5 && list(s)[4].1 == "layer 4",
+        "+ and Cmd-K 'New layer' add layer 3 and layer 4".into(),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
+    s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
+    check(list(s).len() == 3, "adding a layer is one undo step".into())?;
+
+    // Model mode lists no layers.
+    s.frames_with(2, vec![key(egui::Key::Tab, egui::Modifiers::NONE)]);
+    let none = !s.ed.ui.hits.contains_key("layer-0") && !s.ed.ui.hits.contains_key("layer-add");
+    s.frames_with(2, vec![key(egui::Key::Tab, egui::Modifiers::NONE)]);
+    s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
+    check(
+        none && s.ed.ui.hits.contains_key("layer-0") && s.ed.scene.to_vox() == bytes,
+        "model mode lists no layers; every layer edit undone gives the file".into(),
+    )?;
+    Ok(())
+}
+
+/// Camera and view: the View flyout, orthographic and isometric, the six side views by key
+/// (the middle of the view lands on the matching face of a cube), Cmd-K and the O key,
+/// framing that keeps the view, and an edit made in orthographic.
+fn views(dir: &Path) -> Result<(), String> {
+    use vxr_render::View;
+    let mut s = Shot::new(Scene::new(NEW_SIZE), "Untitled", 2.0)?;
+    s.ed.ui.coach = false;
+    let mut cells = Vec::new();
+    for (x, y, z) in (60..68).flat_map(|x| (0..8).flat_map(move |y| (60..68).map(move |z| (x, y, z)))) {
+        cells.push(([x, y, z], 12));
+    }
+    s.ed.scene.edit(cells);
+    s.ed.frame_scene();
+    s.frames(3);
+    let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    let press = |s: &mut Shot, k| s.frames_with(2, vec![key(k, egui::Modifiers::NONE)]);
+    s.ui_click("view")?;
+    check(
+        s.ed.ui.view_panel && s.ed.ui.hits.contains_key("view-front"),
+        "the view button opens the View flyout".into(),
+    )?;
+    // Guides: on by default; the flyout's buttons, G and Cmd-K turn each off and on, and each
+    // changes the view.
+    check(s.ed.ui.grid && s.ed.ui.ground && s.ed.ui.frame, "the grid, ground and bounds show by default".into())?;
+    let view_px = |s: &mut Shot| {
+        s.frames(2);
+        pollster::block_on(read_texture(&s.ed.gpu.device, &s.ed.gpu.queue, &s.ed.renderer.color))
+    };
+    let changed =
+        |a: &[u8], b: &[u8]| a.as_chunks::<4>().0.iter().zip(b.as_chunks::<4>().0).filter(|(p, q)| p != q).count();
+    // The render corner off (it keeps sampling), and the pointer over the flyout, as during
+    // the clicks, so no voxel is highlighted.
+    let corner = std::mem::replace(&mut s.ed.ui.show_render, false);
+    let c = s.ed.ui.hits["view-close"].center() * s.ed.ppp;
+    s.ed.pointer_moved(Some([c.x, c.y]));
+    let all = view_px(&mut s);
+    for (hit, what) in [("view-bounds", "bounds frame"), ("view-grid", "grid"), ("view-ground", "ground")] {
+        s.ui_click(hit)?;
+        let off = view_px(&mut s);
+        let on = [s.ed.ui.grid, s.ed.ui.ground, s.ed.ui.frame];
+        s.ui_click(hit)?;
+        let back = view_px(&mut s);
+        let n = changed(&all, &off);
+        check(
+            on.iter().filter(|o| !**o).count() == 1 && n > 500 && back == all,
+            format!("the flyout's {what} button hides it ({n} pixels change) and shows it again"),
+        )?;
+    }
+    s.ed.ui.show_render = corner;
+    press(&mut s, egui::Key::G);
+    let g_off = !s.ed.ui.grid;
+    press(&mut s, egui::Key::G);
+    check(g_off && s.ed.ui.grid, "G toggles the grid".into())?;
+    for (q, flag) in [("show ground", 1), ("show bounds", 2), ("show grid", 0)] {
+        let get = |s: &Shot| [s.ed.ui.grid, s.ed.ui.ground, s.ed.ui.frame][flag];
+        let before = get(&s);
+        s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+        s.frames_with(1, vec![egui::Event::Text(q.into())]);
+        s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+        let after = get(&s);
+        s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+        s.frames_with(1, vec![egui::Event::Text(q.into())]);
+        s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+        check(before && !after && get(&s), format!("Cmd-K '{q}' hides it and shows it again"))?;
+    }
+    s.ui_click("view")?;
+    if !s.ed.ui.view_panel {
+        s.ui_click("view")?;
+    }
+    s.ui_click("view-ortho")?;
+    let (o0, d0) = s.ed.cam.ray(10.0, 10.0, 400.0, 300.0);
+    let (o1, d1) = s.ed.cam.ray(390.0, 290.0, 400.0, 300.0);
+    check(
+        s.ed.cam.ortho && (d0 - d1).length() < 1e-5 && (o0 - o1).length() > 1.0,
+        "Ortho: orthographic, every ray parallel".into(),
+    )?;
+    let mid = [s.ed.width as f32 / 2.0, s.ed.height as f32 / 2.0];
+    let normal_at_mid = |s: &mut Shot| {
+        s.ed.pointer_moved(Some(mid));
+        s.ed.cursor().filter(|t| !t.ground).map(|t| t.normal)
+    };
+    for (k, v, n) in [
+        (egui::Key::Num1, View::Front, [0, 0, 1]),
+        (egui::Key::Num2, View::Back, [0, 0, -1]),
+        (egui::Key::Num3, View::Left, [-1, 0, 0]),
+        (egui::Key::Num4, View::Right, [1, 0, 0]),
+        (egui::Key::Num6, View::Bottom, [0, -1, 0]),
+        (egui::Key::Num5, View::Top, [0, 1, 0]),
+    ] {
+        press(&mut s, k);
+        let got = normal_at_mid(&mut s);
+        check(
+            s.ed.ui.view == Some(v) && got == Some(n),
+            format!("key {:?}: {} view, the middle of the view is on the cube's {n:?} face ({got:?})", k, v.name()),
+        )?;
+    }
+    // Add in the top orthographic view: the click lands on the top face.
+    s.tool(Tool::Add, Shape::Voxel);
+    s.stroke(mid, &[]);
+    let added = s.voxels();
+    s.ed.undo();
+    check(added == 513 && s.voxels() == 512, format!("add from the top orthographic view: {added}, undo 512"))?;
+    press(&mut s, egui::Key::Period);
+    check(s.ed.cam.ortho && s.ed.ui.view == Some(View::Top), "frame (.) keeps the projection and the view".into())?;
+    s.ui_click("view-iso")?;
+    // Isometric: the cube's three edges from its top corner are the same length on screen.
+    let (w, h) = (s.ed.width as f32, s.ed.height as f32);
+    let vp = s.ed.cam.view_proj(w / h);
+    let at = |p: [f32; 3]| {
+        let c = vp.project_point3(glam::Vec3::from(p));
+        glam::Vec2::new(c.x * w, c.y * h) / 2.0
+    };
+    let o = at([68.0, 8.0, 68.0]);
+    let edges = [at([60.0, 8.0, 68.0]), at([68.0, 0.0, 68.0]), at([68.0, 8.0, 60.0])].map(|e| (e - o).length());
+    let even = edges.iter().all(|e| (e - edges[0]).abs() < 0.5);
+    check(
+        s.ed.cam.ortho && s.ed.ui.view == Some(View::Iso) && even,
+        format!("Iso: orthographic isometric, the cube's edges even on screen ({edges:.1?} px)"),
+    )?;
+    s.frames(3);
+    s.save_png(&dir.join("app-2x-view.png"))?;
+    s.ui_click("view-persp")?;
+    check(!s.ed.cam.ortho && s.ed.ui.view.is_none(), "Persp: back to perspective".into())?;
+    press(&mut s, egui::Key::O);
+    let o_on = s.ed.cam.ortho;
+    press(&mut s, egui::Key::O);
+    check(o_on && !s.ed.cam.ortho, "O toggles orthographic".into())?;
+    for (q, want) in [("orthographic", true), ("perspective", false)] {
+        s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+        s.frames_with(1, vec![egui::Event::Text(q.into())]);
+        s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+        check(s.ed.cam.ortho == want, format!("Cmd-K '{q}'"))?;
+    }
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("right view".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    check(s.ed.ui.view == Some(View::Right), "Cmd-K 'Right view'".into())?;
+    s.ui_click("view-front")?;
+    check(s.ed.ui.view == Some(View::Front), "the flyout's Front button".into())?;
+    press(&mut s, egui::Key::Escape);
+    check(!s.ed.ui.view_panel, "Escape closes the View flyout".into())?;
+    Ok(())
+}
+
 /// The live render corner: it shows, converges, follows an edit without restarting, and
 /// Cmd-K hides it.
 fn render(s: &mut Shot, dir: &Path) -> Result<(), String> {
@@ -622,6 +1648,7 @@ fn render(s: &mut Shot, dir: &Path) -> Result<(), String> {
     )?;
     s.ed.undo();
 
+    full_render(s, dir)?;
     render_panel(s, dir)?;
 
     let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
@@ -631,6 +1658,95 @@ fn render(s: &mut Shot, dir: &Path) -> Result<(), String> {
     check(!s.ed.ui.show_render && !s.ed.ui.hits.contains_key("render"), "Cmd-K hides the render corner".into())?;
     s.ed.ui.show_render = true;
     s.frames(2);
+    Ok(())
+}
+
+/// The full render view: a click on the corner swaps the path-traced image into the whole
+/// view at one pixel per point, edits still reach it without a restart, and its chip, Cmd-K
+/// and Escape swap it back to the 640x360 corner.
+fn full_render(s: &mut Shot, dir: &Path) -> Result<(), String> {
+    let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    let points = (s.ed.width as f32 / s.ed.ppp, s.ed.height as f32 / s.ed.ppp);
+    let size = (points.0.round() as u32, points.1.round() as u32);
+    s.ui_click("render")?;
+    let rect = s.ed.ui.hits.get("render").copied().unwrap_or(egui::Rect::NOTHING);
+    check(
+        s.ed.ui.full_render
+            && (s.ed.preview.width, s.ed.preview.height) == size
+            && rect.width() == points.0
+            && rect.height() == points.1,
+        format!(
+            "a click on the corner fills the view: a {}x{} preview over {:.0}x{:.0} points",
+            s.ed.preview.width,
+            s.ed.preview.height,
+            rect.width(),
+            rect.height()
+        ),
+    )?;
+    for _ in 0..400 {
+        s.frames(1);
+        if s.ed.preview.samples() >= 8.0 {
+            break;
+        }
+    }
+    let spp = s.ed.preview.samples();
+    // The middle of the view on screen is the middle of the preview image.
+    let (dev, queue) = (&s.ed.gpu.device, &s.ed.gpu.queue);
+    let img = pollster::block_on(s.ed.preview.read(dev, queue));
+    let screen = pollster::block_on(read_texture(dev, queue, &s.target));
+    // Mean colour of a 32-point square at the middle, in the image and on screen (BGRA).
+    let mean = |px: &[u8], w: u32, h: u32, scale: u32, bgr: bool| {
+        let mut sum = [0u64; 3];
+        let n = 32 * scale;
+        for y in h / 2 - n / 2..h / 2 + n / 2 {
+            for x in w / 2 - n / 2..w / 2 + n / 2 {
+                let i = ((y * w + x) * 4) as usize;
+                for c in 0..3 {
+                    sum[c] += px[i + if bgr { 2 - c } else { c }] as u64;
+                }
+            }
+        }
+        sum.map(|v| (v / (n * n) as u64) as u8)
+    };
+    let ppp = s.ed.ppp.round() as u32;
+    let (rgb, bgr) = (mean(&img, size.0, size.1, 1, false), mean(&screen, s.ed.width, s.ed.height, ppp, true));
+    let near = (0..3).all(|i| (rgb[i] as i32 - bgr[i] as i32).abs() <= 4);
+    check(
+        spp >= 8.0 && near,
+        format!(
+            "the full view converges ({spp:.0} spp) and shows the preview: {rgb:?} in the image, {bgr:?} on screen"
+        ),
+    )?;
+    s.save_png(&dir.join("app-2x-render-full.png"))?;
+    let restarts = s.ed.preview.restarts;
+    let before = s.voxels();
+    s.tool(Tool::Add, Shape::Voxel);
+    let mid = [s.ed.width as f32 / 2.0, s.ed.height as f32 / 2.0];
+    let p = s.top_face_pixel(mid)?;
+    s.stroke(p, &[]);
+    s.frames(1);
+    check(
+        s.voxels() == before + 1 && s.ed.preview.restarts == restarts && s.ed.preview.last_rows > 0,
+        "an edit in the full view adds its voxel and resets only nearby pixels".into(),
+    )?;
+    s.ed.undo();
+    s.ui_click("render-full")?;
+    s.frames(1);
+    let corner = (s.ed.preview.width, s.ed.preview.height);
+    let back = s.ed.ui.hits.get("render").map(|r| r.width());
+    check(
+        !s.ed.ui.full_render && corner == (640, 360) && back == Some(320.0),
+        format!("its chip swaps back to the corner: a {}x{} preview", corner.0, corner.1),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("full render".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    let on = s.ed.ui.full_render && s.ed.preview.width == size.0;
+    s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+    check(
+        on && !s.ed.ui.full_render && s.ed.preview.width == 640,
+        "Cmd-K Full render view fills the view and Escape swaps back".into(),
+    )?;
     Ok(())
 }
 
@@ -682,6 +1798,37 @@ fn materials(s: &mut Shot, dir: &Path) -> Result<(), String> {
         let got = s.ed.scene.materials[other as usize].kind;
         check(got == want, format!("{}: slot {other} is {:?}", want.name(), got))?;
     }
+    // Glass attenuation dragged full; plastic on a third slot, its specular dragged off and undone.
+    if let Some(&glass) = used.first() {
+        s.ed.ui.slot = glass;
+        s.frames(1);
+        let r = *s.ed.ui.hits.get("mat-att").ok_or("no Attenuation slider on glass")?;
+        let restarts = s.ed.preview.restarts;
+        s.ui_drag(r.center(), egui::pos2(r.right() + 20.0, r.center().y), egui::Modifiers::NONE);
+        let att = s.ed.scene.materials[glass as usize].att;
+        check(
+            att == 1.0 && s.ed.preview.restarts > restarts,
+            format!("glass attenuation slider drag: {att}, the render corner restarted"),
+        )?;
+    }
+    if let Some(&other) = used.get(2) {
+        s.ed.ui.slot = other;
+        s.frames(1);
+        s.ui_click("mt4")?;
+        let m = s.ed.scene.materials[other as usize];
+        let r = *s.ed.ui.hits.get("mat-spec").ok_or("no Specular slider on plastic")?;
+        s.ui_drag(r.center(), egui::pos2(r.left() - 20.0, r.center().y), egui::Modifiers::NONE);
+        let spec = s.ed.scene.materials[other as usize].spec;
+        s.ed.undo();
+        let undone = s.ed.scene.materials[other as usize];
+        check(
+            m.kind == Kind::Plastic && spec == 0.0 && undone == m && m.spec == 1.0,
+            format!(
+                "Plastic: slot {other} is plastic, specular drag to {spec} and one undo step back to {}",
+                undone.spec
+            ),
+        )?;
+    }
     for _ in 0..90 {
         s.frames(1);
     }
@@ -710,7 +1857,7 @@ fn materials(s: &mut Shot, dir: &Path) -> Result<(), String> {
 }
 
 /// The Render panel through egui input on the drawn UI: R opens it, each setting reaches the
-/// path tracer (exposure without a restart), Export PNG renders and reads back a PNG at the
+/// path tracer (exposure, gamma and vignette without a restart), Export PNG renders and reads back a PNG at the
 /// chosen size, Cmd-K starts an export and the panel's button cancels it, Escape closes it.
 fn render_panel(s: &mut Shot, dir: &Path) -> Result<(), String> {
     let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
@@ -733,6 +1880,18 @@ fn render_panel(s: &mut Shot, dir: &Path) -> Result<(), String> {
         ),
     )?;
     s.ed.ui.render.exposure_ev = 0.0;
+    s.frames(2);
+    let (from, to) = (s.at("rs-gamma")?, right(s, "rs-gamma").unwrap());
+    s.ui_drag(from, to, egui::Modifiers::NONE);
+    let (from, to) = (s.at("rs-vignette")?, right(s, "rs-vignette").unwrap());
+    s.ui_drag(from, to, egui::Modifiers::NONE);
+    let l = s.ed.preview.lighting;
+    check(
+        (l.gamma - 3.0).abs() < 1e-3 && (l.vignette - 1.0).abs() < 1e-3 && s.ed.preview.restarts == restarts,
+        format!("gamma and vignette sliders: gamma {:.2}, vignette {:.2}, no restart", l.gamma, l.vignette),
+    )?;
+    s.ed.ui.render.gamma = 2.2;
+    s.ed.ui.render.vignette = 0.0;
     let sun = s.ed.preview.lighting.sun_dir;
     let (from, to) = (s.at("rs-sun-angle")?, right(s, "rs-sun-angle").unwrap());
     s.ui_drag(from, to, egui::Modifiers::NONE);
@@ -750,6 +1909,13 @@ fn render_panel(s: &mut Shot, dir: &Path) -> Result<(), String> {
     s.ui_drag(from, to, egui::Modifiers::NONE);
     let ap = s.ed.preview.lighting.aperture;
     check(sky && ap > 0.0, format!("sky backdrop toggle on, depth of field slider: lens radius {ap:.1} voxels"))?;
+    let restarts = s.ed.preview.restarts;
+    s.ui_click("rs-physical-sky")?;
+    s.frames(1);
+    check(
+        s.ed.preview.lighting.physical_sky && s.ed.preview.restarts > restarts,
+        "physical sky toggle on: the sky follows the sun and the corner restarted".into(),
+    )?;
     for _ in 0..60 {
         s.frames(1);
     }
@@ -820,6 +1986,197 @@ fn render_panel(s: &mut Shot, dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// The OBJ text's vertex and face counts and its faces' total area (each face a rectangle).
+fn obj_stats(obj: &str) -> Result<(usize, usize, f64), String> {
+    let v: Vec<[f64; 3]> = obj
+        .lines()
+        .filter_map(|l| l.strip_prefix("v "))
+        .map(|l| {
+            let n: Vec<f64> = l.split(' ').filter_map(|x| x.parse().ok()).collect();
+            [n[0], n[1], n[2]]
+        })
+        .collect();
+    let (mut faces, mut area) = (0, 0.0);
+    for f in obj.lines().filter_map(|l| l.strip_prefix("f ")) {
+        let c: Vec<usize> = f.split(' ').filter_map(|c| c.split('/').next()?.parse().ok()).collect();
+        let p = |k: usize| v.get(c.get(k)?.checked_sub(1)?).copied();
+        let (Some(a), Some(b), Some(d)) = (p(0), p(1), p(3)) else { return Err(format!("bad face: {f}")) };
+        let (e1, e2) = ([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [d[0] - a[0], d[1] - a[1], d[2] - a[2]]);
+        let n = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+        area += (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+        faces += 1;
+    }
+    Ok((v.len(), faces, area))
+}
+
+/// Faces of `voxels` with an empty cell beside them.
+fn visible_faces(voxels: &std::collections::BTreeMap<[i32; 3], u8>) -> usize {
+    let mut n = 0;
+    for p in voxels.keys() {
+        for a in 0..3 {
+            for d in [-1, 1] {
+                let mut q = *p;
+                q[a] += d;
+                n += !voxels.contains_key(&q) as usize;
+            }
+        }
+    }
+    n
+}
+
+/// The top bar's Export menu and the OBJ export: the menu opens, closes and opens the Render
+/// panel, its OBJ row and Cmd-K ask the host to export, and the files (written as the native
+/// host does) cover the model's visible faces, natively in model mode and on 22-world's
+/// shown objects in world mode.
+fn export(s: &mut Shot, dir: &Path) -> Result<(), String> {
+    use vxr_app::files::{obj_files, slices_png};
+    let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    s.ed.ui.coach = false;
+    s.ui_click("export")?;
+    s.frames(2);
+    check(
+        s.ed.ui.export_menu && s.ed.ui.hits.contains_key("export-obj") && s.ed.ui.hits.contains_key("export-render"),
+        "the top bar's Export button opens the Export menu".into(),
+    )?;
+    s.save_png(&dir.join("app-2x-export.png"))?;
+    s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+    let escaped = !s.ed.ui.export_menu;
+    s.ui_click("export")?;
+    let mid = egui::pos2(s.ed.width as f32 / s.ed.ppp / 2.0, s.ed.height as f32 / s.ed.ppp / 2.0);
+    let voxels = s.voxels();
+    s.ui_drag(mid, mid, egui::Modifiers::NONE);
+    check(
+        escaped && !s.ed.ui.export_menu && s.voxels() == voxels,
+        "Escape closes it, and so does a click outside it, which edits nothing".into(),
+    )?;
+    if s.voxels() != voxels {
+        s.ed.undo();
+    }
+    s.ui_click("export")?;
+    s.ui_click("export-render")?;
+    check(s.ed.ui.render_panel && !s.ed.ui.export_menu, "its Render PNG row opens the Render panel".into())?;
+    s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+
+    s.host.clear();
+    s.ui_click("export")?;
+    s.ui_click("export-obj")?;
+    check(
+        s.host.contains(&Action::ExportObj) && !s.ed.ui.export_menu,
+        "its OBJ row asks the host to export and closes the menu".into(),
+    )?;
+    s.host.clear();
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("export obj".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    check(s.host.contains(&Action::ExportObj), "Cmd-K Export OBJ asks the host too".into())?;
+    s.host.clear();
+    s.ui_click("export")?;
+    s.ui_click("export-slices")?;
+    check(
+        s.host.contains(&Action::ExportSlices) && !s.ed.ui.export_menu,
+        "its PNG slices row asks the host to export and closes the menu".into(),
+    )?;
+    s.host.clear();
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("export png slices".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    check(s.host.contains(&Action::ExportSlices), "Cmd-K Export PNG slices asks the host too".into())?;
+
+    // The slices the native host writes: one tile per layer, every voxel at its cell.
+    let decode = |bytes: &[u8]| -> Result<(u32, u32, Vec<u8>), String> {
+        let mut r = png::Decoder::new(std::io::Cursor::new(bytes)).read_info().map_err(|e| e.to_string())?;
+        let mut px = vec![0; r.output_buffer_size().unwrap_or(0)];
+        let info = r.next_frame(&mut px).map_err(|e| e.to_string())?;
+        Ok((info.width, info.height, px))
+    };
+    let (png_bytes, _, layers) = slices_png(&s.ed.scene)?;
+    std::fs::write(dir.join(s.ed.slices_name()), &png_bytes).map_err(|e| e.to_string())?;
+    let (w, h, px) = decode(&png_bytes)?;
+    let size = s.ed.scene.bounds().size;
+    let (mut n, mut right) = (0usize, 0usize);
+    s.ed.scene.for_each_voxel(|p, c| {
+        let at = (p[2] as usize * w as usize + p[1] as usize * size[0] as usize + p[0] as usize) * 4;
+        let [r, g, b, _] = s.ed.scene.palette[c as usize];
+        n += 1;
+        right += (px[at..at + 4] == [r, g, b, 255]) as usize;
+    });
+    let filled = px.chunks(4).filter(|p| p[3] != 0).count();
+    check(
+        (w, h, layers) == (size[0] * size[1], size[2], size[1]) && right == n && filled == n,
+        format!(
+            "{}: {layers} layers of {}×{} side by side ({w}×{h}), all {n} voxels at their cells",
+            s.ed.slices_name(),
+            size[0],
+            size[2]
+        ),
+    )?;
+
+    // What the native host writes, and what it holds.
+    let stem = s.ed.export_stem();
+    let (files, quads) = obj_files(&s.ed.scene, &stem)?;
+    let out = dir.join("obj");
+    std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
+    for (name, bytes) in &files {
+        std::fs::write(out.join(name), bytes).map_err(|e| e.to_string())?;
+    }
+    let obj = String::from_utf8_lossy(&files[0].1).into_owned();
+    let mtl = String::from_utf8_lossy(&files[1].1).into_owned();
+    let (nv, nf, area) = obj_stats(&obj)?;
+    let mut shown = std::collections::BTreeMap::new();
+    s.ed.scene.for_each_voxel(|p, c| {
+        shown.insert(p, c);
+    });
+    let faces = visible_faces(&shown);
+    check(
+        nf == quads && area as usize == faces && quads * 2 < faces,
+        format!(
+            "{stem}.obj: {nv} vertices, {quads} quads covering all {faces} visible faces of {} voxels",
+            shown.len()
+        ),
+    )?;
+    let mut r = png::Decoder::new(std::io::Cursor::new(&files[2].1)).read_info().map_err(|e| e.to_string())?;
+    let mut tex = vec![0; r.output_buffer_size().unwrap_or(0)];
+    let info = r.next_frame(&mut tex).map_err(|e| e.to_string())?;
+    let slot = (1..256).find(|&i| s.ed.scene.map.counts[i] > 0).unwrap_or(1);
+    check(
+        (info.width, info.height) == (256, 1)
+            && tex[(slot - 1) * 4..slot * 4] == s.ed.scene.palette[slot]
+            && obj.contains(&format!("mtllib {stem}.mtl"))
+            && mtl.contains(&format!("map_Kd {stem}.png")),
+        format!("{stem}.png is the 256×1 palette (texel {} is slot {slot}), named by {stem}.mtl", slot - 1),
+    )?;
+    println!("wrote {}", out.display());
+
+    // World mode exports every shown object; a hidden one is left out.
+    let bytes = vxr_vox::fixtures::all()
+        .into_iter()
+        .find(|f| f.name == "22-world")
+        .ok_or("no 22-world fixture")?
+        .builder
+        .build()
+        .write();
+    let mut w = Shot::new(Scene::from_vox(&bytes)?, "22-world.vox", 1.0)?;
+    w.frames(2);
+    let all = w.ed.scene.world_voxels(false);
+    let shown = w.ed.scene.world_voxels(true);
+    let (files, quads) = obj_files(&w.ed.scene, &w.ed.export_stem())?;
+    let (_, nf, area) = obj_stats(&String::from_utf8_lossy(&files[0].1))?;
+    check(
+        nf == quads && area as usize == visible_faces(&shown) && shown.len() < all.len(),
+        format!(
+            "in world mode 22-world.obj covers its {} shown voxels' {} faces ({} hidden left out)",
+            shown.len(),
+            visible_faces(&shown),
+            all.len() - shown.len()
+        ),
+    )?;
+    let (png_bytes, _, _) = slices_png(&w.ed.scene)?;
+    let (_, _, px) = decode(&png_bytes)?;
+    let filled = px.chunks(4).filter(|p| p[3] != 0).count();
+    check(filled == shown.len(), format!("in world mode 22-world-slices.png holds its {filled} shown voxels"))?;
+    Ok(())
+}
+
 /// Frame time of the island at full Retina (3024x1964), without and with the render corner,
 /// while editing (pointer moving every frame) and idle. Each frame waits for the GPU.
 fn frame_times(scene: &Path) -> Result<(), String> {
@@ -855,10 +2212,16 @@ fn frame_times(scene: &Path) -> Result<(), String> {
     s.ed.scene.select_all();
     let selected = run(&mut s, false, true);
     s.ed.scene.deselect();
+    s.ed.cam.snap(vxr_render::View::Iso);
+    let iso = run(&mut s, true, true);
+    s.ed.cam.ortho = false;
+    s.ed.ui.full_render = true;
+    let full = run(&mut s, true, true);
+    s.ed.ui.full_render = false;
     println!(
         "info frame time, island at 3024x1964 (median, CPU + GPU): {off:.2} ms without the render corner, \
-         {on:.2} ms with it while editing, {idle:.2} ms idle, {selected:.2} ms with every voxel selected; \
-         one 640x360 sample {ms:.2} ms ({})",
+         {on:.2} ms with it while editing, {idle:.2} ms idle, {selected:.2} ms with every voxel selected, \
+         {iso:.2} ms isometric with the render corner, {full:.2} ms in the full render view while editing; one 640x360 sample {ms:.2} ms ({})",
         if measured { "timestamps" } else { "assumed" }
     );
     Ok(())

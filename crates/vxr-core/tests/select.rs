@@ -5,7 +5,8 @@
 use std::collections::BTreeMap;
 
 use vxr_core::Scene;
-use vxr_core::select::{Mode, Transform};
+use vxr_core::select::{Mode, Region, Transform};
+use vxr_core::tools::Target;
 
 /// An L of colour 3 on y = 0 ((0..3, 0, 0) and (0, 0, 1)), plus one voxel of colour 5 at
 /// (5, 0, 5), all offset into the middle of a 32^3 map.
@@ -46,8 +47,40 @@ fn select_by_box_and_colour_with_modes() {
     assert_eq!((s.selected_count(), s.selection_version() > v), (0, true));
     s.select_all();
     assert_eq!(s.selected_count(), 5);
+    s.select_color(3, Mode::Replace);
+    s.invert_selection();
+    assert_eq!(sel(&s), vec![[O + 5, O, O + 5]], "invert keeps only the voxels not selected");
+    s.invert_selection();
+    assert_eq!(s.selected_count(), 4, "inverting twice gives the selection back");
+    s.deselect();
+    s.invert_selection();
+    assert_eq!(s.selected_count(), 5, "inverting nothing selects every voxel");
     assert!(s.undo(), "the scene's own edit");
     assert!(!s.undo(), "selecting is not an undo step");
+}
+
+#[test]
+fn a_click_selects_the_colour_the_face_or_the_volume() {
+    // The L, a voxel of colour 4 on top of its corner, and the far voxel of colour 5.
+    let mut s = scene();
+    s.edit([([O, O + 1, O], 4)]);
+    let top = |p: [i32; 3], value| Target { voxel: p, normal: [0, 1, 0], value, ground: false };
+    let t = top([O + 1, O, O], 3);
+    s.select_region(&t, Region::Color, Mode::Replace);
+    assert_eq!(s.selected_count(), 4, "every voxel of colour 3");
+    s.select_region(&t, Region::Face, Mode::Replace);
+    assert_eq!(sel(&s), vec![[O + 1, O, O], [O + 2, O, O]], "the covered corner splits the face");
+    s.select_region(&t, Region::Volume, Mode::Replace);
+    assert_eq!(s.selected_count(), 5, "the L and the voxel on it, not the far voxel");
+    s.select_region(&top([O + 5, O, O + 5], 5), Region::Volume, Mode::Add);
+    assert_eq!(s.selected_count(), 6);
+    s.select_region(&top([O, O + 1, O], 4), Region::Face, Mode::Subtract);
+    assert_eq!(s.selected_count(), 5);
+    assert!(!s.is_selected([O, O + 1, O]));
+    let ground = Target { voxel: [O, O - 1, O], normal: [0, 1, 0], value: 0, ground: true };
+    s.select_region(&ground, Region::Volume, Mode::Replace);
+    assert_eq!(s.selected_count(), 5, "the ground selects nothing");
+    assert_eq!(s.volume([O + 9, O, O]), Vec::<[i32; 3]>::new(), "an empty cell has no volume");
 }
 
 #[test]

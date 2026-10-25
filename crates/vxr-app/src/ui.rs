@@ -120,6 +120,8 @@ mod icon {
     pub const POINTER: char = '\u{e1c3}';
     pub const SQUARE_DASHED: char = '\u{e1cb}';
     pub const LAYERS: char = '\u{e529}';
+    pub const PLUS: char = '\u{e13d}';
+    pub const MINUS: char = '\u{e11c}';
     /// The mockup's mirror glyph (Lucide 0.460 `flip-horizontal-2`, renamed `flip-vertical-2` in 1.x).
     pub const FLIP: char = '\u{e360}';
     pub const SCAN: char = '\u{e257}';
@@ -136,6 +138,7 @@ mod icon {
     pub const APERTURE: char = '\u{e040}';
     pub const IMAGE_DOWN: char = '\u{e53c}';
     pub const SUN: char = '\u{e178}';
+    pub const SUNSET: char = '\u{e17a}';
     pub const SLASH: char = '\u{e51d}';
     pub const CIRCLE_DOT: char = '\u{e345}';
     pub const GLOBE: char = '\u{e0e8}';
@@ -146,10 +149,19 @@ mod icon {
     pub const CLIPBOARD_PASTE: char = '\u{e3e8}';
     pub const TRASH: char = '\u{e18e}';
     pub const X: char = '\u{e1b2}';
+    pub const AXIS_3D: char = '\u{e2fe}';
+    pub const EYE: char = '\u{e0ba}';
+    pub const EYE_OFF: char = '\u{e0bb}';
+    pub const FOLDER: char = '\u{e0d7}';
+    pub const LINK: char = '\u{e102}';
+    pub const FILE_OUTPUT: char = '\u{e0c8}';
+    pub const MAXIMIZE_2: char = '\u{e113}';
+    pub const MINIMIZE_2: char = '\u{e11b}';
 }
 
-pub use vxr_core::select::Transform;
-pub use vxr_core::tools::{Shape, Tool};
+pub use vxr_core::select::{Region, Transform};
+pub use vxr_core::tools::{MAX_SIZE, Shape, Tool};
+pub use vxr_render::View;
 
 /// What the UI asks the app to do this frame.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -159,7 +171,15 @@ pub enum Action {
     Undo,
     Redo,
     Frame,
+    /// Look from one side, or isometric (which turns orthographic on).
+    Snap(View),
+    /// Orthographic (true) or perspective projection.
+    Ortho(bool),
     Embed,
+    /// Export what the view shows as OBJ with its palette texture (the host writes the files).
+    ExportObj,
+    /// Export the model's layers side by side as one PNG (the host writes the file).
+    ExportSlices,
     /// Show `rgba` in palette slot `slot` now, inside the open colour edit.
     Recolor {
         slot: u8,
@@ -187,16 +207,93 @@ pub enum Action {
     /// Move, rotate, flip or loop the selection, or the whole model when nothing is selected.
     Transform(Transform),
     SelectAll,
+    InvertSelection,
     /// Select every voxel of the current colour.
     SelectColor,
     Deselect,
     DeleteSelection,
     /// Paint the selection with the current colour.
     FillSelection,
+    /// Keep only the voxels seen from outside the selection, or the whole model.
+    Hollow,
+    /// Fill the space the selection, or the whole model, encloses with the current colour.
+    FillInterior,
+    /// Resize the model bounds to this size, keeping the bottom and the centre.
+    Resize([u32; 3]),
+    /// Fit the model bounds to the voxels.
+    Crop,
+    /// Switch between editing a model and the world of every object (Tab).
+    ToggleWorld,
+    /// Copy the picked object beside itself in world mode: its own model, or a linked copy
+    /// sharing it (an instance).
+    Duplicate {
+        linked: bool,
+    },
+    /// A scene tree row was clicked: pick that object in world mode, or edit its model.
+    PickNode(usize),
+    /// Hide or show a tree node in world mode (the row's eye).
+    SetHidden(usize, bool),
+    /// Hide or show the picked object (H).
+    ToggleHidden,
+    /// Put the picked object or group into a new group of its own (Cmd-G).
+    Group,
+    /// Put the picked object or group on this layer (a layer row click in world mode).
+    SetLayer(i32),
+    /// Hide or show a layer (its row's eye).
+    SetLayerHidden(i32, bool),
+    /// Hide or show the picked object's layer (Cmd-K).
+    ToggleLayer,
+    /// Add a layer (the + beside LAYERS).
+    AddLayer,
+    /// Move the picked group's children up into its parent (Cmd-Shift-G).
+    Ungroup,
     Copy,
     Cut,
     Paste,
+    /// Place the box whose height is being set (a click, Enter).
+    PlaceBox,
+    /// Drop the box whose height is being set (Escape).
+    CancelBox,
 }
+
+/// One row of the scene tree: an object or a group, in tree order (set by the editor).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TreeRow {
+    pub node: usize,
+    /// Groups above it, the root not counted.
+    pub depth: usize,
+    pub name: String,
+    pub group: bool,
+    /// Objects showing this object's model, itself included: more than 1 is a linked copy.
+    pub linked: usize,
+    /// The model's size, for objects.
+    pub size: [u32; 3],
+    pub hidden: bool,
+    /// Neither it nor a group above it is hidden or on a hidden layer.
+    pub shown: bool,
+    pub layer: i32,
+}
+
+/// One row of the scene tree's LAYERS list, in world mode (set by the editor).
+#[derive(Clone, Debug, PartialEq)]
+pub struct LayerRow {
+    pub id: i32,
+    pub name: String,
+    /// Objects on the layer.
+    pub objects: usize,
+    pub hidden: bool,
+}
+
+/// What an in-place rename field names: a tree node or a layer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Named {
+    Node(usize),
+    Layer(i32),
+}
+
+/// The scene tree's width, and how many rows it shows before scrolling.
+const TREE_W: f32 = 212.0;
+const TREE_ROWS: usize = 14;
 
 /// What the next swatch click does, armed from the colour editor or Cmd-K.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -254,6 +351,13 @@ pub struct Hybrid {
     pub mirror_on: [bool; 3],
     /// Axis lock (K cycles X, Y, Z, off).
     pub lock: Option<usize>,
+    /// The voxel brush's size, 1 to [`MAX_SIZE`] (- and = step it).
+    pub size: u8,
+    /// What a select click on a voxel takes: its colour, its face or its volume.
+    pub region: Region,
+    /// The size flyout beside the voxel brush button is open (V again, or a click on the
+    /// button while the voxel brush is on). It also shows while the size is above 1.
+    pub size_panel: bool,
     pub slot: u8,
     /// RGBA by voxel index, as the scene stores it.
     pub palette: [[u8; 4]; 256],
@@ -272,25 +376,70 @@ pub struct Hybrid {
     pub slot_op: Option<SlotOp>,
     /// Show the live path-traced render corner.
     pub show_render: bool,
-    /// Where the render corner's image goes this frame, in points.
+    /// Where the render corner's image goes this frame, in points: the corner, or the whole
+    /// view in the full render view.
     pub render_rect: Option<Rect>,
+    /// The path-traced image fills the view instead of the corner.
+    pub full_render: bool,
+    /// The corner's place, which the Render panel lines up with in both views.
+    render_dock: Option<Rect>,
     /// The Render panel is open, and what it edits.
     pub render_panel: bool,
     pub render: RenderSettings,
     /// Text of the Render panel's sun colour field.
     sun_hex: String,
+    /// The model bounds' size, and the Bounds panel's X, Y and Z fields while it is open.
+    pub bounds: [u32; 3],
+    pub bounds_panel: Option<[String; 3]>,
+    /// The camera's projection and the snap view it is at, if any (set by the editor).
+    pub ortho: bool,
+    pub view: Option<View>,
+    /// The View flyout beside the rail's view button is open.
+    pub view_panel: bool,
+    /// The Export menu under the top bar's Export button is open.
+    pub export_menu: bool,
+    /// Left edge of the top bar's Export button, where the Export menu lines up.
+    export_x: f32,
+    /// Guides drawn in the view: the ground grid, the ground plane and the bounds frame.
+    pub grid: bool,
+    pub ground: bool,
+    pub frame: bool,
     /// Where each clickable part of the UI was last drawn, in points, by name, for the
     /// headless checks ("edit-color", "sv", "hue", "swap", "copy", "sw<slot>", ...).
     pub hits: HashMap<String, Rect>,
     /// Top of the mirror button in the rail, where the axis flyout lines up.
     axes_y: f32,
+    voxel_y: f32,
+    /// Top of the view button in the rail, where the View flyout lines up.
+    view_y: f32,
     /// Top of the select button in the rail, where the selection flyout lines up.
     select_y: f32,
     /// How many voxels are selected, and whether Copy or Cut has filled the clipboard.
     pub selected: usize,
     pub has_clip: bool,
+    /// World mode is showing (set by the editor), and the name of the object picked there.
+    pub world: bool,
+    pub picked: Option<String>,
+    /// The scene tree's rows, empty (no tree shown) unless there are two objects or more,
+    /// the row shown on (the picked object, or the object being edited) and the picked node.
+    pub tree: Vec<TreeRow>,
+    pub tree_on: Option<usize>,
+    pub picked_node: Option<usize>,
+    /// The layers listed under the tree in world mode, and the picked node's layer.
+    pub layers: Vec<LayerRow>,
+    pub layer_on: Option<i32>,
+    /// The first tree row shown, when there are more than fit.
+    tree_scroll: usize,
+    /// The node or layer being renamed and its field's text, and whether the field still
+    /// needs focus.
+    renaming: Option<(Named, String)>,
+    rename_focus: bool,
+    /// A finished rename for the editor to apply: node or layer and new name.
+    pub renamed: Option<(Named, String)>,
     /// The box being dragged with the select tool, in points.
     pub marquee: Option<Rect>,
+    /// A box brush's base is drawn and its height follows the pointer (set by the editor).
+    pub lifting: bool,
     /// Swatch being dragged with Cmd (swap) or Cmd+Shift (copy).
     drag_from: Option<u8>,
     /// The slot the swatch grid last scrolled to.
@@ -316,10 +465,18 @@ const COMMANDS: &[Command] = &[
     Command { label: "Pick color", keys: &["I"], run: |h| h.tool = Tool::Pick },
     Command { label: "Select", keys: &["S"], run: |h| h.tool = Tool::Select },
     Command { label: "Select all", keys: &["⌘", "A"], run: |h| h.actions.push(Action::SelectAll) },
+    Command { label: "Invert selection", keys: &["⌘", "⇧", "I"], run: |h| h.actions.push(Action::InvertSelection) },
     Command { label: "Select color", keys: &[], run: |h| h.actions.push(Action::SelectColor) },
+    Command { label: "Click selects color", keys: &[], run: |h| h.set_region(Region::Color) },
+    Command { label: "Click selects face", keys: &[], run: |h| h.set_region(Region::Face) },
+    Command { label: "Click selects volume", keys: &[], run: |h| h.set_region(Region::Volume) },
     Command { label: "Deselect", keys: &["Esc"], run: |h| h.actions.push(Action::Deselect) },
     Command { label: "Delete selection", keys: &["⌫"], run: |h| h.actions.push(Action::DeleteSelection) },
     Command { label: "Fill selection", keys: &[], run: |h| h.actions.push(Action::FillSelection) },
+    Command { label: "Hollow", keys: &[], run: |h| h.actions.push(Action::Hollow) },
+    Command { label: "Fill inside", keys: &[], run: |h| h.actions.push(Action::FillInterior) },
+    Command { label: "Resize bounds…", keys: &[], run: |h| h.toggle_bounds_panel() },
+    Command { label: "Crop to content", keys: &[], run: |h| h.actions.push(Action::Crop) },
     Command { label: "Copy", keys: &["⌘", "C"], run: |h| h.actions.push(Action::Copy) },
     Command { label: "Cut", keys: &["⌘", "X"], run: |h| h.actions.push(Action::Cut) },
     Command { label: "Paste", keys: &["⌘", "V"], run: |h| h.actions.push(Action::Paste) },
@@ -343,7 +500,19 @@ const COMMANDS: &[Command] = &[
         run: |h| h.actions.push(Action::Transform(Transform::Move([0, -1, 0]))),
     },
     Command { label: "Voxel brush", keys: &["V"], run: |h| h.shape = Shape::Voxel },
+    Command {
+        label: "Voxel brush size",
+        keys: &["V", "V"],
+        run: |h| {
+            h.shape = Shape::Voxel;
+            h.size_panel = true;
+        },
+    },
+    Command { label: "Bigger brush", keys: &["="], run: |h| h.step_size(1) },
+    Command { label: "Smaller brush", keys: &["-"], run: |h| h.step_size(-1) },
     Command { label: "Box brush", keys: &["B"], run: |h| h.shape = Shape::Box },
+    Command { label: "Place box", keys: &["↵"], run: |h| h.actions.push(Action::PlaceBox) },
+    Command { label: "Cancel box", keys: &["Esc"], run: |h| h.actions.push(Action::CancelBox) },
     Command { label: "Face brush", keys: &["F"], run: |h| h.shape = Shape::Face },
     Command { label: "Line brush", keys: &["L"], run: |h| h.shape = Shape::Line },
     Command { label: "Center brush: circle", keys: &["C"], run: |h| h.shape = Shape::Circle },
@@ -356,7 +525,39 @@ const COMMANDS: &[Command] = &[
     Command { label: "Lock axis Y", keys: &[], run: |h| h.toggle_lock(1) },
     Command { label: "Lock axis Z", keys: &[], run: |h| h.toggle_lock(2) },
     Command { label: "Cycle axis lock", keys: &["K"], run: |h| h.cycle_lock() },
+    Command { label: "World mode / edit model", keys: &["Tab"], run: |h| h.actions.push(Action::ToggleWorld) },
+    Command {
+        label: "Duplicate object",
+        keys: &["⌘", "D"],
+        run: |h| h.actions.push(Action::Duplicate { linked: false }),
+    },
+    Command {
+        label: "Linked copy (instance)",
+        keys: &["⌘", "⇧", "D"],
+        run: |h| h.actions.push(Action::Duplicate { linked: true }),
+    },
+    Command { label: "Delete object", keys: &["⌫"], run: |h| h.actions.push(Action::DeleteSelection) },
+    Command { label: "Hide or show object", keys: &["H"], run: |h| h.actions.push(Action::ToggleHidden) },
+    Command { label: "Rename object", keys: &[], run: |h| h.start_rename(h.picked_node) },
+    Command { label: "Group object", keys: &["⌘", "G"], run: |h| h.actions.push(Action::Group) },
+    Command { label: "Ungroup", keys: &["⌘", "⇧", "G"], run: |h| h.actions.push(Action::Ungroup) },
+    Command { label: "New layer", keys: &[], run: |h| h.actions.push(Action::AddLayer) },
+    Command { label: "Hide or show layer", keys: &[], run: |h| h.actions.push(Action::ToggleLayer) },
+    Command { label: "Rename layer", keys: &[], run: |h| h.start_layer_rename(h.layer_on) },
     Command { label: "Frame scene", keys: &["."], run: |h| h.actions.push(Action::Frame) },
+    Command { label: "View options", keys: &[], run: |h| h.view_panel = !h.view_panel },
+    Command { label: "Perspective", keys: &["O"], run: |h| h.actions.push(Action::Ortho(false)) },
+    Command { label: "Orthographic", keys: &["O"], run: |h| h.actions.push(Action::Ortho(true)) },
+    Command { label: "Isometric view", keys: &["0"], run: |h| h.actions.push(Action::Snap(View::Iso)) },
+    Command { label: "Front view", keys: &["1"], run: |h| h.actions.push(Action::Snap(View::Front)) },
+    Command { label: "Back view", keys: &["2"], run: |h| h.actions.push(Action::Snap(View::Back)) },
+    Command { label: "Left view", keys: &["3"], run: |h| h.actions.push(Action::Snap(View::Left)) },
+    Command { label: "Right view", keys: &["4"], run: |h| h.actions.push(Action::Snap(View::Right)) },
+    Command { label: "Top view", keys: &["5"], run: |h| h.actions.push(Action::Snap(View::Top)) },
+    Command { label: "Bottom view", keys: &["6"], run: |h| h.actions.push(Action::Snap(View::Bottom)) },
+    Command { label: "Show grid", keys: &["G"], run: |h| h.grid = !h.grid },
+    Command { label: "Show ground", keys: &[], run: |h| h.ground = !h.ground },
+    Command { label: "Show bounds", keys: &[], run: |h| h.frame = !h.frame },
     Command { label: "Undo", keys: &["⌘", "Z"], run: |h| h.actions.push(Action::Undo) },
     Command { label: "Redo", keys: &["⌘", "⇧", "Z"], run: |h| h.actions.push(Action::Redo) },
     Command { label: "Open .vox", keys: &["⌘", "O"], run: |h| h.actions.push(Action::Open) },
@@ -366,9 +567,19 @@ const COMMANDS: &[Command] = &[
     Command { label: "Edit material", keys: &[], run: |h| h.open_material_edit() },
     Command { label: "Swap color with…", keys: &[], run: |h| h.slot_op = Some(SlotOp::Swap) },
     Command { label: "Copy color to…", keys: &[], run: |h| h.slot_op = Some(SlotOp::Copy) },
-    Command { label: "Toggle render preview", keys: &[], run: |h| h.show_render = !h.show_render },
+    Command {
+        label: "Toggle render preview",
+        keys: &[],
+        run: |h| {
+            h.show_render = !h.show_render;
+            h.full_render = false;
+        },
+    },
     Command { label: "Render settings", keys: &["R"], run: |h| h.toggle_render_panel() },
+    Command { label: "Full render view", keys: &[], run: |h| h.toggle_full_render() },
     Command { label: "Export PNG", keys: &[], run: |h| h.actions.push(Action::ExportPng) },
+    Command { label: "Export OBJ", keys: &[], run: |h| h.actions.push(Action::ExportObj) },
+    Command { label: "Export PNG slices", keys: &[], run: |h| h.actions.push(Action::ExportSlices) },
 ];
 
 impl Hybrid {
@@ -379,6 +590,9 @@ impl Hybrid {
             mirror: false,
             mirror_on: [true, false, false],
             lock: None,
+            size: 1,
+            region: Region::Color,
+            size_panel: false,
             slot: 28,
             palette,
             materials: [Material::default(); 256],
@@ -393,15 +607,41 @@ impl Hybrid {
             slot_op: None,
             show_render: true,
             render_rect: None,
+            full_render: false,
+            render_dock: None,
             render_panel: false,
             render: RenderSettings::default(),
             sun_hex: String::new(),
+            bounds: [0; 3],
+            bounds_panel: None,
+            ortho: false,
+            view: None,
+            view_panel: false,
+            export_menu: false,
+            export_x: 0.0,
+            grid: true,
+            ground: true,
+            frame: true,
             hits: HashMap::new(),
             axes_y: 0.0,
+            voxel_y: 0.0,
+            view_y: 0.0,
             select_y: 0.0,
             selected: 0,
             has_clip: false,
+            world: false,
+            picked: None,
+            tree: Vec::new(),
+            tree_on: None,
+            picked_node: None,
+            tree_scroll: 0,
+            layers: Vec::new(),
+            layer_on: None,
+            renaming: None,
+            rename_focus: false,
+            renamed: None,
             marquee: None,
+            lifting: false,
             drag_from: None,
             shown_slot: 28,
             shift: false,
@@ -469,6 +709,29 @@ impl Hybrid {
     }
 
     /// C: the center brush, switching between circle and sphere when it is already on.
+    /// V: the voxel brush, or with it already on, open or close its size flyout.
+    pub fn voxel_brush(&mut self) {
+        if self.shape == Shape::Voxel {
+            self.size_panel = !self.size_panel;
+        }
+        self.shape = Shape::Voxel;
+    }
+
+    /// Step the voxel brush's size by `d`, within 1 to [`MAX_SIZE`].
+    pub fn step_size(&mut self, d: i32) {
+        self.size = (self.size as i32 + d).clamp(1, MAX_SIZE as i32) as u8;
+    }
+
+    /// Whether the size flyout shows: the voxel brush with add, erase or paint in model mode,
+    /// opened or above size 1, and no selection flyout in its place.
+    fn size_shown(&self) -> bool {
+        self.shape == Shape::Voxel
+            && matches!(self.tool, Tool::Add | Tool::Erase | Tool::Paint)
+            && !self.world
+            && self.selected == 0
+            && (self.size_panel || self.size > 1)
+    }
+
     pub fn center_brush(&mut self) {
         self.shape = if self.shape == Shape::Circle { Shape::Sphere } else { Shape::Circle };
     }
@@ -505,14 +768,60 @@ impl Hybrid {
         }
     }
 
-    /// Escape: cancel an armed swap or copy, else close the colour editor or the Render panel,
-    /// else deselect, else the coach card.
+    /// Swap the path-traced image between the corner and the whole view (it shows the corner).
+    pub fn toggle_full_render(&mut self) {
+        self.full_render = !self.full_render;
+        self.show_render = true;
+    }
+
+    /// Open or close the Bounds panel, its fields showing the current size.
+    pub fn toggle_bounds_panel(&mut self) {
+        self.bounds_panel = match self.bounds_panel {
+            Some(_) => None,
+            None => Some(self.bounds.map(|v| v.to_string())),
+        };
+    }
+
+    /// Escape: cancel an armed swap or copy, else close the colour editor, the Bounds panel,
+    /// the View flyout or the Render panel, else leave the full render view, else deselect,
+    /// else the coach card.
+    /// Where flyouts beside the rail start: right of the rail, or of the scene tree when it shows.
+    fn flyout_x(&self) -> f32 {
+        12.0 + 52.0 + 8.0 + if self.tree.is_empty() { 0.0 } else { TREE_W + 8.0 }
+    }
+
+    /// Open the rename field on tree node `node`, in world mode.
+    pub fn start_rename(&mut self, node: Option<usize>) {
+        let Some(row) = node.and_then(|n| self.tree.iter().find(|r| r.node == n)) else { return };
+        if self.world {
+            self.renaming = Some((Named::Node(row.node), row.name.clone()));
+            self.rename_focus = true;
+        }
+    }
+
+    /// Open the rename field on layer `id`, in world mode.
+    pub fn start_layer_rename(&mut self, id: Option<i32>) {
+        let Some(row) = id.and_then(|id| self.layers.iter().find(|l| l.id == id)) else { return };
+        if self.world && !self.tree.is_empty() {
+            self.renaming = Some((Named::Layer(row.id), row.name.clone()));
+            self.rename_focus = true;
+        }
+    }
+
     fn escape(&mut self) {
-        if self.slot_op.take().is_some() || self.color_edit.take().is_some() {
+        if self.slot_op.take().is_some() || self.color_edit.take().is_some() || self.bounds_panel.take().is_some() {
+            return;
+        }
+        if std::mem::take(&mut self.view_panel) || std::mem::take(&mut self.export_menu) {
+            return;
+        }
+        if self.size_shown() && std::mem::take(&mut self.size_panel) {
             return;
         }
         if self.render_panel {
             self.render_panel = false;
+        } else if self.full_render {
+            self.full_render = false;
         } else if self.selected > 0 {
             self.actions.push(Action::Deselect);
         } else {
@@ -544,8 +853,13 @@ impl Hybrid {
         let screen = ctx.content_rect();
         self.top_bar(ctx, screen);
         self.rail(ctx);
+        self.tree_panel(ctx);
         self.axes(ctx);
+        self.size_flyout(ctx);
         self.selection_panel(ctx);
+        self.bounds_panel(ctx);
+        self.view_panel(ctx);
+        self.export_menu(ctx);
         self.marquee(ctx);
         self.palette_panel(ctx, screen);
         self.color_editor(ctx, screen);
@@ -569,12 +883,26 @@ impl Hybrid {
         ctx.input_mut(|i| {
             self.shift = i.modifiers.shift;
             self.alt = i.modifiers.alt;
+            // egui drops focus on Escape before the UI runs, so the rename field's Escape
+            // (cancel) is handled here, ahead of the keys Escape would otherwise reach.
+            if self.renaming.is_some() && i.consume_key(Modifiers::NONE, Key::Escape) {
+                self.renaming = None;
+                return;
+            }
             if i.consume_key(Modifiers::COMMAND, Key::K) {
                 self.cmdk = if self.cmdk.is_some() { None } else { Some(String::new()) };
                 self.cmdk_sel = 0;
             }
             if self.cmdk.is_some() || typing {
                 return;
+            }
+            if self.lifting {
+                if i.consume_key(Modifiers::NONE, Key::Enter) {
+                    self.actions.push(Action::PlaceBox);
+                }
+                if i.consume_key(Modifiers::NONE, Key::Escape) {
+                    self.actions.push(Action::CancelBox);
+                }
             }
             if i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z) {
                 self.actions.push(Action::Redo);
@@ -590,6 +918,21 @@ impl Hybrid {
             }
             if i.consume_key(Modifiers::COMMAND, Key::A) {
                 self.actions.push(Action::SelectAll);
+            }
+            if i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::I) {
+                self.actions.push(Action::InvertSelection);
+            }
+            if i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::D) {
+                self.actions.push(Action::Duplicate { linked: true });
+            }
+            if i.consume_key(Modifiers::COMMAND, Key::D) {
+                self.actions.push(Action::Duplicate { linked: false });
+            }
+            if i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::G) {
+                self.actions.push(Action::Ungroup);
+            }
+            if i.consume_key(Modifiers::COMMAND, Key::G) {
+                self.actions.push(Action::Group);
             }
             // Natively egui-winit turns Cmd-C, Cmd-X and Cmd-V into clipboard events (Paste
             // only when the system clipboard has text); the browser page sends the keys.
@@ -632,7 +975,7 @@ impl Hybrid {
                 (Key::P, |h| h.tool = Tool::Paint),
                 (Key::I, |h| h.tool = Tool::Pick),
                 (Key::S, |h| h.tool = Tool::Select),
-                (Key::V, |h| h.shape = Shape::Voxel),
+                (Key::V, |h| h.voxel_brush()),
                 (Key::B, |h| h.shape = Shape::Box),
                 (Key::F, |h| h.shape = Shape::Face),
                 (Key::L, |h| h.shape = Shape::Line),
@@ -647,6 +990,23 @@ impl Hybrid {
                     h.cmdk_sel = 0;
                 }),
                 (Key::Period, |h| h.actions.push(Action::Frame)),
+                (Key::O, |h| h.actions.push(Action::Ortho(!h.ortho))),
+                (Key::G, |h| h.grid = !h.grid),
+                (Key::H, |h| {
+                    if h.world {
+                        h.actions.push(Action::ToggleHidden)
+                    }
+                }),
+                (Key::Num0, |h| h.actions.push(Action::Snap(View::Iso))),
+                (Key::Num1, |h| h.actions.push(Action::Snap(View::Front))),
+                (Key::Num2, |h| h.actions.push(Action::Snap(View::Back))),
+                (Key::Num3, |h| h.actions.push(Action::Snap(View::Left))),
+                (Key::Num4, |h| h.actions.push(Action::Snap(View::Right))),
+                (Key::Num5, |h| h.actions.push(Action::Snap(View::Top))),
+                (Key::Num6, |h| h.actions.push(Action::Snap(View::Bottom))),
+                (Key::Minus, |h| h.step_size(-1)),
+                (Key::Equals, |h| h.step_size(1)),
+                (Key::Plus, |h| h.step_size(1)),
                 (Key::OpenBracket, |h| h.slot = h.slot.saturating_sub(1).max(1)),
                 (Key::CloseBracket, |h| h.slot = h.slot.saturating_add(1)),
             ] {
@@ -709,6 +1069,13 @@ impl Hybrid {
             if tbtn(ui, &mut x, cy, Some(icon::DOWNLOAD), "Save .vox", "save", true).clicked() {
                 self.actions.push(Action::Save);
             }
+            x += 4.0;
+            self.export_x = x;
+            let r = tbtn_on(ui, &mut x, cy, Some(icon::FILE_OUTPUT), "Export", "export", true, self.export_menu);
+            self.hits.insert("export".into(), r.rect);
+            if r.clicked() {
+                self.export_menu = !self.export_menu;
+            }
             // Right side, laid out from the right edge.
             let embed_label =
                 ui.painter().layout_no_wrap("Embed".into(), inter_semibold(13.0), Color32::from_rgb(0x0d, 0x10, 0x20));
@@ -733,7 +1100,7 @@ impl Hybrid {
 
     // #rail
     fn rail(&mut self, ctx: &Context) {
-        let h = 6.0 + rail_label_h() + 5.0 * 42.0 + 11.0 + rail_label_h() + 5.0 * 42.0 + 11.0 + 3.0 * 42.0 + 6.0 - 2.0;
+        let h = 6.0 + rail_label_h() + 5.0 * 42.0 + 11.0 + rail_label_h() + 5.0 * 42.0 + 11.0 + 4.0 * 42.0 + 6.0 - 2.0;
         let rect = Rect::from_min_size(pos2(12.0, 68.0), vec2(52.0, h));
         Self::panel(ctx, "rail", rect, Order::Middle, |ui, rect| {
             let x = rect.left() + 6.0;
@@ -768,8 +1135,17 @@ impl Hybrid {
                 (Shape::Face, icon::LAYERS, "F"),
                 (Shape::Line, icon::SLASH, "L"),
             ] {
-                if tool_button(ui, pos2(x, y), ic, k, shape == s).clicked() {
-                    self.shape = s;
+                let r = tool_button(ui, pos2(x, y), ic, k, shape == s);
+                if s == Shape::Voxel {
+                    self.voxel_y = y;
+                    self.hits.insert("voxel".into(), r.rect);
+                }
+                if r.clicked() {
+                    if s == Shape::Voxel {
+                        self.voxel_brush();
+                    } else {
+                        self.shape = s;
+                    }
                 }
                 y += 42.0;
             }
@@ -799,7 +1175,474 @@ impl Hybrid {
             if tool_button(ui, pos2(x, y), icon::SCAN, ".", false).clicked() {
                 self.actions.push(Action::Frame);
             }
+            y += 42.0;
+            self.view_y = y;
+            let r = tool_button(ui, pos2(x, y), icon::AXIS_3D, "", self.view_panel);
+            self.hits.insert("view".into(), r.rect);
+            if r.clicked() {
+                self.view_panel = !self.view_panel;
+            }
         });
+    }
+
+    // The scene tree (Diorama's .tree, kept for Hybrid): beside the rail once a second object
+    // exists. A row per object and group in tree order, indented under its groups, with the
+    // model's size and an eye. A click picks the object in world mode or edits its model;
+    // in world mode the eye hides and shows, and a double-click renames.
+    fn tree_panel(&mut self, ctx: &Context) {
+        if self.tree.is_empty() {
+            self.renaming = None;
+            return;
+        }
+        let row_h = 28.0;
+        let rows = self.tree.len().min(TREE_ROWS);
+        self.tree_scroll = self.tree_scroll.min(self.tree.len() - rows);
+        let world = self.world;
+        // The LAYERS list sits under the rows in world mode: a rule, its header and a row each.
+        let layers: &[LayerRow] = if world { &self.layers } else { &[] };
+        let layers_h = if world { 1.0 + 30.0 + layers.len() as f32 * row_h } else { 0.0 };
+        let rect = Rect::from_min_size(
+            pos2(12.0 + 52.0 + 8.0, 68.0),
+            vec2(TREE_W, 36.0 + rows as f32 * row_h + layers_h + 6.0),
+        );
+        let objects = self.tree.iter().filter(|r| !r.group).count();
+        let (on, scroll, layer_on) = (self.tree_on, self.tree_scroll, self.layer_on);
+        let mut renaming = self.renaming.take();
+        let mut focus = std::mem::take(&mut self.rename_focus);
+        let mut run = Vec::new();
+        let mut hits = Vec::new();
+        let mut renamed = None;
+        let mut start_rename = None;
+        let mut wheel = 0.0;
+        Self::panel(ctx, "tree", rect, Order::Middle, |ui, rect| {
+            let header = |ui: &egui::Ui, y: f32, title: &str| {
+                let g = ui.painter().layout_job(spaced(title, inter(9.0), FAINT, 0.72));
+                ui.painter().galley(pos2(rect.left() + 12.0, y - g.size().y / 2.0), g, FAINT);
+            };
+            let hy = rect.top() + 18.0;
+            header(ui, hy, "SCENE");
+            ui.painter().text(
+                pos2(rect.right() - 12.0, hy),
+                Align2::RIGHT_CENTER,
+                format!("{objects} objects"),
+                inter(11.0),
+                FAINT,
+            );
+            let body = Rect::from_min_size(
+                pos2(rect.left() + 6.0, rect.top() + 34.0),
+                vec2(rect.width() - 12.0, rows as f32 * row_h),
+            );
+            if ui.rect_contains_pointer(body) {
+                wheel = ui.input(|i| i.smooth_scroll_delta.y);
+            }
+            for (k, row) in self.tree.iter().skip(scroll).take(rows).enumerate() {
+                let r =
+                    Rect::from_min_size(pos2(body.left(), body.top() + k as f32 * row_h), vec2(body.width(), row_h));
+                let id = format!("tree-{}", row.node);
+                let resp = ui.interact(r, Id::unique(&id), Sense::click());
+                hits.push((id, r));
+                let eye = Rect::from_center_size(pos2(r.right() - 15.0, r.center().y), vec2(22.0, 22.0));
+                let eye_resp = world.then(|| ui.interact(eye, Id::unique(("tree-eye", row.node)), Sense::click()));
+                if world {
+                    hits.push((format!("tree-eye-{}", row.node), eye));
+                }
+                let hover = resp.hovered() || eye_resp.as_ref().is_some_and(|e| e.hovered());
+                let is_on = on == Some(row.node);
+                let p = ui.painter();
+                if is_on {
+                    p.rect_filled(r, CornerRadius::same(7), ACCENT_BG);
+                } else if hover {
+                    p.rect_filled(r, CornerRadius::same(7), HOVER);
+                }
+                let color = match (is_on, row.shown) {
+                    (true, _) => Color32::WHITE,
+                    (false, true) if hover => TEXT,
+                    (false, true) => MUTED,
+                    (false, false) => FAINT,
+                };
+                let x = r.left() + 8.0 + row.depth as f32 * 14.0;
+                let glyph = match (row.group, row.linked > 1) {
+                    (true, _) => icon::FOLDER,
+                    (false, true) => icon::LINK,
+                    (false, false) => icon::BOX,
+                };
+                p.text(pos2(x + 7.0, r.center().y), Align2::CENTER_CENTER, glyph, icon_font(13.0), color);
+                let mut right = eye.left() - 4.0;
+                if !row.group {
+                    let s = row.size;
+                    let g = p.layout_no_wrap(format!("{}×{}×{}", s[0], s[1], s[2]), mono(10.0), FAINT);
+                    right -= g.size().x;
+                    p.galley(pos2(right, r.center().y - g.size().y / 2.0), g, FAINT);
+                    right -= 8.0;
+                }
+                let name_r = Rect::from_min_max(pos2(x + 20.0, r.top() + 4.0), pos2(right, r.bottom() - 4.0));
+                let named = Named::Node(row.node);
+                match renaming.as_mut() {
+                    Some((n, text)) if *n == named => {
+                        hits.push(("tree-rename".to_string(), name_r));
+                        if Self::rename_field(ui, name_r, text, &mut focus) {
+                            renamed = Some((named, text.clone()));
+                            renaming = None;
+                        }
+                    }
+                    _ => Self::row_name(ui, name_r, r, &row.name, color),
+                }
+                if let Some(e) = &eye_resp {
+                    Self::eye(ui, eye, e, row.hidden, row.hidden || hover);
+                }
+                if eye_resp.as_ref().is_some_and(|e| e.clicked()) {
+                    run.push(Action::SetHidden(row.node, !row.hidden));
+                } else if resp.double_clicked() {
+                    start_rename = Some(named);
+                } else if resp.clicked() {
+                    run.push(Action::PickNode(row.node));
+                }
+            }
+            if !world {
+                return;
+            }
+            // LAYERS: a click puts the picked object or group on the layer (its row shows a
+            // dot), the eye hides and shows the layer, a double-click renames, + adds one.
+            let top = body.bottom() + 6.0;
+            ui.painter().hline(rect.left() + 12.0..=rect.right() - 12.0, top, Stroke::new(1.0, LINE));
+            let hy = top + 16.0;
+            header(ui, hy, "LAYERS");
+            let add = Rect::from_center_size(pos2(rect.right() - 21.0, hy), vec2(22.0, 22.0));
+            let add_resp = ui.interact(add, Id::unique("layer-add"), Sense::click());
+            hits.push(("layer-add".to_string(), add));
+            if add_resp.hovered() {
+                ui.painter().rect_filled(add, CornerRadius::same(6), HOVER);
+            }
+            let c = if add_resp.hovered() { TEXT } else { FAINT };
+            ui.painter().text(add.center(), Align2::CENTER_CENTER, icon::PLUS, icon_font(13.0), c);
+            if add_resp.clicked() {
+                run.push(Action::AddLayer);
+            }
+            for (k, l) in layers.iter().enumerate() {
+                let r =
+                    Rect::from_min_size(pos2(body.left(), top + 31.0 + k as f32 * row_h), vec2(body.width(), row_h));
+                let id = format!("layer-{}", l.id);
+                let resp = ui.interact(r, Id::unique(&id), Sense::click());
+                hits.push((id, r));
+                let eye = Rect::from_center_size(pos2(r.right() - 15.0, r.center().y), vec2(22.0, 22.0));
+                let eye_resp = ui.interact(eye, Id::unique(("layer-eye", l.id)), Sense::click());
+                hits.push((format!("layer-eye-{}", l.id), eye));
+                let hover = resp.hovered() || eye_resp.hovered();
+                let p = ui.painter();
+                if hover {
+                    p.rect_filled(r, CornerRadius::same(7), HOVER);
+                }
+                let color = match (l.hidden, hover) {
+                    (true, _) => FAINT,
+                    (false, true) => TEXT,
+                    (false, false) => MUTED,
+                };
+                let x = r.left() + 8.0;
+                p.text(pos2(x + 7.0, r.center().y), Align2::CENTER_CENTER, icon::LAYERS, icon_font(13.0), color);
+                if layer_on == Some(l.id) {
+                    p.circle_filled(pos2(r.left() + 3.0, r.center().y), 2.5, ACCENT);
+                }
+                let g = p.layout_no_wrap(l.objects.to_string(), mono(10.0), FAINT);
+                let right = eye.left() - 4.0 - g.size().x;
+                p.galley(pos2(right, r.center().y - g.size().y / 2.0), g, FAINT);
+                let name_r = Rect::from_min_max(pos2(x + 20.0, r.top() + 4.0), pos2(right - 8.0, r.bottom() - 4.0));
+                let named = Named::Layer(l.id);
+                match renaming.as_mut() {
+                    Some((n, text)) if *n == named => {
+                        hits.push(("tree-rename".to_string(), name_r));
+                        if Self::rename_field(ui, name_r, text, &mut focus) {
+                            renamed = Some((named, text.clone()));
+                            renaming = None;
+                        }
+                    }
+                    _ => Self::row_name(ui, name_r, r, &l.name, color),
+                }
+                Self::eye(ui, eye, &eye_resp, l.hidden, l.hidden || hover);
+                if eye_resp.clicked() {
+                    run.push(Action::SetLayerHidden(l.id, !l.hidden));
+                } else if resp.double_clicked() {
+                    start_rename = Some(named);
+                } else if resp.clicked() {
+                    run.push(Action::SetLayer(l.id));
+                }
+            }
+        });
+        if wheel != 0.0 {
+            let steps = (wheel / row_h).round() as isize;
+            let steps = if steps == 0 { -(wheel.signum() as isize) } else { -steps };
+            self.tree_scroll = self.tree_scroll.saturating_add_signed(steps).min(self.tree.len() - rows);
+        }
+        self.renaming = renaming;
+        self.rename_focus = focus;
+        self.renamed = renamed.or(self.renamed.take());
+        self.hits.extend(hits);
+        self.actions.extend(run);
+        match start_rename {
+            Some(Named::Node(n)) => self.start_rename(Some(n)),
+            Some(Named::Layer(id)) => self.start_layer_rename(Some(id)),
+            None => {}
+        }
+    }
+
+    /// A tree or layer row's name, cut with an ellipsis to fit `name_r`.
+    fn row_name(ui: &egui::Ui, name_r: Rect, r: Rect, name: &str, color: Color32) {
+        let mut job = LayoutJob::single_section(
+            name.to_string(),
+            TextFormat { font_id: inter(12.0), color, ..Default::default() },
+        );
+        job.wrap = egui::text::TextWrapping {
+            max_width: name_r.width().max(1.0),
+            max_rows: 1,
+            break_anywhere: true,
+            overflow_character: Some('…'),
+        };
+        let g = ui.painter().layout_job(job);
+        ui.painter().galley(pos2(name_r.left(), r.center().y - g.size().y / 2.0), g, color);
+    }
+
+    /// A row's eye button, drawn when `show` (hovered or hidden).
+    fn eye(ui: &egui::Ui, eye: Rect, resp: &egui::Response, hidden: bool, show: bool) {
+        if !show {
+            return;
+        }
+        if resp.hovered() {
+            ui.painter().rect_filled(eye, CornerRadius::same(6), HOVER);
+        }
+        let glyph = if hidden { icon::EYE_OFF } else { icon::EYE };
+        let c = if resp.hovered() { TEXT } else { FAINT };
+        ui.painter().text(eye.center(), Align2::CENTER_CENTER, glyph, icon_font(13.0), c);
+    }
+
+    /// The in-place rename field over a row's name; true once it loses focus (done).
+    fn rename_field(ui: &mut egui::Ui, name_r: Rect, text: &mut String, focus: &mut bool) -> bool {
+        ui.painter().rect(
+            name_r.expand2(vec2(4.0, 0.0)),
+            CornerRadius::same(6),
+            Color32::from_white_alpha(9),
+            Stroke::new(1.0, Color32::from_rgba_unmultiplied(142, 162, 255, 140)),
+            StrokeKind::Inside,
+        );
+        let edit = egui::TextEdit::singleline(text)
+            .id(Id::unique("tree-rename"))
+            .font(inter(12.0))
+            .text_color(TEXT)
+            .frame(egui::Frame::NONE)
+            .margin(egui::Margin::ZERO)
+            .desired_width(name_r.width());
+        let line = ui.fonts_mut(|f| f.row_height(&inter(12.0)));
+        let text_r = Rect::from_center_size(name_r.center(), vec2(name_r.width(), line));
+        let out = ui.put(text_r, edit);
+        if std::mem::take(focus) {
+            out.request_focus();
+            false
+        } else {
+            out.lost_focus()
+        }
+    }
+
+    // The Export menu under the top bar's Export button: one row per export, each with what
+    // it writes. A row runs its export and closes the menu; so do Escape and a click outside.
+    fn export_menu(&mut self, ctx: &Context) {
+        if !self.export_menu {
+            return;
+        }
+        let rows = [
+            ("export-render", icon::IMAGE_DOWN, "Render PNG", "R"),
+            ("export-obj", icon::BOX, "OBJ with palette texture", ".obj .mtl .png"),
+            ("export-slices", icon::LAYERS, "PNG slices", ".png"),
+        ];
+        let rect = Rect::from_min_size(
+            pos2(self.export_x, 12.0 + 44.0 + 6.0),
+            vec2(340.0, 36.0 + 34.0 * rows.len() as f32 + 6.0),
+        );
+        let mut run = None;
+        let mut hits = Vec::new();
+        Self::panel(ctx, "export-menu", rect, Order::Foreground, |ui, rect| {
+            let hy = rect.top() + 18.0;
+            let g = ui.painter().layout_job(spaced("EXPORT", inter(9.0), FAINT, 0.72));
+            ui.painter().galley(pos2(rect.left() + 12.0, hy - g.size().y / 2.0), g, FAINT);
+            for (k, (id, glyph, label, hint)) in rows.into_iter().enumerate() {
+                let r = Rect::from_min_size(
+                    pos2(rect.left() + 6.0, rect.top() + 36.0 + 34.0 * k as f32),
+                    vec2(rect.width() - 12.0, 32.0),
+                );
+                let resp = ui.interact(r, Id::unique(id), Sense::click());
+                hits.push((id.to_string(), r));
+                let p = ui.painter();
+                let color = if resp.hovered() {
+                    p.rect_filled(r, CornerRadius::same(7), HOVER);
+                    TEXT
+                } else {
+                    MUTED
+                };
+                let cy = r.center().y;
+                p.text(pos2(r.left() + 16.0, cy), Align2::CENTER_CENTER, glyph, icon_font(15.0), color);
+                p.text(pos2(r.left() + 32.0, cy), Align2::LEFT_CENTER, label, inter(13.0), TEXT);
+                if hint.len() == 1 {
+                    kbd(ui, pos2(r.right() - 8.0, cy), hint, true);
+                } else {
+                    ui.painter().text(pos2(r.right() - 8.0, cy), Align2::RIGHT_CENTER, hint, mono(10.5), FAINT);
+                }
+                if resp.clicked() {
+                    run = Some(k);
+                }
+            }
+        });
+        self.hits.extend(hits);
+        let button = self.hits.get("export").copied().unwrap_or(Rect::NOTHING);
+        let outside = ctx.input(|i| {
+            i.pointer.any_pressed()
+                && i.pointer.interact_pos().is_some_and(|p| !rect.contains(p) && !button.contains(p))
+        });
+        match run {
+            Some(0) => {
+                if !self.render_panel {
+                    self.toggle_render_panel();
+                }
+            }
+            Some(1) => self.actions.push(Action::ExportObj),
+            Some(_) => self.actions.push(Action::ExportSlices),
+            None => {}
+        }
+        if run.is_some() || outside {
+            self.export_menu = false;
+        }
+    }
+
+    // The View flyout beside the rail's view button: the projection (perspective,
+    // orthographic, isometric) and the six side views with their number keys. Built like the
+    // selection flyout, its bottom level with the button's; the view the camera is at shows on.
+    fn view_panel(&mut self, ctx: &Context) {
+        if !self.view_panel {
+            return;
+        }
+        // The button is the last in the rail, so the flyout grows up from its bottom edge.
+        let rect = Rect::from_min_size(pos2(self.flyout_x(), self.view_y + 40.0 + 6.0 - 210.0), vec2(204.0, 210.0));
+        let (ortho, view) = (self.ortho, self.view);
+        let mut guides = [self.grid, self.ground, self.frame];
+        let mut run = Vec::new();
+        let mut hits = Vec::new();
+        let mut close = false;
+        Self::panel(ctx, "view", rect, Order::Middle, |ui, rect| {
+            let hy = rect.top() + 18.0;
+            let g = ui.painter().layout_job(spaced("VIEW", inter(9.0), FAINT, 0.72));
+            ui.painter().galley(pos2(rect.left() + 12.0, hy - g.size().y / 2.0), g, FAINT);
+            let x = Rect::from_center_size(pos2(rect.right() - 19.0, hy), vec2(22.0, 22.0));
+            let resp = ui.interact(x, Id::unique("view-close"), Sense::click());
+            hits.push(("view-close".to_string(), x));
+            if resp.hovered() {
+                ui.painter().rect_filled(x, CornerRadius::same(6), HOVER);
+            }
+            let c = if resp.hovered() { TEXT } else { MUTED };
+            ui.painter().text(x.center(), Align2::CENTER_CENTER, icon::X, icon_font(13.0), c);
+            close = resp.clicked();
+            ui.painter().text(
+                pos2(x.left() - 4.0, hy),
+                Align2::RIGHT_CENTER,
+                view.map_or("Free", |v| v.name()),
+                inter(11.0),
+                FAINT,
+            );
+            let iso = view == Some(View::Iso);
+            let sel = if iso { 2 } else { ortho as usize };
+            let row = Rect::from_min_size(pos2(rect.left() + 12.0, hy + 17.0), vec2(rect.width() - 24.0, 26.0));
+            let mut seg = Vec::new();
+            let labels = ["Persp", "Ortho", "Iso"].map(String::from);
+            let names = ["view-persp", "view-ortho", "view-iso"];
+            match segmented(ui, row, &names, &labels, sel, &[true; 3], inter(11.0), &mut seg) {
+                Some(0) => run.push(Action::Ortho(false)),
+                Some(1) if iso || !ortho => run.push(Action::Ortho(true)),
+                Some(2) => run.push(Action::Snap(View::Iso)),
+                _ => {}
+            }
+            hits.extend(seg.into_iter().map(|(n, r)| (n.to_string(), r)));
+            ui.painter().line_segment(
+                [pos2(rect.left() + 10.0, hy + 54.5), pos2(rect.right() - 10.0, hy + 54.5)],
+                Stroke::new(1.0, LINE),
+            );
+            let cw = (rect.width() - 24.0 - 8.0) / 3.0;
+            let cell = |k: usize, cy: f32| {
+                Rect::from_min_size(pos2(rect.left() + 12.0 + (k % 3) as f32 * (cw + 4.0), cy - 13.0), vec2(cw, 26.0))
+            };
+            for (k, v) in View::ALL[..6].iter().copied().enumerate() {
+                let c = cell(k, hy + 78.0 + (k / 3) as f32 * 34.0);
+                let id = format!("view-{}", v.name().to_lowercase());
+                if view_chip(ui, c, &id, v.name(), &(k + 1).to_string(), view == Some(v)) {
+                    run.push(Action::Snap(v));
+                }
+                hits.push((id, c));
+            }
+            ui.painter().line_segment(
+                [pos2(rect.left() + 10.0, hy + 142.5), pos2(rect.right() - 10.0, hy + 142.5)],
+                Stroke::new(1.0, LINE),
+            );
+            for (k, (id, label, key)) in
+                [("view-grid", "Grid", "G"), ("view-ground", "Ground", ""), ("view-bounds", "Bounds", "")]
+                    .into_iter()
+                    .enumerate()
+            {
+                let c = cell(k, hy + 166.0);
+                if view_chip(ui, c, id, label, key, guides[k]) {
+                    guides[k] = !guides[k];
+                }
+                hits.push((id.to_string(), c));
+            }
+        });
+        [self.grid, self.ground, self.frame] = guides;
+        self.hits.extend(hits);
+        self.actions.extend(run);
+        if close {
+            self.view_panel = false;
+        }
+    }
+
+    // The size flyout beside the rail's voxel brush button: SIZE, minus, the size, plus.
+    // Built like the axis flyout.
+    fn size_flyout(&mut self, ctx: &Context) {
+        if !self.size_shown() {
+            return;
+        }
+        let rect = Rect::from_min_size(pos2(self.flyout_x(), self.voxel_y - 6.0), vec2(150.0, 6.0 + 40.0 + 6.0));
+        let size = self.size;
+        let mut step = 0;
+        let mut hits = Vec::new();
+        Self::panel(ctx, "size", rect, Order::Middle, |ui, rect| {
+            let cy = rect.center().y;
+            let g = ui.painter().layout_job(spaced("SIZE", inter(9.0), FAINT, 0.72));
+            ui.painter().galley(pos2(rect.left() + 12.0, cy - g.size().y / 2.0), g, FAINT);
+            for (k, (id, glyph, d)) in
+                [("size-minus", icon::MINUS, -1), ("size-plus", icon::PLUS, 1)].into_iter().enumerate()
+            {
+                let c = Rect::from_min_size(pos2(rect.left() + 58.0 + k as f32 * 56.0, cy - 13.0), vec2(26.0, 26.0));
+                let off = (d < 0 && size <= 1) || (d > 0 && size >= MAX_SIZE);
+                let resp = ui.interact(c, Id::unique(id), if off { Sense::hover() } else { Sense::click() });
+                hits.push((id.to_string(), c));
+                let hover = resp.hovered() && !off;
+                let border = if hover { Color32::from_white_alpha(64) } else { LINE2 };
+                let p = ui.painter();
+                p.rect_stroke(c, CornerRadius::same(7), Stroke::new(1.0, border), StrokeKind::Inside);
+                let color = if off {
+                    FAINT
+                } else if hover {
+                    TEXT
+                } else {
+                    MUTED
+                };
+                p.text(c.center(), Align2::CENTER_CENTER, glyph, icon_font(13.0), color);
+                if resp.clicked() {
+                    step = d;
+                }
+            }
+            ui.painter().text(
+                pos2(rect.left() + 58.0 + 26.0 + 15.0, cy),
+                Align2::CENTER_CENTER,
+                size.to_string(),
+                mono_medium(12.0),
+                TEXT,
+            );
+        });
+        self.hits.extend(hits);
+        self.step_size(step);
     }
 
     // The axis flyout beside the rail's mirror and lock buttons, shown while either is on:
@@ -809,7 +1652,7 @@ impl Hybrid {
             return;
         }
         let rect =
-            Rect::from_min_size(pos2(12.0 + 52.0 + 8.0, self.axes_y - 6.0), vec2(150.0, 6.0 + 2.0 * 40.0 + 2.0 + 6.0));
+            Rect::from_min_size(pos2(self.flyout_x(), self.axes_y - 6.0), vec2(150.0, 6.0 + 2.0 * 40.0 + 2.0 + 6.0));
         let (mirror, lock) = (self.mirror_axes(), self.lock);
         let mut clicked = (None, None);
         let mut hits = Vec::new();
@@ -861,15 +1704,26 @@ impl Hybrid {
         }
     }
 
+    /// Choose what a select click takes, and switch to the select tool.
+    pub fn set_region(&mut self, region: Region) {
+        self.region = region;
+        self.tool = Tool::Select;
+    }
+
     // The selection flyout beside the rail's select button, shown with the select tool or a
-    // selection: the count, ROTATE / FLIP / LOOP X Y Z (the whole model when nothing is
-    // selected) and fill, copy, cut, paste and delete. Built like the axis flyout.
+    // selection: the count, ROTATE / FLIP / LOOP X Y Z and hollow and fill inside (the
+    // whole model when nothing is selected), crop and resize of the model bounds, select all
+    // and invert, what a click selects (colour, face or volume), and fill, copy, cut, paste
+    // and delete. Built like the axis flyout.
     fn selection_panel(&mut self, ctx: &Context) {
-        if self.tool != Tool::Select && self.selected == 0 {
+        if self.world || (self.tool != Tool::Select && self.selected == 0) {
             return;
         }
-        let rect = Rect::from_min_size(pos2(12.0 + 52.0 + 8.0, self.select_y - 6.0), vec2(162.0, 174.0));
+        let rect = Rect::from_min_size(pos2(self.flyout_x(), self.select_y - 6.0), vec2(162.0, 310.0));
         let (selected, has_clip) = (self.selected, self.has_clip);
+        let mut region = self.region;
+        let bounds_open = self.bounds_panel.is_some();
+        let mut toggle_bounds = false;
         let mut run = Vec::new();
         let mut hits = Vec::new();
         Self::panel(ctx, "selection", rect, Order::Middle, |ui, rect| {
@@ -934,7 +1788,58 @@ impl Hybrid {
                     }
                 }
             }
-            let cy = hy + 30.0 + 3.0 * 34.0 + 4.0;
+            // Text buttons, two per row: hollow and fill inside, crop and resize (which opens
+            // the Bounds panel, and shows on while it is open), then select all and invert.
+            for (k, (label, id, action)) in [
+                ("Hollow", "hollow", Some(Action::Hollow)),
+                ("Fill inside", "fill-in", Some(Action::FillInterior)),
+                ("Crop", "crop", Some(Action::Crop)),
+                ("Resize…", "resize", None),
+                ("All", "select-all", Some(Action::SelectAll)),
+                ("Invert", "invert", Some(Action::InvertSelection)),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let cy = hy + 30.0 + (3 + k / 2) as f32 * 34.0;
+                let c =
+                    Rect::from_min_size(pos2(rect.left() + 12.0 + (k % 2) as f32 * 70.0, cy - 13.0), vec2(68.0, 26.0));
+                let resp = ui.interact(c, Id::unique(id), Sense::click());
+                hits.push((id.to_string(), c));
+                let (hover, on) = (resp.hovered(), action.is_none() && bounds_open);
+                let p = ui.painter();
+                if on {
+                    p.rect_filled(c, CornerRadius::same(7), Color32::from_rgba_unmultiplied(142, 162, 255, 26));
+                }
+                let border = if on {
+                    Color32::from_rgba_unmultiplied(142, 162, 255, 140)
+                } else if hover {
+                    Color32::from_white_alpha(64)
+                } else {
+                    LINE2
+                };
+                p.rect_stroke(c, CornerRadius::same(7), Stroke::new(1.0, border), StrokeKind::Inside);
+                let color = if hover || on { TEXT } else { MUTED };
+                p.text(c.center(), Align2::CENTER_CENTER, label, inter(11.0), color);
+                if resp.clicked() {
+                    match action {
+                        Some(a) => run.push(a),
+                        None => toggle_bounds = true,
+                    }
+                }
+            }
+            // What a click on a voxel selects.
+            let row = Rect::from_min_size(pos2(rect.left() + 12.0, hy + 30.0 + 6.0 * 34.0 - 13.0), vec2(138.0, 26.0));
+            let mut seg = Vec::new();
+            let labels = ["Color", "Face", "Volume"].map(String::from);
+            let names = ["click-color", "click-face", "click-volume"];
+            let regions = [Region::Color, Region::Face, Region::Volume];
+            let on = regions.iter().position(|&r| r == region).unwrap_or(0);
+            if let Some(k) = segmented(ui, row, &names, &labels, on, &[true; 3], inter(10.5), &mut seg) {
+                region = regions[k];
+            }
+            hits.extend(seg.into_iter().map(|(n, r)| (n.to_string(), r)));
+            let cy = hy + 30.0 + 7.0 * 34.0 + 4.0;
             ui.painter().line_segment(
                 [pos2(rect.left() + 10.0, cy - 20.5), pos2(rect.right() - 10.0, cy - 20.5)],
                 Stroke::new(1.0, LINE),
@@ -975,6 +1880,84 @@ impl Hybrid {
         });
         self.hits.extend(hits);
         self.actions.extend(run);
+        self.region = region;
+        if toggle_bounds {
+            self.toggle_bounds_panel();
+        }
+    }
+
+    // The Bounds panel, beside the selection flyout at its Resize button: the model's size as
+    // X, Y and Z fields (vxr's axes, Y up). Enter or leaving a field resizes, keeping the
+    // bottom and the centre, as one undo step.
+    fn bounds_panel(&mut self, ctx: &Context) {
+        let Some(mut fields) = self.bounds_panel.take() else { return };
+        let size = self.bounds;
+        let (w, inner_w) = (232.0, 208.0);
+        let mut job = LayoutJob::default();
+        job.append(
+            "Keeps the bottom and the center. Erases the voxels outside.",
+            0.0,
+            TextFormat { font_id: inter(11.0), color: FAINT, line_height: Some(15.95), ..Default::default() },
+        );
+        job.wrap.max_width = inner_w;
+        let note = ctx.fonts_mut(|f| f.layout_job(job));
+        let h = 36.0 + 28.0 + 12.0 + note.size().y + 14.0;
+        // The fields' row lines up with the Resize button (its centre is select_y + 178).
+        let top = self.select_y + 178.0 - 50.0;
+        let rect = Rect::from_min_size(pos2(self.flyout_x() + 162.0 + 8.0, top), vec2(w, h));
+        let mut close = false;
+        let mut resize = None;
+        let mut hits = Vec::new();
+        Self::panel(ctx, "bounds", rect, Order::Middle, |ui, rect| {
+            let hy = rect.top() + 18.0;
+            let g = ui.painter().layout_job(spaced("BOUNDS", inter(9.0), FAINT, 0.72));
+            ui.painter().galley(pos2(rect.left() + 12.0, hy - g.size().y / 2.0), g, FAINT);
+            let x = Rect::from_center_size(pos2(rect.right() - 19.0, hy), vec2(22.0, 22.0));
+            let resp = ui.interact(x, Id::unique("bounds-close"), Sense::click());
+            hits.push(("bounds-close".to_string(), x));
+            if resp.hovered() {
+                ui.painter().rect_filled(x, CornerRadius::same(6), HOVER);
+            }
+            let c = if resp.hovered() { TEXT } else { MUTED };
+            ui.painter().text(x.center(), Align2::CENTER_CENTER, icon::X, icon_font(13.0), c);
+            ui.painter().text(
+                pos2(x.left() - 4.0, hy),
+                Align2::RIGHT_CENTER,
+                format!("{}×{}×{}", size[0], size[1], size[2]),
+                mono(11.0),
+                MUTED,
+            );
+            close = resp.clicked();
+            let third = (inner_w - 12.0) / 3.0;
+            for (a, label) in ["X", "Y", "Z"].into_iter().enumerate() {
+                let fr = Rect::from_min_size(
+                    pos2(rect.left() + 12.0 + a as f32 * (third + 6.0), rect.top() + 36.0),
+                    vec2(third, 28.0),
+                );
+                let name = format!("bounds-{}", label.to_lowercase());
+                let id = Id::unique(&name);
+                if !ui.memory(|m| m.has_focus(id)) {
+                    fields[a] = size[a].to_string();
+                }
+                hits.push((name, fr));
+                if field(ui, fr, label, id, &mut fields[a])
+                    && let Ok(v) = fields[a].trim().parse::<u32>()
+                    && v != size[a]
+                {
+                    let mut to = size;
+                    to[a] = v;
+                    resize = Some(to);
+                }
+            }
+            ui.painter().galley(pos2(rect.left() + 12.0, rect.top() + 36.0 + 28.0 + 12.0), note, FAINT);
+        });
+        self.hits.extend(hits);
+        if let Some(to) = resize {
+            self.actions.push(Action::Resize(to));
+        }
+        if !close {
+            self.bounds_panel = Some(fields);
+        }
     }
 
     // The select tool's box while it is dragged: an accent outline over a faint accent fill.
@@ -1218,8 +2201,11 @@ impl Hybrid {
         let mat_note = match mat.kind {
             Kind::Diffuse => "Matte, lit by the sun and the sky.",
             Kind::Metal => "Reflects its surroundings in its own color. Rough metal blurs them.",
-            Kind::Glass => "Light passes through, tinted by the color, and the surface reflects.",
+            Kind::Glass => {
+                "Light passes through, tinted by the color, and the surface reflects. Attenuation deepens the tint with the glass crossed."
+            }
             Kind::Emit => "Glows in its color and lights what is near it.",
+            Kind::Plastic => "Matte color under a clear glossy coat. Specular sets how much the coat reflects.",
         };
         mjob.append(mat_note, 0.0, fmt(MUTED));
         mjob.append(" Shows in the render corner and export, and saves to the file's MATL chunks.", 0.0, fmt(FAINT));
@@ -1245,8 +2231,8 @@ impl Hybrid {
         // The Material tab: type buttons, a slider per setting, the note.
         let rows = match mat.kind {
             Kind::Diffuse => 0.0,
-            Kind::Metal | Kind::Emit => 2.0,
-            Kind::Glass => 3.0,
+            Kind::Metal | Kind::Emit | Kind::Plastic => 2.0,
+            Kind::Glass => 4.0,
         };
         let h = if ed.tab == EditTab::Material {
             12.0 + 15.0
@@ -1300,14 +2286,21 @@ impl Hybrid {
             }
             if ed.tab == EditTab::Material {
                 let mut y = tr.bottom() + 10.0;
-                let kinds = Kind::ALL.map(|k| k.name().to_string());
-                let sel = Kind::ALL.iter().position(|&k| k == mat.kind).unwrap_or(0);
+                // Shown in MagicaVoxel's order; each button's hit is `mt` and the type's number.
+                let kinds = Kind::SHOWN.map(|k| k.name().to_string());
+                let names = Kind::SHOWN.map(|k| match k {
+                    Kind::Diffuse => "mt0",
+                    Kind::Metal => "mt1",
+                    Kind::Glass => "mt2",
+                    Kind::Emit => "mt3",
+                    Kind::Plastic => "mt4",
+                });
+                let sel = Kind::SHOWN.iter().position(|&k| k == mat.kind).unwrap_or(0);
                 let r = Rect::from_min_size(pos2(inner.left(), y), vec2(inner.width(), 28.0));
-                if let Some(k) =
-                    segmented(ui, r, &["mt0", "mt1", "mt2", "mt3"], &kinds, sel, &[true; 4], inter(12.0), &mut hits)
-                    && Kind::ALL[k] != mat.kind
+                if let Some(k) = segmented(ui, r, &names, &kinds, sel, &[true; 5], inter(11.0), &mut hits)
+                    && Kind::SHOWN[k] != mat.kind
                 {
-                    new_mat = Some((Material { kind: Kind::ALL[k], ..mat }, true));
+                    new_mat = Some((Material { kind: Kind::SHOWN[k], ..mat }, true));
                 }
                 y += 28.0 + 12.0;
                 let mut m = mat;
@@ -1322,6 +2315,11 @@ impl Hybrid {
                         ("mat-rough", "Roughness", &mut m.rough, 0.0, 1.0, pct),
                         ("mat-trans", "Transparency", &mut m.trans, 0.0, 1.0, pct),
                         ("mat-ior", "Refraction", &mut m.ior, 1.0, 3.0, |v| format!("{v:.2}")),
+                        ("mat-att", "Attenuation", &mut m.att, 0.0, 1.0, pct),
+                    ],
+                    Kind::Plastic => vec![
+                        ("mat-rough", "Roughness", &mut m.rough, 0.0, 1.0, pct),
+                        ("mat-spec", "Specular", &mut m.spec, 0.0, 1.0, pct),
                     ],
                     Kind::Emit => vec![
                         ("mat-emit", "Emission", &mut m.emit, 0.0, 1.0, pct),
@@ -1604,59 +2602,98 @@ impl Hybrid {
     // The live render corner (direction D, pin 4: right:1%, bottom:12%, width:24%, a label
     // chip at .5em). The editor writes the path-traced image into the rect under the UI, so the
     // panel has a border but no fill. 16:9, the preview's own shape, and it sits above #history.
+    // A click on it swaps the image into the whole view (MagicaVoxel's Render tab); there the
+    // chips stay where the corner's bottom edge was and the view takes the pointer as usual.
     fn render_corner(&mut self, ctx: &Context, screen: Rect, s: &Stats) {
         self.render_rect = None;
+        self.render_dock = None;
         let mut open = false;
+        let mut swap = false;
         let Some((spp, live)) = s.render.filter(|_| self.show_render) else { return };
         let w = 320.0;
         let size = vec2(w, (w * 9.0 / 16.0).round());
-        let rect = Rect::from_min_size(
+        let corner = Rect::from_min_size(
             pos2(screen.right() - 12.0 - size.x, screen.bottom() - 12.0 - 40.0 - 10.0 - size.y),
             size,
         );
+        let full = self.full_render;
+        let rect = if full { screen } else { corner };
         self.render_rect = Some(rect);
+        self.render_dock = Some(corner);
         self.hits.insert("render".into(), rect);
-        Area::new(Id::unique("render")).fade_in(false).order(Order::Middle).fixed_pos(rect.min).constrain(false).show(
+        let label = match s.export {
+            Some(((w, h), done, of)) => format!("Exporting {w}×{h} · {:.0}/{of} spp", done.floor()),
+            None => format!("Path trace · {:.0} spp{}", spp.floor(), if live { " · live" } else { "" }),
+        };
+        let g = ctx.fonts_mut(|f| f.layout_no_wrap(label, inter_medium(11.0), TEXT));
+        let chip_size = g.size() + vec2(16.0, 6.0);
+        // The chips' row: the corner's top, or its bottom edge in the full view.
+        let top = if full { corner.bottom() - 8.0 - chip_size.y } else { corner.top() + 8.0 };
+        let row = Rect::from_min_max(pos2(corner.left(), top - 8.0), pos2(corner.right(), top + chip_size.y + 8.0));
+        let area = if full { row } else { corner };
+        Area::new(Id::unique("render")).fade_in(false).order(Order::Middle).fixed_pos(area.min).constrain(false).show(
             ctx,
             |ui| {
-                ui.allocate_rect(rect, Sense::hover());
+                if full {
+                    // Only the chips' row keeps the pointer from the view.
+                    ui.allocate_rect(row, Sense::hover());
+                } else {
+                    // Click-to-swap; the chips below are on top of it.
+                    let r = ui.allocate_rect(corner, Sense::click());
+                    swap |= r.clicked();
+                    if r.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    ui.painter().rect_stroke(
+                        corner,
+                        CornerRadius::same(R),
+                        Stroke::new(1.0, LINE2),
+                        StrokeKind::Inside,
+                    );
+                }
+                let chip = Rect::from_min_size(pos2(corner.left() + 8.0, top), chip_size);
                 let p = ui.painter();
-                p.rect_stroke(rect, CornerRadius::same(R), Stroke::new(1.0, LINE2), StrokeKind::Inside);
-                let label = match s.export {
-                    Some(((w, h), done, of)) => format!("Exporting {w}×{h} · {:.0}/{of} spp", done.floor()),
-                    None => format!("Path trace · {:.0} spp{}", spp.floor(), if live { " · live" } else { "" }),
-                };
-                let g = ui.painter().layout_no_wrap(label, inter_medium(11.0), TEXT);
-                let chip = Rect::from_min_size(rect.min + vec2(8.0, 8.0), g.size() + vec2(16.0, 6.0));
                 p.rect_filled(chip, CornerRadius::same(6), Color32::from_black_alpha(140));
                 p.galley(chip.min + vec2(8.0, 3.0), g, TEXT);
-                // The Render panel's button, a chip at the other corner.
-                let b =
-                    Rect::from_min_size(pos2(rect.right() - 8.0 - 26.0, rect.top() + 8.0), vec2(26.0, chip.height()));
-                let r = ui.interact(b, Id::unique("render-settings"), Sense::click());
-                let on = self.render_panel;
-                let fill = if r.hovered() { Color32::from_black_alpha(190) } else { Color32::from_black_alpha(140) };
-                let p = ui.painter();
-                p.rect_filled(b, CornerRadius::same(6), fill);
-                if on {
-                    p.rect_filled(b, CornerRadius::same(6), ACCENT_BG);
+                // The Render panel's button and the swap button, chips at the other corner.
+                let b = Rect::from_min_size(pos2(corner.right() - 8.0 - 26.0, top), vec2(26.0, chip.height()));
+                let f = b.translate(vec2(-26.0 - 4.0, 0.0));
+                let glyph = if full { icon::MINIMIZE_2 } else { icon::MAXIMIZE_2 };
+                for (rect, id, glyph, on) in
+                    [(f, "render-full", glyph, false), (b, "render-settings", icon::APERTURE, self.render_panel)]
+                {
+                    let r = ui.interact(rect, Id::unique(id), Sense::click());
+                    let fill =
+                        if r.hovered() { Color32::from_black_alpha(190) } else { Color32::from_black_alpha(140) };
+                    let p = ui.painter();
+                    p.rect_filled(rect, CornerRadius::same(6), fill);
+                    if on {
+                        p.rect_filled(rect, CornerRadius::same(6), ACCENT_BG);
+                    }
+                    let c = if on {
+                        ACCENT
+                    } else if r.hovered() {
+                        TEXT
+                    } else {
+                        MUTED
+                    };
+                    p.text(rect.center(), Align2::CENTER_CENTER, glyph, icon_font(13.0), c);
+                    if r.clicked() {
+                        if id == "render-full" {
+                            swap = true;
+                        } else {
+                            open = true;
+                        }
+                    }
+                    self.hits.insert(id.into(), rect);
                 }
-                let c = if on {
-                    ACCENT
-                } else if r.hovered() {
-                    TEXT
-                } else {
-                    MUTED
-                };
-                p.text(b.center(), Align2::CENTER_CENTER, icon::APERTURE, icon_font(13.0), c);
-                if r.clicked() {
-                    open = true;
-                }
-                self.hits.insert("render-settings".into(), b);
             },
         );
         if open {
             self.toggle_render_panel();
+        }
+        if swap {
+            self.toggle_full_render();
         }
     }
 
@@ -1668,9 +2705,9 @@ impl Hybrid {
         }
         let w = 232.0;
         let row = 34.0;
-        let h = 12.0 + 15.0 + 10.0 + 7.0 * row + 28.0 + 8.0 + 28.0 + 12.0 + 2.0 * (14.0 + 28.0 + 10.0) + 32.0 + 12.0;
-        let right = self.render_rect.map_or(screen.right() - 12.0 - 232.0, |r| r.left()) - 8.0;
-        let bottom = self.render_rect.map_or(screen.bottom() - 62.0, |r| r.bottom());
+        let h = 12.0 + 15.0 + 10.0 + 9.0 * row + 28.0 + 8.0 + 28.0 + 12.0 + 2.0 * (14.0 + 28.0 + 10.0) + 32.0 + 12.0;
+        let right = self.render_dock.map_or(screen.right() - 12.0 - 232.0, |r| r.left()) - 8.0;
+        let bottom = self.render_dock.map_or(screen.bottom() - 62.0, |r| r.bottom());
         let rect = Rect::from_min_size(pos2(right - w, (bottom - h).max(68.0)), vec2(w, h));
         let mut rs = self.render.clone();
         let mut hits = Vec::new();
@@ -1694,12 +2731,16 @@ impl Hybrid {
                 y += hh;
                 r
             };
-            let sliders: [SliderRow; 7] = [
+            let sliders: [SliderRow; 9] = [
                 ("rs-sun-angle", "Sun direction", &mut rs.sun_angle, 0.0, 360.0, |v| format!("{v:.0}°")),
                 ("rs-sun-height", "Sun height", &mut rs.sun_height, 2.0, 90.0, |v| format!("{v:.0}°")),
                 ("rs-sun-strength", "Sun strength", &mut rs.sun_strength, 0.0, 10.0, |v| format!("{v:.1}")),
                 ("rs-sky", "Sky light", &mut rs.sky, 0.0, 3.0, |v| format!("{v:.2}")),
                 ("rs-exposure", "Exposure", &mut rs.exposure_ev, -3.0, 3.0, |v| format!("{v:+.1} EV")),
+                ("rs-gamma", "Gamma", &mut rs.gamma, 1.0, 3.0, |v| format!("{v:.2}")),
+                ("rs-vignette", "Vignette", &mut rs.vignette, 0.0, 1.0, |v| {
+                    if v <= 0.0 { "off".into() } else { format!("{:.0}%", v * 100.0) }
+                }),
                 ("rs-blur", "Depth of field", &mut rs.blur, 0.0, 1.0, |v| {
                     if v <= 0.0 { "off".into() } else { format!("{:.0}%", v * 100.0) }
                 }),
@@ -1710,7 +2751,7 @@ impl Hybrid {
                 hits.push((id, r));
                 slider(ui, r, id, label, v, lo, hi, fmt);
             }
-            // Sun colour: a chip and a hex field; the sky backdrop toggle.
+            // Sun colour: a chip and a hex field.
             let r = next(28.0);
             let chip = Rect::from_min_size(r.min, vec2(28.0, 28.0));
             let c = rs.sun_color;
@@ -1733,11 +2774,20 @@ impl Hybrid {
                 rs.sun_color = v;
             }
             next(8.0);
+            // The sky backdrop and physical sky toggles, side by side.
             let r = next(28.0);
-            hits.push(("rs-sky-backdrop", r));
-            if small_button(ui, r, icon::SUN, "Show sky behind the scene", "rs-sky-backdrop", rs.sky_backdrop).clicked()
-            {
+            let half = (r.width() - 6.0) / 2.0;
+            let (a, b) = (
+                Rect::from_min_size(r.min, vec2(half, r.height())),
+                Rect::from_min_size(pos2(r.right() - half, r.top()), vec2(half, r.height())),
+            );
+            hits.push(("rs-sky-backdrop", a));
+            if small_button(ui, a, icon::SUN, "Show sky", "rs-sky-backdrop", rs.sky_backdrop).clicked() {
                 rs.sky_backdrop = !rs.sky_backdrop;
+            }
+            hits.push(("rs-physical-sky", b));
+            if small_button(ui, b, icon::SUNSET, "Physical sky", "rs-physical-sky", rs.physical_sky).clicked() {
+                rs.physical_sky = !rs.physical_sky;
             }
             next(12.0);
             // Samples (where the corner stops, and what an export traces) and export size.
@@ -1830,8 +2880,24 @@ impl Hybrid {
                 };
                 vec![("Click", armed.as_str()), ("Esc", "cancel")]
             }
+            (None, _, _) if self.lifting => {
+                let v = [("Move", "set the height"), ("Click or ↵", "place"), ("Esc", "cancel")];
+                return self.hint_panel(ctx, screen, &v);
+            }
+            (None, _, _) if self.world => {
+                let mut v = vec![("Click", "pick an object"), ("Drag", "move it")];
+                if self.picked.is_some() {
+                    v.extend([("Arrows", "nudge"), ("⌘D", "duplicate"), ("⌘⇧D", "linked copy"), ("⌫", "delete")]);
+                }
+                v.extend([("Tab", "edit its model"), ("Right-drag", "orbit")]);
+                return self.hint_panel(ctx, screen, &v);
+            }
             (None, t, shape) => self.tool_hints(t, shape),
         };
+        let size = format!("size {}", self.size);
+        if self.slot_op.is_none() && self.shape == Shape::Voxel && matches!(t, Tool::Add | Tool::Erase | Tool::Paint) {
+            items.push(("- =", size.as_str()));
+        }
         if self.slot_op.is_none() && t == Tool::Select {
             items.extend([("Shift", "add"), ("Alt", "subtract"), ("Right-drag", "orbit")]);
         } else if self.slot_op.is_none() {
@@ -1847,13 +2913,13 @@ impl Hybrid {
     fn tool_hints(&self, t: Tool, shape: Shape) -> Vec<(&'static str, &'static str)> {
         match (t, shape) {
             (Tool::Add, Shape::Voxel) => vec![("Click", "add"), ("Drag", "draw on that plane")],
-            (Tool::Add, Shape::Box) => vec![("Drag", "fill a rectangle")],
+            (Tool::Add, Shape::Box) => vec![("Drag", "draw a rectangle, then lift it")],
             (Tool::Add, Shape::Face) => vec![("Click", "extrude the whole face")],
             (Tool::Erase, Shape::Voxel) => vec![("Click", "erase"), ("Drag", "erase as you go")],
-            (Tool::Erase, Shape::Box) => vec![("Drag", "clear a rectangle")],
+            (Tool::Erase, Shape::Box) => vec![("Drag", "clear a rectangle, then deepen it")],
             (Tool::Erase, Shape::Face) => vec![("Click", "peel the whole face")],
             (Tool::Paint, Shape::Voxel) => vec![("Click", "paint"), ("Drag", "paint as you go")],
-            (Tool::Paint, Shape::Box) => vec![("Drag", "paint a rectangle")],
+            (Tool::Paint, Shape::Box) => vec![("Drag", "paint a rectangle, then deepen it")],
             (Tool::Paint, Shape::Face) => vec![("Click", "fill the connected face")],
             (Tool::Add, Shape::Line) => vec![("Drag", "draw a line")],
             (Tool::Erase, Shape::Line) => vec![("Drag", "erase along a line")],
@@ -1868,7 +2934,15 @@ impl Hybrid {
             (Tool::Select, _) if self.selected > 0 => {
                 vec![("Drag", "box select"), ("Drag selection", "move it"), ("Arrows", "nudge"), ("⌫", "delete")]
             }
-            (Tool::Select, _) => vec![("Drag", "box select"), ("Click", "select that color")],
+            (Tool::Select, _) => vec![("Drag", "box select"), ("Click", self.region_hint())],
+        }
+    }
+
+    fn region_hint(&self) -> &'static str {
+        match self.region {
+            Region::Color => "select that color",
+            Region::Face => "select that face",
+            Region::Volume => "select that volume",
         }
     }
 
@@ -2055,6 +3129,33 @@ fn rail_sep(ui: &Ui, rail: Rect, y: &mut f32) {
     *y += 11.0 - 2.0 + 2.0;
 }
 
+// A text button of the View flyout with its key in the corner, accent when on. Returns
+// whether it was clicked.
+fn view_chip(ui: &mut Ui, c: Rect, id: &str, label: &str, key: &str, on: bool) -> bool {
+    let resp = ui.interact(c, Id::unique(id), Sense::click());
+    let hover = resp.hovered();
+    let p = ui.painter();
+    let color = if on {
+        p.rect(
+            c,
+            CornerRadius::same(7),
+            ACCENT_BG,
+            Stroke::new(1.0, Color32::from_rgba_unmultiplied(142, 162, 255, 89)),
+            StrokeKind::Inside,
+        );
+        ACCENT
+    } else {
+        let border = if hover { Color32::from_white_alpha(64) } else { LINE2 };
+        p.rect_stroke(c, CornerRadius::same(7), Stroke::new(1.0, border), StrokeKind::Inside);
+        if hover { TEXT } else { MUTED }
+    };
+    let shift = if key.is_empty() { 0.0 } else { 3.0 };
+    p.text(pos2(c.center().x - shift, c.center().y), Align2::CENTER_CENTER, label, inter(11.0), color);
+    let kc = if on { ACCENT.gamma_multiply(0.8) } else { FAINT };
+    p.text(pos2(c.right() - 4.0, c.bottom() - 2.0), Align2::RIGHT_BOTTOM, key, mono_medium(8.5), kc);
+    resp.clicked()
+}
+
 // .tool, .tool.on, .tool .k
 fn tool_button(ui: &mut Ui, at: Pos2, glyph: char, key: &str, on: bool) -> egui::Response {
     let r = Rect::from_min_size(at, vec2(40.0, 40.0));
@@ -2090,6 +3191,21 @@ fn tbtn(
     id: &str,
     enabled: bool,
 ) -> egui::Response {
+    tbtn_on(ui, x, cy, glyph, label, id, enabled, false)
+}
+
+/// A top bar button, drawn hovered while `on` (its menu is open).
+#[allow(clippy::too_many_arguments)]
+fn tbtn_on(
+    ui: &mut Ui,
+    x: &mut f32,
+    cy: f32,
+    glyph: Option<char>,
+    label: &str,
+    id: &str,
+    enabled: bool,
+    on: bool,
+) -> egui::Response {
     let g = (!label.is_empty()).then(|| ui.painter().layout_no_wrap(label.into(), inter(13.0), MUTED));
     let w = 20.0
         + glyph.map_or(0.0, |_| 16.0)
@@ -2100,7 +3216,7 @@ fn tbtn(
     let resp = ui.interact(r, Id::unique(("tbtn", id)), sense);
     let p = ui.painter();
     let mut color = MUTED;
-    if enabled && resp.hovered() {
+    if enabled && (resp.hovered() || on) {
         p.rect_filled(r, CornerRadius::same(8), HOVER);
         color = TEXT;
     }
@@ -2277,10 +3393,22 @@ fn segmented(
     hits: &mut Vec<(&'static str, Rect)>,
 ) -> Option<usize> {
     let n = labels.len();
-    let cw = (r.width() - 4.0 * (n - 1) as f32) / n as f32;
+    let free = r.width() - 4.0 * (n - 1) as f32;
+    // Equal cells, unless a label would not keep 8 points either side: then each cell is its
+    // label's width plus an equal share of what is left.
+    let text: Vec<f32> =
+        labels.iter().map(|l| ui.fonts_mut(|f| f.layout_no_wrap(l.clone(), font.clone(), TEXT)).size().x).collect();
+    let widths: Vec<f32> = if text.iter().all(|&t| t + 16.0 <= free / n as f32) {
+        vec![free / n as f32; n]
+    } else {
+        let pad = (free - text.iter().sum::<f32>()) / n as f32;
+        text.iter().map(|t| t + pad).collect()
+    };
     let mut out = None;
+    let mut x = r.left();
     for (k, label) in labels.iter().enumerate() {
-        let c = Rect::from_min_size(pos2(r.left() + k as f32 * (cw + 4.0), r.top()), vec2(cw, r.height()));
+        let c = Rect::from_min_size(pos2(x, r.top()), vec2(widths[k], r.height()));
+        x += widths[k] + 4.0;
         hits.push((names[k], c));
         let enabled = ok[k];
         let resp = ui.interact(c, Id::unique(names[k]), if enabled { Sense::click() } else { Sense::hover() });
@@ -2361,5 +3489,22 @@ mod tests {
         assert_eq!(super::group_thousands(145064), "145,064");
         assert_eq!(super::group_thousands(999), "999");
         assert_eq!(super::group_thousands(1_000_000), "1,000,000");
+    }
+
+    #[test]
+    fn the_full_render_view_swaps_and_escape_backs_out_in_order() {
+        let mut h = super::Hybrid::new([[0; 4]; 256], [false; 256], "test");
+        h.show_render = false;
+        h.toggle_full_render();
+        assert!(h.full_render && h.show_render, "it shows the render too");
+        h.toggle_render_panel();
+        h.escape();
+        assert!(!h.render_panel && h.full_render, "Escape closes the Render panel first");
+        h.escape();
+        assert!(!h.full_render && h.show_render, "then swaps back to the corner");
+        h.toggle_full_render();
+        let hide = super::COMMANDS.iter().find(|c| c.label == "Toggle render preview").unwrap();
+        (hide.run)(&mut h);
+        assert!(!h.show_render && !h.full_render, "hiding the render leaves the full view");
     }
 }
