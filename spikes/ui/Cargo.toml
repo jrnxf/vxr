@@ -1,0 +1,23 @@
+[package]
+name = "vxr-ui-spike"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Phase 2 test 3: the Hybrid UI in egui and in HTML/CSS over the test 1 renderer (throwaway spike)"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+vxr-engine-spike = { path = "../engine" }
+wgpu = "30.0.1"
+egui = "0.37"
+egui-wgpu = { version = "0.37", default-features = false }
+glam = "0.34"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pollster = "1"
+png = "0.18"
+
+[profile.release]
+debug = 0

@@ -1,2 +1,4 @@
 # Build output: run `node prototype/src/build.mjs` to regenerate.
 prototype/demo/
+# Scratch space for downloaded references and local evidence; never committed.
+.scratch/
