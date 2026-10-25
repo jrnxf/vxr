@@ -39,6 +39,17 @@ struct Marquee {
 /// Pointer travel, in pixels, below which a select press is a click.
 const CLICK_PX: f32 = 4.0;
 
+/// An object being dragged in world mode, on the plane across `axis` through the pressed
+/// voxel. In world cells, since the world map moves under it as the object does.
+#[derive(Clone, Copy, Debug)]
+struct WorldDrag {
+    object: usize,
+    axis: usize,
+    start: [i32; 3],
+    /// How far the object has been moved so far.
+    offset: [i32; 3],
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum CamDrag {
     Orbit,
@@ -72,6 +83,7 @@ pub struct Editor {
     /// click, which selects that colour.
     move_press: Option<([f32; 2], Target)>,
     marquee: Option<Marquee>,
+    world_drag: Option<WorldDrag>,
     /// The selection version and `map.fills` the renderer's selection mask was built at.
     sel_shown: (u64, u64),
     cam_drag: Option<CamDrag>,
@@ -141,6 +153,7 @@ impl Editor {
             moving: None,
             move_press: None,
             marquee: None,
+            world_drag: None,
             sel_shown: (u64::MAX, 0),
             cam_drag: None,
             pointer: None,
@@ -180,6 +193,7 @@ impl Editor {
         self.gesture = None;
         self.moving = None;
         self.marquee = None;
+        self.world_drag = None;
         self.sel_shown = (u64::MAX, 0);
         self.cursor = None;
         self.frame_scene();
@@ -256,6 +270,10 @@ impl Editor {
             m.end = p;
             return;
         }
+        if let Some(g) = self.world_drag {
+            self.drag_object(g, o, d);
+            return;
+        }
         if let Some(g) = &mut self.moving {
             if let Some(c) = plane_cell(o, d, g.axis, g.layer) {
                 g.move_to(&mut self.scene, c);
@@ -297,6 +315,9 @@ impl Editor {
                 if let Some(m) = self.marquee.take() {
                     self.finish_marquee(m);
                 }
+                if self.world_drag.take().is_some() {
+                    self.scene.commit();
+                }
             }
             self.cam_drag = None;
             return;
@@ -305,6 +326,7 @@ impl Editor {
             || self.gesture.is_some()
             || self.moving.is_some()
             || self.marquee.is_some()
+            || self.world_drag.is_some()
             || self.cam_drag.is_some()
         {
             return;
@@ -325,6 +347,10 @@ impl Editor {
         self.scene.commit();
         let Some(p) = self.pointer else { return };
         let (o, d) = self.ray(p);
+        if self.scene.at() == At::World {
+            self.press_world(self.scene.target(o, d));
+            return;
+        }
         if self.ui.tool == Tool::Select {
             self.press_select(p, self.scene.target(o, d));
             return;
@@ -338,6 +364,73 @@ impl Editor {
             }
             Press::Drag(g) => self.gesture = Some(g),
             Press::Done(_) | Press::Nothing => {}
+        }
+    }
+
+    /// A press in world mode, with any tool: pick the object under it and start dragging it
+    /// on the plane of the face pressed, or pick nothing.
+    fn press_world(&mut self, t: Option<Target>) {
+        let t = t.filter(|t| !t.ground);
+        let object = t.and_then(|t| self.scene.object_at(t.voxel));
+        self.scene.pick(object);
+        if let (Some(t), Some(object)) = (t, object) {
+            let axis = t.normal.iter().position(|&n| n != 0).unwrap_or(1);
+            self.world_drag = Some(WorldDrag { object, axis, start: self.scene.to_world(t.voxel), offset: [0; 3] });
+        }
+    }
+
+    /// Move the object being dragged to where the ray crosses its drag plane, as part of one
+    /// undo step, and keep the camera on the same world point as the world map moves.
+    fn drag_object(&mut self, g: WorldDrag, o: [f32; 3], d: [f32; 3]) {
+        let layer = g.start[g.axis] - self.scene.origin[g.axis];
+        let Some(c) = plane_cell(o, d, g.axis, layer) else { return };
+        let q = self.scene.to_world(c);
+        let mut offset: [i32; 3] = std::array::from_fn(|a| q[a] - g.start[a]);
+        offset[g.axis] = 0;
+        let step: [i32; 3] = std::array::from_fn(|a| offset[a] - g.offset[a]);
+        if step == [0; 3] || self.scene.put_world(|w| w.move_by(g.object, step)).is_none() {
+            return;
+        }
+        self.world_drag = Some(WorldDrag { offset, ..g });
+        if self.scene.reshapes() != self.shape.0 {
+            self.reshaped();
+        }
+    }
+
+    /// A selection action in world mode, where it acts on the picked object: arrows and
+    /// Move nudge it, Delete removes it, Deselect and Escape pick nothing. Voxel actions
+    /// say to Tab into an object first.
+    fn world_action(&mut self, a: Action) {
+        let picked = self.scene.picked();
+        let s = &mut self.scene;
+        match (a, picked) {
+            (Action::Deselect, _) => {
+                s.pick(None);
+            }
+            (Action::Transform(Transform::Move(d)), Some(i)) => {
+                if s.edit_world(|w| w.move_by(i, d)).is_none() {
+                    self.ui.toast(&self.ctx, "No room in the scene for that");
+                }
+            }
+            (Action::DeleteSelection, Some(i)) => {
+                let name = object_name(s.world().unwrap(), i);
+                if s.edit_world(|w| w.remove(i)) == Some(true) {
+                    self.ui.toast(&self.ctx, format!("Deleted {name}"));
+                }
+            }
+            (Action::Duplicate { linked }, Some(i)) => match s.edit_world(|w| w.duplicate(i, linked)).flatten() {
+                Some(c) => {
+                    s.pick(Some(c));
+                    let name = object_name(s.world().unwrap(), i);
+                    let what = if linked { "Linked copy of" } else { "Duplicated" };
+                    self.ui.toast(&self.ctx, format!("{what} {name}"));
+                }
+                None => self.ui.toast(&self.ctx, "No room in the scene for that"),
+            },
+            (Action::Duplicate { .. } | Action::Transform(Transform::Move(_)) | Action::DeleteSelection, None) => {
+                self.ui.toast(&self.ctx, "Click an object to pick it first")
+            }
+            _ => self.ui.toast(&self.ctx, "Tab into an object to edit its voxels"),
         }
     }
 
@@ -423,6 +516,11 @@ impl Editor {
     fn selection_action(&mut self, a: Action) {
         self.gesture = None;
         self.moving = None;
+        if self.scene.at() == At::World {
+            self.world_drag = None;
+            self.scene.commit();
+            return self.world_action(a);
+        }
         let s = &mut self.scene;
         match a {
             Action::Transform(t) => {
@@ -507,17 +605,23 @@ impl Editor {
     pub fn undo(&mut self) {
         self.gesture = None;
         self.moving = None;
+        self.world_drag = None;
         self.scene.undo();
     }
 
     pub fn redo(&mut self) {
         self.gesture = None;
         self.moving = None;
+        self.world_drag = None;
         self.scene.redo();
     }
 
     /// What a shape drag in progress spans, for the stats panel.
     pub fn span(&self) -> Option<(&'static str, String)> {
+        if let Some(g) = &self.world_drag {
+            let o = g.offset;
+            return Some(("MOVE", format!("{},{},{}", o[0], o[1], o[2])));
+        }
         if let Some(m) = &self.moving {
             let o = m.offset;
             return Some(("MOVE", format!("{},{},{}", o[0], o[1], o[2])));
@@ -594,6 +698,8 @@ impl Editor {
         self.ui.selected = self.scene.selected_count();
         self.ui.has_clip = self.scene.clipboard.is_some();
         self.ui.bounds = self.scene.bounds().size;
+        self.ui.world = self.scene.at() == At::World;
+        self.ui.picked = self.scene.picked().map(|i| object_name(self.scene.world().unwrap(), i));
         (self.ui.ortho, self.ui.view) = (self.cam.ortho, self.cam.view());
         self.ui.marquee = self.marquee.map(|m| {
             let (a, b) = (m.start, m.end);
@@ -639,7 +745,8 @@ impl Editor {
                 | Action::Crop
                 | Action::Copy
                 | Action::Cut
-                | Action::Paste => self.selection_action(a),
+                | Action::Paste
+                | Action::Duplicate { .. } => self.selection_action(a),
                 Action::ToggleWorld => self.toggle_world(),
                 Action::ExportPng => self.start_export(),
                 Action::CancelExport => {
@@ -667,12 +774,13 @@ impl Editor {
         self.gesture = None;
         self.moving = None;
         self.marquee = None;
+        self.world_drag = None;
         let s = &mut self.scene;
         let msg = match (s.at(), s.world()) {
             (_, None) => "A new scene is one model".to_string(),
             (At::World, Some(w)) => {
                 let objects = w.objects();
-                let i = self.last_object.filter(|i| objects.contains(i)).or(objects.first().copied());
+                let i = s.picked().or(self.last_object.filter(|i| objects.contains(i))).or(objects.first().copied());
                 match i {
                     Some(i) if s.edit_object(i) => format!("Editing {}", object_name(s.world().unwrap(), i)),
                     _ => "No object to edit".into(),
@@ -682,6 +790,7 @@ impl Editor {
                 if s.show_world() {
                     if let At::Object(i) = at {
                         self.last_object = Some(i);
+                        s.pick(Some(i));
                     }
                     let n = s.world().unwrap().objects().len();
                     format!("World: {n} object{}", if n == 1 { "" } else { "s" })
@@ -780,7 +889,8 @@ impl Editor {
             self.sel_shown = sel;
             self.renderer.set_selection(dev, queue, &self.scene.selection_mask());
         }
-        let busy = self.gesture.is_some() || self.moving.is_some() || self.marquee.is_some();
+        let busy =
+            self.gesture.is_some() || self.moving.is_some() || self.marquee.is_some() || self.world_drag.is_some();
         let tint = if busy { None } else { self.cursor.filter(|t| !t.ground).map(|t| t.voxel) };
         self.renderer.guides = Guides {
             bounds: self.scene.map.size_voxels(),

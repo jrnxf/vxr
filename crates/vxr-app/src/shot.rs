@@ -710,16 +710,25 @@ fn world(dir: &Path) -> Result<(), String> {
     let p = s.top_face_pixel(mid)?;
     s.stroke(p, &[]);
     check(s.voxels() == shown && !s.ed.scene.history().can_undo(), "a click in world mode edits no voxel".into())?;
+    s.frames(1);
+    let picked = s.ed.scene.picked();
+    check(
+        picked.is_some() && s.ed.scene.selected_count() > 0 && s.ed.ui.picked.is_some(),
+        format!("the click picks {} and shows it selected", s.ed.ui.picked.clone().unwrap_or_default()),
+    )?;
     s.frames(2);
     s.save_png(&dir.join("app-2x-world.png"))?;
 
     tab(&mut s);
-    let first = objects[0];
+    let first = picked.ok_or("nothing picked")?;
     let w = s.ed.scene.world().ok_or("no world")?;
-    let model = w.models[w.model_of(first).ok_or("not an object")?].voxels;
+    let m = w.model_of(first).ok_or("not an object")?;
+    let model = w.models[m].voxels;
+    // A linked copy's edit shows on every shown copy of its model.
+    let copies = w.objects().into_iter().filter(|&i| w.model_of(i) == Some(m) && w.shown(i)).count() as u64;
     check(
         s.ed.scene.at() == At::Object(first) && s.voxels() == model,
-        format!("Tab edits the first object's model ({model} voxels)"),
+        format!("Tab edits the picked object's model ({model} voxels)"),
     )?;
     s.ed.frame_scene();
     s.frames(2);
@@ -730,7 +739,7 @@ fn world(dir: &Path) -> Result<(), String> {
     check(s.voxels() == model - 1, "an erase in model mode".into())?;
     tab(&mut s);
     check(
-        s.ed.scene.at() == At::World && s.voxels() == shown - 1,
+        s.ed.scene.at() == At::World && s.voxels() == shown - copies,
         format!("Tab shows the world with the edit ({} voxels, {:?})", s.voxels(), s.ed.scene.at()),
     )?;
     tab(&mut s);
@@ -744,6 +753,80 @@ fn world(dir: &Path) -> Result<(), String> {
         s.ed.scene.at() == At::Object(first) && s.voxels() == model && s.ed.scene.to_vox() == bytes,
         "undo goes back into the model and the save is byte-identical again".into(),
     )?;
+
+    // World mode: pick, drag, nudge, duplicate, linked copy, delete, all through the
+    // pointer path and keys.
+    tab(&mut s);
+    check(
+        s.ed.scene.at() == At::World && s.ed.scene.picked() == Some(first),
+        "leaving a model picks it in the world".into(),
+    )?;
+    s.frames(2);
+    let p = s.top_face_pixel(mid)?;
+    s.stroke(p, &[]);
+    let o = s.ed.scene.picked().ok_or("the click picked nothing")?;
+    let place = |s: &Shot, i| s.ed.scene.world().and_then(|w| w.placement(i)).ok_or("no placement");
+    let before = place(&s, o)?;
+    s.stroke(p, &[[20.0, 0.0], [40.0, 4.0], [70.0, 10.0]]);
+    let after = place(&s, o)?;
+    check(
+        after.1 == before.1 && after.0[1] == before.0[1] && after.0 != before.0 && s.ed.scene.picked() == Some(o),
+        format!("a drag moves the object on its top face's plane ({:?} to {:?})", before.0, after.0),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::Z, egui::Modifiers::COMMAND)]);
+    let undone = place(&s, o)? == before;
+    s.frames_with(2, vec![key(egui::Key::Z, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT)]);
+    check(undone && place(&s, o)? == after, "the drag is one undo step, and redo puts it back".into())?;
+    s.frames_with(2, vec![key(egui::Key::ArrowRight, egui::Modifiers::NONE)]);
+    let n = place(&s, o)?;
+    let d: i32 = (0..3).map(|a| (n.0[a] - after.0[a]).abs()).sum();
+    check(d == 1 && n.0[1] == after.0[1], "an arrow nudges the picked object one cell along the ground".into())?;
+    s.frames_with(2, vec![key(egui::Key::ArrowUp, egui::Modifiers::SHIFT)]);
+    check(place(&s, o)?.0[1] == n.0[1] + 1, "Shift-Up raises it one cell".into())?;
+    let counts = |s: &Shot| s.ed.scene.world().map_or((0, 0), |w| (w.objects().len(), w.models.len()));
+    let (n0, m0) = counts(&s);
+    s.frames_with(2, vec![key(egui::Key::D, egui::Modifiers::COMMAND)]);
+    let dup = s.ed.scene.picked().ok_or("no pick after duplicate")?;
+    let (pd, po) = (place(&s, dup)?, place(&s, o)?);
+    check(
+        counts(&s) == (n0 + 1, m0 + 1) && dup != o && pd.0[0] == po.0[0] + po.1[0] as i32 + 1 && pd.1 == po.1,
+        "Cmd-D duplicates the object beside itself with its own model, and picks the copy".into(),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::D, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT)]);
+    let link = s.ed.scene.picked().ok_or("no pick after linked copy")?;
+    let w = s.ed.scene.world().ok_or("no world")?;
+    check(
+        counts(&s) == (n0 + 2, m0 + 1) && link != dup && w.model_of(link) == w.model_of(dup),
+        "Cmd-Shift-D makes a linked copy sharing the model".into(),
+    )?;
+    tab(&mut s);
+    check(s.ed.scene.at() == At::Object(link), "Tab edits the picked object's model".into())?;
+    tab(&mut s);
+    s.frames_with(2, vec![key(egui::Key::Backspace, egui::Modifiers::NONE)]);
+    s.frames(1);
+    check(
+        counts(&s).0 == n0 + 1 && s.ed.scene.picked().is_none() && s.ed.ui.picked.is_none(),
+        "Backspace deletes the picked object".into(),
+    )?;
+    s.stroke(p, &[]);
+    let had = s.ed.scene.picked().is_some();
+    s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+    check(had && s.ed.scene.picked().is_none() && s.ed.scene.selected_count() == 0, "Escape picks nothing".into())?;
+    s.stroke(p, &[]);
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("duplicate object".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    check(counts(&s).0 == n0 + 2, "Cmd-K 'Duplicate object'".into())?;
+    s.frames(2);
+    s.save_png(&dir.join("app-2x-world-edit.png"))?;
+    let saved = s.ed.scene.to_vox();
+    let again = Scene::from_vox(&saved)?;
+    check(
+        again.world_voxels(false) == s.ed.scene.world_voxels(false),
+        "the edited world saves and reopens the same".into(),
+    )?;
+    while s.ed.scene.undo() {}
+    check(s.ed.scene.to_vox() == bytes, "every world edit undone: byte-identical save".into())?;
     Ok(())
 }
 

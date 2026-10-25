@@ -350,3 +350,89 @@ fn world_edits_and_model_edits_undo_in_order_across_modes() {
     assert_eq!((s.world_voxels(false), s.world_voxels(true)), done);
     assert!(s.to_vox() == saved, "redone: the same file");
 }
+
+#[test]
+fn objects_are_picked_dragged_duplicated_linked_and_deleted_in_world_mode() {
+    let bytes = fixture("22-world");
+    let mut s = vxr_core::Scene::from_vox(&bytes).unwrap();
+    let w = s.world().unwrap();
+    let (slab, tree_a) = (find(w, "slab"), find(w, "tree a"));
+    let (objects, models) = (w.objects().len(), w.models.len());
+    let slab_voxels = {
+        let mut n = 0;
+        w.for_each_object_voxel(slab, |_, _| n += 1);
+        n
+    };
+
+    // A slab voxel picks the slab, and picking shows its voxels selected.
+    let mut cell = None;
+    s.for_each_voxel(|p, _| {
+        if cell.is_none() && s.object_at(p) == Some(slab) {
+            cell = Some(p);
+        }
+    });
+    let cell = cell.unwrap();
+    assert!(s.pick(Some(slab)));
+    assert_eq!(s.selected_count(), slab_voxels);
+    assert!(!s.pick(Some(0)), "the root is not an object");
+
+    // A drag through three positions is one undo step, and the pick survives the reload.
+    let before = s.world_voxels(false);
+    for d in [[1, 0, 0], [1, 0, 1], [0, 0, 1]] {
+        s.put_world(|w| w.move_by(slab, d)).unwrap();
+    }
+    assert_eq!(s.picked(), Some(slab));
+    assert_eq!(s.selected_count(), slab_voxels);
+    s.commit();
+    let moved = s.world_voxels(false);
+    assert_eq!(moved.len(), before.len());
+    assert!(s.undo());
+    assert_eq!(s.world_voxels(false), before, "one step for the whole drag");
+    assert!(s.redo());
+    assert_eq!(s.world_voxels(false), moved);
+
+    // Duplicate sits beside the original with its own model; a linked copy shares it.
+    let dup = s.edit_world(|w| w.duplicate(slab, false)).unwrap().unwrap();
+    let link = s.edit_world(|w| w.duplicate(tree_a, true)).unwrap().unwrap();
+    let w = s.world().unwrap();
+    assert_eq!(w.objects().len(), objects + 2);
+    assert_eq!(w.models.len(), models + 1);
+    assert_eq!(w.model_of(link), w.model_of(tree_a));
+    let (lo, size) = w.placement(slab).unwrap();
+    let (dlo, dsize) = w.placement(dup).unwrap();
+    assert_eq!((dlo, dsize), ([lo[0] + size[0] as i32 + 1, lo[1], lo[2]], size));
+    assert!(s.pick(Some(dup)));
+    assert_eq!(s.selected_count(), slab_voxels);
+
+    // Deleting the picked duplicate drops the pick; undo brings it back.
+    assert!(s.edit_world(|w| w.remove(dup)).unwrap());
+    assert_eq!(s.picked(), None);
+    assert_eq!(s.selected_count(), 0);
+    assert!(s.world().unwrap().object_at(s.to_world(cell)).is_none_or(|i| i != dup));
+
+    // Saved and reopened: the moved slab, the linked copy, no duplicate.
+    let saved = s.to_vox();
+    let again = vxr_core::Scene::from_vox(&saved).unwrap();
+    assert_eq!(again.world_voxels(false), s.world_voxels(false));
+    let w2 = again.world().unwrap();
+    assert_eq!(w2.objects().len(), objects + 1);
+    let links = w2.objects().iter().filter(|&&i| w2.model_of(i) == w2.model_of(find(w2, "tree a"))).count();
+    assert_eq!(links, 4, "three linked trees and the new linked copy");
+
+    // Everything undone is the original file again.
+    while s.undo() {}
+    assert!(s.to_vox() == bytes);
+}
+
+#[test]
+fn every_shown_voxel_belongs_to_an_object() {
+    for (name, bytes) in scene_files() {
+        let mut s = vxr_core::Scene::from_vox(&bytes).unwrap();
+        if !s.show_world() && s.at() != vxr_core::history::At::World {
+            continue;
+        }
+        let mut missing = 0;
+        s.for_each_voxel(|p, _| missing += s.object_at(p).is_none() as usize);
+        assert_eq!(missing, 0, "{name}");
+    }
+}

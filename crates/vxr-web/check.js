@@ -594,6 +594,62 @@ async () => {
     await frames(10);
     s = st();
     step('a broken file keeps the scene', s.name === 'saved.vox' && s.voxels === s0.voxels + 1);
+
+    // World mode on the generated 22-world file (several objects, groups, linked copies):
+    // pick, drag, undo, nudge, duplicate, linked copy, delete, Escape, Cmd-K, and a save
+    // that keeps every other chunk, then undo back to the file's bytes.
+    const worldFile = new Uint8Array(await (await fetch('__fixtures/22-world.vox')).arrayBuffer());
+    const wdt = new DataTransfer();
+    wdt.items.add(new File([worldFile], '22-world.vox'));
+    input.files = wdt.files;
+    input.dispatchEvent(new Event('change'));
+    for (let i = 0; i < 60 && st().name !== '22-world.vox'; i++) await frames(1);
+    await frames(6);
+    const w0 = st();
+    step('a file of several objects opens in world mode', w0.mode === 'world' && w0.objects === 6 && same(bytes(), worldFile), JSON.stringify(w0));
+    // A point on an object near the middle: a click there picks it and edits nothing.
+    let at = null;
+    for (const [dx, dy] of [[0, 0], [0, 30], [-40, 20], [40, 20], [0, 60], [-80, 40], [80, 40]]) {
+      await click(640 + dx, 400 + dy);
+      if (st().picked) { at = [640 + dx, 400 + dy]; break; }
+    }
+    s = st();
+    step('a click in world mode picks an object and edits nothing', !!at && s.selected > 0 && s.voxels === w0.voxels && !s.undo, JSON.stringify(s));
+    if (at) {
+      const name = st().picked;
+      await drag(at[0], at[1], at[0] + 90, at[1] + 10);
+      s = st();
+      step('a drag moves the picked object', s.picked === name && s.undo && !same(bytes(), worldFile), JSON.stringify(s));
+      const moved = bytes();
+      await key('z', cmd);
+      step('one undo puts it back', same(bytes(), worldFile) && st().picked === name);
+      await key('z', { metaKey: true, shiftKey: true });
+      step('redo moves it again', same(bytes(), moved));
+      await key('ArrowRight');
+      step('an arrow nudges the picked object', !same(bytes(), moved) && st().voxels === w0.voxels);
+      await key('d', cmd);
+      s = st();
+      step('Cmd-D duplicates it with its own model and picks the copy', s.objects === 7 && s.models === w0.models + 1 && !!s.picked, JSON.stringify(s));
+      await key('d', { metaKey: true, shiftKey: true });
+      s = st();
+      step('Cmd-Shift-D makes a linked copy sharing the model', s.objects === 8 && s.models === w0.models + 1, JSON.stringify(s));
+      await key('Backspace');
+      s = st();
+      step('Backspace deletes the picked object', s.objects === 7 && s.picked === null && s.selected === 0, JSON.stringify(s));
+      await click(...at);
+      const had = st().picked;
+      await key('Escape');
+      step('Escape picks nothing', !!had && st().picked === null);
+      await click(...at);
+      await key('k', cmd);
+      for (const ch of 'duplicate object') await key(ch);
+      await key('Enter');
+      step("Cmd-K 'Duplicate object'", st().objects === 8, JSON.stringify(st()));
+      const edited = bytes();
+      step('the edited world keeps every other chunk of the file', others(edited).join('|') === others(worldFile).join('|'));
+      for (let i = 0; i < 20 && st().undo; i++) await key('z', cmd);
+      step('every world edit undone gives back the file', same(bytes(), worldFile) && st().objects === 6, JSON.stringify(st()));
+    }
   } finally {
     input.click = realClick;
     URL.createObjectURL = realUrl;

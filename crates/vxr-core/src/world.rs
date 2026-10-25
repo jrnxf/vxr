@@ -127,18 +127,22 @@ impl World {
             objects.reverse();
         }
         for i in objects {
-            if shown_only && !self.shown(i) {
-                continue;
+            if !shown_only || self.shown(i) {
+                self.for_each_object_voxel(i, |p, c| f(i, p, c));
             }
-            let Some(m) = self.model_of(i) else { continue };
-            let w = self.world_transform(i);
-            let map = &self.models[m];
-            let size = vox_size(map);
-            map.for_each(|u, c| {
-                let v = local_to_vox(size, u);
-                f(i, vox_to_world(vxr_vox::Scene::world_cell(&w, size, v)), c);
-            });
         }
+    }
+
+    /// Every voxel of object `i` as (vxr world cell, palette index), hidden or not.
+    pub fn for_each_object_voxel(&self, i: usize, mut f: impl FnMut([i32; 3], u8)) {
+        let Some(m) = self.model_of(i) else { return };
+        let w = self.world_transform(i);
+        let map = &self.models[m];
+        let size = vox_size(map);
+        map.for_each(|u, c| {
+            let v = local_to_vox(size, u);
+            f(vox_to_world(vxr_vox::Scene::world_cell(&w, size, v)), c);
+        });
     }
 
     /// The world's voxels by vxr cell, with the overlap rule.
@@ -206,12 +210,72 @@ impl World {
         self.models[m] = model;
     }
 
+    /// The shown object whose voxel shows at vxr world cell `q`, with the overlap rule.
+    pub fn object_at(&self, q: [i32; 3]) -> Option<usize> {
+        let mut objects = self.objects();
+        if self.version < 200 {
+            objects.reverse();
+        }
+        let v = world_to_vox(q);
+        objects.into_iter().find(|&i| {
+            let Some(m) = self.model_of(i).filter(|_| self.shown(i)) else { return false };
+            let (map, w) = (&self.models[m], self.world_transform(i));
+            let size = vox_size(map);
+            let l = local_of(&w, size, v);
+            if (0..3).any(|a| l[a] < 0 || l[a] >= size[a]) {
+                return false;
+            }
+            let u = vox_to_local(size, l);
+            map.get(u[0], u[1], u[2]) != 0
+        })
+    }
+
+    /// Take node `i` (and what it holds) out of the tree. Its models stay, so undo can put
+    /// it back. False for the root.
+    pub fn remove(&mut self, i: usize) -> bool {
+        let Some(p) = self.tree.parents()[i] else { return false };
+        let Kind::Group(kids) = &mut self.tree.nodes[p].kind else { return false };
+        kids.retain(|&k| k != i);
+        true
+    }
+
     /// Move node `i` by `d` world cells (vxr axes).
     pub fn move_by(&mut self, i: usize, d: [i32; 3]) {
         let parent = self.tree.parents()[i].map_or(Affine::IDENTITY, |p| self.world_transform(p));
         let local = mat_vec(&transpose(&parent.r), world_to_vox(d));
         let t = &mut self.tree.nodes[i].local.t;
         *t = std::array::from_fn(|a| t[a] + local[a]);
+    }
+
+    /// The objects at or under node `i`.
+    pub fn objects_under(&self, i: usize) -> Vec<usize> {
+        match &self.tree.nodes[i].kind {
+            Kind::Object(_) => vec![i],
+            Kind::Group(kids) => kids.iter().flat_map(|&k| self.objects_under(k)).collect(),
+        }
+    }
+
+    /// The box node `i`'s objects fill in the world (vxr axes): low corner and size. None
+    /// for an empty group.
+    pub fn extent(&self, i: usize) -> Option<([i32; 3], [u32; 3])> {
+        let (mut lo, mut hi) = ([i32::MAX; 3], [i32::MIN; 3]);
+        for o in self.objects_under(i) {
+            let (l, s) = self.placement(o)?;
+            for a in 0..3 {
+                lo[a] = lo[a].min(l[a]);
+                hi[a] = hi[a].max(l[a] + s[a] as i32);
+            }
+        }
+        (lo[0] < hi[0]).then(|| (lo, std::array::from_fn(|a| (hi[a] - lo[a]) as u32)))
+    }
+
+    /// Copy node `i` (as [`World::copy`]) and put the copy beside it on +X with one cell
+    /// between, so it shows. Returns the copy.
+    pub fn duplicate(&mut self, i: usize, linked: bool) -> Option<usize> {
+        let w = self.extent(i).map_or(0, |(_, s)| s[0] as i32 + 1);
+        let c = self.copy(i, linked)?;
+        self.move_by(c, [w, 0, 0]);
+        Some(c)
     }
 
     /// Copy node `i` (and what it holds) next to it. `linked` shares the models (a linked

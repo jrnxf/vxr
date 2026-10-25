@@ -136,10 +136,10 @@ Feature names below follow the update log [S1] unless another source is given.
 
 | Feature | MagicaVoxel | vxr | Priority | Why |
 |---|---|---|---|---|
-| Multiple objects per scene | Tab switches model and world editors [S1 0.99] | partial: files open as separate objects (world mode with several, model mode with one); Tab and Cmd-K switch between editing one model (edits reach every linked copy) and the world, undo follows edits across modes, and saving writes models, nodes and layers losslessly; the scene tree, object moves, duplicate, instance, groups and layers are in the core, not yet in the UI [8] | P1 | lossless |
-| Move, rotate, flip objects | Gizmo, explicit position, 90 degree rotate gizmo [S1 0.99, 0.99.7.0, 0.99.7.2] | missing [8] | P2 | - |
+| Multiple objects per scene | Tab switches model and world editors [S1 0.99] | partial: files open as separate objects (world mode with several, model mode with one); Tab and Cmd-K switch between editing one model (edits reach every linked copy) and the world, undo follows edits across modes, and saving writes models, nodes and layers losslessly; in world mode a click picks an object, a drag or the arrows move it, Cmd-D duplicates it, Cmd-Shift-D makes a linked copy and Backspace deletes it; the scene tree, groups and layers are in the core, not yet in the UI [8] | P1 | lossless |
+| Move, rotate, flip objects | Gizmo, explicit position, 90 degree rotate gizmo [S1 0.99, 0.99.7.0, 0.99.7.2] | partial [8] (move: drag on the face plane, arrows and Shift-Up/Down, one undo step each; rotate and flip objects missing) | P2 | - |
 | Groups | Enter and leave with Tab or double-click [S1 0.99, 0.99.5.1] | missing [8] | P2 | - |
-| References (instances) and duplicates | Shift+drag; Ref-R converts [S1 0.99, 0.99.5.1] | missing [8] | P2 | - |
+| References (instances) and duplicates | Shift+drag; Ref-R converts [S1 0.99, 0.99.5.1] | done [8] (Cmd-D duplicate with its own model, Cmd-Shift-D linked copy sharing it, placed beside the original; Cmd-K; saved losslessly) | P2 | - |
 | Layers: show, hide, name, colour, sort | Layer panel [S1 0.99.6.4, 0.99.7.1] | missing [8] | P2 | - |
 | Scene outline panel | Rename, hide, reorder, multi-select [S1 0.99.6.4] | missing [8] (decisions: the tree appears once a second object exists) | P2 | - |
 | Pattern library | Drag assets in, match palettes [S1 0.99.6.4] | missing | P3 | minutes |

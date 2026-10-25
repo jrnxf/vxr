@@ -64,6 +64,10 @@ pub struct Scene {
     world: Option<World>,
     /// What the map holds.
     at: At,
+    /// The object picked in world mode, whose voxels show selected there.
+    picked: Option<usize>,
+    /// The world edit in progress (a drag): the tree and model count before it.
+    world_stroke: Option<(vxr_vox::Tree, usize)>,
 }
 
 /// The changes of the edit in progress: one entry per cell or palette slot, first old value
@@ -111,6 +115,8 @@ impl Scene {
             reshapes: 0,
             world: None,
             at: At::Map,
+            picked: None,
+            world_stroke: None,
         }
     }
 
@@ -224,25 +230,86 @@ impl Scene {
     /// group, hide, rename, layers) and add models (a duplicate's own). None outside world
     /// mode, or if the result would be over [`MAX_EXTENT`] on an axis (then nothing changes).
     pub fn edit_world<R>(&mut self, f: impl FnOnce(&mut World) -> R) -> Option<R> {
+        self.commit();
+        let r = self.put_world(f);
+        self.commit();
+        r
+    }
+
+    /// A world change inside the open edit (opening one if needed), shown at once, so a
+    /// drag through many positions becomes one undo step at [`Scene::commit`]. None outside
+    /// world mode, or if the result would be over [`MAX_EXTENT`] on an axis (then this
+    /// change is dropped and the edit keeps what it had).
+    pub fn put_world<R>(&mut self, f: impl FnOnce(&mut World) -> R) -> Option<R> {
         if self.at != At::World {
             return None;
         }
-        self.commit();
         let w = self.world.as_mut()?;
-        let (old, models) = (w.tree.clone(), w.models.len());
+        let (tree, models) = (w.tree.clone(), w.models.len());
+        self.world_stroke.get_or_insert_with(|| (tree.clone(), models));
         let r = f(w);
-        if w.tree == old && w.models.len() == models {
+        if w.tree == tree && w.models.len() == models {
             return Some(r);
         }
-        let change = WorldChange { old, new: w.tree.clone(), models, added: w.models[models..].to_vec() };
         if self.load(At::World).is_err() {
             let w = self.world.as_mut()?;
-            w.tree = change.old;
+            w.tree = tree;
             w.models.truncate(models);
             return None;
         }
-        self.history.push(Step { world: Some(Box::new(change)), at: At::World, ..Step::default() });
         Some(r)
+    }
+
+    /// Close the open world edit as one undo step, if it changed anything.
+    fn commit_world(&mut self) {
+        let (Some((old, models)), Some(w)) = (self.world_stroke.take(), &self.world) else { return };
+        if w.tree == old && w.models.len() == models {
+            return;
+        }
+        let change = WorldChange { old, new: w.tree.clone(), models, added: w.models[models..].to_vec() };
+        self.history.push(Step { world: Some(Box::new(change)), at: At::World, ..Step::default() });
+    }
+
+    /// The object picked in world mode, if it is still in the world.
+    pub fn picked(&self) -> Option<usize> {
+        self.picked
+    }
+
+    /// Pick object `i` in world mode (None picks nothing): its voxels show selected. Not
+    /// an undo step. False outside world mode or if `i` is not an object.
+    pub fn pick(&mut self, i: Option<usize>) -> bool {
+        let ok =
+            self.at == At::World && i.is_none_or(|i| self.world.as_ref().is_some_and(|w| w.objects().contains(&i)));
+        if ok {
+            self.picked = i;
+            self.show_picked();
+        }
+        ok
+    }
+
+    /// The object whose voxel shows at map cell `p`, in world mode.
+    pub fn object_at(&self, p: [i32; 3]) -> Option<usize> {
+        self.world.as_ref().filter(|_| self.at == At::World)?.object_at(self.to_world(p))
+    }
+
+    /// Select the picked object's voxels in the world map, or nothing.
+    fn show_picked(&mut self) {
+        let mut cells = HashSet::new();
+        if let (Some(i), Some(w)) = (self.picked, &self.world) {
+            if w.objects().contains(&i) {
+                w.for_each_object_voxel(i, |q, _| {
+                    let p = self.to_map(q);
+                    if self.map.get(p[0], p[1], p[2]) != 0 {
+                        cells.insert(p);
+                    }
+                });
+            } else {
+                self.picked = None;
+            }
+        }
+        self.selection = cells;
+        self.selection_version += 1;
+        self.selected_cache.set(None);
     }
 
     /// Store the current model into the world and load `at` into the map.
@@ -299,11 +366,13 @@ impl Scene {
         // Mirror across the middle of the model on every axis.
         self.pivot = std::array::from_fn(|a| 2 * lo[a] + size[a] as i32);
         self.at = at;
-        if !self.selection.is_empty() {
+        if at == At::World {
+            self.show_picked();
+        } else {
             self.selection.clear();
+            self.selection_version += 1;
+            self.selected_cache.set(None);
         }
-        self.selection_version += 1;
-        self.selected_cache.set(None);
         self.reshapes += 1;
         Ok(())
     }
@@ -419,6 +488,7 @@ impl Scene {
     /// Close the open edit as one undo step. Cells and slots that ended where they started
     /// are dropped. Returns how many voxels changed.
     pub fn commit(&mut self) -> usize {
+        self.commit_world();
         let Some(mut s) = self.stroke.take() else { return 0 };
         if !self.selection.is_empty() {
             let emptied: Vec<_> =

@@ -264,7 +264,7 @@ impl App {
         let e = &self.editor;
         let (c, h) = (&e.cam, e.scene.history());
         format!(
-            r#"{{"voxels":{},"tool":"{:?}","shape":"{:?}","mirror":{},"mirrorAxes":[{},{},{}],"lock":{},"span":{},"selected":{},"hasClip":{},"bounds":[{},{},{}],"boundsPanel":{},"slot":{},"colorEdit":{},"slotOp":"{:?}","undo":{},"redo":{},"cmdk":{},"coach":{},"name":{:?},"size":[{},{}],"ppp":{},"cam":[{},{},{},{},{},{}],"ortho":{},"view":{},"viewPanel":{},"guides":[{},{},{}],"mode":"{}","render":{{"shown":{},"spp":{},"rows":{},"restarts":{},"timestamps":{},"panel":{},"maxSpp":{},"exposure":{},"aperture":{},"sky":{},"export":{}}}}}"#,
+            r#"{{"voxels":{},"tool":"{:?}","shape":"{:?}","mirror":{},"mirrorAxes":[{},{},{}],"lock":{},"span":{},"selected":{},"hasClip":{},"bounds":[{},{},{}],"boundsPanel":{},"slot":{},"colorEdit":{},"slotOp":"{:?}","undo":{},"redo":{},"cmdk":{},"coach":{},"name":{:?},"size":[{},{}],"ppp":{},"cam":[{},{},{},{},{},{}],"ortho":{},"view":{},"viewPanel":{},"guides":[{},{},{}],"mode":"{}","objects":{},"models":{},"picked":{},"render":{{"shown":{},"spp":{},"rows":{},"restarts":{},"timestamps":{},"panel":{},"maxSpp":{},"exposure":{},"aperture":{},"sky":{},"export":{}}}}}"#,
             e.scene.map.voxels,
             e.ui.tool,
             e.ui.shape,
@@ -308,6 +308,12 @@ impl App {
                 vxr_core::history::At::Object(_) => "object",
                 vxr_core::history::At::Map => "model",
             },
+            e.scene.world().map_or(1, |w| w.objects().len()),
+            e.scene.world().map_or(1, |w| w.models.len()),
+            e.scene
+                .picked()
+                .and_then(|i| e.scene.world().map(|w| vxr_app::editor::object_name(w, i)))
+                .map_or("null".into(), |n| format!("{n:?}")),
             e.ui.render_rect.is_some() && e.ui.show_render,
             e.preview.samples(),
             e.preview.last_rows,

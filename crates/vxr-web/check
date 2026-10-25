@@ -16,11 +16,17 @@ command -v chrome-devtools-axi >/dev/null || { echo "chrome-devtools-axi is not 
 mkdir -p "$shots"
 
 cd "$root"
+# Generated fixtures the check opens through the file input, served under /__fixtures/
+# from a temporary folder so dist/ stays the site.
+fixtures="$(mktemp -d)"
+trap 'rm -rf "$fixtures"' EXIT
+./dev cargo run -q --release -p vxr-vox --example fixture -- 22-world "$fixtures/22-world.vox"
 ./dev node -e "
 const http = require('node:http'), fs = require('node:fs'), path = require('node:path');
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.wasm': 'application/wasm' };
 http.createServer((req, res) => {
-  const p = path.join(process.argv[1], decodeURIComponent(new URL(req.url, 'http://x').pathname));
+  const u = decodeURIComponent(new URL(req.url, 'http://x').pathname);
+  const p = u.startsWith('/__fixtures/') ? path.join(process.argv[3], u.slice(12)) : path.join(process.argv[1], u);
   const f = p.endsWith('/') ? p + 'index.html' : p;
   fs.readFile(f, (err, data) => {
     if (err) { res.writeHead(404); res.end(); return; }
@@ -28,7 +34,7 @@ http.createServer((req, res) => {
     res.end(data);
   });
 }).listen(+process.argv[2], '127.0.0.1');
-" "$dist" "$port" &
+" "$dist" "$port" "$fixtures" &
 server=$!
 gpu=vxr-check-$$
 nogpu=vxr-check-nogpu-$$
@@ -36,6 +42,7 @@ cleanup() {
   CHROME_DEVTOOLS_AXI_SESSION=$gpu chrome-devtools-axi stop >/dev/null 2>&1 || true
   CHROME_DEVTOOLS_AXI_SESSION=$nogpu chrome-devtools-axi stop >/dev/null 2>&1 || true
   kill "$server" 2>/dev/null || true
+  rm -rf "$fixtures"
 }
 trap cleanup EXIT
 for _ in $(seq 50); do curl -sf "$url" >/dev/null && break; sleep 0.1; done

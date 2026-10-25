@@ -81,7 +81,7 @@ function wire() {
     if (composing || e.isComposing) return;
     mods(e);
     if (app.key(e.key, down, e.repeat)) e.preventDefault();
-    if ((e.metaKey || e.ctrlKey) && ['k', 'z', 'o', 's'].includes(e.key.toLowerCase())) e.preventDefault();
+    if ((e.metaKey || e.ctrlKey) && ['k', 'z', 'o', 's', 'd'].includes(e.key.toLowerCase())) e.preventDefault();
   };
   addEventListener('keydown', (e) => key(e, true));
   addEventListener('keyup', (e) => key(e, false));

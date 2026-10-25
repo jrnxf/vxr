@@ -209,6 +209,11 @@ pub enum Action {
     Crop,
     /// Switch between editing a model and the world of every object (Tab).
     ToggleWorld,
+    /// Copy the picked object beside itself in world mode: its own model, or a linked copy
+    /// sharing it (an instance).
+    Duplicate {
+        linked: bool,
+    },
     Copy,
     Cut,
     Paste,
@@ -319,6 +324,9 @@ pub struct Hybrid {
     /// How many voxels are selected, and whether Copy or Cut has filled the clipboard.
     pub selected: usize,
     pub has_clip: bool,
+    /// World mode is showing (set by the editor), and the name of the object picked there.
+    pub world: bool,
+    pub picked: Option<String>,
     /// The box being dragged with the select tool, in points.
     pub marquee: Option<Rect>,
     /// Swatch being dragged with Cmd (swap) or Cmd+Shift (copy).
@@ -391,6 +399,17 @@ const COMMANDS: &[Command] = &[
     Command { label: "Lock axis Z", keys: &[], run: |h| h.toggle_lock(2) },
     Command { label: "Cycle axis lock", keys: &["K"], run: |h| h.cycle_lock() },
     Command { label: "World mode / edit model", keys: &["Tab"], run: |h| h.actions.push(Action::ToggleWorld) },
+    Command {
+        label: "Duplicate object",
+        keys: &["⌘", "D"],
+        run: |h| h.actions.push(Action::Duplicate { linked: false }),
+    },
+    Command {
+        label: "Linked copy (instance)",
+        keys: &["⌘", "⇧", "D"],
+        run: |h| h.actions.push(Action::Duplicate { linked: true }),
+    },
+    Command { label: "Delete object", keys: &["⌫"], run: |h| h.actions.push(Action::DeleteSelection) },
     Command { label: "Frame scene", keys: &["."], run: |h| h.actions.push(Action::Frame) },
     Command { label: "View options", keys: &[], run: |h| h.view_panel = !h.view_panel },
     Command { label: "Perspective", keys: &["O"], run: |h| h.actions.push(Action::Ortho(false)) },
@@ -458,6 +477,8 @@ impl Hybrid {
             select_y: 0.0,
             selected: 0,
             has_clip: false,
+            world: false,
+            picked: None,
             marquee: None,
             drag_from: None,
             shown_slot: 28,
@@ -660,6 +681,12 @@ impl Hybrid {
             }
             if i.consume_key(Modifiers::COMMAND, Key::A) {
                 self.actions.push(Action::SelectAll);
+            }
+            if i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::D) {
+                self.actions.push(Action::Duplicate { linked: true });
+            }
+            if i.consume_key(Modifiers::COMMAND, Key::D) {
+                self.actions.push(Action::Duplicate { linked: false });
             }
             // Natively egui-winit turns Cmd-C, Cmd-X and Cmd-V into clipboard events (Paste
             // only when the system clipboard has text); the browser page sends the keys.
@@ -1039,7 +1066,7 @@ impl Hybrid {
     // whole model when nothing is selected), crop and resize of the model bounds, and fill,
     // copy, cut, paste and delete. Built like the axis flyout.
     fn selection_panel(&mut self, ctx: &Context) {
-        if self.tool != Tool::Select && self.selected == 0 {
+        if self.world || (self.tool != Tool::Select && self.selected == 0) {
             return;
         }
         let rect = Rect::from_min_size(pos2(12.0 + 52.0 + 8.0, self.select_y - 6.0), vec2(162.0, 242.0));
@@ -2120,6 +2147,14 @@ impl Hybrid {
                     SlotOp::Copy => format!("a slot to copy slot {} to", self.slot),
                 };
                 vec![("Click", armed.as_str()), ("Esc", "cancel")]
+            }
+            (None, _, _) if self.world => {
+                let mut v = vec![("Click", "pick an object"), ("Drag", "move it")];
+                if self.picked.is_some() {
+                    v.extend([("Arrows", "nudge"), ("⌘D", "duplicate"), ("⌘⇧D", "linked copy"), ("⌫", "delete")]);
+                }
+                v.extend([("Tab", "edit its model"), ("Right-drag", "orbit")]);
+                return self.hint_panel(ctx, screen, &v);
             }
             (None, t, shape) => self.tool_hints(t, shape),
         };
