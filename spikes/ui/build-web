@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Build the HTML/CSS build's shell wasm (viewer only, no egui) into web/pkg and print its size.
+# Build a test 3 shell wasm and print its size. `build-web` builds the HTML/CSS build's viewer-only
+# shell (no egui) into web/pkg; `build-web egui` builds the egui build's shell into web/pkg-egui.
 # Same size settings as the test 5 embed: opt-level s, fat LTO, wasm-opt -O3. Run from anywhere.
 set -euo pipefail
 cd "$(dirname "$0")"
-../dev cargo build --profile wasm --target wasm32-unknown-unknown --lib --no-default-features
-../dev wasm-bindgen --target web --no-typescript --out-dir web/pkg target/wasm32-unknown-unknown/wasm/vxr_ui_spike.wasm
-../dev wasm-opt -O3 --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types -o web/pkg/vxr_ui_spike_bg.wasm web/pkg/vxr_ui_spike_bg.wasm
-for f in web/pkg/vxr_ui_spike_bg.wasm web/pkg/vxr_ui_spike.js; do
+if [ "${1:-}" = egui ]; then flags=(); out=web/pkg-egui; else flags=(--no-default-features); out=web/pkg; fi
+../dev cargo build --profile wasm --target wasm32-unknown-unknown --lib "${flags[@]}"
+../dev wasm-bindgen --target web --no-typescript --out-dir "$out" target/wasm32-unknown-unknown/wasm/vxr_ui_spike.wasm
+../dev wasm-opt -O3 --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types -o "$out/vxr_ui_spike_bg.wasm" "$out/vxr_ui_spike_bg.wasm"
+for f in "$out/vxr_ui_spike_bg.wasm" "$out/vxr_ui_spike.js"; do
   printf '%-32s %8d B raw %8d B brotli\n' "$(basename "$f")" "$(wc -c <"$f")" "$(../dev brotli -c -q 11 "$f" | wc -c)"
 done

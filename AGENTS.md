@@ -5,7 +5,7 @@ fast voxel scenes: an open-source voxel scene editor (Rust, wgpu) with a one-tag
 ## Stack
 
 - Rust core on wgpu (Metal, Vulkan, DX12, WebGPU in the browser). Desktop first; the browser build and the embed come from the same code. No server.
-- UI drawn in Rust so the Hybrid UI runs native and in the browser; the UI layer is not picked yet.
+- UI drawn in Rust with egui (picked by test 3, see `docs/decisions.md`) so the Hybrid UI runs native and in the browser.
 - No real build yet. The Phase 2 spikes in `spikes/` build through `spikes/dev <command>` (a Nix dev shell with Rust, the wasm32 target, wasm-bindgen, wasm-opt and twiggy; `spikes/dev --fuzz` adds nightly and cargo-fuzz). Wrap timed GPU runs in `spikes/gpu-lock` so benchmarks never share the GPU.
 
 ## Where things live

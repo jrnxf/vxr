@@ -14,3 +14,6 @@ pub mod offscreen;
 
 #[cfg(target_arch = "wasm32")]
 pub mod web;
+
+#[cfg(all(feature = "egui", target_arch = "wasm32"))]
+pub mod web_egui;

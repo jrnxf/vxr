@@ -6,14 +6,14 @@ use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
 pub struct Viewer {
-    gpu: gpu::Gpu,
-    surface: wgpu::Surface<'static>,
-    scene: Scene,
-    map: gpu::GpuBrickMap,
-    renderer: gpu::Renderer,
-    cam: OrbitCamera,
-    width: u32,
-    height: u32,
+    pub(crate) gpu: gpu::Gpu,
+    pub(crate) surface: wgpu::Surface<'static>,
+    pub(crate) scene: Scene,
+    pub(crate) map: gpu::GpuBrickMap,
+    pub(crate) renderer: gpu::Renderer,
+    pub(crate) cam: OrbitCamera,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
 }
 
 fn err(e: impl ToString) -> JsValue {
@@ -95,8 +95,7 @@ impl Viewer {
     /// and upload the change, so the next `frame` shows it. Returns the voxel's palette slot for
     /// pick, 1 if a voxel changed otherwise, 0 if nothing changed, and -1 on a miss.
     pub fn edit(&mut self, x: f32, y: f32, tool: u32, slot: u8) -> i32 {
-        let (ro, dir) = self.cam.ray(x, y, self.width as f32, self.height as f32);
-        let Some(hit) = self.scene.map.raycast(ro.into(), dir.into(), 1e6) else { return -1 };
+        let Some(hit) = self.hit(x, y) else { return -1 };
         let [vx, vy, vz] = hit.voxel;
         let [nx, ny, nz] = hit.normal;
         let changed = match tool {
@@ -113,25 +112,12 @@ impl Viewer {
 
     /// The voxel under device pixel (x, y) as [x, y, z], or empty on a miss.
     pub fn cursor(&self, x: f32, y: f32) -> Vec<i32> {
-        let (ro, dir) = self.cam.ray(x, y, self.width as f32, self.height as f32);
-        self.scene.map.raycast(ro.into(), dir.into(), 1e6).map(|h| h.voxel.to_vec()).unwrap_or_default()
+        self.hit(x, y).map(|h| h.voxel.to_vec()).unwrap_or_default()
     }
 
     /// March and present one frame.
     pub fn frame(&mut self) {
-        let frame = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
-            _ => {
-                self.configure();
-                return;
-            }
-        };
-        self.renderer.set_camera(&self.gpu.queue, &self.cam);
-        let mut enc = self.gpu.device.create_command_encoder(&Default::default());
-        self.renderer.march(&mut enc, &self.map, None);
-        self.renderer.blit(&mut enc, &frame.texture.create_view(&Default::default()), None);
-        self.gpu.queue.submit([enc.finish()]);
-        self.gpu.queue.present(frame);
+        self.frame_with(|_, _, _| ());
     }
 
     pub fn voxels(&self) -> u32 {
@@ -156,5 +142,32 @@ impl Viewer {
         }
         used[0] = 0;
         used
+    }
+}
+
+impl Viewer {
+    /// March and blit into the canvas, let `ui` record more passes over the frame, then present.
+    pub(crate) fn frame_with(&mut self, ui: impl FnOnce(&gpu::Gpu, &mut wgpu::CommandEncoder, &wgpu::TextureView)) {
+        let frame = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
+            _ => {
+                self.configure();
+                return;
+            }
+        };
+        self.renderer.set_camera(&self.gpu.queue, &self.cam);
+        let view = frame.texture.create_view(&Default::default());
+        let mut enc = self.gpu.device.create_command_encoder(&Default::default());
+        self.renderer.march(&mut enc, &self.map, None);
+        self.renderer.blit(&mut enc, &view, None);
+        ui(&self.gpu, &mut enc, &view);
+        self.gpu.queue.submit([enc.finish()]);
+        self.gpu.queue.present(frame);
+    }
+
+    /// Ray from device pixel (x, y) into the scene.
+    pub(crate) fn hit(&self, x: f32, y: f32) -> Option<vxr_engine_spike::brickmap::Hit> {
+        let (ro, dir) = self.cam.ray(x, y, self.width as f32, self.height as f32);
+        self.scene.map.raycast(ro.into(), dir.into(), 1e6)
     }
 }

@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vxr test 3: Hybrid in egui</title>
+<!--
+  Test 3, egui build: the test 1 renderer and the Hybrid UI drawn by egui on one canvas
+  (pkg-egui/, built by `build-web egui`). This page only forwards DOM input to egui and runs the
+  frame loop. Query: ?cmdk=<text> opens Cmd-K with that text, ?shot freezes the stats.
+  window.bench(n) times n frames with the UI and n without; window.latency holds click timings.
+-->
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0d0f14; }
+  canvas#c { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; outline: none; }
+  /* Receives keyboard and IME composition while an egui text field has focus. */
+  #ime { position: fixed; left: 50%; top: 30%; width: 1px; height: 1px; opacity: 0; border: 0; padding: 0; }
+</style>
+</head>
+<body>
+<canvas id="c" tabindex="0"></canvas>
+<input id="ime" autocomplete="off" aria-hidden="true">
+<script type="module">
+import init, { create_egui_app } from './pkg-egui/vxr_ui_spike.js';
+
+const q = new URLSearchParams(location.search);
+const canvas = document.getElementById('c');
+const ime = document.getElementById('ime');
+const dpr = () => devicePixelRatio || 1;
+let app, dirty = true, drag = null, composing = false;
+window.latency = [];
+let pendingEdit = null;
+
+function mods(e) { app.set_modifiers(e.shiftKey, e.altKey, e.ctrlKey, e.metaKey); }
+
+function fit() {
+  canvas.width = Math.round(canvas.clientWidth * dpr());
+  canvas.height = Math.round(canvas.clientHeight * dpr());
+  if (app) { app.resize(canvas.width, canvas.height, dpr()); dirty = true; }
+}
+
+function wire() {
+  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+  canvas.addEventListener('pointerdown', (e) => {
+    canvas.setPointerCapture(e.pointerId);
+    mods(e);
+    dirty = true;
+    if (app.pointer_button(e.offsetX, e.offsetY, e.button, true)) return;
+    if (e.button === 2) { drag = { x: e.clientX, y: e.clientY, pan: e.shiftKey }; return; }
+    if (e.button !== 0) return;
+    if (app.click(e.offsetX, e.offsetY) === 1) pendingEdit = { input: e.timeStamp, edited: performance.now() };
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    app.pointer_move(e.offsetX, e.offsetY);
+    if (drag) {
+      const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+      drag.x = e.clientX; drag.y = e.clientY;
+      if (drag.pan) app.pan(dx * dpr(), dy * dpr()); else app.orbit(dx, dy);
+    }
+    dirty = true;
+  });
+  canvas.addEventListener('pointerup', (e) => { drag = null; mods(e); app.pointer_button(e.offsetX, e.offsetY, e.button, false); dirty = true; });
+  canvas.addEventListener('pointerleave', () => { app.pointer_gone(); dirty = true; });
+  canvas.addEventListener('wheel', (e) => { e.preventDefault(); app.zoom(-e.deltaY / 100, e.offsetX, e.offsetY); dirty = true; }, { passive: false });
+  const key = (e, down) => {
+    if (composing || e.isComposing) return;
+    mods(e);
+    if (app.key(e.key, down, e.repeat)) e.preventDefault();
+    if ((e.metaKey || e.ctrlKey) && ['k', 'z', 'o', 's'].includes(e.key.toLowerCase())) e.preventDefault();
+    dirty = true;
+  };
+  addEventListener('keydown', (e) => key(e, true));
+  addEventListener('keyup', (e) => key(e, false));
+  // IME: composition events from the hidden field go to egui as preedit and commit.
+  ime.addEventListener('compositionstart', () => { composing = true; });
+  ime.addEventListener('compositionupdate', (e) => { app.ime(e.data, false); dirty = true; });
+  ime.addEventListener('compositionend', (e) => { composing = false; app.ime(e.data, true); ime.value = ''; dirty = true; });
+  ime.addEventListener('input', () => { if (!composing) ime.value = ''; });
+}
+
+let frames = 0, fpsT = performance.now(), lastMs = 0;
+function tick(now) {
+  if (dirty || q.has('continuous')) {
+    const t0 = performance.now();
+    dirty = app.frame(now / 1000);
+    lastMs = performance.now() - t0;
+    if (pendingEdit) { window.latency.push({ input_to_frame_ms: now - pendingEdit.input, input_to_upload_ms: pendingEdit.edited - pendingEdit.input, frames_after_input: 1, ui_cpu_ms: app.ui_cpu_ms() }); pendingEdit = null; }
+    // Keep the hidden field focused while egui is typing so the OS IME targets it.
+    if (app.wants_keyboard() && document.activeElement !== ime) ime.focus();
+    if (!app.wants_keyboard() && document.activeElement === ime) canvas.focus();
+  }
+  frames++;
+  if (now - fpsT > 500) { app.set_fps(Math.round(frames * 1000 / (now - fpsT)), lastMs); frames = 0; fpsT = now; dirty = true; }
+  requestAnimationFrame(tick);
+}
+
+window.bench = async (n = 300) => { const r = await app.bench(n); dirty = true; return { gpu_without: [r[0], r[1]], gpu_with: [r[2], r[3]], ui_cpu: [r[4], r[5]], ui_adds_median: r[2] - r[0] + r[4] }; };
+
+async function main() {
+  await init();
+  fit();
+  const get = async (u) => new Uint8Array(await (await fetch(u)).arrayBuffer());
+  const f = (n) => get('/fetched/' + n);
+  const [vox, ir, im, isb, mr, mm, ic] = await Promise.all([get('/scene.vox'), f('Inter-Regular.ttf'), f('Inter-Medium.ttf'), f('Inter-SemiBold.ttf'), f('JetBrainsMono-Regular.ttf'), f('JetBrainsMono-Medium.ttf'), f('lucide.ttf')]);
+  app = await create_egui_app(canvas, vox, dpr(), ir, im, isb, mr, mm, ic);
+  if (q.has('shot')) app.freeze_stats();
+  if (q.has('cmdk')) app.open_cmdk(q.get('cmdk'));
+  wire();
+  addEventListener('resize', fit);
+  canvas.focus();
+  requestAnimationFrame(tick);
+  requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(() => { document.title = 'ready'; })));
+}
+main().catch((e) => { document.title = 'error'; document.body.insertAdjacentHTML('beforeend', `<pre style="position:fixed;bottom:60px;left:12px;color:#ff6b7a">${e}</pre>`); });
+</script>
+</body>
+</html>
