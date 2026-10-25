@@ -51,6 +51,21 @@ fn select_by_box_and_colour_with_modes() {
 }
 
 #[test]
+fn erased_voxels_leave_the_selection() {
+    let mut s = scene();
+    s.select_color(3, Mode::Replace);
+    s.edit([([O, O, O], 0), ([O + 1, O, O], 0)]);
+    assert_eq!(sel(&s), vec![[O, O, O + 1], [O + 2, O, O]]);
+    s.edit([([O, O, O], 4)]);
+    assert!(!s.is_selected([O, O, O]), "a voxel added where one was erased is not selected");
+    assert!(s.undo());
+    assert!(s.undo(), "the erase");
+    assert_eq!(s.selected_count(), 4, "undoing the erase selects the voxels again");
+    assert!(s.redo());
+    assert_eq!(s.selected_count(), 2);
+}
+
+#[test]
 fn move_drag_is_live_and_one_undo_step() {
     let mut s = scene();
     let before = voxels(&s);

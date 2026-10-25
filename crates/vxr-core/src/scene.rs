@@ -41,8 +41,9 @@ pub struct Scene {
     source: Option<Document>,
     history: History,
     stroke: Option<Stroke>,
-    /// Selected map cells (see [`crate::select`]). Cells emptied since they were selected stay
-    /// in the set but are ignored.
+    /// Selected map cells (see [`crate::select`]). An edit that empties selected cells drops
+    /// them at [`Scene::commit`], so a voxel added there later is not selected; until then
+    /// they stay in the set but are ignored.
     pub(crate) selection: HashSet<[i32; 3]>,
     /// Bumped on every selection change, so the renderer knows when to upload it again.
     pub(crate) selection_version: u64,
@@ -305,7 +306,18 @@ impl Scene {
     /// Close the open edit as one undo step. Cells and slots that ended where they started
     /// are dropped. Returns how many voxels changed.
     pub fn commit(&mut self) -> usize {
-        let Some(s) = self.stroke.take() else { return 0 };
+        let Some(mut s) = self.stroke.take() else { return 0 };
+        if !self.selection.is_empty() {
+            let emptied: Vec<_> =
+                s.changes.iter().filter(|c| c.new == 0 && self.selection.contains(&c.pos)).map(|c| c.pos).collect();
+            if !emptied.is_empty() {
+                s.selection.get_or_insert_with(|| self.selection.iter().copied().collect());
+                for p in emptied {
+                    self.selection.remove(&p);
+                }
+                self.selection_version += 1;
+            }
+        }
         let selection = s.selection.and_then(|old| {
             let same = old.len() == self.selection.len() && old.iter().all(|p| self.selection.contains(p));
             (!same).then(|| Box::new(SelectionChange { old, new: self.selection.iter().copied().collect() }))
