@@ -197,6 +197,10 @@ pub enum Action {
     Hollow,
     /// Fill the space the selection, or the whole model, encloses with the current colour.
     FillInterior,
+    /// Resize the model bounds to this size, keeping the bottom and the centre.
+    Resize([u32; 3]),
+    /// Fit the model bounds to the voxels.
+    Crop,
     Copy,
     Cut,
     Paste,
@@ -283,6 +287,9 @@ pub struct Hybrid {
     pub render: RenderSettings,
     /// Text of the Render panel's sun colour field.
     sun_hex: String,
+    /// The model bounds' size, and the Bounds panel's X, Y and Z fields while it is open.
+    pub bounds: [u32; 3],
+    pub bounds_panel: Option<[String; 3]>,
     /// Where each clickable part of the UI was last drawn, in points, by name, for the
     /// headless checks ("edit-color", "sv", "hue", "swap", "copy", "sw<slot>", ...).
     pub hits: HashMap<String, Rect>,
@@ -326,6 +333,8 @@ const COMMANDS: &[Command] = &[
     Command { label: "Fill selection", keys: &[], run: |h| h.actions.push(Action::FillSelection) },
     Command { label: "Hollow", keys: &[], run: |h| h.actions.push(Action::Hollow) },
     Command { label: "Fill inside", keys: &[], run: |h| h.actions.push(Action::FillInterior) },
+    Command { label: "Resize bounds…", keys: &[], run: |h| h.toggle_bounds_panel() },
+    Command { label: "Crop to content", keys: &[], run: |h| h.actions.push(Action::Crop) },
     Command { label: "Copy", keys: &["⌘", "C"], run: |h| h.actions.push(Action::Copy) },
     Command { label: "Cut", keys: &["⌘", "X"], run: |h| h.actions.push(Action::Cut) },
     Command { label: "Paste", keys: &["⌘", "V"], run: |h| h.actions.push(Action::Paste) },
@@ -402,6 +411,8 @@ impl Hybrid {
             render_panel: false,
             render: RenderSettings::default(),
             sun_hex: String::new(),
+            bounds: [0; 3],
+            bounds_panel: None,
             hits: HashMap::new(),
             axes_y: 0.0,
             select_y: 0.0,
@@ -511,10 +522,18 @@ impl Hybrid {
         }
     }
 
-    /// Escape: cancel an armed swap or copy, else close the colour editor or the Render panel,
-    /// else deselect, else the coach card.
+    /// Open or close the Bounds panel, its fields showing the current size.
+    pub fn toggle_bounds_panel(&mut self) {
+        self.bounds_panel = match self.bounds_panel {
+            Some(_) => None,
+            None => Some(self.bounds.map(|v| v.to_string())),
+        };
+    }
+
+    /// Escape: cancel an armed swap or copy, else close the colour editor, the Bounds panel or
+    /// the Render panel, else deselect, else the coach card.
     fn escape(&mut self) {
-        if self.slot_op.take().is_some() || self.color_edit.take().is_some() {
+        if self.slot_op.take().is_some() || self.color_edit.take().is_some() || self.bounds_panel.take().is_some() {
             return;
         }
         if self.render_panel {
@@ -552,6 +571,7 @@ impl Hybrid {
         self.rail(ctx);
         self.axes(ctx);
         self.selection_panel(ctx);
+        self.bounds_panel(ctx);
         self.marquee(ctx);
         self.palette_panel(ctx, screen);
         self.color_editor(ctx, screen);
@@ -869,14 +889,16 @@ impl Hybrid {
 
     // The selection flyout beside the rail's select button, shown with the select tool or a
     // selection: the count, ROTATE / FLIP / LOOP X Y Z and hollow and fill inside (the
-    // whole model when nothing is selected), and fill, copy, cut, paste and delete. Built like the
-    // axis flyout.
+    // whole model when nothing is selected), crop and resize of the model bounds, and fill,
+    // copy, cut, paste and delete. Built like the axis flyout.
     fn selection_panel(&mut self, ctx: &Context) {
         if self.tool != Tool::Select && self.selected == 0 {
             return;
         }
-        let rect = Rect::from_min_size(pos2(12.0 + 52.0 + 8.0, self.select_y - 6.0), vec2(162.0, 208.0));
+        let rect = Rect::from_min_size(pos2(12.0 + 52.0 + 8.0, self.select_y - 6.0), vec2(162.0, 242.0));
         let (selected, has_clip) = (self.selected, self.has_clip);
+        let bounds_open = self.bounds_panel.is_some();
+        let mut toggle_bounds = false;
         let mut run = Vec::new();
         let mut hits = Vec::new();
         Self::panel(ctx, "selection", rect, Order::Middle, |ui, rect| {
@@ -941,25 +963,45 @@ impl Hybrid {
                     }
                 }
             }
-            let cy = hy + 30.0 + 3.0 * 34.0;
-            for (k, (label, id, action)) in
-                [("Hollow", "hollow", Action::Hollow), ("Fill inside", "fill-in", Action::FillInterior)]
-                    .into_iter()
-                    .enumerate()
+            // Text buttons, two per row: hollow and fill inside, then crop and resize (which
+            // opens the Bounds panel, and shows on while it is open).
+            for (k, (label, id, action)) in [
+                ("Hollow", "hollow", Some(Action::Hollow)),
+                ("Fill inside", "fill-in", Some(Action::FillInterior)),
+                ("Crop", "crop", Some(Action::Crop)),
+                ("Resize…", "resize", None),
+            ]
+            .into_iter()
+            .enumerate()
             {
-                let c = Rect::from_min_size(pos2(rect.left() + 12.0 + k as f32 * 70.0, cy - 13.0), vec2(68.0, 26.0));
+                let cy = hy + 30.0 + (3 + k / 2) as f32 * 34.0;
+                let c =
+                    Rect::from_min_size(pos2(rect.left() + 12.0 + (k % 2) as f32 * 70.0, cy - 13.0), vec2(68.0, 26.0));
                 let resp = ui.interact(c, Id::unique(id), Sense::click());
                 hits.push((id.to_string(), c));
-                let hover = resp.hovered();
+                let (hover, on) = (resp.hovered(), action.is_none() && bounds_open);
                 let p = ui.painter();
-                let border = if hover { Color32::from_white_alpha(64) } else { LINE2 };
+                if on {
+                    p.rect_filled(c, CornerRadius::same(7), Color32::from_rgba_unmultiplied(142, 162, 255, 26));
+                }
+                let border = if on {
+                    Color32::from_rgba_unmultiplied(142, 162, 255, 140)
+                } else if hover {
+                    Color32::from_white_alpha(64)
+                } else {
+                    LINE2
+                };
                 p.rect_stroke(c, CornerRadius::same(7), Stroke::new(1.0, border), StrokeKind::Inside);
-                p.text(c.center(), Align2::CENTER_CENTER, label, inter(11.0), if hover { TEXT } else { MUTED });
+                let color = if hover || on { TEXT } else { MUTED };
+                p.text(c.center(), Align2::CENTER_CENTER, label, inter(11.0), color);
                 if resp.clicked() {
-                    run.push(action);
+                    match action {
+                        Some(a) => run.push(a),
+                        None => toggle_bounds = true,
+                    }
                 }
             }
-            let cy = hy + 30.0 + 4.0 * 34.0 + 4.0;
+            let cy = hy + 30.0 + 5.0 * 34.0 + 4.0;
             ui.painter().line_segment(
                 [pos2(rect.left() + 10.0, cy - 20.5), pos2(rect.right() - 10.0, cy - 20.5)],
                 Stroke::new(1.0, LINE),
@@ -1000,6 +1042,83 @@ impl Hybrid {
         });
         self.hits.extend(hits);
         self.actions.extend(run);
+        if toggle_bounds {
+            self.toggle_bounds_panel();
+        }
+    }
+
+    // The Bounds panel, beside the selection flyout at its Resize button: the model's size as
+    // X, Y and Z fields (vxr's axes, Y up). Enter or leaving a field resizes, keeping the
+    // bottom and the centre, as one undo step.
+    fn bounds_panel(&mut self, ctx: &Context) {
+        let Some(mut fields) = self.bounds_panel.take() else { return };
+        let size = self.bounds;
+        let (w, inner_w) = (232.0, 208.0);
+        let mut job = LayoutJob::default();
+        job.append(
+            "Keeps the bottom and the center. Erases the voxels outside.",
+            0.0,
+            TextFormat { font_id: inter(11.0), color: FAINT, line_height: Some(15.95), ..Default::default() },
+        );
+        job.wrap.max_width = inner_w;
+        let note = ctx.fonts_mut(|f| f.layout_job(job));
+        let h = 36.0 + 28.0 + 12.0 + note.size().y + 14.0;
+        // The fields' row lines up with the Resize button (its centre is select_y + 178).
+        let top = self.select_y + 178.0 - 50.0;
+        let rect = Rect::from_min_size(pos2(12.0 + 52.0 + 8.0 + 162.0 + 8.0, top), vec2(w, h));
+        let mut close = false;
+        let mut resize = None;
+        let mut hits = Vec::new();
+        Self::panel(ctx, "bounds", rect, Order::Middle, |ui, rect| {
+            let hy = rect.top() + 18.0;
+            let g = ui.painter().layout_job(spaced("BOUNDS", inter(9.0), FAINT, 0.72));
+            ui.painter().galley(pos2(rect.left() + 12.0, hy - g.size().y / 2.0), g, FAINT);
+            let x = Rect::from_center_size(pos2(rect.right() - 19.0, hy), vec2(22.0, 22.0));
+            let resp = ui.interact(x, Id::unique("bounds-close"), Sense::click());
+            hits.push(("bounds-close".to_string(), x));
+            if resp.hovered() {
+                ui.painter().rect_filled(x, CornerRadius::same(6), HOVER);
+            }
+            let c = if resp.hovered() { TEXT } else { MUTED };
+            ui.painter().text(x.center(), Align2::CENTER_CENTER, icon::X, icon_font(13.0), c);
+            ui.painter().text(
+                pos2(x.left() - 4.0, hy),
+                Align2::RIGHT_CENTER,
+                format!("{}×{}×{}", size[0], size[1], size[2]),
+                mono(11.0),
+                MUTED,
+            );
+            close = resp.clicked();
+            let third = (inner_w - 12.0) / 3.0;
+            for (a, label) in ["X", "Y", "Z"].into_iter().enumerate() {
+                let fr = Rect::from_min_size(
+                    pos2(rect.left() + 12.0 + a as f32 * (third + 6.0), rect.top() + 36.0),
+                    vec2(third, 28.0),
+                );
+                let name = format!("bounds-{}", label.to_lowercase());
+                let id = Id::unique(&name);
+                if !ui.memory(|m| m.has_focus(id)) {
+                    fields[a] = size[a].to_string();
+                }
+                hits.push((name, fr));
+                if field(ui, fr, label, id, &mut fields[a])
+                    && let Ok(v) = fields[a].trim().parse::<u32>()
+                    && v != size[a]
+                {
+                    let mut to = size;
+                    to[a] = v;
+                    resize = Some(to);
+                }
+            }
+            ui.painter().galley(pos2(rect.left() + 12.0, rect.top() + 36.0 + 28.0 + 12.0), note, FAINT);
+        });
+        self.hits.extend(hits);
+        if let Some(to) = resize {
+            self.actions.push(Action::Resize(to));
+        }
+        if !close {
+            self.bounds_panel = Some(fields);
+        }
     }
 
     // The select tool's box while it is dragged: an accent outline over a faint accent fill.

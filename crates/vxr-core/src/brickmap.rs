@@ -19,6 +19,9 @@ pub fn local_index(x: u32, y: u32, z: u32) -> usize {
 pub struct BrickMap {
     /// Scene size in bricks.
     pub dims: [u32; 3],
+    /// Scene size in voxels (the model bounds): cells beyond it, in the last brick on each
+    /// axis, stay empty.
+    size: [u32; 3],
     /// One slot per brick cell, x fastest, then y, then z. EMPTY or a brick id.
     pub grid: Vec<u32>,
     /// 16 u32 per brick.
@@ -49,12 +52,14 @@ pub struct Hit {
 }
 
 impl BrickMap {
-    /// A map covering at least `size` voxels on each axis.
+    /// A map of `size` voxels on each axis (at least one), stored in whole bricks.
     pub fn new(size: [u32; 3]) -> Self {
-        let dims = [size[0].div_ceil(B).max(1), size[1].div_ceil(B).max(1), size[2].div_ceil(B).max(1)];
+        let size = size.map(|s| s.max(1));
+        let dims = size.map(|s| s.div_ceil(B));
         let cells = dims[0] as usize * dims[1] as usize * dims[2] as usize;
         Self {
             dims,
+            size,
             grid: vec![EMPTY; cells],
             masks: Vec::new(),
             pal: Vec::new(),
@@ -70,8 +75,14 @@ impl BrickMap {
         }
     }
 
+    /// The size in voxels: every cell inside it can hold a voxel.
     pub fn size_voxels(&self) -> [u32; 3] {
-        [self.dims[0] * B, self.dims[1] * B, self.dims[2] * B]
+        self.size
+    }
+
+    /// Whether changes are being recorded for partial GPU uploads.
+    pub fn tracking(&self) -> bool {
+        self.track
     }
 
     /// Start recording which bricks and grid cells change, for partial GPU uploads.
@@ -298,8 +309,8 @@ mod tests {
 
     #[test]
     fn set_get_and_counts() {
-        let mut m = BrickMap::new([20, 20, 20]);
-        assert_eq!(m.size_voxels(), [24, 24, 24]);
+        let mut m = BrickMap::new([24, 24, 24]);
+        assert_eq!((m.size_voxels(), m.dims), ([24, 24, 24], [3, 3, 3]));
         assert!(m.set(1, 2, 3, 5));
         assert!(!m.set(1, 2, 3, 5), "same value is not a change");
         assert!(m.set(9, 2, 3, 5));

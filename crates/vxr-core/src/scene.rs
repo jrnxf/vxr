@@ -12,7 +12,7 @@ use vxr_vox::scene::Rule;
 use vxr_vox::{Document, Material};
 
 use crate::brickmap::{B, BRICK_VOXELS, BrickMap, EMPTY, MASK_WORDS};
-use crate::history::{Change, ColorChange, History, MaterialChange, SelectionChange, Step};
+use crate::history::{Bounds, BoundsChange, Change, ColorChange, History, MaterialChange, SelectionChange, Step};
 use crate::select::Clip;
 
 /// Largest scene extent per axis, in voxels. The brick grid for 2048^3 is 64 MiB.
@@ -51,6 +51,9 @@ pub struct Scene {
     pub(crate) selected_cache: std::cell::Cell<Option<(u64, u64, usize)>>,
     /// What Copy or Cut took, for Paste.
     pub clipboard: Option<Clip>,
+    /// Bumped whenever the map is replaced by a resize or crop (or their undo), so the
+    /// renderer knows to upload it again.
+    reshapes: u64,
 }
 
 /// The changes of the edit in progress: one entry per cell or palette slot, first old value
@@ -63,6 +66,7 @@ struct Stroke {
     materials: Vec<MaterialChange>,
     /// The selection when the edit first changed it.
     selection: Option<Vec<[i32; 3]>>,
+    bounds: Option<BoundsChange>,
 }
 
 pub fn vox_to_world(p: [i32; 3]) -> [i32; 3] {
@@ -94,6 +98,7 @@ impl Scene {
             selection_version: 0,
             selected_cache: Default::default(),
             clipboard: None,
+            reshapes: 0,
         }
     }
 
@@ -330,6 +335,7 @@ impl Scene {
             colors: s.colors.into_iter().filter(|c| c.old != c.new).collect(),
             materials: s.materials.into_iter().filter(|c| c.old != c.new).collect(),
             selection,
+            bounds: s.bounds.filter(|b| b.old != b.new),
         };
         let n = step.voxels.len();
         if !step.is_empty() {
@@ -384,15 +390,15 @@ impl Scene {
 
     pub fn undo(&mut self) -> bool {
         self.commit();
-        let Some(step) = self.history.undo().cloned() else { return false };
-        self.apply(&step, true);
+        let Some(mut step) = self.history.undo().cloned() else { return false };
+        self.apply(&mut step, true);
         true
     }
 
     pub fn redo(&mut self) -> bool {
         self.commit();
-        let Some(step) = self.history.redo().cloned() else { return false };
-        self.apply(&step, false);
+        let Some(mut step) = self.history.redo().cloned() else { return false };
+        self.apply(&mut step, false);
         true
     }
 
@@ -400,7 +406,14 @@ impl Scene {
         &self.history
     }
 
-    fn apply(&mut self, step: &Step, revert: bool) {
+    /// Apply or revert a step. A bounds change moves the map before the voxels go back
+    /// (revert) or after they are dropped (apply), so the step's cells are always in the
+    /// map they name.
+    fn apply(&mut self, step: &mut Step, revert: bool) {
+        if revert && let Some(b) = step.bounds {
+            let d = self.reshape(b.old);
+            step.translate(d);
+        }
         let mut set = |c: &Change| {
             self.map.set(c.pos[0], c.pos[1], c.pos[2], if revert { c.old } else { c.new });
         };
@@ -430,5 +443,81 @@ impl Scene {
                 self.selection_version += 1;
             }
         }
+        if !revert && let Some(b) = step.bounds {
+            self.reshape(b.new);
+        }
+    }
+
+    /// The model bounds: where the map sits in the world, its size, and the ground layer.
+    pub fn bounds(&self) -> Bounds {
+        Bounds { lo: self.origin, size: self.map.size_voxels(), floor: self.origin[1] + self.floor }
+    }
+
+    /// How many times the map has been replaced (see [`Scene::set_bounds`]).
+    pub fn reshapes(&self) -> u64 {
+        self.reshapes
+    }
+
+    /// Change the model bounds to `size` voxels from world cell `lo`, as one undo step.
+    /// Voxels outside the new bounds are erased; the ground stays where it is unless it would
+    /// fall outside. Returns how many voxels were erased, or None if a size is 0 or over
+    /// [`MAX_EXTENT`].
+    pub fn set_bounds(&mut self, lo: [i32; 3], size: [u32; 3]) -> Option<usize> {
+        self.commit();
+        if size.iter().any(|&s| s == 0 || s > MAX_EXTENT) {
+            return None;
+        }
+        let old = self.bounds();
+        let floor = old.floor.clamp(lo[1], lo[1] + size[1] as i32 - 1);
+        let new = Bounds { lo, size, floor };
+        if new == old {
+            return Some(0);
+        }
+        let inside = |w: [i32; 3]| (0..3).all(|a| w[a] >= lo[a] && w[a] < lo[a] + size[a] as i32);
+        let mut outside = Vec::new();
+        self.for_each_voxel(|p, _| {
+            if !inside(self.to_world(p)) {
+                outside.push(p);
+            }
+        });
+        self.begin();
+        for p in outside {
+            self.put(p, 0);
+        }
+        self.stroke.get_or_insert_default().bounds = Some(BoundsChange { old, new });
+        let n = self.commit();
+        self.reshape(new);
+        Some(n)
+    }
+
+    /// Replace the map with one covering `b`, keeping every voxel inside it, and move every
+    /// map cell the scene remembers (selection, history, clipboard) with it. Returns the
+    /// shift from old map cells to new ones.
+    fn reshape(&mut self, b: Bounds) -> [i32; 3] {
+        let d: [i32; 3] = std::array::from_fn(|a| self.origin[a] - b.lo[a]);
+        let mut map = BrickMap::new(b.size);
+        map.track_dirty(self.map.tracking());
+        self.for_each_voxel(|p, v| {
+            map.set(p[0] + d[0], p[1] + d[1], p[2] + d[2], v);
+        });
+        self.map = map;
+        self.origin = b.lo;
+        self.floor = b.floor - b.lo[1];
+        let shift = |p: [i32; 3]| -> [i32; 3] { std::array::from_fn(|a| p[a] + d[a]) };
+        let size = b.size;
+        self.selection = self
+            .selection
+            .iter()
+            .map(|&p| shift(p))
+            .filter(|p| (0..3).all(|a| p[a] >= 0 && p[a] < size[a] as i32))
+            .collect();
+        self.selection_version += 1;
+        self.selected_cache.set(None);
+        self.history.translate(d);
+        if let Some(c) = &mut self.clipboard {
+            c.from = shift(c.from);
+        }
+        self.reshapes += 1;
+        d
     }
 }

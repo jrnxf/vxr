@@ -1,6 +1,7 @@
 //! Model tools, as in MagicaVoxel's and vengi's edit menus: hollow (keep only the voxels
-//! that can be seen from outside) and fill (fill the space the model encloses). Both work on
-//! the selection, or the whole model when nothing is selected, and each is one undo step.
+//! that can be seen from outside) and fill (fill the space the model encloses), both on the
+//! selection or the whole model when nothing is selected; and resize the model bounds and
+//! crop them to the voxels (see [`Scene::set_bounds`]). Each is one undo step.
 //! "Outside" is every empty cell reachable from beyond the voxels' bounds through face
 //! neighbours, so a closed shell counts as solid and an open cup does not get filled.
 
@@ -118,5 +119,34 @@ impl Scene {
         let Some(sp) = Space::new(&solid) else { return 0 };
         let holes: Vec<_> = sp.enclosed().filter(|p| self.map.get(p[0], p[1], p[2]) == 0).collect();
         self.edit(holes.into_iter().map(|p| (p, v)))
+    }
+
+    /// Resize the model bounds to `size`, keeping the bottom and the centre on X and Z (an
+    /// odd change goes to the low side when growing and the high side when shrinking), as
+    /// [`Scene::set_bounds`].
+    pub fn resize(&mut self, size: [u32; 3]) -> Option<usize> {
+        let b = self.bounds();
+        let grow = |a: usize| (b.size[a] as i32 - size[a] as i32).div_euclid(2);
+        self.set_bounds([b.lo[0] + grow(0), b.lo[1], b.lo[2] + grow(2)], size)
+    }
+
+    /// Shrink (or grow) the model bounds to fit the voxels exactly, as one undo step.
+    /// Returns false when there are no voxels or the bounds already fit.
+    pub fn crop(&mut self) -> bool {
+        let mut lo = [i32::MAX; 3];
+        let mut hi = [i32::MIN; 3];
+        self.for_each_voxel(|p, _| {
+            for a in 0..3 {
+                lo[a] = lo[a].min(p[a]);
+                hi[a] = hi[a].max(p[a]);
+            }
+        });
+        if lo[0] > hi[0] {
+            return false;
+        }
+        let size = std::array::from_fn(|a| (hi[a] - lo[a] + 1) as u32);
+        let before = self.bounds();
+        self.set_bounds(self.to_world(lo), size);
+        self.bounds() != before
     }
 }

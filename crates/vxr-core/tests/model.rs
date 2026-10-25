@@ -1,4 +1,5 @@
-//! Model tools: hollow and fill, of the whole model and of the selection, one undo step each.
+//! Model tools: hollow and fill, of the whole model and of the selection, and resize and
+//! crop of the model bounds, one undo step each.
 
 use vxr_core::Scene;
 use vxr_core::select::Mode;
@@ -85,5 +86,73 @@ fn fill_skips_cells_other_voxels_hold() {
 fn empty_scene_does_nothing() {
     let mut s = Scene::new([16, 16, 16]);
     assert_eq!((s.hollow(), s.fill_interior(3)), (0, 0));
+    assert!(!s.undo());
+}
+
+/// Every voxel in world cells, sorted.
+fn world(s: &Scene) -> Vec<([i32; 3], u8)> {
+    let mut out = Vec::new();
+    s.for_each_voxel(|p, v| out.push((s.to_world(p), v)));
+    out.sort();
+    out
+}
+
+#[test]
+fn crop_fits_the_bounds_to_the_voxels_and_undo_restores_them() {
+    let mut s = cube(5);
+    s.edit([([20, 4, 9], 5)]);
+    let (before, cells) = (s.bounds(), world(&s));
+    assert_eq!(before.size, [32, 32, 32]);
+    assert!(s.crop());
+    let b = s.bounds();
+    assert_eq!((b.lo, b.size), (s.to_world([0, 0, 0]), [17, 5, 6]));
+    assert_eq!(b.lo, [before.lo[0] + 4, before.lo[1] + 4, before.lo[2] + 4]);
+    assert_eq!(world(&s), cells, "crop keeps every voxel where it was in the world");
+    assert_eq!(b.floor, b.lo[1], "the ground moves up to the cropped bottom");
+    assert!(!s.map.set(0, 5, 0, 1), "no cell outside the bounds");
+    assert!(!s.crop(), "already cropped");
+    let back = Scene::from_vox(&s.to_vox()).unwrap();
+    assert_eq!(world(&back), cells, "a cropped scene saves and opens the same");
+    // An edit after the crop, in the new map's cells, undoes and redoes in place.
+    s.edit([([16, 0, 0], 9)]);
+    assert!(s.undo() && s.undo());
+    assert_eq!((s.bounds(), world(&s)), (before, cells.clone()), "crop is one undo step");
+    assert!(s.redo());
+    assert_eq!(s.bounds(), b);
+    assert!(s.redo());
+    assert_eq!(s.map.get(16, 0, 0), 9, "the later edit redoes in the cropped map");
+}
+
+#[test]
+fn resize_keeps_the_bottom_and_centre_and_drops_what_falls_outside() {
+    let mut s = Scene::new([16, 16, 16]);
+    let lo = s.bounds().lo;
+    s.edit([([0, 0, 0], 1), ([8, 3, 8], 2), ([15, 15, 15], 3)]);
+    s.select_all();
+    let (cells, version) = (world(&s), s.reshapes());
+    assert_eq!(s.resize([20, 16, 24]), Some(0));
+    let b = s.bounds();
+    assert_eq!((b.lo, b.size), ([lo[0] - 2, lo[1], lo[2] - 4], [20, 16, 24]));
+    assert_eq!((world(&s), s.reshapes()), (cells.clone(), version + 1));
+    assert_eq!(s.selected_count(), 3, "the selection moves with the map");
+    // Shrinking by an odd amount takes the extra cell from the high side.
+    assert_eq!(s.resize([9, 9, 9]), Some(2), "two corners fall outside");
+    let b = s.bounds();
+    assert_eq!((b.lo, b.size), ([lo[0] + 3, lo[1], lo[2] + 3], [9, 9, 9]));
+    assert_eq!(world(&s), vec![([lo[0] + 8, lo[1] + 3, lo[2] + 8], 2)]);
+    assert_eq!(s.selected_count(), 1);
+    assert!(s.undo());
+    assert_eq!((world(&s), s.selected_count()), (cells.clone(), 3), "resize is one undo step");
+    assert!(s.undo());
+    assert_eq!((s.bounds().lo, s.bounds().size, world(&s)), (lo, [16, 16, 16], cells));
+    assert_eq!(s.resize([0, 4, 4]), None);
+    assert_eq!(s.resize([16, 16, 16]), Some(0), "same size is no step");
+    assert!(s.redo(), "the redo stack survives a no-op");
+}
+
+#[test]
+fn crop_of_an_empty_scene_does_nothing() {
+    let mut s = Scene::new([16, 16, 16]);
+    assert!(!s.crop());
     assert!(!s.undo());
 }

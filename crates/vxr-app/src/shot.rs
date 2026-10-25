@@ -250,7 +250,7 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     palette(&mut s, dir)?;
     brushes(dir)?;
     selection(dir)?;
-    model_tools()?;
+    model_tools(dir)?;
     render(&mut s, dir)?;
     materials(&mut s, dir)?;
 
@@ -592,8 +592,10 @@ fn selection(dir: &Path) -> Result<(), String> {
 }
 
 /// Model tools on an empty scene with one 5^3 cube, so every count is exact: the selection
-/// flyout's hollow and fill (whole model), Cmd-K 'Fill inside', and one undo step each.
-fn model_tools() -> Result<(), String> {
+/// flyout's hollow and fill (whole model), Cmd-K 'Fill inside', crop to content (flyout and
+/// Cmd-K) and resize through the Bounds panel's fields, one undo step each. Writes
+/// `app-2x-bounds.png` with the Bounds panel open.
+fn model_tools(dir: &Path) -> Result<(), String> {
     let mut s = Shot::new(Scene::new(NEW_SIZE), "Untitled", 2.0)?;
     s.ed.ui.coach = false;
     let mut cells = Vec::new();
@@ -627,6 +629,53 @@ fn model_tools() -> Result<(), String> {
     check(
         filled == 27 && s.voxels() == 125 && s.ed.scene.map.counts[12] == 125,
         "Cmd-K 'Fill inside'; undo back to the solid cube".into(),
+    )?;
+
+    // Crop: the bounds fit the cube, the cube stays where it is in the world, and the view
+    // does not jump (the voxel under the middle of the view is the same world cell).
+    let mid = [s.ed.width as f32 / 2.0, s.ed.height as f32 / 2.0];
+    let under = |s: &mut Shot| {
+        s.ed.pointer_moved(Some(mid));
+        s.ed.cursor().filter(|t| !t.ground).map(|t| s.ed.scene.to_world(t.voxel))
+    };
+    let (before, world) = (under(&mut s), s.ed.scene.to_world([60, 0, 60]));
+    s.ui_click("crop")?;
+    let b = s.ed.scene.bounds();
+    check(
+        b.size == [5, 5, 5] && b.lo == world && s.voxels() == 125,
+        format!("flyout crop: the bounds fit the cube ({:?} at {:?})", b.size, b.lo),
+    )?;
+    check(before.is_some() && under(&mut s) == before, format!("the view holds still across the crop ({before:?})"))?;
+    s.frames_with(2, vec![key(egui::Key::Z, egui::Modifiers::COMMAND)]);
+    let b = s.ed.scene.bounds();
+    check(b.size == [128, 128, 128] && s.voxels() == 125 && under(&mut s) == before, "crop is one undo step".into())?;
+    // Resize through the Bounds panel: 3 wide keeps the middle three columns of the cube.
+    s.ui_click("resize")?;
+    check(
+        s.ed.ui.bounds_panel.is_some() && s.ed.ui.hits.contains_key("bounds-x"),
+        "Resize… opens the Bounds panel".into(),
+    )?;
+    s.type_into("bounds-x", "3")?;
+    let b = s.ed.scene.bounds();
+    check(
+        b.size == [3, 128, 128] && s.voxels() == 75,
+        format!("the X field resizes to 3, erasing what falls outside ({:?}, {} voxels)", b.size, s.voxels()),
+    )?;
+    s.frames(2);
+    s.save_png(&dir.join("app-2x-bounds.png"))?;
+    s.frames_with(2, vec![key(egui::Key::Z, egui::Modifiers::COMMAND)]);
+    check(s.ed.scene.bounds().size == [128; 3] && s.voxels() == 125, "resize is one undo step".into())?;
+    s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+    check(s.ed.ui.bounds_panel.is_none(), "Escape closes the Bounds panel".into())?;
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("crop to content".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    let cropped = s.ed.scene.bounds().size;
+    s.ed.undo();
+    s.frames(1);
+    check(
+        cropped == [5, 5, 5] && s.ed.scene.bounds().size == [128; 3] && s.voxels() == 125,
+        "Cmd-K 'Crop to content' and its undo".into(),
     )?;
     Ok(())
 }

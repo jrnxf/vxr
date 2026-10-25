@@ -91,6 +91,8 @@ pub struct Editor {
     pub exported: Option<(Vec<u8>, (u32, u32))>,
     /// Export sizes this GPU can render.
     export_fits: [bool; 4],
+    /// The scene's map replacements and origin the GPU map was built at (see `Scene::reshapes`).
+    shape: (u64, [i32; 3]),
 }
 
 impl Editor {
@@ -148,7 +150,9 @@ impl Editor {
             export: None,
             exported: None,
             export_fits: [false; 4],
+            shape: (0, [0; 3]),
         };
+        e.shape = (e.scene.reshapes(), e.scene.origin);
         e.export_fits = EXPORT_SIZES.map(|(w, h)| Preview::fits(&e.gpu.device, w, h));
         e.frame_scene();
         Ok(e)
@@ -165,6 +169,7 @@ impl Editor {
         self.preview.set_materials(&self.gpu.queue, &self.materials);
         self.preview.restart();
         self.export = None;
+        self.shape = (scene.reshapes(), scene.origin);
         self.scene = scene;
         self.ui.scene_name = name.into();
         self.gesture = None;
@@ -433,6 +438,27 @@ impl Editor {
                 let msg = if n > 0 { format!("Filled {n} enclosed cells") } else { "No enclosed space to fill".into() };
                 self.ui.toast(&self.ctx, msg);
             }
+            Action::Resize(size) => match s.resize(size) {
+                Some(n) => {
+                    let msg = format!("Bounds {}×{}×{}", size[0], size[1], size[2]);
+                    let msg = if n > 0 { format!("{msg}: erased {n} voxels outside") } else { msg };
+                    self.ui.toast(&self.ctx, msg);
+                }
+                None => self
+                    .ui
+                    .toast(&self.ctx, format!("Bounds go from 1 to {} on each axis", vxr_core::scene::MAX_EXTENT)),
+            },
+            Action::Crop => {
+                let msg = if s.crop() {
+                    let b = s.bounds().size;
+                    format!("Cropped to {}×{}×{}", b[0], b[1], b[2])
+                } else if s.map.voxels == 0 {
+                    "Nothing to crop to".into()
+                } else {
+                    "Already cropped".into()
+                };
+                self.ui.toast(&self.ctx, msg);
+            }
             Action::Copy | Action::Cut => {
                 let n = if a == Action::Copy { s.copy_selection() } else { s.cut_selection() };
                 if n > 0 {
@@ -540,6 +566,7 @@ impl Editor {
         self.ui.can_redo = self.scene.history().can_redo();
         self.ui.selected = self.scene.selected_count();
         self.ui.has_clip = self.scene.clipboard.is_some();
+        self.ui.bounds = self.scene.bounds().size;
         self.ui.marquee = self.marquee.map(|m| {
             let (a, b) = (m.start, m.end);
             egui::Rect::from_two_pos(egui::pos2(a[0], a[1]), egui::pos2(b[0], b[1])) / self.ppp
@@ -577,6 +604,8 @@ impl Editor {
                 | Action::FillSelection
                 | Action::Hollow
                 | Action::FillInterior
+                | Action::Resize(_)
+                | Action::Crop
                 | Action::Copy
                 | Action::Cut
                 | Action::Paste => self.selection_action(a),
@@ -627,6 +656,28 @@ impl Editor {
         }
     }
 
+    /// The scene replaced its map (a resize or crop, or their undo): upload the new one and
+    /// keep the camera on the same world point, so the view does not jump.
+    fn reshaped(&mut self) {
+        let old = self.shape.1;
+        self.shape = (self.scene.reshapes(), self.scene.origin);
+        let d: [i32; 3] = std::array::from_fn(|a| old[a] - self.scene.origin[a]);
+        self.cam.target += Vec3::new(d[0] as f32, d[1] as f32, d[2] as f32);
+        let (dev, queue) = (&self.gpu.device, &self.gpu.queue);
+        match GpuMap::new(dev, queue, &self.layout, &self.scene.map, &self.scene.palette) {
+            Ok(m) => self.map = m,
+            Err(e) => eprintln!("upload failed: {e}"),
+        }
+        self.scene.map.take_dirty();
+        self.scene.map.take_dirty_box();
+        self.sel_shown = (u64::MAX, 0);
+        self.cursor = None;
+        self.preview.restart();
+        if self.export.take().is_some() {
+            self.ui.toast(&self.ctx, "Export cancelled: the model bounds changed");
+        }
+    }
+
     /// Draw a frame; returns `Action::Exported` when an export finished this frame.
     fn draw(
         &mut self,
@@ -635,6 +686,9 @@ impl Editor {
         textures: egui::TexturesDelta,
         view: &wgpu::TextureView,
     ) -> Option<Action> {
+        if self.scene.reshapes() != self.shape.0 {
+            self.reshaped();
+        }
         let (dev, queue) = (&self.gpu.device, &self.gpu.queue);
         if self.scene.palette != self.palette {
             self.palette = self.scene.palette;

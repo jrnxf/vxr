@@ -166,6 +166,14 @@ async () => {
   // Mirror axes from the flyout, and the axis lock.
   await key('m');
   const chip = async (name) => { const h = window.vxr.hit(name); if (h.length) await click(h[0], h[1]); return h.length > 0; };
+  const at = (name) => { const h = window.vxr.hit(name); return h.length ? h : null; };
+  const clickAt = async (name) => { const h = at(name); if (h) await click(h[0], h[1]); return !!h; };
+  const typeInto = async (name, text) => {
+    await clickAt(name);
+    await key('a', cmd);
+    for (const ch of text) await key(ch);
+    await key('Enter');
+  };
   const shown = await chip('mirror-y');
   step('the mirror flyout adds Y', shown && JSON.stringify(st().mirrorAxes) === '[true,true,false]', JSON.stringify(st().mirrorAxes));
   await chip('mirror-x');
@@ -179,7 +187,8 @@ async () => {
   step('K again locks Y, Z, then off', st().lock === null);
 
   // Selection and transform: S, colour click, Escape, box select, a live move drag, the
-  // flyout, copy and paste, Backspace and Cmd-A, hollow and fill inside, each edit undone again.
+  // flyout, copy and paste, Backspace and Cmd-A, hollow and fill inside, crop and resize, each
+  // edit undone again.
   await key('s');
   step('S picks the select tool and shows the selection flyout', st().tool === 'Select' && window.vxr.hit('rotate-y').length === 2, st().tool);
   await click(mx, my);
@@ -231,6 +240,29 @@ async () => {
   await key('z', cmd);
   await key('z', cmd);
   step('hollow and fill inside are one undo step each', same(bytes(), original), `${st().voxels}`);
+  // Crop to content and resize through the Bounds panel, one undo step each. The island
+  // opens with 16 cells of room on every side, so crop takes 32 off each axis.
+  const bounds0 = st().bounds;
+  await chip('crop');
+  const bounds1 = st().bounds;
+  step('the flyout crops the bounds to the island', bounds1.every((v, i) => v === bounds0[i] - 32) && st().voxels === solid, `${bounds0} -> ${bounds1}`);
+  step('crop keeps every voxel: the save is still the original bytes', same(bytes(), original));
+  await key('z', cmd);
+  step('crop is one undo step', st().bounds.join() === bounds0.join(), `${st().bounds}`);
+  step('Resize… opens the Bounds panel', (await chip('resize')) && st().boundsPanel && !!at('bounds-x'));
+  await typeInto('bounds-x', String(bounds0[0] - 40));
+  const narrowed = st().voxels;
+  step('the X field resizes the bounds and erases what falls outside', st().bounds[0] === bounds0[0] - 40 && narrowed < solid, `${st().bounds} ${solid} -> ${narrowed}`);
+  await key('z', cmd);
+  step('resize is one undo step', same(bytes(), original) && st().bounds.join() === bounds0.join(), `${st().bounds}`);
+  await key('Escape');
+  step('Escape closes the Bounds panel', !st().boundsPanel);
+  await key('k', cmd);
+  for (const ch of 'crop to content') await key(ch);
+  await key('Enter');
+  const bounds2 = st().bounds;
+  await key('z', cmd);
+  step('Cmd-K crops to content, and undo restores the bounds', bounds2.join() === bounds1.join() && st().bounds.join() === bounds0.join(), `${bounds2}`);
   await key('a');
   step('undo after every tool returns to the island', same(bytes(), original));
 
@@ -296,15 +328,7 @@ async () => {
   await key('v');
 
   // Palette editing, clicking the drawn UI where the editor says each part is.
-  const at = (name) => { const h = window.vxr.hit(name); return h.length ? h : null; };
-  const clickAt = async (name) => { const h = at(name); if (h) await click(h[0], h[1]); return !!h; };
   const col = (slot) => Array.from(window.vxr.color(slot));
-  const typeInto = async (name, text) => {
-    await clickAt(name);
-    await key('a', cmd);
-    for (const ch of text) await key(ch);
-    await key('Enter');
-  };
   let used = 1;
   for (let i = 1; i < 256; i++) if (col(i)[4] > col(used)[4]) used = i;
   while (st().slot > used) await key('[');
