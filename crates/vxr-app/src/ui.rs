@@ -2598,7 +2598,7 @@ impl Hybrid {
         }
         let w = 232.0;
         let row = 34.0;
-        let h = 12.0 + 15.0 + 10.0 + 7.0 * row + 28.0 + 8.0 + 28.0 + 12.0 + 2.0 * (14.0 + 28.0 + 10.0) + 32.0 + 12.0;
+        let h = 12.0 + 15.0 + 10.0 + 9.0 * row + 28.0 + 8.0 + 28.0 + 12.0 + 2.0 * (14.0 + 28.0 + 10.0) + 32.0 + 12.0;
         let right = self.render_rect.map_or(screen.right() - 12.0 - 232.0, |r| r.left()) - 8.0;
         let bottom = self.render_rect.map_or(screen.bottom() - 62.0, |r| r.bottom());
         let rect = Rect::from_min_size(pos2(right - w, (bottom - h).max(68.0)), vec2(w, h));
@@ -2624,12 +2624,16 @@ impl Hybrid {
                 y += hh;
                 r
             };
-            let sliders: [SliderRow; 7] = [
+            let sliders: [SliderRow; 9] = [
                 ("rs-sun-angle", "Sun direction", &mut rs.sun_angle, 0.0, 360.0, |v| format!("{v:.0}°")),
                 ("rs-sun-height", "Sun height", &mut rs.sun_height, 2.0, 90.0, |v| format!("{v:.0}°")),
                 ("rs-sun-strength", "Sun strength", &mut rs.sun_strength, 0.0, 10.0, |v| format!("{v:.1}")),
                 ("rs-sky", "Sky light", &mut rs.sky, 0.0, 3.0, |v| format!("{v:.2}")),
                 ("rs-exposure", "Exposure", &mut rs.exposure_ev, -3.0, 3.0, |v| format!("{v:+.1} EV")),
+                ("rs-gamma", "Gamma", &mut rs.gamma, 1.0, 3.0, |v| format!("{v:.2}")),
+                ("rs-vignette", "Vignette", &mut rs.vignette, 0.0, 1.0, |v| {
+                    if v <= 0.0 { "off".into() } else { format!("{:.0}%", v * 100.0) }
+                }),
                 ("rs-blur", "Depth of field", &mut rs.blur, 0.0, 1.0, |v| {
                     if v <= 0.0 { "off".into() } else { format!("{:.0}%", v * 100.0) }
                 }),

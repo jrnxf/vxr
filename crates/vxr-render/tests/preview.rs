@@ -251,6 +251,52 @@ fn exposure_re_resolves_without_a_restart_and_stops_at_max_spp() {
 }
 
 #[test]
+fn gamma_and_vignette_re_resolve_without_a_restart() {
+    let Some(g) = gpu() else { return };
+    let scene = red_scene();
+    let mut rig = Rig::new(g, &scene);
+    rig.preview.max_spp = 8;
+    rig.frames(40, None);
+    let a = rig.image();
+    let restarts = rig.preview.restarts;
+    // A higher display gamma lifts the mid-tones.
+    rig.preview.lighting.gamma = 3.0;
+    rig.frames(1, None);
+    let b = rig.image();
+    assert_eq!(rig.preview.restarts, restarts, "a gamma change restarted the preview");
+    assert!(
+        mean_luma(&b) > mean_luma(&a) * 1.1,
+        "gamma 3 did not brighten: {:.1} -> {:.1}",
+        mean_luma(&a),
+        mean_luma(&b)
+    );
+    // A full vignette darkens the outer ring and leaves the middle as it was.
+    rig.preview.lighting.gamma = 2.2;
+    rig.preview.lighting.vignette = 1.0;
+    rig.frames(1, None);
+    let c = rig.image();
+    assert_eq!(rig.preview.restarts, restarts, "a vignette change restarted the preview");
+    let (w, h) = (PREVIEW_W as f32, PREVIEW_H as f32);
+    let ring = |img: &[u8], lo: f32, hi: f32| -> Vec<u8> {
+        img.as_chunks::<4>()
+            .0
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| {
+                let (x, y) = ((*i as u32 % PREVIEW_W) as f32 + 0.5, (*i as u32 / PREVIEW_W) as f32 + 0.5);
+                let d = (x / w - 0.5).powi(2) + (y / h - 0.5).powi(2);
+                (lo..hi).contains(&d)
+            })
+            .flat_map(|(_, p)| *p)
+            .collect()
+    };
+    let (outer_a, outer_c) = (mean_luma(&ring(&a, 0.3, 1.0)), mean_luma(&ring(&c, 0.3, 1.0)));
+    let (mid_a, mid_c) = (mean_luma(&ring(&a, 0.0, 0.002)), mean_luma(&ring(&c, 0.0, 0.002)));
+    assert!(outer_c < outer_a * 0.5, "the vignette did not darken the corners: {outer_a:.1} -> {outer_c:.1}");
+    assert!((mid_c - mid_a).abs() < mid_a * 0.02 + 0.5, "the vignette changed the middle: {mid_a:.1} -> {mid_c:.1}");
+}
+
+#[test]
 fn sky_backdrop_and_depth_of_field() {
     let Some(g) = gpu() else { return };
     let scene = red_scene();

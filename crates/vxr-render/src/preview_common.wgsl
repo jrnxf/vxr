@@ -18,6 +18,7 @@ struct Frame {
     cam_r: vec4<f32>,    // camera right, w = lens radius (voxels, 0 = pinhole)
     cam_u: vec4<f32>,    // camera up, w = focus distance along the view direction
     cam_f: vec4<f32>,    // view direction, w = sky light intensity
+    post: vec4<f32>,     // x = 2.2 / display gamma, y = vignette strength
 };
 
 const SKY_BACKDROP: u32 = 2u;

@@ -1706,7 +1706,7 @@ fn materials(s: &mut Shot, dir: &Path) -> Result<(), String> {
 }
 
 /// The Render panel through egui input on the drawn UI: R opens it, each setting reaches the
-/// path tracer (exposure without a restart), Export PNG renders and reads back a PNG at the
+/// path tracer (exposure, gamma and vignette without a restart), Export PNG renders and reads back a PNG at the
 /// chosen size, Cmd-K starts an export and the panel's button cancels it, Escape closes it.
 fn render_panel(s: &mut Shot, dir: &Path) -> Result<(), String> {
     let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
@@ -1729,6 +1729,18 @@ fn render_panel(s: &mut Shot, dir: &Path) -> Result<(), String> {
         ),
     )?;
     s.ed.ui.render.exposure_ev = 0.0;
+    s.frames(2);
+    let (from, to) = (s.at("rs-gamma")?, right(s, "rs-gamma").unwrap());
+    s.ui_drag(from, to, egui::Modifiers::NONE);
+    let (from, to) = (s.at("rs-vignette")?, right(s, "rs-vignette").unwrap());
+    s.ui_drag(from, to, egui::Modifiers::NONE);
+    let l = s.ed.preview.lighting;
+    check(
+        (l.gamma - 3.0).abs() < 1e-3 && (l.vignette - 1.0).abs() < 1e-3 && s.ed.preview.restarts == restarts,
+        format!("gamma and vignette sliders: gamma {:.2}, vignette {:.2}, no restart", l.gamma, l.vignette),
+    )?;
+    s.ed.ui.render.gamma = 2.2;
+    s.ed.ui.render.vignette = 0.0;
     let sun = s.ed.preview.lighting.sun_dir;
     let (from, to) = (s.at("rs-sun-angle")?, right(s, "rs-sun-angle").unwrap());
     s.ui_drag(from, to, egui::Modifiers::NONE);

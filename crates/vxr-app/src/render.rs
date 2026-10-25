@@ -30,6 +30,9 @@ pub struct RenderSettings {
     pub sky_backdrop: bool,
     /// Exposure in stops.
     pub exposure_ev: f32,
+    /// Display gamma (2.2 is plain sRGB) and vignette (0 is off, 1 takes the corners to black).
+    pub gamma: f32,
+    pub vignette: f32,
     /// Depth of field: 0 is off, 1 is the strongest blur.
     pub blur: f32,
     /// Focus distance as a multiple of the orbit distance (1 focuses on the orbit target).
@@ -50,6 +53,8 @@ impl Default for RenderSettings {
             sky: 1.0,
             sky_backdrop: false,
             exposure_ev: 0.0,
+            gamma: 2.2,
+            vignette: 0.0,
             blur: 0.0,
             focus: 1.0,
             spp: 2,
@@ -69,6 +74,8 @@ impl RenderSettings {
             sky: self.sky,
             sky_backdrop: self.sky_backdrop,
             exposure: 2f32.powf(self.exposure_ev),
+            gamma: self.gamma,
+            vignette: self.vignette,
             aperture: self.blur * 0.03 * distance,
             focus: self.focus * distance,
         }
@@ -179,6 +186,7 @@ mod tests {
         assert!(l.sun_dir.angle_between(d.sun_dir) < 0.02, "{:?}", l.sun_dir);
         assert!((l.sun_color - d.sun_color).abs().max_element() < 0.05, "{:?}", l.sun_color);
         assert_eq!((l.exposure, l.aperture, l.focus, l.sky), (1.0, 0.0, 100.0, 1.0));
+        assert_eq!((l.gamma, l.vignette), (d.gamma, d.vignette));
     }
 
     #[test]

@@ -69,6 +69,7 @@ struct FrameU {
     cam_r: [f32; 4],
     cam_u: [f32; 4],
     cam_f: [f32; 4],
+    post: [f32; 4],
 }
 
 #[repr(C)]
@@ -115,8 +116,13 @@ pub struct Lighting {
     pub sky: f32,
     /// Show the sky behind the scene instead of the editor's backdrop.
     pub sky_backdrop: bool,
-    /// Linear exposure. Changing it alone re-resolves the image without a restart.
+    /// Linear exposure. Changing it, the gamma or the vignette alone re-resolves the image
+    /// without a restart.
     pub exposure: f32,
+    /// Display gamma: 2.2 is the plain sRGB image, higher is brighter in the mid-tones.
+    pub gamma: f32,
+    /// How much the corners darken: 0 is none, 1 takes the corners to black.
+    pub vignette: f32,
     /// Lens radius in voxels; 0 is a pinhole (no depth of field).
     pub aperture: f32,
     /// Distance in voxels from the eye to the plane in focus; 0 or less focuses on the orbit
@@ -132,6 +138,8 @@ impl Default for Lighting {
             sky: 1.0,
             sky_backdrop: false,
             exposure: 1.0,
+            gamma: 2.2,
+            vignette: 0.0,
             aperture: 0.0,
             focus: 0.0,
         }
@@ -239,7 +247,8 @@ pub struct Preview {
     cs_rect: wgpu::Buffer,
     sampler: wgpu::Sampler,
     last_key: Option<[f32; 18]>,
-    last_exposure: f32,
+    /// Exposure, gamma and vignette of the last resolve.
+    last_post: [f32; 3],
     /// Sampling stops at this many samples per pixel until something changes.
     pub max_spp: u32,
     cursor: u32,
@@ -502,7 +511,7 @@ impl Preview {
             cs_rect,
             sampler,
             last_key: None,
-            last_exposure: 1.0,
+            last_post: [1.0, 2.2, 0.0],
             max_spp: MAX_SPP,
             cursor: 0,
             frame_counter: 0,
@@ -611,6 +620,7 @@ impl Preview {
             cam_r: [right.x, right.y, right.z, l.aperture.max(0.0)],
             cam_u: [up.x, up.y, up.z, focus],
             cam_f: [fwd.x, fwd.y, fwd.z, l.sky.max(0.0)],
+            post: [2.2 / l.gamma.max(0.1), l.vignette.clamp(0.0, 1.0), 0.0, 0.0],
         };
         queue.write_buffer(&self.frame_buf, 0, bytemuck::bytes_of(&u));
     }
@@ -666,8 +676,10 @@ impl Preview {
         let restart = self.force_restart || self.last_key != Some(key) || (edit.is_some() && self.lighting.dof());
         self.force_restart = false;
         self.last_key = Some(key);
-        let exposure = self.lighting.exposure != self.last_exposure;
-        self.last_exposure = self.lighting.exposure;
+        let l = &self.lighting;
+        let post = [l.exposure, l.gamma, l.vignette];
+        let exposure = post != self.last_post;
+        self.last_post = post;
         if restart {
             self.cursor = 0;
             self.restarts += 1;
@@ -677,7 +689,7 @@ impl Preview {
         }
         let reset_pass = restart || edit.is_some();
         // Converged and nothing changed: keep the image, skip all work.
-        // A new exposure alone only needs the resolve.
+        // A new exposure, gamma or vignette alone only needs the resolve.
         let converged = self.converged();
         if !reset_pass && converged && !exposure {
             self.last_rows = 0;

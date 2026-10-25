@@ -86,7 +86,7 @@ Feature names below follow the update log [S1] unless another source is given.
 | Copy and paste colours between palettes | [S1 0.99.7.1] | missing | P2 | palette |
 | Sort palette | `pal sort [+-hsvrgb]` [S1 0.99.2] | missing | P3 | palette |
 | Mask unused colours | `pal mask` [S1 0.97.1]; vxr shows dots on used colours | partial (used dots) | P3 | palette |
-| Select voxels by colour and colours by voxels | Palette menu [S1 0.99.5] | partial [5] (voxels by colour; colours by voxels missing) | P1 | palette |
+| Select voxels by colour and colours by voxels | Palette menu [S1 0.99.5] | partial [5] (voxels by colour; colours by voxels waits for multi-select colours, the P2 row above: until the palette can hold more than one colour there is nothing to select them into; see `docs/decisions.md`) | P1 | palette |
 | Palette notes | A note per palette row, saved in NOTE [S1 0.99.5.1, S2] | missing (kept by lossless save [1]) | P3 | lossless |
 | Import and export palettes | IO panel, text and image [S1 0.99.5.1] | missing | P2 | palette |
 
@@ -106,7 +106,7 @@ Feature names below follow the update log [S1] unless another source is given.
 |---|---|---|---|---|
 | Interactive path tracer | Progressive GPU path tracing [S1] | partial [3]: the live corner runs in the app and the browser (640x360, A-trous denoise, 3 ms per frame while editing, 12 ms idle); no full-view render mode or click-to-swap yet | P1 | render |
 | Sun direction and colour, sky | Atmospheric sky with Rayleigh and Mie, sun disk [S1 0.99.1, 0.99.2] | partial [3]: Render panel sun direction, height, colour and strength, sky light and a sky backdrop toggle over a gradient sky; no physical sky or sun disk | P1 | render |
-| Exposure, gamma, tone mapping, vignette | Post->E, Camera->G, ACES [S1 0.97.3, 0.98.1] | partial [3]: exposure in stops (no restart) and ACES tone mapping; no gamma or vignette controls | P1 | render |
+| Exposure, gamma, tone mapping, vignette | Post->E, Camera->G, ACES [S1 0.97.3, 0.98.1] | done [3]: exposure in stops, gamma and vignette in the Render panel (none restarts the trace) and ACES tone mapping | P1 | render |
 | Depth of field, bokeh | Click to set focus; bladed bokeh [S1 0.98.1, 0.99.1] | partial [3]: thin-lens depth of field with blur and focus sliders (round bokeh); no click to focus or bladed bokeh | P2 | render |
 | Bloom | [S1 0.98.2, 0.99.1] | missing | P3 | render |
 | Fog and volumetrics | [S1 0.97.5, 0.99.4.1] | missing | P3 | render |

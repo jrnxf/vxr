@@ -63,7 +63,15 @@ for scale in 1 2; do
 done
 axi emulate --viewport "1280x800x1" >/dev/null
 axi open "$url" >/dev/null
-results="$(axi eval "$(sed -n '/^async/,$p' "$here/check.js")" | unwrap)"
+# check.js outlasts one eval's 60 s request limit: start it, then poll for its lines.
+axi eval "() => { window.__check = null; ($(sed -n '/^async/,$p' "$here/check.js"))().then((r) => { window.__check = r }, (e) => { window.__check = 'FAIL check.js threw: ' + e }); return 'started' }" >/dev/null
+results=""
+for _ in $(seq 600); do
+  results="$(axi eval --full "() => window.__check || ''" | unwrap)"
+  [ -n "$results" ] && break
+  sleep 1
+done
+[ -n "$results" ] || results="FAIL check.js did not finish in 10 minutes"
 axi screenshot "$shots/web-1x-checked.png" >/dev/null
 
 export CHROME_DEVTOOLS_AXI_SESSION=$nogpu

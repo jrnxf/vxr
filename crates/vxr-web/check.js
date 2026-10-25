@@ -590,6 +590,17 @@ async () => {
     await drag(ex[0], ex[1], ex[0] - 120, ex[1]);
     step('the exposure slider sets -3 EV', Math.abs(st().render.exposure - 0.125) < 1e-3, JSON.stringify(st().render));
     await click(ex[0], ex[1]);
+    const restarts = st().render.restarts;
+    const ga = hit('rs-gamma');
+    await drag(ga[0], ga[1], ga[0] + 120, ga[1]);
+    const vi = hit('rs-vignette');
+    await drag(vi[0], vi[1], vi[0] + 120, vi[1]);
+    const post = st().render;
+    step('the gamma and vignette sliders reach the preview without a restart', near(post.gamma, 3) && near(post.vignette, 1) && post.restarts === restarts, JSON.stringify(post));
+    // The track is 206 points wide around the centre, so 2.2 (60% along) is 20.6 right of it.
+    await click(ga[0] + 20.6, ga[1]);
+    await drag(vi[0], vi[1], vi[0] - 120, vi[1]);
+    step('and set back', Math.abs(st().render.gamma - 2.2) < 0.02 && st().render.vignette === 0, JSON.stringify(st().render));
     await click(...hit('rs-spp0'));
     await click(...hit('rs-size0'));
     step('Samples 64 stops the corner at 64 spp', st().render.maxSpp === 64, JSON.stringify(st().render));

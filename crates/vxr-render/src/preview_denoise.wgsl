@@ -160,5 +160,9 @@ fn resolve_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     } else if (px.t >= 0.0) {
         mapped = to_srgb(aces(pal[px.info & 0xffu].rgb * irr * frame.sun_col.w));
     }
+    // Gamma and vignette apply to the whole image, backdrop included, like a photo's post.
+    mapped = pow(mapped, vec3<f32>(frame.post.x));
+    let c = (vec2<f32>(gid.xy) + 0.5) * frame.size.zw - 0.5;
+    mapped *= 1.0 - frame.post.y * 2.0 * dot(c, c);
     textureStore(out_tex, gid.xy, vec4<f32>(mapped, 1.0));
 }
