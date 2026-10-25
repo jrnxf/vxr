@@ -46,7 +46,7 @@ Once the tests pass: a desktop app with the Hybrid toolbar and palette, add/eras
 
 ## Phase AI: assistant and MCP server (in v1, waiting for the owner's go)
 
-Research and mocks are done: `docs/research/ai.md` (with sources) and the throwaway mocks in `.scratch/ai-mocks/`. The pick: one typed scene edit API (`vxr-ops`) used by a bring-your-own-key assistant in the app (a docked chat panel plus Cmd-K "Ask AI", with a review card) and by `vxr mcp`, a stdio MCP server that edits `.vox` files and later drives a running desktop app. It ships in v1 and follows Part 3 items 6 to 9 (model tools, camera and view, world editor, export). Questions 1, 2, 3, 5 and 6 at the end of `docs/research/ai.md` are answered; do not start until the owner gives the go.
+Research and mocks are done: `docs/research/ai.md` (with sources) and the throwaway mocks in `.scratch/ai-mocks/`. The pick: one typed scene edit API (`vxr-ops`) used by a bring-your-own-key assistant in the app (a docked chat panel plus Cmd-K "Ask AI", with a review card) and by `vxr mcp`, a stdio MCP server that edits `.vox` files and later drives a running desktop app. It ships in v1 and follows Part 3 items 6 to 9 (model tools, camera and view, world editor, export). All six questions at the end of `docs/research/ai.md` are answered; do not start until the owner gives the go.
 
 Risk tests first, each a throwaway spike under `spikes/ai-<name>/` with a `RESULTS.md`. They need the owner's API keys (or a local model), so none can run without them.
 

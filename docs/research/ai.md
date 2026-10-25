@@ -55,11 +55,14 @@ decisions.md says no server, so the browser build has to call providers directly
 
 - **Desktop:** the OS keychain through the `keyring` crate (4.2: macOS and iOS Keychain, Windows Credential Manager, Linux Secret Service and keyutils, [docs.rs](https://docs.rs/keyring/latest/keyring/)). Never in a settings file, never in a `.vox`. The key is read when a request is sent and not kept in UI state.
 - **Browser, the risks:** any script running on the editor's origin can read a key the page can use. That means an XSS bug or a compromised dependency on vxr.jrnxf.co, not other sites. A key in `localStorage` also sits on disk in the clear and survives the session. Wrapping it in a non-extractable WebCrypto key in IndexedDB stops someone copying the browser profile from reading it, but not a script on the page, which can still ask the browser to decrypt. Because the page has to send the key itself, no browser storage protects it from code on the page.
-- **Browser, what is safest with no server:**
+- **Browser, where the key lives (settled 2026-10-25).** Three choices, and a key is never stored anywhere the server can read it:
   1. Default: **this tab only**. The key lives in wasm memory and is gone when the tab closes.
-  2. Opt-in: **remember in this browser**, stored encrypted as above, with the warning in plain words.
-  3. Prefer keys the user can limit: OpenRouter's PKCE key (spend limits per key), or a provider key with a spend cap and a project of its own. The settings screen links to where to set them.
-  4. Keep the attack surface small: a strict Content Security Policy on the editor page (`connect-src` only to the provider hosts the user turned on, no third-party scripts), which the static Cloudflare deploy can send as a header.
+  2. Opt-in, off by default: **remember in this browser**, stored encrypted on the device as above, with the warning in plain words (as mocked in `keys-web.html`).
+  3. Later: **sync to my account**. The browser encrypts the key with a passphrase only the user knows before uploading it, so the database (D1) holds only an unreadable copy. It comes with Google login, when sharing and embeds are built; the no-server rule holds until then.
+  - Considered and rejected: keeping keys in a database the server can read, in plain or encrypted with a server-held secret. One breach would leak every saved key, stolen AI keys are resold, and the operator would become the custodian of everyone's keys.
+  - The limit above is unchanged for all three: code running on vxr.jrnxf.co itself can read the key while the page uses it. Items 4 and 5 below limit the damage.
+  4. Prefer keys the user can limit: OpenRouter's PKCE key (spend limits per key), or a provider key with a spend cap and a project of its own. The settings screen links to where to set them.
+  5. Keep the attack surface small: a strict Content Security Policy on the editor page (`connect-src` only to the provider hosts the user turned on, no third-party scripts), which the static Cloudflare deploy can send as a header.
 - Local models need no key.
 
 ## 2. How AI edits a scene
@@ -203,6 +206,6 @@ Listed with thresholds in `docs/plan.md`, phase "AI". In short: can models actua
 1. ~~Is AI still out of v1 (decisions.md says so), with this as the first phase after it, or does the assistant ship in v1?~~ Answered 2026-10-25: the assistant and `vxr mcp` both ship in v1.
 2. ~~Direction A (panel) or B (Cmd-K and a card) for the assistant?~~ Answered 2026-10-25: both, sharing one conversation, with the panel as home.
 3. ~~Should vxr ever offer a hosted key or proxy (a paid tier from the market research), or stay strictly bring-your-own-key?~~ Answered 2026-10-25: do not plan the hosted tier yet.
-4. Is "remember in this browser" worth offering at all, given what it cannot protect against?
+4. ~~Is "remember in this browser" worth offering at all, given what it cannot protect against?~~ Answered 2026-10-25: three choices for where a browser key lives, and never anywhere the server can read it: this tab only (default), remember in this browser (encrypted on the device, off by default, with the warning), and later sync to my account (encrypted in the browser with the user's own passphrase before upload, so D1 holds only an unreadable copy; comes with Google login). Server-readable storage was rejected.
 5. ~~Live MCP: apply each agent call straight away with undo, or review every call?~~ Answered 2026-10-25: apply straight away, one undo step each, visible on screen, and the agent can undo on request.
 6. ~~Script mode (b) on the same API: Lua (vengi-compatible scripts) or Rhai/JS in a wasm sandbox?~~ Answered 2026-10-25: pass on scripting for now; the script language is decided when script mode is planned.
