@@ -1788,6 +1788,13 @@ fn render_panel(s: &mut Shot, dir: &Path) -> Result<(), String> {
     s.ui_drag(from, to, egui::Modifiers::NONE);
     let ap = s.ed.preview.lighting.aperture;
     check(sky && ap > 0.0, format!("sky backdrop toggle on, depth of field slider: lens radius {ap:.1} voxels"))?;
+    let restarts = s.ed.preview.restarts;
+    s.ui_click("rs-physical-sky")?;
+    s.frames(1);
+    check(
+        s.ed.preview.lighting.physical_sky && s.ed.preview.restarts > restarts,
+        "physical sky toggle on: the sky follows the sun and the corner restarted".into(),
+    )?;
     for _ in 0..60 {
         s.frames(1);
     }

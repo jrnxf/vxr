@@ -75,6 +75,9 @@ fn sun_dir(s: ptr<function, u32>) -> vec3<f32> {
 }
 
 fn sky(d: vec3<f32>) -> vec3<f32> {
+    if ((frame.flags.w & PHYSICAL_SKY) != 0u) {
+        return physical_sky(d);
+    }
     let up = d.y;
     if (up < 0.0) {
         // Below the horizon: a dim ground bounce colour.
@@ -82,6 +85,60 @@ fn sky(d: vec3<f32>) -> vec3<f32> {
     }
     let k = sqrt(clamp(up, 0.0, 1.0));
     return mix(vec3<f32>(0.70, 0.80, 0.95), vec3<f32>(0.26, 0.46, 0.86), k);
+}
+
+// The physical sky: single scattering in a thin atmosphere lit by the sun. Rayleigh
+// scattering makes it blue overhead and paler toward the horizon, Mie scattering (haze) a glow
+// around the sun, and the sun's light reddens as it crosses more air near the horizon, where
+// ozone also takes out some green so twilight stays blue rather than grey. Optical depths are
+// per vertical air column (at 680, 550 and 440 nm).
+const RAYLEIGH: vec3<f32> = vec3<f32>(0.05, 0.12, 0.25);
+const MIE: f32 = 0.01;
+const OZONE: vec3<f32> = vec3<f32>(0.02, 0.05, 0.002);
+// Scales the scattered light so the default sun's sky is about as bright as the gradient sky.
+const SKY_GAIN: f32 = 10.0;
+
+// Air crossed along a ray that climbs at sine c, relative to straight up.
+fn airmass(c: f32) -> f32 {
+    return 1.0 / (max(c, 0.0) + 0.035);
+}
+
+// The sun's light after crossing the air at the sun's height (the sun disk's colour).
+fn sun_transmit() -> vec3<f32> {
+    return exp(-(RAYLEIGH + MIE + OZONE) * airmass(frame.sun.y));
+}
+
+// Sunlight scattered toward the eye along a view ray climbing at d.y >= 0.
+fn scattered(d: vec3<f32>) -> vec3<f32> {
+    let mu = dot(d, frame.sun.xyz);
+    let ext = RAYLEIGH + MIE;
+    // In-scattered light along the view ray, attenuated on its way to the eye.
+    let along = (vec3<f32>(1.0) - exp(-ext * airmass(d.y))) / ext;
+    let pr = 3.0 / (16.0 * PI) * (1.0 + mu * mu);
+    let g = 0.76;
+    let pm = (1.0 - g * g) / (4.0 * PI * pow(1.0 + g * g - 2.0 * g * mu, 1.5));
+    return frame.sun_col.rgb * sun_transmit() * along * (RAYLEIGH * pr + MIE * pm) * SKY_GAIN;
+}
+
+fn physical_sky(d: vec3<f32>) -> vec3<f32> {
+    let l = scattered(vec3<f32>(d.x, max(d.y, 0.0), d.z));
+    if (d.y >= 0.0) {
+        return l;
+    }
+    // Below the horizon: the haze at the horizon fading into a ground lit by the sun and the
+    // sky overhead.
+    let lit = frame.sun_col.rgb * sun_transmit() * max(frame.sun.y, 0.0) + scattered(vec3<f32>(0.0, 1.0, 0.0)) * PI;
+    let ground = vec3<f32>(0.30, 0.28, 0.25) * lit / PI;
+    return mix(l, ground, clamp(-d.y * 12.0, 0.0, 1.0));
+}
+
+// The sun disk seen straight along a camera ray (other rays find the sun by sampling it).
+fn sun_disk(d: vec3<f32>) -> vec3<f32> {
+    let c = dot(d, frame.sun.xyz);
+    if (c < frame.sun.w) {
+        return vec3<f32>(0.0);
+    }
+    return frame.sun_col.rgb * sun_transmit() * 40.0;
 }
 
 // Distance along ro + t d where the ray leaves the voxel it is in at distance t, and the
@@ -289,6 +346,9 @@ fn trace_main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 demod += thr * backdrop(jpx);
             } else {
                 demod += thr * sky(d) * frame.cam_f.w;
+                if (straight && (frame.flags.w & PHYSICAL_SKY) != 0u) {
+                    demod += thr * sun_disk(d);
+                }
             }
             break;
         }

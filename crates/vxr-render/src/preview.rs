@@ -112,10 +112,13 @@ pub struct Lighting {
     pub sun_dir: Vec3,
     /// Sun irradiance, linear RGB.
     pub sun_color: Vec3,
-    /// Sky light, times the built-in sky gradient.
+    /// Sky light, times the built-in sky (the gradient or the physical sky).
     pub sky: f32,
     /// Show the sky behind the scene instead of the editor's backdrop.
     pub sky_backdrop: bool,
+    /// The physical sky (scattered sunlight that follows the sun's height, with the sun disk
+    /// shown behind the scene) instead of the fixed gradient.
+    pub physical_sky: bool,
     /// Linear exposure. Changing it, the gamma or the vignette alone re-resolves the image
     /// without a restart.
     pub exposure: f32,
@@ -137,6 +140,7 @@ impl Default for Lighting {
             sun_color: Vec3::new(3.0, 2.85, 2.6),
             sky: 1.0,
             sky_backdrop: false,
+            physical_sky: false,
             exposure: 1.0,
             gamma: 2.2,
             vignette: 0.0,
@@ -246,7 +250,7 @@ pub struct Preview {
     cs_layout: wgpu::BindGroupLayout,
     cs_rect: wgpu::Buffer,
     sampler: wgpu::Sampler,
-    last_key: Option<[f32; 18]>,
+    last_key: Option<[f32; 19]>,
     /// Exposure, gamma and vignette of the last resolve.
     last_post: [f32; 3],
     /// Sampling stops at this many samples per pixel until something changes.
@@ -569,7 +573,7 @@ impl Preview {
         (self.budget.ms_per_row * self.height as f64, self.budget.learnt)
     }
 
-    fn key(&self, cam: &OrbitCamera) -> [f32; 18] {
+    fn key(&self, cam: &OrbitCamera) -> [f32; 19] {
         let l = &self.lighting;
         [
             cam.target.x,
@@ -588,6 +592,7 @@ impl Preview {
             l.sun_color.z,
             l.sky,
             l.sky_backdrop as u8 as f32,
+            l.physical_sky as u8 as f32,
             l.aperture,
             l.focus,
         ]
@@ -616,7 +621,12 @@ impl Preview {
             edit_hi: v4(hi),
             cap_lo: v4(lo - m),
             cap_hi: v4(hi + m),
-            flags: [flags, HIST_CAP, self.frame_counter, 1 | (l.sky_backdrop as u32) << 1 | (l.dof() as u32) << 2],
+            flags: [
+                flags,
+                HIST_CAP,
+                self.frame_counter,
+                1 | (l.sky_backdrop as u32) << 1 | (l.dof() as u32) << 2 | (l.physical_sky as u32) << 3,
+            ],
             cam_r: [right.x, right.y, right.z, l.aperture.max(0.0)],
             cam_u: [up.x, up.y, up.z, focus],
             cam_f: [fwd.x, fwd.y, fwd.z, l.sky.max(0.0)],

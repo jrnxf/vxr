@@ -622,6 +622,12 @@ async () => {
     const skyOn = st().render.sky;
     await click(...hit('rs-sky-backdrop'));
     step('the sky backdrop toggles', skyOn && !st().render.sky);
+    const skyRestarts = st().render.restarts;
+    await click(...hit('rs-physical-sky'));
+    await frames(2);
+    const phys = st().render;
+    await click(...hit('rs-physical-sky'));
+    step('the physical sky toggles and restarts the corner', phys.physicalSky && phys.restarts > skyRestarts && !st().render.physicalSky, JSON.stringify(phys));
     const realUrl = URL.createObjectURL;
     const realA = HTMLAnchorElement.prototype.click;
     let png = null, pngName = null;

@@ -25,9 +25,11 @@ pub struct RenderSettings {
     /// Sun colour (sRGB) and strength.
     pub sun_color: [u8; 3],
     pub sun_strength: f32,
-    /// Sky light strength, and whether the sky shows behind the scene.
+    /// Sky light strength, whether the sky shows behind the scene, and whether it is the
+    /// physical sky (following the sun, with its disk) or the fixed gradient.
     pub sky: f32,
     pub sky_backdrop: bool,
+    pub physical_sky: bool,
     /// Exposure in stops.
     pub exposure_ev: f32,
     /// Display gamma (2.2 is plain sRGB) and vignette (0 is off, 1 takes the corners to black).
@@ -52,6 +54,7 @@ impl Default for RenderSettings {
             sun_strength: 3.0,
             sky: 1.0,
             sky_backdrop: false,
+            physical_sky: false,
             exposure_ev: 0.0,
             gamma: 2.2,
             vignette: 0.0,
@@ -73,6 +76,7 @@ impl RenderSettings {
             sun_color: Vec3::from(c) * self.sun_strength,
             sky: self.sky,
             sky_backdrop: self.sky_backdrop,
+            physical_sky: self.physical_sky,
             exposure: 2f32.powf(self.exposure_ev),
             gamma: self.gamma,
             vignette: self.vignette,
@@ -186,7 +190,7 @@ mod tests {
         assert!(l.sun_dir.angle_between(d.sun_dir) < 0.02, "{:?}", l.sun_dir);
         assert!((l.sun_color - d.sun_color).abs().max_element() < 0.05, "{:?}", l.sun_color);
         assert_eq!((l.exposure, l.aperture, l.focus, l.sky), (1.0, 0.0, 100.0, 1.0));
-        assert_eq!((l.gamma, l.vignette), (d.gamma, d.vignette));
+        assert_eq!((l.gamma, l.vignette, l.physical_sky), (d.gamma, d.vignette, d.physical_sky));
     }
 
     #[test]

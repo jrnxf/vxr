@@ -297,6 +297,76 @@ fn gamma_and_vignette_re_resolve_without_a_restart() {
 }
 
 #[test]
+fn physical_sky_follows_the_sun_and_shows_its_disk() {
+    let Some(g) = gpu() else { return };
+    let scene = red_scene();
+    let mut rig = Rig::new(g, &scene);
+    // Nearly level, so the top of the view sees the sky above the horizon.
+    rig.cam.pitch = 0.1;
+    let cpu = cpu_values(&scene.map, &rig.cam);
+    // Mean colour and luma of the miss pixels looking up (the sky) or down (its ground).
+    let ups: Vec<bool> = (0..PREVIEW_H)
+        .flat_map(|y| (0..PREVIEW_W).map(move |x| (x, y)))
+        .map(|(x, y)| rig.cam.ray(x as f32 + 0.5, y as f32 + 0.5, PREVIEW_W as f32, PREVIEW_H as f32).1.y > 0.05)
+        .collect();
+    let sky = |img: &[u8]| -> ([f64; 3], f64) {
+        let px: Vec<&[u8; 4]> = img
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(cpu.iter().zip(&ups))
+            .filter(|(_, (v, up))| **v == 0 && **up)
+            .map(|(p, _)| p)
+            .collect();
+        let n = px.len() as f64;
+        let c = [0, 1, 2].map(|k| px.iter().map(|p| p[k] as f64).sum::<f64>() / n);
+        (c, c[0] * 0.2126 + c[1] * 0.7152 + c[2] * 0.0722)
+    };
+    rig.preview.lighting.sky_backdrop = true;
+    rig.frames(30, None);
+    let (_, gradient) = sky(&rig.image());
+    // The default sun's physical sky is about as bright as the gradient, and blue.
+    let restarts = rig.preview.restarts;
+    rig.preview.lighting.physical_sky = true;
+    rig.frames(30, None);
+    assert!(rig.preview.restarts > restarts, "turning the physical sky on did not restart the preview");
+    let (high, luma) = sky(&rig.image());
+    eprintln!("gradient sky luma {gradient:.1}, physical {luma:.1} {high:.0?}");
+    assert!(luma > gradient * 0.6 && luma < gradient * 1.5, "physical sky luma {luma:.1}, gradient {gradient:.1}");
+    assert!(high[2] > high[0] * 1.15, "a high sun's sky is not blue: {high:.0?}");
+    // A low sun reddens it.
+    rig.preview.lighting.sun_dir = glam::Vec3::new(0.97, 0.06, 0.2);
+    rig.frames(30, None);
+    let (low, _) = sky(&rig.image());
+    eprintln!("low sun sky {low:.0?}");
+    assert!(low[0] / low[2] > high[0] / high[2] * 1.3, "a low sun did not redden the sky: {high:.0?} -> {low:.0?}");
+    // The sun disk shows on a miss pixel looking straight at the sun, and only in the
+    // physical sky.
+    let (x, y) = (0..PREVIEW_H)
+        .flat_map(|y| (0..PREVIEW_W).map(move |x| (x, y)))
+        .find(|&(x, y)| {
+            (x, y) > (PREVIEW_W / 2, PREVIEW_H / 6) && cpu[(y * PREVIEW_W + x) as usize] == 0 && {
+                let (_, d) = rig.cam.ray(x as f32 + 0.5, y as f32 + 0.5, PREVIEW_W as f32, PREVIEW_H as f32);
+                d.y > 0.1
+            }
+        })
+        .expect("a sky pixel above the horizon");
+    let (_, d) = rig.cam.ray(x as f32 + 0.5, y as f32 + 0.5, PREVIEW_W as f32, PREVIEW_H as f32);
+    rig.preview.lighting.sun_dir = d;
+    let at = |img: &[u8]| {
+        let p = img.as_chunks::<4>().0[(y * PREVIEW_W + x) as usize];
+        p[0] as f64 * 0.2126 + p[1] as f64 * 0.7152 + p[2] as f64 * 0.0722
+    };
+    rig.frames(30, None);
+    let disk = at(&rig.image());
+    rig.preview.lighting.physical_sky = false;
+    rig.frames(30, None);
+    let plain = at(&rig.image());
+    eprintln!("pixel ({x}, {y}) toward the sun: disk {disk:.0}, gradient {plain:.0}");
+    assert!(disk > 245.0 && disk > plain + 20.0, "no sun disk at ({x}, {y}): {disk:.0} (gradient {plain:.0})");
+}
+
+#[test]
 fn sky_backdrop_and_depth_of_field() {
     let Some(g) = gpu() else { return };
     let scene = red_scene();

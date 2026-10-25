@@ -138,6 +138,7 @@ mod icon {
     pub const APERTURE: char = '\u{e040}';
     pub const IMAGE_DOWN: char = '\u{e53c}';
     pub const SUN: char = '\u{e178}';
+    pub const SUNSET: char = '\u{e17a}';
     pub const SLASH: char = '\u{e51d}';
     pub const CIRCLE_DOT: char = '\u{e345}';
     pub const GLOBE: char = '\u{e0e8}';
@@ -2670,7 +2671,7 @@ impl Hybrid {
                 hits.push((id, r));
                 slider(ui, r, id, label, v, lo, hi, fmt);
             }
-            // Sun colour: a chip and a hex field; the sky backdrop toggle.
+            // Sun colour: a chip and a hex field.
             let r = next(28.0);
             let chip = Rect::from_min_size(r.min, vec2(28.0, 28.0));
             let c = rs.sun_color;
@@ -2693,11 +2694,20 @@ impl Hybrid {
                 rs.sun_color = v;
             }
             next(8.0);
+            // The sky backdrop and physical sky toggles, side by side.
             let r = next(28.0);
-            hits.push(("rs-sky-backdrop", r));
-            if small_button(ui, r, icon::SUN, "Show sky behind the scene", "rs-sky-backdrop", rs.sky_backdrop).clicked()
-            {
+            let half = (r.width() - 6.0) / 2.0;
+            let (a, b) = (
+                Rect::from_min_size(r.min, vec2(half, r.height())),
+                Rect::from_min_size(pos2(r.right() - half, r.top()), vec2(half, r.height())),
+            );
+            hits.push(("rs-sky-backdrop", a));
+            if small_button(ui, a, icon::SUN, "Show sky", "rs-sky-backdrop", rs.sky_backdrop).clicked() {
                 rs.sky_backdrop = !rs.sky_backdrop;
+            }
+            hits.push(("rs-physical-sky", b));
+            if small_button(ui, b, icon::SUNSET, "Physical sky", "rs-physical-sky", rs.physical_sky).clicked() {
+                rs.physical_sky = !rs.physical_sky;
             }
             next(12.0);
             // Samples (where the corner stops, and what an export traces) and export size.
