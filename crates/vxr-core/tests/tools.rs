@@ -209,3 +209,22 @@ fn a_new_edit_after_a_drag_drops_redo_and_undo_commits_an_open_stroke() {
     s.edit([([9, 9, 9], 1)]);
     assert!(!s.history().can_redo());
 }
+
+#[test]
+fn a_sphere_dragged_out_and_back_matches_one_drawn_at_once() {
+    let cells = |s: &Scene| {
+        let mut v = Vec::new();
+        s.for_each_voxel(|p, c| v.push((p, c)));
+        v
+    };
+    let ground = Target { voxel: [16, -1, 16], normal: [0, 1, 0], value: 0, ground: true };
+    let b = Brush { mirror: [true, false, true], ..brush(Tool::Add, Shape::Sphere) };
+    let mut once = Scene::new([48, 48, 48]);
+    let n = drag(&mut once, b, ground, &[[22, 0, 16]]);
+    // Grown a cell at a time, past the end, and back.
+    let mut grown = Scene::new([48, 48, 48]);
+    let path: Vec<_> = (17..=26).chain((22..26).rev()).map(|x| [x, 0, 16]).collect();
+    assert_eq!(drag(&mut grown, b, ground, &path), n);
+    assert_eq!(cells(&grown), cells(&once));
+    assert!(grown.undo() && grown.map.voxels == 0, "one undo step");
+}

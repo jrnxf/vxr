@@ -100,6 +100,8 @@ pub struct Gesture {
     pub start: [i32; 3],
     pub end: [i32; 3],
     last: [i32; 3],
+    /// The radius a circle or sphere was last drawn at.
+    drawn: i32,
 }
 
 impl Scene {
@@ -224,7 +226,7 @@ impl Scene {
         let start = if brush.tool == Tool::Add { t.front() } else { t.voxel };
         let axis = brush.lock.unwrap_or(axis_of(t.normal));
         self.begin();
-        let g = Gesture { brush, axis, layer: start[axis], start, end: start, last: start };
+        let g = Gesture { brush, axis, layer: start[axis], start, end: start, last: start, drawn: 0 };
         if brush.shape == Shape::Voxel {
             self.apply_voxel(&brush, start);
         } else {
@@ -247,7 +249,8 @@ impl Gesture {
 
     /// The pointer moved over cell `p`. Voxel strokes fill the gap from the last cell so fast
     /// moves stay continuous; span shapes (box, line, circle, sphere) are redrawn from the
-    /// press to `p`, so the scene shows the shape live.
+    /// press to `p`, so the scene shows the shape live. A circle or sphere is redrawn only
+    /// when its radius changes, and a growing one only adds the new shell.
     pub fn move_to(&mut self, scene: &mut Scene, p: [i32; 3]) {
         if p == self.last {
             return;
@@ -261,7 +264,16 @@ impl Gesture {
         }
         self.end = p;
         self.last = p;
-        if self.brush.shape.is_span() {
+        if matches!(self.brush.shape, Shape::Circle | Shape::Sphere) {
+            let r = self.radius();
+            if r > self.drawn {
+                self.draw_round(scene, Some(self.drawn));
+            } else if r < self.drawn {
+                scene.revert_voxels();
+                self.draw(scene);
+            }
+            self.drawn = r;
+        } else if self.brush.shape.is_span() {
             scene.revert_voxels();
             self.draw(scene);
         }
@@ -311,23 +323,30 @@ impl Gesture {
                     scene.apply_voxel(b, q);
                 }
             }
-            Shape::Circle | Shape::Sphere => {
-                // Cells within r^2 + r/2 of the press: radius 1 is a plus, radius 2 a round disc.
-                let r = self.radius() as f32;
-                let r2 = r * r + r / 2.0;
-                let (lo, hi) = self.extent();
-                for z in lo[2]..=hi[2] {
-                    for y in lo[1]..=hi[1] {
-                        for x in lo[0]..=hi[0] {
-                            let d = [x - s[0], y - s[1], z - s[2]];
-                            if ((d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) as f32) <= r2 {
-                                scene.apply_voxel(b, [x, y, z]);
-                            }
-                        }
+            Shape::Circle | Shape::Sphere => self.draw_round(scene, None),
+            Shape::Voxel | Shape::Face => {}
+        }
+    }
+
+    /// Apply a circle or sphere at the current radius, leaving out the cells of radius
+    /// `inside` when it is already drawn. Cells within r^2 + r/2 of the press: radius 1 is a
+    /// plus, radius 2 a round disc.
+    fn draw_round(&self, scene: &mut Scene, inside: Option<i32>) {
+        let reach = |r: i32| (r * r) as f32 + r as f32 / 2.0;
+        let (s, b) = (self.start, &self.brush);
+        let r2 = reach(self.radius());
+        let skip = inside.map_or(-1.0, reach);
+        let (lo, hi) = self.extent();
+        for z in lo[2]..=hi[2] {
+            for y in lo[1]..=hi[1] {
+                for x in lo[0]..=hi[0] {
+                    let d = [x - s[0], y - s[1], z - s[2]];
+                    let d2 = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) as f32;
+                    if d2 <= r2 && d2 > skip {
+                        scene.apply_voxel(b, [x, y, z]);
                     }
                 }
             }
-            Shape::Voxel | Shape::Face => {}
         }
     }
 
