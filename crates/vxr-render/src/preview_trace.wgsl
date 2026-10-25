@@ -2,30 +2,32 @@
 // brick map, palette and trace_h()) and preview_common.wgsl.
 //
 // One sample = jittered primary ray, sun shadow ray (next-event estimation), one cosine-
-// weighted diffuse bounce, and a sun shadow ray from the bounce hit. Metal and glass add
+// weighted diffuse bounce, and a sun shadow ray from the bounce hit. Metal, plastic and glass add
 // specular events on the way (up to 4), emissive voxels add their light where a path hits.
 
 @group(0) @binding(0) var<uniform> frame: Frame;
 @group(0) @binding(1) var<uniform> disp: Dispatch;
 @group(0) @binding(2) var<storage, read_write> pixels: array<Pixel>;
-// Material per palette index: x = type (0 diffuse, 1 metal, 2 glass, 3 emit), y = roughness,
-// z = metalness (metal), refractive index (glass) or radiance (emit), w = transparency (glass).
-@group(0) @binding(3) var<uniform> mats: array<vec4<f32>, 256>;
+// Material per palette index v, two vec4s. mats[2v]: x = type (0 diffuse, 1 metal, 2 glass,
+// 3 emit, 4 plastic), y = roughness, z = metalness (metal), refractive index (glass), radiance
+// (emit) or specular (plastic), w = transparency (glass). mats[2v + 1]: x = attenuation (glass).
+@group(0) @binding(3) var<uniform> mats: array<vec4<f32>, 512>;
 
 const M_METAL: u32 = 1u;
 const M_GLASS: u32 = 2u;
 const M_EMIT: u32 = 3u;
+const M_PLASTIC: u32 = 4u;
 const MAX_GLASS: u32 = 24u;
 const MAX_SPECULAR: u32 = 4u;
 
 fn kind(v: u32) -> u32 {
-    return u32(mats[v].x + 0.5);
+    return u32(mats[2u * v].x + 0.5);
 }
 
-// Metal and glass pixels are stored with their colour (not demodulated).
+// Metal, plastic and glass pixels are stored with their colour (not demodulated).
 fn specular(v: u32) -> bool {
     let k = kind(v);
-    return k == M_METAL || k == M_GLASS;
+    return k == M_METAL || k == M_GLASS || k == M_PLASTIC;
 }
 
 fn tr(ro: vec3<f32>, d: vec3<f32>, t_min: f32, t_max: f32) -> Hit {
@@ -153,8 +155,10 @@ fn voxel_exit(ro: vec3<f32>, d: vec3<f32>, t: f32) -> vec2<f32> {
 }
 
 // A ray that passes straight through glass voxels (thin glass: no bending inside), each one
-// tinting it by its colour as much as it is not transparent. Returns the first other hit and
-// the tint in `tint`. Too much glass on the way counts as opaque.
+// tinting it by its colour as much as it is not transparent, and attenuation taking on more
+// of the colour the longer the ray's run inside (Beer-Lambert, the colour as the transmittance
+// of one voxel at full attenuation). Returns the first other hit and the tint in `tint`. Too
+// much glass on the way counts as opaque.
 fn tr_solid(ro: vec3<f32>, d: vec3<f32>, t_max: f32, tint: ptr<function, vec3<f32>>) -> Hit {
     var t0 = 0.0;
     var axis = 4u;
@@ -168,8 +172,10 @@ fn tr_solid(ro: vec3<f32>, d: vec3<f32>, t_max: f32, tint: ptr<function, vec3<f3
         if (h.axis == MISS || kind(h.value) != M_GLASS) {
             return h;
         }
-        *tint *= mix(palette[h.value].rgb, vec3<f32>(1.0), mats[h.value].w);
+        let c = palette[h.value].rgb;
         let e = voxel_exit(ro, d, h.t);
+        let att = mats[2u * h.value + 1u].x * max(e.x - h.t, 0.0);
+        *tint *= mix(c, vec3<f32>(1.0), mats[2u * h.value].w) * pow(max(c, vec3<f32>(1e-3)), vec3<f32>(att));
         t0 = e.x + 1e-4;
         axis = u32(e.y);
     }
@@ -354,7 +360,7 @@ fn trace_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
         let n = hit_normal(h, d);
         let p = ro + d * h.t;
-        let m = mats[h.value];
+        let m = mats[2u * h.value];
         let k = kind(h.value);
         let first = diffuse_hits == 0u && spec_hits == 0u && straight;
         let alb = select(palette[h.value].rgb, vec3<f32>(1.0), first && demodulate);
@@ -392,6 +398,22 @@ fn trace_main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 thr *= tint;
             }
             continue;
+        }
+        if (k == M_PLASTIC && spec_hits < MAX_SPECULAR) {
+            // A clear coat over the diffuse colour: Schlick's Fresnel for a 1.5 index, scaled
+            // by the specular setting, picks a white glossy reflection; the rest is diffuse.
+            let c = clamp(-dot(d, n), 0.0, 1.0);
+            if (rand(&s) < m.z * (0.04 + 0.96 * pow(1.0 - c, 5.0))) {
+                spec_hits += 1u;
+                let r = glossy(d, n, m.y, &s);
+                if (all(r == vec3<f32>(0.0))) { break; }
+                demod += thr * sun_gloss(p, n, reflect(d, n), m.y, &s);
+                ro = p + n * EPS;
+                d = r;
+                straight = false;
+                h = tr(ro, d, 0.0, 1e9);
+                continue;
+            }
         }
         // Diffuse: direct sun, then one bounce lit by the sun or the sky.
         demod += thr * alb * sun_light(p, n, &s);

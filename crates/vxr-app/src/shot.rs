@@ -1798,6 +1798,37 @@ fn materials(s: &mut Shot, dir: &Path) -> Result<(), String> {
         let got = s.ed.scene.materials[other as usize].kind;
         check(got == want, format!("{}: slot {other} is {:?}", want.name(), got))?;
     }
+    // Glass attenuation dragged full; plastic on a third slot, its specular dragged off and undone.
+    if let Some(&glass) = used.first() {
+        s.ed.ui.slot = glass;
+        s.frames(1);
+        let r = *s.ed.ui.hits.get("mat-att").ok_or("no Attenuation slider on glass")?;
+        let restarts = s.ed.preview.restarts;
+        s.ui_drag(r.center(), egui::pos2(r.right() + 20.0, r.center().y), egui::Modifiers::NONE);
+        let att = s.ed.scene.materials[glass as usize].att;
+        check(
+            att == 1.0 && s.ed.preview.restarts > restarts,
+            format!("glass attenuation slider drag: {att}, the render corner restarted"),
+        )?;
+    }
+    if let Some(&other) = used.get(2) {
+        s.ed.ui.slot = other;
+        s.frames(1);
+        s.ui_click("mt4")?;
+        let m = s.ed.scene.materials[other as usize];
+        let r = *s.ed.ui.hits.get("mat-spec").ok_or("no Specular slider on plastic")?;
+        s.ui_drag(r.center(), egui::pos2(r.left() - 20.0, r.center().y), egui::Modifiers::NONE);
+        let spec = s.ed.scene.materials[other as usize].spec;
+        s.ed.undo();
+        let undone = s.ed.scene.materials[other as usize];
+        check(
+            m.kind == Kind::Plastic && spec == 0.0 && undone == m && m.spec == 1.0,
+            format!(
+                "Plastic: slot {other} is plastic, specular drag to {spec} and one undo step back to {}",
+                undone.spec
+            ),
+        )?;
+    }
     for _ in 0..90 {
         s.frames(1);
     }

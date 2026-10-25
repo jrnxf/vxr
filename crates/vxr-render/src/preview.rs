@@ -8,10 +8,11 @@
 //!   measured cost per row. Without timestamps a conservative fixed cost per row is assumed.
 //! - Edits reset only the pixels whose primary or sun ray crosses the edited box; a camera move
 //!   restarts the whole image. Recolours need no reset (radiance is stored demodulated),
-//!   unless a slot is metal or glass: those pixels are stored in colour, so they restart.
+//!   unless a slot is metal, plastic or glass: those pixels are stored in colour, so they restart.
 //! - Materials per palette slot ([`Preview::set_materials`]): diffuse, metal (glossy, with a
-//!   sun highlight), glass (Fresnel reflection, or straight through with a tint: thin glass,
-//!   no bending) and emissive.
+//!   sun highlight), plastic (diffuse under a clear glossy coat), glass (Fresnel reflection, or
+//!   straight through with a tint that deepens with the distance crossed: thin glass, no
+//!   bending) and emissive.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -269,13 +270,14 @@ pub struct Preview {
     pub last_rows: u32,
 }
 
-/// One slot's material as the trace shader reads it (`mats` in preview_trace.wgsl).
-fn material_params(m: &Material) -> [f32; 4] {
+/// One slot's material as the trace shader reads it: two vec4s (`mats` in preview_trace.wgsl).
+fn material_params(m: &Material) -> [[f32; 4]; 2] {
     match m.kind {
-        Kind::Diffuse => [0.0; 4],
-        Kind::Metal => [1.0, m.rough, m.metal, 0.0],
-        Kind::Glass => [2.0, m.rough, m.ior, m.trans],
-        Kind::Emit => [3.0, 0.0, m.radiance(), 0.0],
+        Kind::Diffuse => [[0.0; 4]; 2],
+        Kind::Metal => [[1.0, m.rough, m.metal, 0.0], [0.0; 4]],
+        Kind::Glass => [[2.0, m.rough, m.ior, m.trans], [m.att, 0.0, 0.0, 0.0]],
+        Kind::Emit => [[3.0, 0.0, m.radiance(), 0.0], [0.0; 4]],
+        Kind::Plastic => [[4.0, m.rough, m.spec, 0.0], [0.0; 4]],
     }
 }
 
@@ -358,7 +360,7 @@ impl Preview {
         let fa = buf("preview filter a", n * 16, st);
         let fb = buf("preview filter b", n * 16, st);
         let pal_buf = buf("preview palette", 256 * 16, un);
-        let mat_buf = buf("preview materials", 256 * 16, un);
+        let mat_buf = buf("preview materials", 256 * 32, un);
         let out_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("preview out"),
             size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
@@ -531,20 +533,20 @@ impl Preview {
             last_rows: 0,
         };
         queue.write_buffer(&me.pal_buf, 0, bytemuck::cast_slice(&palette_linear(palette)));
-        queue.write_buffer(&me.mat_buf, 0, &[0u8; 256 * 16]);
+        queue.write_buffer(&me.mat_buf, 0, &[0u8; 256 * 32]);
         me
     }
 
     /// Set the material of every palette slot (index 0 is unused). Restarts sampling.
     pub fn set_materials(&mut self, queue: &wgpu::Queue, materials: &[Material; 256]) {
-        let params: Vec<[f32; 4]> = materials.iter().map(material_params).collect();
+        let params: Vec<[[f32; 4]; 2]> = materials.iter().map(material_params).collect();
         queue.write_buffer(&self.mat_buf, 0, bytemuck::cast_slice(&params));
-        self.has_specular = materials[1..].iter().any(|m| matches!(m.kind, Kind::Metal | Kind::Glass));
+        self.has_specular = materials[1..].iter().any(|m| matches!(m.kind, Kind::Metal | Kind::Glass | Kind::Plastic));
         self.force_restart = true;
     }
 
     /// Recolor: rewrite the preview's palette copy (the map's palette is written separately).
-    /// Instant, except with depth of field or a metal or glass slot, which restart.
+    /// Instant, except with depth of field or a metal, plastic or glass slot, which restart.
     pub fn set_palette(&mut self, queue: &wgpu::Queue, palette: &[[u8; 4]; 256]) {
         queue.write_buffer(&self.pal_buf, 0, bytemuck::cast_slice(&palette_linear(palette)));
         if self.lighting.dof() || self.has_specular {

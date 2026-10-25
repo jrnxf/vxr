@@ -475,6 +475,12 @@ fn materials_emit_reflect_and_let_light_through() {
     assert_eq!(rig.preview.restarts, restarts + 1, "a material change restarts");
     let glass = mean_of(&rig.image(), &cpu, 2);
     assert!(glass[0] > glass[2] * 1.3, "clear glass shows the red under it: {glass:?}");
+    // Attenuation: the same clear glass takes on its pale blue along the two voxels crossed.
+    mats[2].att = 1.0;
+    rig.preview.set_materials(&rig.g.queue, &mats);
+    rig.frames(60, None);
+    let deep = mean_of(&rig.image(), &cpu, 2);
+    assert!(deep[0] < glass[0] * 0.85, "attenuated glass absorbs more red: {deep:?} vs {glass:?}");
     let restarts = rig.preview.restarts;
     rig.preview.set_palette(&rig.g.queue, &scene.palette);
     rig.frames(1, None);
@@ -489,12 +495,28 @@ fn materials_emit_reflect_and_let_light_through() {
     let metal = mean_of(&rig.image(), &cpu, 2);
     assert!(metal[2] > metal[0] * 1.1, "the mirror reflects the sky: {metal:?}");
 
+    // Plastic: pure red under a clear coat reflects the blue sky that matte red cannot show.
+    scene.set_color(2, [255, 0, 0, 255]);
+    rig.map.set_palette(&rig.g.queue, &scene.palette);
+    rig.preview.set_palette(&rig.g.queue, &scene.palette);
+    let mut plastic = |spec: f32| {
+        mats[2] = Material { kind: Kind::Plastic, rough: 0.0, spec, ..Material::default() };
+        rig.preview.set_materials(&rig.g.queue, &mats);
+        rig.frames(60, None);
+        mean_of(&rig.image(), &cpu, 2)
+    };
+    let (matte, coat) = (plastic(0.0), plastic(1.0));
+    assert!(matte[2] < 3.0, "plastic without specular is matte red: {matte:?}");
+    assert!(coat[2] > matte[2] + 3.0, "the coat reflects the sky: {coat:?} vs {matte:?}");
+
     // Emissive: slot 1 glows far brighter than when lit by the sun alone.
     mats[2] = Material::default();
     mats[1] = Material { kind: Kind::Emit, emit: 1.0, flux: 3.0, ..Material::default() };
     rig.preview.set_materials(&rig.g.queue, &mats);
     rig.frames(60, None);
     let emit = mean_of(&rig.image(), &cpu, 1);
-    eprintln!("mean colours: diffuse {diffuse:?}, glass {glass:?}, metal {metal:?}, emissive {emit:?}");
+    eprintln!(
+        "mean colours: diffuse {diffuse:?}, glass {glass:?}, attenuated {deep:?}, metal {metal:?}, plastic {matte:?} to {coat:?}, emissive {emit:?}"
+    );
     assert!(emit[0] > diffuse.0[0] + 20.0, "emissive red is brighter: {emit:?} vs {:?}", diffuse.0);
 }

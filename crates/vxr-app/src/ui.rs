@@ -2201,8 +2201,11 @@ impl Hybrid {
         let mat_note = match mat.kind {
             Kind::Diffuse => "Matte, lit by the sun and the sky.",
             Kind::Metal => "Reflects its surroundings in its own color. Rough metal blurs them.",
-            Kind::Glass => "Light passes through, tinted by the color, and the surface reflects.",
+            Kind::Glass => {
+                "Light passes through, tinted by the color, and the surface reflects. Attenuation deepens the tint with the glass crossed."
+            }
             Kind::Emit => "Glows in its color and lights what is near it.",
+            Kind::Plastic => "Matte color under a clear glossy coat. Specular sets how much the coat reflects.",
         };
         mjob.append(mat_note, 0.0, fmt(MUTED));
         mjob.append(" Shows in the render corner and export, and saves to the file's MATL chunks.", 0.0, fmt(FAINT));
@@ -2228,8 +2231,8 @@ impl Hybrid {
         // The Material tab: type buttons, a slider per setting, the note.
         let rows = match mat.kind {
             Kind::Diffuse => 0.0,
-            Kind::Metal | Kind::Emit => 2.0,
-            Kind::Glass => 3.0,
+            Kind::Metal | Kind::Emit | Kind::Plastic => 2.0,
+            Kind::Glass => 4.0,
         };
         let h = if ed.tab == EditTab::Material {
             12.0 + 15.0
@@ -2283,14 +2286,21 @@ impl Hybrid {
             }
             if ed.tab == EditTab::Material {
                 let mut y = tr.bottom() + 10.0;
-                let kinds = Kind::ALL.map(|k| k.name().to_string());
-                let sel = Kind::ALL.iter().position(|&k| k == mat.kind).unwrap_or(0);
+                // Shown in MagicaVoxel's order; each button's hit is `mt` and the type's number.
+                let kinds = Kind::SHOWN.map(|k| k.name().to_string());
+                let names = Kind::SHOWN.map(|k| match k {
+                    Kind::Diffuse => "mt0",
+                    Kind::Metal => "mt1",
+                    Kind::Glass => "mt2",
+                    Kind::Emit => "mt3",
+                    Kind::Plastic => "mt4",
+                });
+                let sel = Kind::SHOWN.iter().position(|&k| k == mat.kind).unwrap_or(0);
                 let r = Rect::from_min_size(pos2(inner.left(), y), vec2(inner.width(), 28.0));
-                if let Some(k) =
-                    segmented(ui, r, &["mt0", "mt1", "mt2", "mt3"], &kinds, sel, &[true; 4], inter(12.0), &mut hits)
-                    && Kind::ALL[k] != mat.kind
+                if let Some(k) = segmented(ui, r, &names, &kinds, sel, &[true; 5], inter(11.0), &mut hits)
+                    && Kind::SHOWN[k] != mat.kind
                 {
-                    new_mat = Some((Material { kind: Kind::ALL[k], ..mat }, true));
+                    new_mat = Some((Material { kind: Kind::SHOWN[k], ..mat }, true));
                 }
                 y += 28.0 + 12.0;
                 let mut m = mat;
@@ -2305,6 +2315,11 @@ impl Hybrid {
                         ("mat-rough", "Roughness", &mut m.rough, 0.0, 1.0, pct),
                         ("mat-trans", "Transparency", &mut m.trans, 0.0, 1.0, pct),
                         ("mat-ior", "Refraction", &mut m.ior, 1.0, 3.0, |v| format!("{v:.2}")),
+                        ("mat-att", "Attenuation", &mut m.att, 0.0, 1.0, pct),
+                    ],
+                    Kind::Plastic => vec![
+                        ("mat-rough", "Roughness", &mut m.rough, 0.0, 1.0, pct),
+                        ("mat-spec", "Specular", &mut m.spec, 0.0, 1.0, pct),
                     ],
                     Kind::Emit => vec![
                         ("mat-emit", "Emission", &mut m.emit, 0.0, 1.0, pct),
@@ -3378,10 +3393,22 @@ fn segmented(
     hits: &mut Vec<(&'static str, Rect)>,
 ) -> Option<usize> {
     let n = labels.len();
-    let cw = (r.width() - 4.0 * (n - 1) as f32) / n as f32;
+    let free = r.width() - 4.0 * (n - 1) as f32;
+    // Equal cells, unless a label would not keep 8 points either side: then each cell is its
+    // label's width plus an equal share of what is left.
+    let text: Vec<f32> =
+        labels.iter().map(|l| ui.fonts_mut(|f| f.layout_no_wrap(l.clone(), font.clone(), TEXT)).size().x).collect();
+    let widths: Vec<f32> = if text.iter().all(|&t| t + 16.0 <= free / n as f32) {
+        vec![free / n as f32; n]
+    } else {
+        let pad = (free - text.iter().sum::<f32>()) / n as f32;
+        text.iter().map(|t| t + pad).collect()
+    };
     let mut out = None;
+    let mut x = r.left();
     for (k, label) in labels.iter().enumerate() {
-        let c = Rect::from_min_size(pos2(r.left() + k as f32 * (cw + 4.0), r.top()), vec2(cw, r.height()));
+        let c = Rect::from_min_size(pos2(x, r.top()), vec2(widths[k], r.height()));
+        x += widths[k] + 4.0;
         hits.push((names[k], c));
         let enabled = ok[k];
         let resp = ui.interact(c, Id::unique(names[k]), if enabled { Sense::click() } else { Sense::hover() });

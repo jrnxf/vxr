@@ -761,6 +761,14 @@ async () => {
     const em = hit('mat-flux');
     await drag(em[0], em[1], em[0] + 150, em[1]);
     step('Emit and its power slider', mat(slot)[0] === 3 && mat(slot)[6] === 4, `${mat(slot)}`);
+    await click(...hit('mt4'));
+    const sp = hit('mat-spec');
+    await drag(sp[0], sp[1], sp[0] - 150, sp[1]);
+    step('Plastic and its specular slider', mat(slot)[0] === 4 && mat(slot)[7] === 0, `${mat(slot)}`);
+    await click(...hit('mt2'));
+    const at = hit('mat-att');
+    await drag(at[0], at[1], at[0] + 150, at[1]);
+    step('Glass and its attenuation slider', mat(slot)[0] === 2 && mat(slot)[8] === 1, `${mat(slot)}`);
     const saved = bytes();
     let matl = 0;
     for (let i = 0; i + 4 <= saved.length; i++) if (saved[i] === 77 && saved[i + 1] === 65 && saved[i + 2] === 84 && saved[i + 3] === 76) matl++;

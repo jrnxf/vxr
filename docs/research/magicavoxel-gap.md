@@ -95,7 +95,7 @@ Feature names below follow the update log [S1] unless another source is given.
 | Feature | MagicaVoxel | vxr | Priority | Why |
 |---|---|---|---|---|
 | Per-slot material | Matter->Sel per palette slot [S1 0.96.2] | done [3]: the colour editor's Material tab and Cmd-K "Edit material", one undo step per change; swap and copy carry it | P1 | render |
-| Diffuse, metal, glass, emissive | Plus plastic, roughness, IOR, attenuation, emission power [S1 0.96-0.98.2] | partial [3]: the four types with roughness, metalness, transparency, refractive index (reflection only: glass is thin, no bending), emission and power, path traced in the corner and export; no plastic, specular or attenuation | P1 | render |
+| Diffuse, metal, glass, emissive | Plus plastic, roughness, IOR, attenuation, emission power [S1 0.96-0.98.2] | done [3]: diffuse, metal, plastic, glass and emissive with roughness, metalness, specular (plastic's clear coat), transparency, refractive index (reflection only: glass is thin, no bending), attenuation (Beer-Lambert through the glass crossed), emission and power, path traced in the corner and export; plastic is saved as MagicaVoxel's `_metal` with `_plastic` 1 | P1 | render |
 | Blend, SSS, media (cloud) | Unified material system [S1 0.99.6.2] | missing | P3 | render |
 | Saved to `.vox` MATL | [S1 0.98, S2] | done [3]: edits change only that slot's MATL keys of its type; unknown keys and unedited slots keep their bytes; new scenes write MATL for non-diffuse slots | P1 | lossless, render |
 | Copy and paste materials | Ctrl+C/V [S1 0.99] | missing | P3 | - |
