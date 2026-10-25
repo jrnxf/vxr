@@ -5,10 +5,12 @@
 //! - [`ui::Hybrid`]: the Hybrid UI (direction D), drawn with egui.
 //! - [`color`]: hex, RGB and HSV for the palette editor.
 //! - [`fonts`]: loading the UI fonts.
+//! - [`render`]: the Render panel's settings and the PNG render export.
 
 pub mod color;
 pub mod editor;
 pub mod fonts;
+pub mod render;
 pub mod ui;
 
 pub use editor::Editor;

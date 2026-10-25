@@ -105,14 +105,14 @@ Feature names below follow the update log [S1] unless another source is given.
 | Feature | MagicaVoxel | vxr | Priority | Why |
 |---|---|---|---|---|
 | Interactive path tracer | Progressive GPU path tracing [S1] | partial [3]: the live corner runs in the app and the browser (640x360, A-trous denoise, 3 ms per frame while editing, 12 ms idle); no full-view render mode or click-to-swap yet | P1 | render |
-| Sun direction and colour, sky | Atmospheric sky with Rayleigh and Mie, sun disk [S1 0.99.1, 0.99.2] | missing [3] | P1 | render |
-| Exposure, gamma, tone mapping, vignette | Post->E, Camera->G, ACES [S1 0.97.3, 0.98.1] | missing [3] (exposure first) | P1 | render |
-| Depth of field, bokeh | Click to set focus; bladed bokeh [S1 0.98.1, 0.99.1] | missing [3] | P2 | render |
+| Sun direction and colour, sky | Atmospheric sky with Rayleigh and Mie, sun disk [S1 0.99.1, 0.99.2] | partial [3]: Render panel sun direction, height, colour and strength, sky light and a sky backdrop toggle over a gradient sky; no physical sky or sun disk | P1 | render |
+| Exposure, gamma, tone mapping, vignette | Post->E, Camera->G, ACES [S1 0.97.3, 0.98.1] | partial [3]: exposure in stops (no restart) and ACES tone mapping; no gamma or vignette controls | P1 | render |
+| Depth of field, bokeh | Click to set focus; bladed bokeh [S1 0.98.1, 0.99.1] | partial [3]: thin-lens depth of field with blur and focus sliders (round bokeh); no click to focus or bladed bokeh | P2 | render |
 | Bloom | [S1 0.98.2, 0.99.1] | missing | P3 | render |
 | Fog and volumetrics | [S1 0.97.5, 0.99.4.1] | missing | P3 | render |
 | Image-based lighting (`.hdr`) | Sky->IBL [S1 0.99.4.1] | missing | P3 | render |
 | Denoiser | Intel OIDN plugin [S1 0.99.4.2] | done [3]: A-trous in the live corner | P1 | render |
-| Export PNG at a chosen size | Photo mode up to 12000x12000 [S1 0.99.3] | missing [3] | P1 | render, minutes |
+| Export PNG at a chosen size | Photo mode up to 12000x12000 [S1 0.99.3] | done [3]: 720p to 4K (as the GPU allows) at 64 to 4,096 spp, traced in the background while editing; download in the browser | P1 | render, minutes |
 | Turntable and animation render | [S1 0.99.3, 0.99.7.0] | missing | P3 | - |
 | Voxel shapes (Lego, marching cubes, clay) | [S1 0.96, 0.99.2] | missing | P3 | - |
 | Editor display modes | AO and constant shading, background fading, grid/edge colours [S1 0.99.5.1] | partial (one lit shading with the mockup background) | P3 | - |
@@ -193,5 +193,5 @@ Design note: `.vox` animation is a list of `nSHP` models with `_f` frame indices
 ## Takeaways
 
 1. Lossless save [1] was the one blocking gap for anyone with existing files. It is done: saving an opened MagicaVoxel scene keeps its materials, layers, cameras and names.
-2. The palette [2] and the renderer [3] were the two loved features vxr lacked most visibly. Palette editing is done (picker, live recolour, swap and copy); multi-select, sorting and palette import/export remain. The live path-traced corner is in; the Render panel (sun, sky, exposure, depth of field), PNG export and materials are next.
+2. The palette [2] and the renderer [3] were the two loved features vxr lacked most visibly. Palette editing is done (picker, live recolour, swap and copy); multi-select, sorting and palette import/export remain. The live path-traced corner, the Render panel (sun, sky, exposure, depth of field, samples) and PNG export are in; materials are next.
 3. Brushes [4] and selection [5] close the sculpting gap. After them, the world editor [8] matters most for MagicaVoxel scenes with many objects.

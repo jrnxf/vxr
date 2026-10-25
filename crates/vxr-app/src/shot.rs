@@ -310,12 +310,112 @@ fn render(s: &mut Shot, dir: &Path) -> Result<(), String> {
     )?;
     s.ed.undo();
 
+    render_panel(s, dir)?;
+
     let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
     s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
     s.frames_with(1, vec![egui::Event::Text("render preview".into())]);
     s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
     check(!s.ed.ui.show_render && !s.ed.ui.hits.contains_key("render"), "Cmd-K hides the render corner".into())?;
     s.ed.ui.show_render = true;
+    s.frames(2);
+    Ok(())
+}
+
+/// The Render panel through egui input on the drawn UI: R opens it, each setting reaches the
+/// path tracer (exposure without a restart), Export PNG renders and reads back a PNG at the
+/// chosen size, Cmd-K starts an export and the panel's button cancels it, Escape closes it.
+fn render_panel(s: &mut Shot, dir: &Path) -> Result<(), String> {
+    let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    s.frames_with(2, vec![key(egui::Key::R, egui::Modifiers::NONE)]);
+    check(s.ed.ui.render_panel && s.ed.ui.hits.contains_key("rs-export"), "R opens the Render panel".into())?;
+    let left = |s: &Shot, name: &str| s.ed.ui.hits.get(name).map(|r| egui::pos2(r.left(), r.center().y));
+    let right = |s: &Shot, name: &str| s.ed.ui.hits.get(name).map(|r| egui::pos2(r.right(), r.center().y));
+    // Let the corner converge first so the exposure change hits a converged image.
+    s.ed.ui.render.spp = 0;
+    s.frames(40);
+    let restarts = s.ed.preview.restarts;
+    let (from, to) = (s.at("rs-exposure")?, left(s, "rs-exposure").unwrap());
+    s.ui_drag(from, to, egui::Modifiers::NONE);
+    let l = s.ed.preview.lighting;
+    check(
+        (l.exposure - 0.125).abs() < 1e-3 && s.ed.preview.restarts == restarts && s.ed.preview.max_spp == 64,
+        format!(
+            "exposure slider: x{:.3}, no restart; Samples 64 stops the corner at {}",
+            l.exposure, s.ed.preview.max_spp
+        ),
+    )?;
+    s.ed.ui.render.exposure_ev = 0.0;
+    let sun = s.ed.preview.lighting.sun_dir;
+    let (from, to) = (s.at("rs-sun-angle")?, right(s, "rs-sun-angle").unwrap());
+    s.ui_drag(from, to, egui::Modifiers::NONE);
+    let moved = s.ed.preview.lighting.sun_dir.angle_between(sun).to_degrees();
+    check(
+        moved > 15.0 && s.ed.preview.restarts > restarts,
+        format!("sun direction slider: the sun moved {moved:.0}° and the corner restarted"),
+    )?;
+    s.type_into("rs-sun-color", "FF8040")?;
+    let c = s.ed.preview.lighting.sun_color;
+    check(c.x > 4.0 * c.z, format!("sun colour field: #FF8040 gives linear sun ({:.2}, {:.2}, {:.2})", c.x, c.y, c.z))?;
+    s.ui_click("rs-sky-backdrop")?;
+    let sky = s.ed.preview.lighting.sky_backdrop;
+    let (from, to) = (s.at("rs-blur")?, right(s, "rs-blur").unwrap());
+    s.ui_drag(from, to, egui::Modifiers::NONE);
+    let ap = s.ed.preview.lighting.aperture;
+    check(sky && ap > 0.0, format!("sky backdrop toggle on, depth of field slider: lens radius {ap:.1} voxels"))?;
+    for _ in 0..60 {
+        s.frames(1);
+    }
+    s.save_png(&dir.join("app-2x-render-panel.png"))?;
+    s.ed.ui.render = vxr_app::render::RenderSettings { spp: 0, size: 0, ..Default::default() };
+    s.frames(2);
+
+    // Export at 1280x720, 64 spp.
+    s.ui_click("rs-export")?;
+    check(s.ed.export.is_some(), "Export PNG starts a 1280×720 render".into())?;
+    let t0 = std::time::Instant::now();
+    let (mut n, mut sample_ms) = (0, 0.0);
+    while s.ed.exported.is_none() && n < 3000 {
+        s.frames(1);
+        // As a window's vsync would, keep the CPU at most a frame ahead of the GPU.
+        let _ = s.ed.gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        n += 1;
+        if let Some(x) = &s.ed.export {
+            sample_ms = x.sample_ms().0;
+        }
+    }
+    let Some((png, (w, h))) = s.ed.exported.take() else {
+        return check(false, format!("the export did not finish in {n} frames"));
+    };
+    let mut r = png::Decoder::new(std::io::Cursor::new(&png)).read_info().map_err(|e| e.to_string())?;
+    let mut buf = vec![0; r.output_buffer_size().unwrap_or(0)];
+    let info = r.next_frame(&mut buf).map_err(|e| e.to_string())?;
+    let lum: Vec<u32> = buf.as_chunks::<4>().0.iter().map(|p| p[0] as u32 + p[1] as u32 + p[2] as u32).collect();
+    let (lo, hi) = (lum.iter().min().unwrap(), lum.iter().max().unwrap());
+    check(
+        (info.width, info.height) == (1280, 720) && (w, h) == (1280, 720) && hi - lo > 200,
+        format!(
+            "export PNG: {}×{}, {} KB, light and shadow ({lo} to {hi}), 64 spp in {n} frames, {:.2} s \
+             ({sample_ms:.2} ms per sample)",
+            info.width,
+            info.height,
+            png.len() / 1024,
+            t0.elapsed().as_secs_f64()
+        ),
+    )?;
+    std::fs::write(dir.join("render-export.png"), &png).map_err(|e| e.to_string())?;
+    println!("wrote {}", dir.join("render-export.png").display());
+
+    // Cmd-K starts one, the panel's button cancels it.
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("export png".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    let started = s.ed.export.is_some();
+    s.ui_click("rs-export")?;
+    check(started && s.ed.export.is_none(), "Cmd-K Export PNG starts an export; the panel's button cancels it".into())?;
+    s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+    check(!s.ed.ui.render_panel, "Escape closes the Render panel".into())?;
+    s.ed.ui.render = Default::default();
     s.frames(2);
     Ok(())
 }

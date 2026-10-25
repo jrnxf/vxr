@@ -157,10 +157,22 @@ fn trace_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     _ = pcg(&s);
 
     let jitter = vec2<f32>(rand(&s), rand(&s));
-    let d = camera_ray(vec2<f32>(f32(gid.x), f32(y)) + jitter);
-    let hit = tr(frame.eye.xyz, d, 0.0, 1e9);
+    var d = camera_ray(vec2<f32>(f32(gid.x), f32(y)) + jitter);
+    var ro = frame.eye.xyz;
+    let dof = (frame.flags.w & DOF) != 0u;
+    if (dof) {
+        // Thin lens: a point on the lens disc, aimed at the pixel's point on the focus plane.
+        let focus_p = ro + d * (frame.cam_u.w / max(dot(d, frame.cam_f.xyz), 1e-3));
+        let r = sqrt(rand(&s)) * frame.cam_r.w;
+        let phi = 2.0 * PI * rand(&s);
+        ro += frame.cam_r.xyz * (r * cos(phi)) + frame.cam_u.xyz * (r * sin(phi));
+        d = normalize(focus_p - ro);
+    }
+    let hit = tr(ro, d, 0.0, 1e9);
     var demod: vec3<f32>;
-    if (hit.axis == MISS) {
+    if (hit.axis == MISS && (frame.flags.w & SKY_BACKDROP) != 0u) {
+        demod = sky(d) * frame.cam_f.w;
+    } else if (hit.axis == MISS) {
         // Backdrop: the editor view's background (march.wgsl), so the corner sits in the
         // Hybrid UI like the main view does. The sky still lights the scene.
         let uv = vec2<f32>(f32(gid.x), f32(y)) * frame.size.zw + jitter * frame.size.zw - vec2<f32>(0.5, 0.35);
@@ -168,19 +180,22 @@ fn trace_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         demod = pow(mix(vec3<f32>(38.0, 43.0, 55.0), vec3<f32>(13.0, 15.0, 20.0), k) / 255.0, vec3<f32>(2.2));
     } else {
         let n = hit_normal(hit, d);
-        let p = frame.eye.xyz + d * hit.t;
+        let p = ro + d * hit.t;
         // Direct sun, then one diffuse bounce lit by the sun or the sky.
         var l = sun_light(p, n, &s);
         let b = cosine_dir(n, &s);
         let h2 = tr(p + n * EPS, b, 0.0, 1e9);
         if (h2.axis == MISS) {
-            l += sky(b);
+            l += sky(b) * frame.cam_f.w;
         } else {
             let n2 = hit_normal(h2, b);
             let p2 = p + n * EPS + b * h2.t;
             l += palette[h2.value].rgb * sun_light(p2, n2, &s);
         }
         demod = l;
+        if (dof) {
+            demod *= palette[hit.value].rgb;
+        }
     }
     var px = pixels[i];
     px.sum += demod;

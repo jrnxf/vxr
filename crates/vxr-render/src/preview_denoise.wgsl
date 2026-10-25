@@ -147,9 +147,14 @@ fn resolve_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     } else {
         irr = px.sum / px.n;
     }
-    // Backdrop pixels use the editor's encoding (gamma 2.2, no tonemap) so the two match.
+    // The editor's backdrop uses its encoding (gamma 2.2, no tonemap) so the two match.
+    // Hits and the sky backdrop are tonemapped; with depth of field the samples are already in
+    // colour (a backdrop pixel's blurred edge mixes in a little of the scene, unmapped).
     var mapped = pow(clamp(irr, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(1.0 / 2.2));
-    if (px.t >= 0.0) {
+    let dof = (frame.flags.w & DOF) != 0u;
+    if ((dof && px.t >= 0.0) || (px.t < 0.0 && (frame.flags.w & SKY_BACKDROP) != 0u)) {
+        mapped = to_srgb(aces(irr * frame.sun_col.w));
+    } else if (px.t >= 0.0) {
         mapped = to_srgb(aces(pal[px.info & 0xffu].rgb * irr * frame.sun_col.w));
     }
     textureStore(out_tex, gid.xy, vec4<f32>(mapped, 1.0));

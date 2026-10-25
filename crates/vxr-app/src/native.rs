@@ -154,6 +154,20 @@ impl State {
                 }
             }
             Action::Embed => self.editor.ui.toast(&ctx, "The embed export is not built yet"),
+            Action::Exported => {
+                let Some((png, (w, h))) = self.editor.exported.take() else { return };
+                let Some(path) = rfd::FileDialog::new()
+                    .add_filter("PNG", &["png"])
+                    .set_file_name(self.editor.export_name())
+                    .save_file()
+                else {
+                    return;
+                };
+                match std::fs::write(&path, png) {
+                    Ok(()) => self.editor.ui.toast(&ctx, format!("Saved {} ({w}×{h})", file_name(&path))),
+                    Err(e) => self.editor.ui.toast(&ctx, format!("Could not save: {e}")),
+                }
+            }
             _ => {}
         }
     }

@@ -192,7 +192,8 @@ impl App {
         .into()
     }
 
-    /// Draw a frame at `time` seconds. Returns what the page must do: "open", "save" or "embed".
+    /// Draw a frame at `time` seconds. Returns what the page must do: "open", "save", "embed"
+    /// or "exported" (a render export is ready: `take_export`).
     pub fn frame(&mut self, time: f64) -> Vec<String> {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
@@ -222,6 +223,7 @@ impl App {
                 Action::Open => Some("open".into()),
                 Action::Save => Some("save".into()),
                 Action::Embed => Some("embed".into()),
+                Action::Exported => Some("exported".into()),
                 _ => None,
             })
             .collect()
@@ -241,6 +243,16 @@ impl App {
         self.editor.scene.to_vox()
     }
 
+    /// The finished render export's PNG (empty if none), for the page to download.
+    pub fn take_export(&mut self) -> Vec<u8> {
+        self.editor.exported.take().map(|(png, _)| png).unwrap_or_default()
+    }
+
+    /// The file name for the render export.
+    pub fn export_name(&self) -> String {
+        self.editor.export_name()
+    }
+
     /// The scene's file name.
     pub fn name(&self) -> String {
         self.editor.ui.scene_name.clone()
@@ -252,7 +264,7 @@ impl App {
         let e = &self.editor;
         let (c, h) = (&e.cam, e.scene.history());
         format!(
-            r#"{{"voxels":{},"tool":"{:?}","shape":"{:?}","mirror":{},"slot":{},"colorEdit":{},"slotOp":"{:?}","undo":{},"redo":{},"cmdk":{},"coach":{},"name":{:?},"size":[{},{}],"ppp":{},"cam":[{},{},{},{},{},{}],"render":{{"shown":{},"spp":{},"rows":{},"restarts":{},"timestamps":{}}}}}"#,
+            r#"{{"voxels":{},"tool":"{:?}","shape":"{:?}","mirror":{},"slot":{},"colorEdit":{},"slotOp":"{:?}","undo":{},"redo":{},"cmdk":{},"coach":{},"name":{:?},"size":[{},{}],"ppp":{},"cam":[{},{},{},{},{},{}],"render":{{"shown":{},"spp":{},"rows":{},"restarts":{},"timestamps":{},"panel":{},"maxSpp":{},"exposure":{},"aperture":{},"sky":{},"export":{}}}}}"#,
             e.scene.map.voxels,
             e.ui.tool,
             e.ui.shape,
@@ -279,6 +291,12 @@ impl App {
             e.preview.last_rows,
             e.preview.restarts,
             e.gpu.timestamps,
+            e.ui.render_panel,
+            e.preview.max_spp,
+            e.preview.lighting.exposure,
+            e.preview.lighting.aperture,
+            e.preview.lighting.sky_backdrop,
+            e.export.as_ref().map_or("null".into(), |x| format!("{:?}", x.progress().0)),
         )
     }
 

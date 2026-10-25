@@ -200,3 +200,108 @@ fn sampling_stops_when_converged_and_resumes_on_an_edit() {
     rig.frames(1, Some(EditBox::voxels(b.0, b.1)));
     assert!(rig.preview.last_rows > 0, "an edit did not resume sampling");
 }
+
+fn mean_luma(img: &[u8]) -> f64 {
+    img.as_chunks::<4>()
+        .0
+        .iter()
+        .map(|p| p[0] as f64 * 0.2126 + p[1] as f64 * 0.7152 + p[2] as f64 * 0.0722)
+        .sum::<f64>()
+        / (img.len() / 4) as f64
+}
+
+#[test]
+fn exposure_re_resolves_without_a_restart_and_stops_at_max_spp() {
+    let Some(g) = gpu() else { return };
+    let scene = red_scene();
+    let mut rig = Rig::new(g, &scene);
+    rig.preview.max_spp = 8;
+    rig.frames(40, None);
+    assert!(rig.preview.converged(), "not converged at {} spp", rig.preview.samples());
+    rig.frames(1, None);
+    assert_eq!(rig.preview.last_rows, 0, "tracing past max_spp");
+    // Hits only: the editor backdrop does not follow exposure.
+    let cpu = cpu_values(&scene.map, &rig.cam);
+    let hits = |img: Vec<u8>| -> Vec<u8> {
+        img.as_chunks::<4>().0.iter().zip(&cpu).filter(|(_, v)| **v != 0).flat_map(|(p, _)| *p).collect()
+    };
+    let a = mean_luma(&hits(rig.image()));
+    let restarts = rig.preview.restarts;
+    rig.preview.lighting.exposure = 0.25;
+    rig.frames(1, None);
+    let b = mean_luma(&hits(rig.image()));
+    assert_eq!(rig.preview.restarts, restarts, "an exposure change restarted the preview");
+    assert!(b < a * 0.8, "two stops down did not darken the image: {a:.1} -> {b:.1}");
+}
+
+#[test]
+fn sky_backdrop_and_depth_of_field() {
+    let Some(g) = gpu() else { return };
+    let scene = red_scene();
+    let mut rig = Rig::new(g, &scene);
+    rig.frames(30, None);
+    let cpu = cpu_values(&scene.map, &rig.cam);
+    let sharp = rig.image();
+    // The sky backdrop: miss pixels show the sky (and its ground below the horizon) instead
+    // of the dark editor backdrop.
+    rig.preview.lighting.sky_backdrop = true;
+    rig.frames(30, None);
+    let img = rig.image();
+    let px = img.as_chunks::<4>().0;
+    let sky = cpu.iter().zip(px).filter(|(v, p)| **v == 0 && p[0].max(p[1]).max(p[2]) > 90).count();
+    let misses = cpu.iter().filter(|&&v| v == 0).count();
+    assert!(sky * 100 >= misses * 95, "{sky} of {misses} miss pixels show the sky");
+    rig.preview.lighting.sky_backdrop = false;
+    // Depth of field focused far behind the scene: edges blur, so neighbouring pixels differ
+    // less than in the pinhole image (sum of squared steps), and recolours restart.
+    rig.preview.lighting.aperture = 4.0;
+    rig.preview.lighting.focus = rig.cam.distance * 4.0;
+    rig.frames(60, None);
+    let blurred = rig.image();
+    let edges = |img: &[u8]| -> f64 {
+        let w = vxr_render::preview::PREVIEW_W as usize;
+        let p = img.as_chunks::<4>().0;
+        // Squared steps: a blur spreads an edge over several smaller steps.
+        (1..p.len()).filter(|i| i % w != 0).map(|i| (p[i][0].abs_diff(p[i - 1][0]) as f64).powi(2)).sum::<f64>()
+    };
+    let (e0, e1) = (edges(&sharp), edges(&blurred));
+    assert!(e1 < e0 * 0.8, "depth of field did not soften edges: {e0:.0} -> {e1:.0}");
+    let restarts = rig.preview.restarts;
+    rig.preview.set_palette(&rig.g.queue, &scene.palette);
+    rig.frames(1, None);
+    assert_eq!(rig.preview.restarts, restarts + 1, "a recolour with depth of field kept stale colours");
+}
+
+#[test]
+fn an_export_sized_preview_matches_geometry() {
+    let Some(g) = gpu() else { return };
+    let scene = red_scene();
+    let layout = brickmap_layout(&g.device);
+    let map = GpuMap::new(&g.device, &g.queue, &layout, &scene.map, &scene.palette).unwrap();
+    let (w, h) = (1280, 720);
+    assert!(Preview::fits(&g.device, w, h));
+    let mut p = Preview::sized(&g.device, &g.queue, &layout, &scene.palette, g.timestamps, (w, h));
+    p.max_spp = 4;
+    let cam = camera_for(&scene.map);
+    for _ in 0..400 {
+        let mut enc = g.device.create_command_encoder(&Default::default());
+        p.encode_budget(&g.queue, &mut enc, &map, &cam, None, 12.0);
+        g.queue.submit([enc.finish()]);
+        p.after_submit(&g.device);
+        if p.converged() {
+            break;
+        }
+    }
+    assert!(p.converged(), "{} spp after 400 frames", p.samples());
+    let img = pollster::block_on(p.read(&g.device, &g.queue));
+    assert_eq!(img.len(), (w * h * 4) as usize);
+    let mut cpu = Vec::with_capacity((w * h) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            let (o, d) = cam.ray(x as f32 + 0.5, y as f32 + 0.5, w as f32, h as f32);
+            cpu.push(scene.map.raycast(o.to_array(), d.to_array(), 1e6).map_or(0, |h| h.value));
+        }
+    }
+    let m = mismatch(&img, &cpu);
+    assert!(m < 0.01, "{:.2}% of export pixels disagree with the CPU ray cast", m * 100.0);
+}

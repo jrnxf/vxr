@@ -284,6 +284,44 @@ async () => {
     await key('Enter');
     await frames(2);
     step('and shows it again', st().render.shown);
+
+    // The Render panel: R opens it, the sliders and buttons reach the path tracer, Export PNG
+    // downloads a PNG at the chosen size, Escape closes it.
+    const hit = (name) => { const h = window.vxr.hit(name); return h.length ? h : null; };
+    await key('r');
+    step('R opens the Render panel', st().render.panel && !!hit('rs-export'), JSON.stringify(st().render));
+    const ex = hit('rs-exposure');
+    await drag(ex[0], ex[1], ex[0] - 120, ex[1]);
+    step('the exposure slider sets -3 EV', Math.abs(st().render.exposure - 0.125) < 1e-3, JSON.stringify(st().render));
+    await click(ex[0], ex[1]);
+    await click(...hit('rs-spp0'));
+    await click(...hit('rs-size0'));
+    step('Samples 64 stops the corner at 64 spp', st().render.maxSpp === 64, JSON.stringify(st().render));
+    await click(...hit('rs-sky-backdrop'));
+    const skyOn = st().render.sky;
+    await click(...hit('rs-sky-backdrop'));
+    step('the sky backdrop toggles', skyOn && !st().render.sky);
+    const realUrl = URL.createObjectURL;
+    const realA = HTMLAnchorElement.prototype.click;
+    let png = null, pngName = null;
+    URL.createObjectURL = (b) => { png = b; return realUrl.call(URL, b); };
+    HTMLAnchorElement.prototype.click = function () { pngName = this.download; };
+    try {
+      await click(...hit('rs-export'));
+      const exporting = st().render.export !== null;
+      for (let i = 0; i < 3000 && !pngName; i++) await frames(1);
+      const b = png && new Uint8Array(await png.arrayBuffer());
+      const dv = b && new DataView(b.buffer);
+      const ok = b && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47;
+      const [w, h] = ok ? [dv.getUint32(16), dv.getUint32(20)] : [0, 0];
+      step('Export PNG renders and downloads island-render.png at 1280x720', exporting && ok && pngName === 'island-render.png' && w === 1280 && h === 720, `${pngName} ${w}x${h} ${b && b.length} bytes`);
+    } finally {
+      URL.createObjectURL = realUrl;
+      HTMLAnchorElement.prototype.click = realA;
+    }
+    await click(...hit('rs-spp2'));
+    await key('Escape');
+    step('Escape closes the Render panel', !st().render.panel && st().render.maxSpp === 1024 && near(st().render.exposure, 1), JSON.stringify(st().render));
     step('the render steps leave the file as it was', same(bytes(), original));
   }
 

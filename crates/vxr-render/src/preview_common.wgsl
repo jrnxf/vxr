@@ -12,9 +12,16 @@ struct Frame {
     cap_lo: vec4<f32>,   // box where history is capped after an edit (indirect light changed)
     cap_hi: vec4<f32>,
     // x: 1 = restart (camera moved), 2 = edit this frame; y: history cap after an edit;
-    // z: frame counter (random seed); w: 1 = denoise on
+    // z: frame counter (random seed); w: 1 = denoise on, 2 = sky backdrop, 4 = depth of field
+    // (samples stored with their own hit's colour, not demodulated)
     flags: vec4<u32>,
+    cam_r: vec4<f32>,    // camera right, w = lens radius (voxels, 0 = pinhole)
+    cam_u: vec4<f32>,    // camera up, w = focus distance along the view direction
+    cam_f: vec4<f32>,    // view direction, w = sky light intensity
 };
+
+const SKY_BACKDROP: u32 = 2u;
+const DOF: u32 = 4u;
 
 struct Dispatch {
     row0: u32,  // first row of this trace dispatch

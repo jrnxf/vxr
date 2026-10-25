@@ -60,6 +60,9 @@ struct FrameU {
     cap_lo: [f32; 4],
     cap_hi: [f32; 4],
     flags: [u32; 4],
+    cam_r: [f32; 4],
+    cam_u: [f32; 4],
+    cam_f: [f32; 4],
 }
 
 #[repr(C)]
@@ -95,19 +98,45 @@ impl EditBox {
     }
 }
 
-/// Light and camera response of the preview.
+/// Light, sky and lens of the preview (the Render panel's settings).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Lighting {
     /// Toward the sun (normalized on use).
     pub sun_dir: Vec3,
     /// Sun irradiance, linear RGB.
     pub sun_color: Vec3,
+    /// Sky light, times the built-in sky gradient.
+    pub sky: f32,
+    /// Show the sky behind the scene instead of the editor's backdrop.
+    pub sky_backdrop: bool,
+    /// Linear exposure. Changing it alone re-resolves the image without a restart.
     pub exposure: f32,
+    /// Lens radius in voxels; 0 is a pinhole (no depth of field).
+    pub aperture: f32,
+    /// Distance in voxels from the eye to the plane in focus; 0 or less focuses on the orbit
+    /// target.
+    pub focus: f32,
 }
 
 impl Default for Lighting {
     fn default() -> Self {
-        Self { sun_dir: Vec3::new(0.45, 0.8, 0.35), sun_color: Vec3::new(3.0, 2.85, 2.6), exposure: 1.0 }
+        Self {
+            sun_dir: Vec3::new(0.45, 0.8, 0.35),
+            sun_color: Vec3::new(3.0, 2.85, 2.6),
+            sky: 1.0,
+            sky_backdrop: false,
+            exposure: 1.0,
+            aperture: 0.0,
+            focus: 0.0,
+        }
+    }
+}
+
+impl Lighting {
+    /// Depth of field is on. The image is then stored with the colour of each sample's own
+    /// hit (blurred edges mix colours), so recolours and edits restart it.
+    pub fn dof(&self) -> bool {
+        self.aperture > 0.0
     }
 }
 
@@ -119,9 +148,9 @@ struct Budget {
 }
 
 impl Budget {
-    fn rows(&self, budget_ms: f64) -> u32 {
+    fn rows(&self, budget_ms: f64, height: u32) -> u32 {
         let r = ((budget_ms - self.denoise_ms).max(0.25) / self.ms_per_row) as u32;
-        r.clamp(8, PREVIEW_H * MAX_SAMPLES_PER_FRAME)
+        r.clamp(8, height * MAX_SAMPLES_PER_FRAME)
     }
 
     fn learn(&mut self, rows: u32, trace_ms: f64, denoise_ms: f64) {
@@ -200,7 +229,10 @@ pub struct Preview {
     cs_layout: wgpu::BindGroupLayout,
     cs_rect: wgpu::Buffer,
     sampler: wgpu::Sampler,
-    last_key: Option<[f32; 14]>,
+    last_key: Option<[f32; 17]>,
+    last_exposure: f32,
+    /// Sampling stops at this many samples per pixel until something changes.
+    pub max_spp: u32,
     cursor: u32,
     frame_counter: u32,
     force_restart: bool,
@@ -244,7 +276,8 @@ fn storage_tex() -> wgpu::BindingType {
 }
 
 impl Preview {
-    /// `timestamps`: the device has `TIMESTAMP_QUERY` (see `Gpu::timestamps`).
+    /// The corner preview, 640x360. `timestamps`: the device has `TIMESTAMP_QUERY` (see
+    /// `Gpu::timestamps`).
     pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -252,7 +285,34 @@ impl Preview {
         palette: &[[u8; 4]; 256],
         timestamps: bool,
     ) -> Self {
-        let (w, h) = (PREVIEW_W, PREVIEW_H);
+        Self::sized(device, queue, map_layout, palette, timestamps, (PREVIEW_W, PREVIEW_H))
+    }
+
+    /// Bytes of GPU buffers a preview of `w` x `h` needs, and the largest single buffer.
+    pub fn memory(w: u32, h: u32) -> (u64, u64) {
+        let n = w as u64 * h as u64;
+        (n * (PIXEL_BYTES + 3 * 16), n * PIXEL_BYTES)
+    }
+
+    /// Whether a preview of `w` x `h` fits the device's buffer limits (for render export).
+    pub fn fits(device: &wgpu::Device, w: u32, h: u32) -> bool {
+        let l = device.limits();
+        let (_, largest) = Self::memory(w, h);
+        largest <= l.max_storage_buffer_binding_size
+            && largest <= l.max_buffer_size
+            && w.max(h) <= l.max_texture_dimension_2d
+    }
+
+    /// A preview of `size` pixels (render export uses the export size).
+    pub fn sized(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        map_layout: &wgpu::BindGroupLayout,
+        palette: &[[u8; 4]; 256],
+        timestamps: bool,
+        size: (u32, u32),
+    ) -> Self {
+        let (w, h) = size;
         let n = (w * h) as u64;
         let buf = |label: &str, size: u64, usage: wgpu::BufferUsages| {
             device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage, mapped_at_creation: false })
@@ -414,22 +474,32 @@ impl Preview {
             cs_rect,
             sampler,
             last_key: None,
+            last_exposure: 1.0,
+            max_spp: MAX_SPP,
             cursor: 0,
             frame_counter: 0,
             force_restart: true,
-            budget: Budget { ms_per_row: GUESS_SAMPLE_MS / h as f64, denoise_ms: 0.5, learnt: false },
+            budget: Budget {
+                ms_per_row: GUESS_SAMPLE_MS * (w * h) as f64 / (PREVIEW_W * PREVIEW_H) as f64 / h as f64,
+                denoise_ms: 0.5 * (w * h) as f64 / (PREVIEW_W * PREVIEW_H) as f64,
+                learnt: false,
+            },
             timer: timestamps.then(|| Timer::new(device, queue)),
             rows_since_restart: 0,
             restarts: 0,
             last_rows: 0,
         };
-        me.set_palette(queue, palette);
+        queue.write_buffer(&me.pal_buf, 0, bytemuck::cast_slice(&palette_linear(palette)));
         me
     }
 
     /// Recolor: rewrite the preview's palette copy (the map's palette is written separately).
-    pub fn set_palette(&self, queue: &wgpu::Queue, palette: &[[u8; 4]; 256]) {
+    /// Instant, except with depth of field, which restarts.
+    pub fn set_palette(&mut self, queue: &wgpu::Queue, palette: &[[u8; 4]; 256]) {
         queue.write_buffer(&self.pal_buf, 0, bytemuck::cast_slice(&palette_linear(palette)));
+        if self.lighting.dof() {
+            self.force_restart = true;
+        }
     }
 
     /// Drop all accumulated samples on the next frame (a new scene).
@@ -442,13 +512,18 @@ impl Preview {
         self.rows_since_restart as f32 / self.height as f32
     }
 
+    /// Sampling reached `max_spp` and stopped.
+    pub fn converged(&self) -> bool {
+        self.rows_since_restart >= self.max_spp as u64 * self.height as u64
+    }
+
     /// GPU time of one full sample, as measured (or assumed without timestamps), and whether
     /// it was measured.
     pub fn sample_ms(&self) -> (f64, bool) {
         (self.budget.ms_per_row * self.height as f64, self.budget.learnt)
     }
 
-    fn key(&self, cam: &OrbitCamera) -> [f32; 14] {
+    fn key(&self, cam: &OrbitCamera) -> [f32; 17] {
         let l = &self.lighting;
         [
             cam.target.x,
@@ -464,7 +539,10 @@ impl Preview {
             l.sun_color.x,
             l.sun_color.y,
             l.sun_color.z,
-            l.exposure,
+            l.sky,
+            l.sky_backdrop as u8 as f32,
+            l.aperture,
+            l.focus,
         ]
     }
 
@@ -476,6 +554,11 @@ impl Preview {
         let (lo, hi) = edit.map(|e| (e.lo, e.hi)).unwrap_or((Vec3::ZERO, Vec3::ZERO));
         let m = Vec3::splat(CAP_MARGIN);
         let v4 = |v: Vec3| [v.x, v.y, v.z, 0.0];
+        let fwd = (cam.target - eye).normalize_or(Vec3::NEG_Z);
+        let right = fwd.cross(Vec3::Y).normalize_or(Vec3::X);
+        let up = right.cross(fwd);
+        let l = &self.lighting;
+        let focus = if l.focus > 0.0 { l.focus } else { cam.distance };
         let u = FrameU {
             inv_vp: vp.inverse().to_cols_array_2d(),
             eye: [eye.x, eye.y, eye.z, 1.0],
@@ -486,7 +569,10 @@ impl Preview {
             edit_hi: v4(hi),
             cap_lo: v4(lo - m),
             cap_hi: v4(hi + m),
-            flags: [flags, HIST_CAP, self.frame_counter, 1],
+            flags: [flags, HIST_CAP, self.frame_counter, 1 | (l.sky_backdrop as u32) << 1 | (l.dof() as u32) << 2],
+            cam_r: [right.x, right.y, right.z, l.aperture.max(0.0)],
+            cam_u: [up.x, up.y, up.z, focus],
+            cam_f: [fwd.x, fwd.y, fwd.z, l.sky.max(0.0)],
         };
         queue.write_buffer(&self.frame_buf, 0, bytemuck::bytes_of(&u));
     }
@@ -522,11 +608,28 @@ impl Preview {
         edit: Option<EditBox>,
         idle: bool,
     ) {
+        let budget = if idle { BUDGET_IDLE_MS } else { BUDGET_EDITING_MS };
+        self.encode_budget(queue, enc, map, cam, edit, budget);
+    }
+
+    /// `encode` with a GPU budget of `budget_ms` for this frame (render export uses its own).
+    pub fn encode_budget(
+        &mut self,
+        queue: &wgpu::Queue,
+        enc: &mut wgpu::CommandEncoder,
+        map: &GpuMap,
+        cam: &OrbitCamera,
+        edit: Option<EditBox>,
+        budget_ms: f64,
+    ) {
         self.read_timestamps();
         let key = self.key(cam);
-        let restart = self.force_restart || self.last_key != Some(key);
+        // With depth of field the reset pass cannot tell which pixels an edit touched.
+        let restart = self.force_restart || self.last_key != Some(key) || (edit.is_some() && self.lighting.dof());
         self.force_restart = false;
         self.last_key = Some(key);
+        let exposure = self.lighting.exposure != self.last_exposure;
+        self.last_exposure = self.lighting.exposure;
         if restart {
             self.cursor = 0;
             self.restarts += 1;
@@ -536,14 +639,16 @@ impl Preview {
         }
         let reset_pass = restart || edit.is_some();
         // Converged and nothing changed: keep the image, skip all work.
-        if !reset_pass && self.rows_since_restart >= MAX_SPP as u64 * self.height as u64 {
+        // A new exposure alone only needs the resolve.
+        let converged = self.converged();
+        if !reset_pass && converged && !exposure {
             self.last_rows = 0;
             return;
         }
         let flags = (restart as u32) | if edit.is_some() { 2 } else { 0 };
         self.write_frame(queue, cam, flags, edit);
 
-        let rows = self.budget.rows(if idle { BUDGET_IDLE_MS } else { BUDGET_EDITING_MS });
+        let rows = if converged && !reset_pass { 0 } else { self.budget.rows(budget_ms, self.height) };
         let rpd = ((DISPATCH_MS / self.budget.ms_per_row) as u32).max(8);
         // Dispatch slots: trace bands first, then A-trous steps, then resolve.
         let mut slots: Vec<DispatchU> = Vec::new();

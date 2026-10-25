@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::color::{Hsv, hex, parse_hex};
+use crate::render::{EXPORT_SIZES, RenderSettings, SPP_CHOICES};
 
 // :root custom properties.
 pub const PANEL: Color32 = Color32::from_rgba_unmultiplied_const(20, 23, 30, 199);
@@ -130,6 +131,9 @@ mod icon {
     pub const CHEVRON_DOWN: char = '\u{e06d}';
     pub const ARROW_LEFT_RIGHT: char = '\u{e24a}';
     pub const COPY: char = '\u{e09e}';
+    pub const APERTURE: char = '\u{e040}';
+    pub const IMAGE_DOWN: char = '\u{e53c}';
+    pub const SUN: char = '\u{e178}';
 }
 
 pub use vxr_core::tools::{Shape, Tool};
@@ -157,6 +161,11 @@ pub enum Action {
         from: u8,
         to: u8,
     },
+    /// Start a PNG render export with the Render panel's settings, or cancel the one running.
+    ExportPng,
+    CancelExport,
+    /// For the host: an export finished; take its PNG from `Editor::exported`.
+    Exported,
 }
 
 /// What the next swatch click does, armed from the colour editor or Cmd-K.
@@ -189,6 +198,10 @@ pub struct Stats {
     pub box_size: Option<[i32; 3]>,
     /// The render corner's samples per pixel and whether it is still sampling, if shown.
     pub render: Option<(f32, bool)>,
+    /// A render export in progress: its size, samples per pixel so far and the target.
+    pub export: Option<((u32, u32), f32, u32)>,
+    /// Export sizes this GPU can render (by `EXPORT_SIZES` index).
+    pub export_fits: [bool; 4],
 }
 
 pub struct Hybrid {
@@ -213,6 +226,11 @@ pub struct Hybrid {
     pub show_render: bool,
     /// Where the render corner's image goes this frame, in points.
     pub render_rect: Option<Rect>,
+    /// The Render panel is open, and what it edits.
+    pub render_panel: bool,
+    pub render: RenderSettings,
+    /// Text of the Render panel's sun colour field.
+    sun_hex: String,
     /// Where each clickable part of the UI was last drawn, in points, by name, for the
     /// headless checks ("edit-color", "sv", "hue", "swap", "copy", "sw<slot>", ...).
     pub hits: HashMap<String, Rect>,
@@ -251,6 +269,8 @@ const COMMANDS: &[Command] = &[
     Command { label: "Swap color with…", keys: &[], run: |h| h.slot_op = Some(SlotOp::Swap) },
     Command { label: "Copy color to…", keys: &[], run: |h| h.slot_op = Some(SlotOp::Copy) },
     Command { label: "Toggle render preview", keys: &[], run: |h| h.show_render = !h.show_render },
+    Command { label: "Render settings", keys: &["R"], run: |h| h.toggle_render_panel() },
+    Command { label: "Export PNG", keys: &[], run: |h| h.actions.push(Action::ExportPng) },
 ];
 
 impl Hybrid {
@@ -272,6 +292,9 @@ impl Hybrid {
             slot_op: None,
             show_render: true,
             render_rect: None,
+            render_panel: false,
+            render: RenderSettings::default(),
+            sun_hex: String::new(),
             hits: HashMap::new(),
             drag_from: None,
             shown_slot: 28,
@@ -305,15 +328,33 @@ impl Hybrid {
 
     /// Open the colour editor on the current slot.
     pub fn open_color_edit(&mut self) {
+        // The two side panels share the space left of the palette and the render corner.
+        self.render_panel = false;
         if self.color_edit.is_none() {
             let c = self.palette[self.slot as usize];
             self.color_edit = Some(ColorEdit { hsv: Hsv::from_rgb([c[0], c[1], c[2]]), fields: Default::default() });
         }
     }
 
-    /// Escape: cancel an armed swap or copy, else close the colour editor, else the coach card.
+    /// Open or close the Render panel (it shows the render corner too).
+    pub fn toggle_render_panel(&mut self) {
+        self.render_panel = !self.render_panel;
+        if self.render_panel {
+            self.color_edit = None;
+            self.slot_op = None;
+            self.show_render = true;
+        }
+    }
+
+    /// Escape: cancel an armed swap or copy, else close the colour editor or the Render panel,
+    /// else the coach card.
     fn escape(&mut self) {
-        if self.slot_op.take().is_none() && self.color_edit.take().is_none() {
+        if self.slot_op.take().is_some() || self.color_edit.take().is_some() {
+            return;
+        }
+        if self.render_panel {
+            self.render_panel = false;
+        } else {
             self.coach = false;
         }
     }
@@ -349,6 +390,7 @@ impl Hybrid {
         }
         self.stats(ctx, screen, stats);
         self.render_corner(ctx, screen, stats);
+        self.render_panel(ctx, screen, stats);
         self.hint_bar(ctx, screen);
         self.history(ctx, screen);
         self.toast_panel(ctx, screen);
@@ -391,6 +433,7 @@ impl Hybrid {
                 (Key::B, |h| h.shape = Shape::Box),
                 (Key::F, |h| h.shape = Shape::Face),
                 (Key::M, |h| h.mirror = !h.mirror),
+                (Key::R, |h| h.toggle_render_panel()),
                 (Key::Escape, |h| h.escape()),
                 // The coach card's "? for every key": the command list shows every key.
                 (Key::Questionmark, |h| {
@@ -1037,6 +1080,7 @@ impl Hybrid {
     // panel has a border but no fill. 16:9, the preview's own shape, and it sits above #history.
     fn render_corner(&mut self, ctx: &Context, screen: Rect, s: &Stats) {
         self.render_rect = None;
+        let mut open = false;
         let Some((spp, live)) = s.render.filter(|_| self.show_render) else { return };
         let w = 320.0;
         let size = vec2(w, (w * 9.0 / 16.0).round());
@@ -1052,13 +1096,186 @@ impl Hybrid {
                 ui.allocate_rect(rect, Sense::hover());
                 let p = ui.painter();
                 p.rect_stroke(rect, CornerRadius::same(R), Stroke::new(1.0, LINE2), StrokeKind::Inside);
-                let label = format!("Path trace · {:.0} spp{}", spp.floor(), if live { " · live" } else { "" });
+                let label = match s.export {
+                    Some(((w, h), done, of)) => format!("Exporting {w}×{h} · {:.0}/{of} spp", done.floor()),
+                    None => format!("Path trace · {:.0} spp{}", spp.floor(), if live { " · live" } else { "" }),
+                };
                 let g = ui.painter().layout_no_wrap(label, inter_medium(11.0), TEXT);
                 let chip = Rect::from_min_size(rect.min + vec2(8.0, 8.0), g.size() + vec2(16.0, 6.0));
                 p.rect_filled(chip, CornerRadius::same(6), Color32::from_black_alpha(140));
                 p.galley(chip.min + vec2(8.0, 3.0), g, TEXT);
+                // The Render panel's button, a chip at the other corner.
+                let b =
+                    Rect::from_min_size(pos2(rect.right() - 8.0 - 26.0, rect.top() + 8.0), vec2(26.0, chip.height()));
+                let r = ui.interact(b, Id::unique("render-settings"), Sense::click());
+                let on = self.render_panel;
+                let fill = if r.hovered() { Color32::from_black_alpha(190) } else { Color32::from_black_alpha(140) };
+                let p = ui.painter();
+                p.rect_filled(b, CornerRadius::same(6), fill);
+                if on {
+                    p.rect_filled(b, CornerRadius::same(6), ACCENT_BG);
+                }
+                let c = if on {
+                    ACCENT
+                } else if r.hovered() {
+                    TEXT
+                } else {
+                    MUTED
+                };
+                p.text(b.center(), Align2::CENTER_CENTER, icon::APERTURE, icon_font(13.0), c);
+                if r.clicked() {
+                    open = true;
+                }
+                self.hits.insert("render-settings".into(), b);
             },
         );
+        if open {
+            self.toggle_render_panel();
+        }
+    }
+
+    // The Render panel: not in the mockups (the board lists Render as "next"). A .panel left of
+    // the render corner, bottom-aligned with it, built from the colour editor's parts.
+    fn render_panel(&mut self, ctx: &Context, screen: Rect, s: &Stats) {
+        if !self.render_panel {
+            return;
+        }
+        let w = 232.0;
+        let row = 34.0;
+        let h = 12.0 + 15.0 + 10.0 + 7.0 * row + 28.0 + 8.0 + 28.0 + 12.0 + 2.0 * (14.0 + 28.0 + 10.0) + 32.0 + 12.0;
+        let right = self.render_rect.map_or(screen.right() - 12.0 - 232.0, |r| r.left()) - 8.0;
+        let bottom = self.render_rect.map_or(screen.bottom() - 62.0, |r| r.bottom());
+        let rect = Rect::from_min_size(pos2(right - w, (bottom - h).max(68.0)), vec2(w, h));
+        let mut rs = self.render.clone();
+        let mut hits = Vec::new();
+        let (mut close, mut export) = (false, false);
+        let mut hex_text = std::mem::take(&mut self.sun_hex);
+        Self::panel(ctx, "render-panel", rect, Order::Middle, |ui, rect| {
+            let inner = rect.shrink(12.0);
+            let p = ui.painter().clone();
+            let hy = inner.top() + 7.5;
+            let g = p.layout_job(spaced("RENDER", inter_semibold(11.0), MUTED, 0.88));
+            p.galley(pos2(inner.left(), hy - g.size().y / 2.0), g, MUTED);
+            let x = Rect::from_center_size(pos2(inner.right() - 6.0, hy), vec2(16.0, 22.0));
+            let xr = ui.interact(x, Id::unique("render-panel-x"), Sense::click());
+            hits.push(("render-panel-x", x));
+            p.text(x.center(), Align2::CENTER_CENTER, "×", inter(18.0), if xr.hovered() { TEXT } else { FAINT });
+            close |= xr.clicked();
+            p.text(pos2(x.left() - 6.0, hy), Align2::RIGHT_CENTER, "Path trace", mono(11.0), FAINT);
+            let mut y = inner.top() + 25.0;
+            let mut next = |hh: f32| {
+                let r = Rect::from_min_size(pos2(inner.left(), y), vec2(inner.width(), hh));
+                y += hh;
+                r
+            };
+            let sliders: [SliderRow; 7] = [
+                ("rs-sun-angle", "Sun direction", &mut rs.sun_angle, 0.0, 360.0, |v| format!("{v:.0}°")),
+                ("rs-sun-height", "Sun height", &mut rs.sun_height, 2.0, 90.0, |v| format!("{v:.0}°")),
+                ("rs-sun-strength", "Sun strength", &mut rs.sun_strength, 0.0, 10.0, |v| format!("{v:.1}")),
+                ("rs-sky", "Sky light", &mut rs.sky, 0.0, 3.0, |v| format!("{v:.2}")),
+                ("rs-exposure", "Exposure", &mut rs.exposure_ev, -3.0, 3.0, |v| format!("{v:+.1} EV")),
+                ("rs-blur", "Depth of field", &mut rs.blur, 0.0, 1.0, |v| {
+                    if v <= 0.0 { "off".into() } else { format!("{:.0}%", v * 100.0) }
+                }),
+                ("rs-focus", "Focus", &mut rs.focus, 0.25, 2.0, |v| format!("{v:.2}× target")),
+            ];
+            for (id, label, v, lo, hi, fmt) in sliders {
+                let r = next(row);
+                hits.push((id, r));
+                slider(ui, r, id, label, v, lo, hi, fmt);
+            }
+            // Sun colour: a chip and a hex field; the sky backdrop toggle.
+            let r = next(28.0);
+            let chip = Rect::from_min_size(r.min, vec2(28.0, 28.0));
+            let c = rs.sun_color;
+            p.rect(
+                chip,
+                CornerRadius::same(7),
+                Color32::from_rgb(c[0], c[1], c[2]),
+                Stroke::new(1.0, Color32::from_white_alpha(38)),
+                StrokeKind::Inside,
+            );
+            let fr = Rect::from_min_max(pos2(chip.right() + 6.0, r.top()), r.max);
+            let id = Id::unique("rs-sun-color");
+            if !ui.memory(|m| m.has_focus(id)) {
+                hex_text = hex(c);
+            }
+            hits.push(("rs-sun-color", fr));
+            if field(ui, fr, "SUN", id, &mut hex_text)
+                && let Some(v) = parse_hex(hex_text.trim())
+            {
+                rs.sun_color = v;
+            }
+            next(8.0);
+            let r = next(28.0);
+            hits.push(("rs-sky-backdrop", r));
+            if small_button(ui, r, icon::SUN, "Show sky behind the scene", "rs-sky-backdrop", rs.sky_backdrop).clicked()
+            {
+                rs.sky_backdrop = !rs.sky_backdrop;
+            }
+            next(12.0);
+            // Samples (where the corner stops, and what an export traces) and export size.
+            let spp_labels = SPP_CHOICES.map(|n| if n >= 1024 { format!("{}K", n / 1024) } else { n.to_string() });
+            let size_labels = EXPORT_SIZES.map(|(_, h)| if h >= 2160 { "4K".to_string() } else { format!("{h}p") });
+            let n = s.export.map_or(String::new(), |_| " (exporting)".into());
+            for (name, label, labels, sel, ok) in [
+                ("rs-spp", format!("Samples{n}"), &spp_labels, &mut rs.spp, [true; 4]),
+                ("rs-size", "Export size".to_string(), &size_labels, &mut rs.size, s.export_fits),
+            ] {
+                let lr = next(14.0);
+                p.text(lr.left_center(), Align2::LEFT_CENTER, label, inter(12.0), MUTED);
+                if name == "rs-size" {
+                    let (w, h) = EXPORT_SIZES[*sel];
+                    p.text(lr.right_center(), Align2::RIGHT_CENTER, format!("{w}×{h}"), mono(11.0), FAINT);
+                }
+                let r = next(28.0);
+                if let Some(k) = segmented(ui, r, name, labels, *sel, &ok, &mut hits) {
+                    *sel = k;
+                }
+                next(10.0);
+            }
+            // Export PNG, the panel's one primary action (the Embed button's look).
+            let r = next(32.0);
+            hits.push(("rs-export", r));
+            let resp = ui.interact(r, Id::unique("rs-export"), Sense::click());
+            let ink = Color32::from_rgb(0x0d, 0x10, 0x20);
+            let p = ui.painter();
+            let label = match s.export {
+                Some((_, done, of)) => {
+                    p.rect(r, CornerRadius::same(8), ACCENT_BG, Stroke::new(1.0, LINE2), StrokeKind::Inside);
+                    let k = (done / of as f32).clamp(0.0, 1.0);
+                    let fill = Rect::from_min_size(r.min, vec2(r.width() * k, r.height()));
+                    p.rect_filled(fill, CornerRadius::same(8), ACCENT.gamma_multiply(0.45));
+                    format!("Cancel export · {:.0}%", k * 100.0)
+                }
+                None => {
+                    p.rect_filled(
+                        r,
+                        CornerRadius::same(8),
+                        if resp.hovered() { Color32::from_rgb(0xa6, 0xb6, 0xff) } else { ACCENT },
+                    );
+                    "Export PNG".to_string()
+                }
+            };
+            let color = if s.export.is_some() { TEXT } else { ink };
+            let g = p.layout_no_wrap(label, inter_semibold(13.0), color);
+            let total = 16.0 + 6.0 + g.size().x;
+            let x0 = r.center().x - total / 2.0;
+            p.text(pos2(x0 + 8.0, r.center().y), Align2::CENTER_CENTER, icon::IMAGE_DOWN, icon_font(16.0), color);
+            p.galley(pos2(x0 + 22.0, r.center().y - g.size().y / 2.0), g, color);
+            export |= resp.clicked();
+        });
+        for (k, r) in hits {
+            self.hits.insert(k.into(), r);
+        }
+        self.sun_hex = hex_text;
+        self.render = rs;
+        if export {
+            self.actions.push(if s.export.is_some() { Action::CancelExport } else { Action::ExportPng });
+        }
+        if close {
+            self.render_panel = false;
+        }
     }
 
     // #hint
@@ -1449,6 +1666,92 @@ fn field(ui: &mut Ui, rect: Rect, label: &str, id: Id, text: &mut String) -> boo
         .margin(egui::Margin::ZERO)
         .desired_width(tr.width());
     ui.put(tr, edit).lost_focus()
+}
+
+/// A Render panel slider: hit name, label, value, range and how the value reads.
+type SliderRow<'a> = (&'static str, &'static str, &'a mut f32, f32, f32, fn(f32) -> String);
+
+/// A labelled slider row: label and value on top, a thin track below. Dragging or clicking
+/// anywhere on the row sets the value. Returns true when the value changed.
+#[allow(clippy::too_many_arguments)]
+fn slider(ui: &mut Ui, r: Rect, id: &str, label: &str, v: &mut f32, lo: f32, hi: f32, fmt: fn(f32) -> String) -> bool {
+    let resp = ui.interact(r, Id::unique(("slider", id)), Sense::click_and_drag());
+    let track = Rect::from_min_size(pos2(r.left() + 1.0, r.top() + 22.0), vec2(r.width() - 2.0, 4.0));
+    let mut changed = false;
+    if resp.is_pointer_button_down_on()
+        && let Some(q) = resp.interact_pointer_pos()
+    {
+        let k = ((q.x - track.left()) / track.width()).clamp(0.0, 1.0);
+        let nv = lo + k * (hi - lo);
+        changed = nv != *v;
+        *v = nv;
+    }
+    let p = ui.painter();
+    let active = resp.hovered() || resp.dragged();
+    p.text(r.left_top() + vec2(0.0, 7.0), Align2::LEFT_CENTER, label, inter(12.0), if active { TEXT } else { MUTED });
+    p.text(r.right_top() + vec2(0.0, 7.0), Align2::RIGHT_CENTER, fmt(*v), mono(11.0), TEXT);
+    let k = ((*v - lo) / (hi - lo)).clamp(0.0, 1.0);
+    p.rect_filled(track, CornerRadius::same(2), LINE2);
+    p.rect_filled(Rect::from_min_size(track.min, vec2(track.width() * k, 4.0)), CornerRadius::same(2), ACCENT);
+    let at = pos2(track.left() + track.width() * k, track.center().y);
+    p.circle(at, 6.0, TEXT, Stroke::new(1.0, Color32::from_black_alpha(100)));
+    changed
+}
+
+/// A row of equal buttons, one selected (the .tool.on look); `ok[k]` false greys one out.
+/// Records each as `<name><k>` in `hits` and returns the one clicked.
+fn segmented(
+    ui: &mut Ui,
+    r: Rect,
+    name: &str,
+    labels: &[String],
+    sel: usize,
+    ok: &[bool],
+    hits: &mut Vec<(&'static str, Rect)>,
+) -> Option<usize> {
+    const NAMES: [[&str; 4]; 2] =
+        [["rs-spp0", "rs-spp1", "rs-spp2", "rs-spp3"], ["rs-size0", "rs-size1", "rs-size2", "rs-size3"]];
+    let names = if name == "rs-spp" { NAMES[0] } else { NAMES[1] };
+    let n = labels.len();
+    let cw = (r.width() - 4.0 * (n - 1) as f32) / n as f32;
+    let mut out = None;
+    for (k, label) in labels.iter().enumerate() {
+        let c = Rect::from_min_size(pos2(r.left() + k as f32 * (cw + 4.0), r.top()), vec2(cw, r.height()));
+        hits.push((names[k], c));
+        let enabled = ok[k];
+        let resp = ui.interact(c, Id::unique((name, k)), if enabled { Sense::click() } else { Sense::hover() });
+        let p = ui.painter();
+        let color = if k == sel {
+            p.rect(
+                c,
+                CornerRadius::same(7),
+                ACCENT_BG,
+                Stroke::new(1.0, Color32::from_rgba_unmultiplied(142, 162, 255, 89)),
+                StrokeKind::Inside,
+            );
+            ACCENT
+        } else {
+            let hover = enabled && resp.hovered();
+            p.rect_stroke(
+                c,
+                CornerRadius::same(7),
+                Stroke::new(1.0, if hover { Color32::from_white_alpha(64) } else { LINE2 }),
+                StrokeKind::Inside,
+            );
+            if !enabled {
+                FAINT.gamma_multiply(0.6)
+            } else if hover {
+                TEXT
+            } else {
+                MUTED
+            }
+        };
+        p.text(c.center(), Align2::CENTER_CENTER, label, mono(11.5), color);
+        if enabled && resp.clicked() {
+            out = Some(k);
+        }
+    }
+    out
 }
 
 // #edit-color, at a fixed size with an icon; `on` is the .tool.on look for an armed action.

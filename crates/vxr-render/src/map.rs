@@ -161,7 +161,8 @@ fn runs(v: &[u32]) -> Vec<(u32, u32)> {
     out
 }
 
-fn srgb_to_linear(c: u8) -> f32 {
+/// An sRGB channel as linear light, 0 to 1.
+pub fn srgb_to_linear(c: u8) -> f32 {
     let c = c as f32 / 255.0;
     if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
 }

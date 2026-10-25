@@ -99,13 +99,16 @@ function wire() {
   new ResizeObserver(fit).observe(canvas);
 }
 
-function save() {
-  const name = /\.vox$/i.test(app.name()) ? app.name() : 'scene.vox';
-  const url = URL.createObjectURL(new Blob([app.save()], { type: 'application/octet-stream' }));
+function download(bytes, name, type) {
+  const url = URL.createObjectURL(new Blob([bytes], { type }));
   const a = Object.assign(document.createElement('a'), { href: url, download: name });
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
   app.toast(`Downloaded ${name}`);
+}
+
+function save() {
+  download(app.save(), /\.vox$/i.test(app.name()) ? app.name() : 'scene.vox', 'application/octet-stream');
 }
 
 let cursor = '';
@@ -114,6 +117,7 @@ function tick(now) {
     if (a === 'open') fileInput.click();
     else if (a === 'save') save();
     else if (a === 'embed') app.toast('The embed export is not built yet');
+    else if (a === 'exported') download(app.take_export(), app.export_name(), 'image/png');
   }
   const c = app.cursor();
   if (c !== cursor) canvas.style.cursor = cursor = c;

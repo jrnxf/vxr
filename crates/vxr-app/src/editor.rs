@@ -7,6 +7,7 @@ use vxr_core::Scene;
 use vxr_core::tools::{Brush, Gesture, Press, Target, plane_cell};
 use vxr_render::{EditBox, Gpu, GpuMap, OrbitCamera, Preview, Renderer, brickmap_layout, gpu::now_ms};
 
+use crate::render::{EXPORT_SIZES, Export};
 use crate::ui::{Action, FontBytes, Hybrid, Stats};
 
 /// Input quiet for this long raises the preview's budget (spikes/preview/RESULTS.md).
@@ -59,6 +60,12 @@ pub struct Editor {
     frames: Vec<f64>,
     /// Where the scene was opened from or last saved to.
     pub path: Option<std::path::PathBuf>,
+    /// A PNG render export in progress (the corner pauses meanwhile).
+    pub export: Option<Export>,
+    /// The last finished export's PNG and size, for the host to save or download.
+    pub exported: Option<(Vec<u8>, (u32, u32))>,
+    /// Export sizes this GPU can render.
+    export_fits: [bool; 4],
 }
 
 impl Editor {
@@ -107,7 +114,11 @@ impl Editor {
             palette,
             frames: Vec::new(),
             path: None,
+            export: None,
+            exported: None,
+            export_fits: [false; 4],
         };
+        e.export_fits = EXPORT_SIZES.map(|(w, h)| Preview::fits(&e.gpu.device, w, h));
         e.frame_scene();
         Ok(e)
     }
@@ -120,6 +131,7 @@ impl Editor {
         self.palette = scene.palette;
         self.preview.set_palette(&self.gpu.queue, &self.palette);
         self.preview.restart();
+        self.export = None;
         self.scene = scene;
         self.ui.scene_name = name.into();
         self.gesture = None;
@@ -271,7 +283,20 @@ impl Editor {
             std::array::from_fn(|a| hi[a] - lo[a] + 1)
         });
         let render = self.ui.show_render.then(|| (self.preview.samples(), self.preview.last_rows > 0));
-        Stats { voxels: self.scene.map.voxels, fps: fps as f32, frame_ms: frame_ms as f32, cursor, box_size, render }
+        let export = self.export.as_ref().map(|x| {
+            let (done, of) = x.progress();
+            (x.size(), done, of)
+        });
+        Stats {
+            voxels: self.scene.map.voxels,
+            fps: fps as f32,
+            frame_ms: frame_ms as f32,
+            cursor,
+            box_size,
+            render,
+            export,
+            export_fits: self.export_fits,
+        }
     }
 
     /// Run the UI, apply what it asked for, and draw a frame onto `view`. Returns the actions
@@ -313,25 +338,58 @@ impl Editor {
                     self.scene.copy_color(from, to);
                     self.ui.toast(&self.ctx, format!("Copied slot {from} to slot {to}"));
                 }
+                Action::ExportPng => self.start_export(),
+                Action::CancelExport => {
+                    self.export = None;
+                    self.ui.toast(&self.ctx, "Export cancelled");
+                }
                 other => host.push(other),
             }
         }
-        self.draw(out.shapes, out.pixels_per_point, out.textures_delta, view);
+        self.preview.lighting = self.ui.render.lighting(self.cam.distance);
+        self.preview.max_spp = self.ui.render.samples();
+        if let Some(done) = self.draw(out.shapes, out.pixels_per_point, out.textures_delta, view) {
+            host.push(done);
+        }
         (host, out.platform_output)
     }
 
+    /// The file name for a render export: the scene's name with `-render.png`.
+    pub fn export_name(&self) -> String {
+        let n = self.ui.scene_name.trim_end_matches(".vox").trim_end_matches(".VOX");
+        format!("{}-render.png", if n.is_empty() { "vxr" } else { n })
+    }
+
+    /// Start a PNG export of the corner's view with the Render panel's settings.
+    pub fn start_export(&mut self) {
+        let r = Export::start(&self.gpu, &self.layout, &self.scene.palette, self.cam, &self.ui.render);
+        match r {
+            Ok(x) => {
+                let (w, h) = x.size();
+                self.export = Some(x);
+                self.ui.show_render = true;
+                self.ui.toast(&self.ctx, format!("Rendering {w}×{h} at {} spp", self.ui.render.samples()));
+            }
+            Err(e) => self.ui.toast(&self.ctx, format!("Could not export: {e}")),
+        }
+    }
+
+    /// Draw a frame; returns `Action::Exported` when an export finished this frame.
     fn draw(
         &mut self,
         shapes: Vec<egui::epaint::ClippedShape>,
         ppp: f32,
         textures: egui::TexturesDelta,
         view: &wgpu::TextureView,
-    ) {
+    ) -> Option<Action> {
         let (dev, queue) = (&self.gpu.device, &self.gpu.queue);
         if self.scene.palette != self.palette {
             self.palette = self.scene.palette;
             self.map.set_palette(queue, &self.palette);
             self.preview.set_palette(queue, &self.palette);
+            if let Some(x) = &mut self.export {
+                x.set_palette(queue, &self.palette);
+            }
         }
         let edit = self.scene.map.take_dirty_box().map(|(lo, hi)| EditBox::voxels(lo, hi));
         if let Err(e) = self.map.upload_dirty(dev, queue, &mut self.scene.map, &self.scene.palette) {
@@ -342,7 +400,11 @@ impl Editor {
         let mut enc = dev.create_command_encoder(&Default::default());
         // The preview's passes go first so they can be timed on their own (see preview.rs).
         let corner = self.ui.render_rect.filter(|_| self.ui.show_render);
-        if corner.is_some() {
+        if let Some(x) = &mut self.export {
+            x.encode(queue, &mut enc, &self.map, edit);
+        }
+        // An export takes the corner's GPU time; the corner keeps its last image meanwhile.
+        if corner.is_some() && self.export.is_none() {
             if !self.preview_shown {
                 self.preview.restart();
             }
@@ -386,6 +448,20 @@ impl Editor {
         queue.submit(extra.into_iter().chain([enc.finish()]));
         if corner.is_some() {
             self.preview.after_submit(dev);
+        }
+        let done = self.export.as_mut().and_then(|x| x.after_submit(&self.gpu).map(|r| (r, x.size())));
+        match done {
+            Some((Ok(png), size)) => {
+                self.export = None;
+                self.exported = Some((png, size));
+                Some(Action::Exported)
+            }
+            Some((Err(e), _)) => {
+                self.export = None;
+                self.ui.toast(&self.ctx, format!("Could not export: {e}"));
+                None
+            }
+            None => None,
         }
     }
 }
