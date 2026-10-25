@@ -255,3 +255,19 @@ proptest! {
         prop_assert_eq!(s.map.voxels, 0);
     }
 }
+
+#[test]
+fn dirty_box_covers_every_changed_voxel() {
+    let mut s = Scene::new([64, 64, 64]);
+    s.map.track_dirty(true);
+    assert_eq!(s.map.take_dirty_box(), None);
+    s.edit([([3, 4, 5], 1), ([10, 2, 7], 2)]);
+    assert_eq!(s.map.take_dirty_box(), Some(([3, 2, 5], [10, 4, 7])));
+    assert_eq!(s.map.take_dirty_box(), None, "taking it clears it");
+    // Setting a voxel to the value it has is no change.
+    s.edit([([3, 4, 5], 1)]);
+    assert_eq!(s.map.take_dirty_box(), None);
+    // Undo reverts the whole first edit, so the box covers both voxels again.
+    assert!(s.undo());
+    assert_eq!(s.map.take_dirty_box(), Some(([3, 2, 5], [10, 4, 7])));
+}

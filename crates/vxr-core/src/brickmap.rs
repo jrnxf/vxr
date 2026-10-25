@@ -33,6 +33,8 @@ pub struct BrickMap {
     dirty_brick_flag: Vec<bool>,
     pub dirty_bricks: Vec<u32>,
     pub dirty_cells: Vec<u32>,
+    /// Voxels changed since the last `take_dirty_box`, as (min, max inclusive).
+    dirty_box: Option<([i32; 3], [i32; 3])>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -61,6 +63,7 @@ impl BrickMap {
             dirty_brick_flag: Vec::new(),
             dirty_bricks: Vec::new(),
             dirty_cells: Vec::new(),
+            dirty_box: None,
         }
     }
 
@@ -169,6 +172,13 @@ impl BrickMap {
             }
         }
         self.mark_brick(b);
+        if self.track {
+            let p = [x as i32, y as i32, z as i32];
+            self.dirty_box = Some(match self.dirty_box {
+                Some((lo, hi)) => (std::array::from_fn(|a| lo[a].min(p[a])), std::array::from_fn(|a| hi[a].max(p[a]))),
+                None => (p, p),
+            });
+        }
         if v == 0 {
             let base = b as usize * MASK_WORDS;
             if self.masks[base..base + MASK_WORDS].iter().all(|&m| m == 0) {
@@ -188,6 +198,11 @@ impl BrickMap {
             self.dirty_brick_flag[b as usize] = false;
         }
         (std::mem::take(&mut self.dirty_bricks), std::mem::take(&mut self.dirty_cells))
+    }
+
+    /// The box of voxels changed since the last call (dirty tracking on), for the preview.
+    pub fn take_dirty_box(&mut self) -> Option<([i32; 3], [i32; 3])> {
+        self.dirty_box.take()
     }
 
     /// Bounds of occupied bricks, in voxels: (min, max exclusive). None if empty.

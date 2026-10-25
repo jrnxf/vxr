@@ -25,7 +25,7 @@ pub const DANGER: Color32 = Color32::from_rgb(0xff, 0x6b, 0x7a);
 pub const OK: Color32 = Color32::from_rgb(0x6e, 0xe7, 0xa8);
 pub const MID: Color32 = Color32::from_rgb(0xff, 0xd1, 0x66);
 const HOVER: Color32 = Color32::from_rgba_unmultiplied_const(255, 255, 255, 15);
-const R: u8 = 12;
+pub(crate) const R: u8 = 12;
 
 /// Font bytes, loaded by the caller (see `crate::fonts`).
 pub struct FontBytes {
@@ -187,6 +187,8 @@ pub struct Stats {
     pub cursor: Option<[i32; 3]>,
     /// Size of the box being dragged, shown in place of the cursor.
     pub box_size: Option<[i32; 3]>,
+    /// The render corner's samples per pixel and whether it is still sampling, if shown.
+    pub render: Option<(f32, bool)>,
 }
 
 pub struct Hybrid {
@@ -207,6 +209,10 @@ pub struct Hybrid {
     pub can_redo: bool,
     pub color_edit: Option<ColorEdit>,
     pub slot_op: Option<SlotOp>,
+    /// Show the live path-traced render corner.
+    pub show_render: bool,
+    /// Where the render corner's image goes this frame, in points.
+    pub render_rect: Option<Rect>,
     /// Where each clickable part of the UI was last drawn, in points, by name, for the
     /// headless checks ("edit-color", "sv", "hue", "swap", "copy", "sw<slot>", ...).
     pub hits: HashMap<String, Rect>,
@@ -244,6 +250,7 @@ const COMMANDS: &[Command] = &[
     Command { label: "Edit color", keys: &[], run: |h| h.open_color_edit() },
     Command { label: "Swap color with…", keys: &[], run: |h| h.slot_op = Some(SlotOp::Swap) },
     Command { label: "Copy color to…", keys: &[], run: |h| h.slot_op = Some(SlotOp::Copy) },
+    Command { label: "Toggle render preview", keys: &[], run: |h| h.show_render = !h.show_render },
 ];
 
 impl Hybrid {
@@ -263,6 +270,8 @@ impl Hybrid {
             can_redo: false,
             color_edit: None,
             slot_op: None,
+            show_render: true,
+            render_rect: None,
             hits: HashMap::new(),
             drag_from: None,
             shown_slot: 28,
@@ -339,6 +348,7 @@ impl Hybrid {
             self.coach_card(ctx, screen);
         }
         self.stats(ctx, screen, stats);
+        self.render_corner(ctx, screen, stats);
         self.hint_bar(ctx, screen);
         self.history(ctx, screen);
         self.toast_panel(ctx, screen);
@@ -1020,6 +1030,35 @@ impl Hybrid {
                 x += cw + 16.0;
             }
         });
+    }
+
+    // The live render corner (direction D, pin 4: right:1%, bottom:12%, width:24%, a label
+    // chip at .5em). The editor writes the path-traced image into the rect under the UI, so the
+    // panel has a border but no fill. 16:9, the preview's own shape, and it sits above #history.
+    fn render_corner(&mut self, ctx: &Context, screen: Rect, s: &Stats) {
+        self.render_rect = None;
+        let Some((spp, live)) = s.render.filter(|_| self.show_render) else { return };
+        let w = 320.0;
+        let size = vec2(w, (w * 9.0 / 16.0).round());
+        let rect = Rect::from_min_size(
+            pos2(screen.right() - 12.0 - size.x, screen.bottom() - 12.0 - 40.0 - 10.0 - size.y),
+            size,
+        );
+        self.render_rect = Some(rect);
+        self.hits.insert("render".into(), rect);
+        Area::new(Id::unique("render")).fade_in(false).order(Order::Middle).fixed_pos(rect.min).constrain(false).show(
+            ctx,
+            |ui| {
+                ui.allocate_rect(rect, Sense::hover());
+                let p = ui.painter();
+                p.rect_stroke(rect, CornerRadius::same(R), Stroke::new(1.0, LINE2), StrokeKind::Inside);
+                let label = format!("Path trace · {:.0} spp{}", spp.floor(), if live { " · live" } else { "" });
+                let g = ui.painter().layout_no_wrap(label, inter_medium(11.0), TEXT);
+                let chip = Rect::from_min_size(rect.min + vec2(8.0, 8.0), g.size() + vec2(16.0, 6.0));
+                p.rect_filled(chip, CornerRadius::same(6), Color32::from_black_alpha(140));
+                p.galley(chip.min + vec2(8.0, 3.0), g, TEXT);
+            },
+        );
     }
 
     // #hint

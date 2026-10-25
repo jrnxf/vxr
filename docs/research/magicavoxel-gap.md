@@ -104,14 +104,14 @@ Feature names below follow the update log [S1] unless another source is given.
 
 | Feature | MagicaVoxel | vxr | Priority | Why |
 |---|---|---|---|---|
-| Interactive path tracer | Progressive GPU path tracing [S1] | missing in the app [3]; proven in `spikes/preview` (640x360, A-trous denoise, 3 ms per frame) | P1 | render |
+| Interactive path tracer | Progressive GPU path tracing [S1] | partial [3]: the live corner runs in the app and the browser (640x360, A-trous denoise, 3 ms per frame while editing, 12 ms idle); no full-view render mode or click-to-swap yet | P1 | render |
 | Sun direction and colour, sky | Atmospheric sky with Rayleigh and Mie, sun disk [S1 0.99.1, 0.99.2] | missing [3] | P1 | render |
 | Exposure, gamma, tone mapping, vignette | Post->E, Camera->G, ACES [S1 0.97.3, 0.98.1] | missing [3] (exposure first) | P1 | render |
 | Depth of field, bokeh | Click to set focus; bladed bokeh [S1 0.98.1, 0.99.1] | missing [3] | P2 | render |
 | Bloom | [S1 0.98.2, 0.99.1] | missing | P3 | render |
 | Fog and volumetrics | [S1 0.97.5, 0.99.4.1] | missing | P3 | render |
 | Image-based lighting (`.hdr`) | Sky->IBL [S1 0.99.4.1] | missing | P3 | render |
-| Denoiser | Intel OIDN plugin [S1 0.99.4.2] | missing [3] (A-trous in the spike) | P1 | render |
+| Denoiser | Intel OIDN plugin [S1 0.99.4.2] | done [3]: A-trous in the live corner | P1 | render |
 | Export PNG at a chosen size | Photo mode up to 12000x12000 [S1 0.99.3] | missing [3] | P1 | render, minutes |
 | Turntable and animation render | [S1 0.99.3, 0.99.7.0] | missing | P3 | - |
 | Voxel shapes (Lego, marching cubes, clay) | [S1 0.96, 0.99.2] | missing | P3 | - |
@@ -193,5 +193,5 @@ Design note: `.vox` animation is a list of `nSHP` models with `_f` frame indices
 ## Takeaways
 
 1. Lossless save [1] was the one blocking gap for anyone with existing files. It is done: saving an opened MagicaVoxel scene keeps its materials, layers, cameras and names.
-2. The palette [2] and the renderer [3] were the two loved features vxr lacked most visibly. Palette editing is done (picker, live recolour, swap and copy); multi-select, sorting and palette import/export remain. The renderer is next.
+2. The palette [2] and the renderer [3] were the two loved features vxr lacked most visibly. Palette editing is done (picker, live recolour, swap and copy); multi-select, sorting and palette import/export remain. The live path-traced corner is in; the Render panel (sun, sky, exposure, depth of field), PNG export and materials are next.
 3. Brushes [4] and selection [5] close the sculpting gap. After them, the world editor [8] matters most for MagicaVoxel scenes with many objects.

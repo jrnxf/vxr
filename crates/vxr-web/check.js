@@ -260,6 +260,33 @@ async () => {
   step('undoing every palette edit gives back the file', same(bytes(), original));
   await key('v');
 
+  // The live render corner: on screen, sampling, an edit resets only nearby pixels, Cmd-K hides it.
+  {
+    const r0 = st().render;
+    step('the render corner is on screen', r0.shown && window.vxr.hit('render').length === 2, JSON.stringify(r0));
+    let r = r0;
+    for (let i = 0; i < 300 && r.spp < 8; i++) { await frames(1); r = st().render; }
+    step('the render corner path traces samples', r.spp >= 8 && r.rows > 0, `${JSON.stringify(r)} (GPU timestamps: ${r.timestamps})`);
+    await key('v');
+    await key('a');
+    await click(mx, my);
+    await frames(2);
+    const r1 = st().render;
+    step('an edit resets only nearby pixels of the render', r1.restarts === r.restarts && r1.rows > 0, `${JSON.stringify(r)} -> ${JSON.stringify(r1)}`);
+    await key('z', cmd);
+    await key('k', cmd);
+    for (const ch of 'render preview') await key(ch);
+    await key('Enter');
+    await frames(2);
+    step('Cmd-K hides the render corner', !st().render.shown && window.vxr.hit('render').length === 0, JSON.stringify(st().render));
+    await key('k', cmd);
+    for (const ch of 'render preview') await key(ch);
+    await key('Enter');
+    await frames(2);
+    step('and shows it again', st().render.shown);
+    step('the render steps leave the file as it was', same(bytes(), original));
+  }
+
   // Save (download) and Open (file input).
   const input = document.getElementById('file');
   let picked = 0;

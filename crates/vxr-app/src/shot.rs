@@ -24,9 +24,13 @@ struct Shot {
 
 impl Shot {
     fn new(scene: Scene, name: &str, ppp: f32) -> Result<Self, String> {
+        Self::sized(scene, name, ppp, POINTS)
+    }
+
+    fn sized(scene: Scene, name: &str, ppp: f32, points: (u32, u32)) -> Result<Self, String> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let gpu = pollster::block_on(Gpu::new(instance, None))?;
-        let (w, h) = ((POINTS.0 as f32 * ppp) as u32, (POINTS.1 as f32 * ppp) as u32);
+        let (w, h) = ((points.0 as f32 * ppp) as u32, (points.1 as f32 * ppp) as u32);
         let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("shot"),
             size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
@@ -158,6 +162,7 @@ fn check(ok: bool, what: String) -> Result<(), String> {
 
 pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     let path = scene;
+    let source = scene;
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let load = || match scene {
         Some(p) => crate::native::open(p),
@@ -238,6 +243,7 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     check(s.ed.ui.cmdk.is_none(), "Escape closes it".into())?;
 
     palette(&mut s, dir)?;
+    render(&mut s, dir)?;
 
     // Save, reopen and compare.
     let bytes = s.ed.scene.to_vox();
@@ -265,7 +271,92 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     let p = s.top_face_pixel(mid)?;
     s.ed.pointer_moved(Some(p));
     s.frames(12);
-    s.save_png(&dir.join("app-2x-edited.png"))
+    s.save_png(&dir.join("app-2x-edited.png"))?;
+    if let Some(p) = source {
+        frame_times(p)?;
+    }
+    Ok(())
+}
+
+/// The live render corner: it shows, converges, follows an edit without restarting, and
+/// Cmd-K hides it.
+fn render(s: &mut Shot, dir: &Path) -> Result<(), String> {
+    s.frames(2);
+    let rect = s.ed.ui.hits.get("render").copied();
+    check(rect.is_some(), "the render corner is on screen".into())?;
+    let restarts = s.ed.preview.restarts;
+    for _ in 0..200 {
+        s.frames(1);
+        if s.ed.preview.samples() >= 16.0 {
+            break;
+        }
+    }
+    let spp = s.ed.preview.samples();
+    check(spp >= 16.0, format!("the render corner reaches {spp:.0} spp"))?;
+    let img = pollster::block_on(s.ed.preview.read(&s.ed.gpu.device, &s.ed.gpu.queue));
+    let lum: Vec<u32> = img.as_chunks::<4>().0.iter().map(|p| p[0] as u32 + p[1] as u32 + p[2] as u32).collect();
+    let (lo, hi) = (lum.iter().min().unwrap(), lum.iter().max().unwrap());
+    check(hi - lo > 200, format!("the path-traced image has light and shadow (sum of RGB {lo} to {hi})"))?;
+    s.save_png(&dir.join("app-2x-render.png"))?;
+
+    s.tool(Tool::Add, Shape::Voxel);
+    let mid = [s.ed.width as f32 / 2.0, s.ed.height as f32 / 2.0];
+    let p = s.top_face_pixel(mid)?;
+    s.stroke(p, &[]);
+    s.frames(1);
+    check(
+        s.ed.preview.restarts == restarts && s.ed.preview.last_rows > 0,
+        format!("an edit resets only nearby pixels ({} full restarts)", s.ed.preview.restarts - restarts),
+    )?;
+    s.ed.undo();
+
+    let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("render preview".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    check(!s.ed.ui.show_render && !s.ed.ui.hits.contains_key("render"), "Cmd-K hides the render corner".into())?;
+    s.ed.ui.show_render = true;
+    s.frames(2);
+    Ok(())
+}
+
+/// Frame time of the island at full Retina (3024x1964), without and with the render corner,
+/// while editing (pointer moving every frame) and idle. Each frame waits for the GPU.
+fn frame_times(scene: &Path) -> Result<(), String> {
+    let (sc, name) = crate::native::open(scene)?;
+    let mut s = Shot::sized(sc, &name, 2.0, (1512, 982))?;
+    s.ed.ui.coach = false;
+    s.frames(4);
+    let mid = [s.ed.width as f32 / 2.0, s.ed.height as f32 / 2.0];
+    let run = |s: &mut Shot, render: bool, editing: bool| {
+        s.ed.ui.show_render = render;
+        s.frames(4);
+        if !editing {
+            std::thread::sleep(std::time::Duration::from_millis(350));
+        }
+        let mut t = Vec::new();
+        for i in 0..90 {
+            if editing {
+                s.ed.pointer_moved(Some([mid[0] + (i % 7) as f32, mid[1]]));
+            }
+            let t0 = std::time::Instant::now();
+            s.frames(1);
+            let _ = s.ed.gpu.device.poll(wgpu::PollType::wait_indefinitely());
+            t.push(t0.elapsed().as_secs_f64() * 1000.0);
+        }
+        t.sort_by(f64::total_cmp);
+        t[t.len() / 2]
+    };
+    let off = run(&mut s, false, true);
+    let on = run(&mut s, true, true);
+    let idle = run(&mut s, true, false);
+    let (ms, measured) = s.ed.preview.sample_ms();
+    println!(
+        "info frame time, island at 3024x1964 (median, CPU + GPU): {off:.2} ms without the render corner, \
+         {on:.2} ms with it while editing, {idle:.2} ms idle; one 640x360 sample {ms:.2} ms ({})",
+        if measured { "timestamps" } else { "assumed" }
+    );
+    Ok(())
 }
 
 /// The palette editor, through egui input on the drawn UI: live recolour, one undo step per

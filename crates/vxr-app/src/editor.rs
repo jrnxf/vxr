@@ -5,9 +5,12 @@
 use glam::Vec3;
 use vxr_core::Scene;
 use vxr_core::tools::{Brush, Gesture, Press, Target, plane_cell};
-use vxr_render::{Gpu, GpuMap, OrbitCamera, Renderer, brickmap_layout, gpu::now_ms};
+use vxr_render::{EditBox, Gpu, GpuMap, OrbitCamera, Preview, Renderer, brickmap_layout, gpu::now_ms};
 
 use crate::ui::{Action, FontBytes, Hybrid, Stats};
+
+/// Input quiet for this long raises the preview's budget (spikes/preview/RESULTS.md).
+const IDLE_MS: f64 = 300.0;
 
 /// Size of a new, empty scene.
 pub const NEW_SIZE: [u32; 3] = [128, 128, 128];
@@ -31,6 +34,12 @@ pub struct Editor {
     layout: wgpu::BindGroupLayout,
     map: GpuMap,
     renderer: Renderer,
+    /// The live path-traced preview in the corner.
+    pub preview: Preview,
+    /// Whether the preview drew last frame (showing it again restarts it).
+    preview_shown: bool,
+    /// When input last arrived (ms, `now_ms`).
+    last_input: f64,
     pub cam: OrbitCamera,
     pub ctx: egui::Context,
     egui: egui_wgpu::Renderer,
@@ -68,6 +77,7 @@ impl Editor {
         let map = GpuMap::new(&gpu.device, &gpu.queue, &layout, &scene.map, &scene.palette)?;
         let (width, height) = (size.0.max(1), size.1.max(1));
         let renderer = Renderer::new(&gpu.device, &layout, format, width, height, false);
+        let preview = Preview::new(&gpu.device, &gpu.queue, &layout, &scene.palette, gpu.timestamps);
         let egui = egui_wgpu::Renderer::new(&gpu.device, format, egui_wgpu::RendererOptions::default());
         let ctx = egui::Context::default();
         crate::ui::install(&ctx, fonts);
@@ -79,6 +89,9 @@ impl Editor {
             layout,
             map,
             renderer,
+            preview,
+            preview_shown: false,
+            last_input: 0.0,
             cam: OrbitCamera::framing(Vec3::ZERO, Vec3::ONE),
             ctx,
             egui,
@@ -105,6 +118,8 @@ impl Editor {
         scene.map.track_dirty(true);
         self.map = GpuMap::new(&self.gpu.device, &self.gpu.queue, &self.layout, &scene.map, &scene.palette)?;
         self.palette = scene.palette;
+        self.preview.set_palette(&self.gpu.queue, &self.palette);
+        self.preview.restart();
         self.scene = scene;
         self.ui.scene_name = name.into();
         self.gesture = None;
@@ -149,6 +164,7 @@ impl Editor {
 
     /// The pointer moved to `p` (pixels), or left the view (`None`).
     pub fn pointer_moved(&mut self, p: Option<[f32; 2]>) {
+        self.last_input = now_ms();
         let last = self.pointer;
         self.pointer = p;
         let Some(p) = p else {
@@ -180,6 +196,7 @@ impl Editor {
 
     /// A mouse button changed. `over_ui` is true when egui has the pointer.
     pub fn button(&mut self, b: Button, pressed: bool, over_ui: bool) {
+        self.last_input = now_ms();
         if !pressed {
             if let Some(g) = self.gesture.take()
                 && b == Button::Left
@@ -222,6 +239,7 @@ impl Editor {
 
     /// Wheel zoom toward the point under the pointer, in notches (positive zooms in).
     pub fn scroll(&mut self, notches: f32) {
+        self.last_input = now_ms();
         let hit = self.pointer.and_then(|p| {
             let (o, d) = self.ray(p);
             self.scene.map.raycast(o, d, 1e5).map(|h| (Vec3::from(d), h.t))
@@ -252,13 +270,17 @@ impl Editor {
             let (lo, hi) = g.extent();
             std::array::from_fn(|a| hi[a] - lo[a] + 1)
         });
-        Stats { voxels: self.scene.map.voxels, fps: fps as f32, frame_ms: frame_ms as f32, cursor, box_size }
+        let render = self.ui.show_render.then(|| (self.preview.samples(), self.preview.last_rows > 0));
+        Stats { voxels: self.scene.map.voxels, fps: fps as f32, frame_ms: frame_ms as f32, cursor, box_size, render }
     }
 
     /// Run the UI, apply what it asked for, and draw a frame onto `view`. Returns the actions
     /// the host handles (open, save, embed) and egui's platform output.
     pub fn frame(&mut self, input: egui::RawInput, view: &wgpu::TextureView) -> (Vec<Action>, egui::PlatformOutput) {
         let now = now_ms();
+        if !input.events.is_empty() {
+            self.last_input = now;
+        }
         self.frames.push(now);
         let keep = self.frames.iter().position(|&t| now - t <= 500.0).unwrap_or(0);
         self.frames.drain(..keep);
@@ -309,14 +331,30 @@ impl Editor {
         if self.scene.palette != self.palette {
             self.palette = self.scene.palette;
             self.map.set_palette(queue, &self.palette);
+            self.preview.set_palette(queue, &self.palette);
         }
+        let edit = self.scene.map.take_dirty_box().map(|(lo, hi)| EditBox::voxels(lo, hi));
         if let Err(e) = self.map.upload_dirty(dev, queue, &mut self.scene.map, &self.scene.palette) {
             eprintln!("upload failed: {e}");
         }
         let tint = if self.gesture.is_none() { self.cursor.filter(|t| !t.ground).map(|t| t.voxel) } else { None };
         self.renderer.set_camera(queue, &self.cam, tint);
         let mut enc = dev.create_command_encoder(&Default::default());
+        // The preview's passes go first so they can be timed on their own (see preview.rs).
+        let corner = self.ui.render_rect.filter(|_| self.ui.show_render);
+        if corner.is_some() {
+            if !self.preview_shown {
+                self.preview.restart();
+            }
+            let idle = now_ms() - self.last_input > IDLE_MS;
+            self.preview.encode(queue, &mut enc, &self.map, &self.cam, edit, idle);
+        }
+        self.preview_shown = corner.is_some();
         self.renderer.march(&mut enc, &self.map, None);
+        if let Some(r) = corner {
+            let px = [r.left() * ppp, r.top() * ppp, r.width() * ppp, r.height() * ppp];
+            self.preview.composite_into(dev, queue, &mut enc, &self.renderer.color, px, crate::ui::R as f32 * ppp);
+        }
         self.renderer.blit(&mut enc, view, None);
         let jobs = self.ctx.tessellate(shapes, ppp);
         for (id, deltas) in &textures.set {
@@ -346,6 +384,9 @@ impl Editor {
             self.egui.free_texture(id);
         }
         queue.submit(extra.into_iter().chain([enc.finish()]));
+        if corner.is_some() {
+            self.preview.after_submit(dev);
+        }
     }
 }
 

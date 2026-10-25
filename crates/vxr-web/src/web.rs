@@ -252,7 +252,7 @@ impl App {
         let e = &self.editor;
         let (c, h) = (&e.cam, e.scene.history());
         format!(
-            r#"{{"voxels":{},"tool":"{:?}","shape":"{:?}","mirror":{},"slot":{},"colorEdit":{},"slotOp":"{:?}","undo":{},"redo":{},"cmdk":{},"coach":{},"name":{:?},"size":[{},{}],"ppp":{},"cam":[{},{},{},{},{},{}]}}"#,
+            r#"{{"voxels":{},"tool":"{:?}","shape":"{:?}","mirror":{},"slot":{},"colorEdit":{},"slotOp":"{:?}","undo":{},"redo":{},"cmdk":{},"coach":{},"name":{:?},"size":[{},{}],"ppp":{},"cam":[{},{},{},{},{},{}],"render":{{"shown":{},"spp":{},"rows":{},"restarts":{},"timestamps":{}}}}}"#,
             e.scene.map.voxels,
             e.ui.tool,
             e.ui.shape,
@@ -274,6 +274,11 @@ impl App {
             c.yaw,
             c.pitch,
             c.distance,
+            e.ui.render_rect.is_some() && e.ui.show_render,
+            e.preview.samples(),
+            e.preview.last_rows,
+            e.preview.restarts,
+            e.gpu.timestamps,
         )
     }
 
