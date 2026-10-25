@@ -1,0 +1,21 @@
+[package]
+name = "vxr-web"
+description = "vxr's editor in the browser: the vxr-app Editor on a WebGPU canvas"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+vxr-app = { path = "../vxr-app" }
+vxr-core.workspace = true
+vxr-render.workspace = true
+egui = "0.37"
+wgpu = { version = "30.0.1", default-features = false, features = ["webgpu", "wgsl", "std"] }
+# Pinned exactly: wasm-bindgen-cli in nix/flake.nix must match it.
+wasm-bindgen = "=0.2.129"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["HtmlCanvasElement"] }
+console_error_panic_hook = "0.1"

@@ -2,7 +2,7 @@
 
 fast voxel scenes
 
-Early stage. The real build is a Rust workspace in `crates/`, and the first desktop editor runs: open a MagicaVoxel `.vox` file, add, erase, paint and pick with the voxel, box and face brushes (and X mirror), orbit, pan and zoom, undo and redo, and save. It uses the Hybrid UI (tool rail, palette, hint bar, Cmd-K) drawn with egui, and shows the voxel count and FPS. See `AGENTS.md` for how to build and run it. The browser build of the editor comes next.
+Early stage. The real build is a Rust workspace in `crates/`, and the first desktop editor runs: open a MagicaVoxel `.vox` file, add, erase, paint and pick with the voxel, box and face brushes (and X mirror), orbit, pan and zoom, undo and redo, and save. It uses the Hybrid UI (tool rail, palette, hint bar, Cmd-K) drawn with egui, and shows the voxel count and FPS. The same editor runs in the browser with WebGPU (open and save there go through a file picker and a download). See `AGENTS.md` for how to build and run both.
 
 ## What is here
 

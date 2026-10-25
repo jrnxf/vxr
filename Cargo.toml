@@ -19,3 +19,11 @@ debug = 0
 
 [profile.dev]
 debug = 0
+
+# The browser build: small and fast to load (same settings as the Phase 2 embed).
+[profile.wasm]
+inherits = "release"
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+strip = true

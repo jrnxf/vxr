@@ -1,0 +1,8 @@
+// The browser editor on Cloudflare: static assets only, no Worker code.
+// Build with ./build, deploy with ./deploy.
+{
+  "name": "vxr",
+  "compatibility_date": "2026-10-01",
+  "assets": { "directory": "./dist" },
+  "routes": [{ "pattern": "vxr.jrnxf.co", "custom_domain": true }]
+}

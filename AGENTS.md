@@ -17,11 +17,12 @@ fast voxel scenes: an open-source voxel scene editor (Rust, wgpu) with a one-tag
 - `./dev cargo test`: unit and property tests (brick map, undo/redo, editing tools, `.vox` round-trip, GPU renderer). Without the island the island tests skip. `PROPTEST_CASES=<n>` sets the property test size.
 - `./dev cargo clippy --all-targets -- -D warnings` and `./dev cargo fmt --check` must be clean.
 - `./dev cargo build --target wasm32-unknown-unknown` checks the browser target.
+- Browser editor: `crates/vxr-web/build` makes the static site in the git-ignored `crates/vxr-web/dist/` (wasm, page, fonts with their licences, the island as `scene.vox`); serve that folder to try it. It needs WebGPU. `crates/vxr-web/deploy` builds and deploys it to https://vxr.jrnxf.co (Cloudflare Workers static assets, `crates/vxr-web/wrangler.jsonc`), only from a clean `main`.
 - Fixtures are generated in tests (`vxr_vox::fixtures`), never committed as `.vox` files.
 
 ## Where things live
 
-- `crates/vxr-vox`: the `.vox` codec (from `spikes/vox`). `crates/vxr-core`: the editable scene (brick map, undo/redo, `.vox` open and save), no GPU. `crates/vxr-render`: the GPU renderer (from `spikes/engine`: compacted brick map upload, `trace_h` march, blit, orbit camera); its tests render on the real GPU and compare every pixel with the CPU ray cast, and skip when there is no adapter. `crates/vxr-app`: the desktop editor (binary `vxr`): `editor.rs` (scene, camera, gestures and drawing, no window), `ui.rs` (the Hybrid UI in egui, from `spikes/ui`), `native.rs` (winit window, file dialogs), `shot.rs` (the headless check).
+- `crates/vxr-vox`: the `.vox` codec (from `spikes/vox`). `crates/vxr-core`: the editable scene (brick map, undo/redo, `.vox` open and save), no GPU. `crates/vxr-render`: the GPU renderer (from `spikes/engine`: compacted brick map upload, `trace_h` march, blit, orbit camera); its tests render on the real GPU and compare every pixel with the CPU ray cast, and skip when there is no adapter. `crates/vxr-app`: the desktop editor (binary `vxr`): `editor.rs` (scene, camera, gestures and drawing, no window), `ui.rs` (the Hybrid UI in egui, from `spikes/ui`), `native.rs` (winit window, file dialogs), `shot.rs` (the headless check). `crates/vxr-web`: the same `Editor` on a WebGPU canvas (`src/web.rs`) and its page (`www/index.html`), which forwards input, opens files through a file picker and downloads saves.
 
 - `docs/plan.md`: what to research and test next, in order. Ask the owner before starting each phase.
 - `docs/decisions.md`: every settled decision and why. Update it when a decision changes; do not duplicate it here.
