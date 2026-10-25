@@ -46,7 +46,7 @@ Once the tests pass: a desktop app with the Hybrid toolbar and palette, add/eras
 
 ## Phase AI: assistant and MCP server (waiting for the owner's go)
 
-Research and mocks are done: `docs/research/ai.md` (with sources) and the throwaway mocks in `.scratch/ai-mocks/`. The pick: one typed scene edit API (`vxr-ops`) used by a bring-your-own-key assistant in the app (Cmd-K and a review card) and by `vxr mcp`, a stdio MCP server that edits `.vox` files and later drives a running desktop app. Do not start until the owner answers the open questions at the end of `docs/research/ai.md`.
+Research and mocks are done: `docs/research/ai.md` (with sources) and the throwaway mocks in `.scratch/ai-mocks/`. The pick: one typed scene edit API (`vxr-ops`) used by a bring-your-own-key assistant in the app (a docked chat panel plus Cmd-K "Ask AI", with a review card) and by `vxr mcp`, a stdio MCP server that edits `.vox` files and later drives a running desktop app. Questions 2 and 5 at the end of `docs/research/ai.md` are answered; do not start until the owner gives the go.
 
 Risk tests first, each a throwaway spike under `spikes/ai-<name>/` with a `RESULTS.md`. They need the owner's API keys (or a local model), so none can run without them.
 
@@ -57,7 +57,7 @@ Risk tests first, each a throwaway spike under `spikes/ai-<name>/` with a `RESUL
 5. **`vxr mcp` files mode from Claude Code.** Build a scene from an empty file through the MCP tools, then edit a generated fixture with materials, layers and cameras. Pass: the agent finishes the build, every untouched chunk stays byte-identical, and the result opens in vxr.
 6. **Big staged changes.** A 100k-cell staged change drawn as a ghost on the island at 3024x1964. Pass: the frame stays within the current budget (about 2 ms without the render corner on the M4 Pro), and Apply and Discard each take under 50 ms.
 
-Then build in this order: `vxr-ops` with its limits and tests, the review step, the Cmd-K assistant with the two clients, `vxr mcp` files mode, and live mode over a local socket.
+Then build in this order: `vxr-ops` with its limits and tests, the review step, the assistant panel and Cmd-K "Ask AI" with the two clients, `vxr mcp` files mode, and live mode over a local socket.
 
 ## Working rules
 

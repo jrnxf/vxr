@@ -2,7 +2,7 @@
 
 Desk research, 2026-10-25. No API calls with keys were made (there were none). The only network checks were unauthenticated CORS preflight (`OPTIONS`) requests against each provider's endpoint, noted where used. Prices and model IDs are as listed on the providers' pages that day.
 
-**Answer.** Build one typed **scene edit API** in Rust (a new crate, `vxr-ops`) and put everything AI on top of it: the in-app assistant calls it through the model's tool calling, and `vxr mcp` (a stdio MCP server) exposes the same operations to Claude Code and other terminal agents. The model sees the scene as a short text summary plus slices and, for vision models, a rendered picture of the view; it never gets the raw voxels. Every AI change lands as a staged edit that the user previews (ghost voxels plus counts) and then applies as one undo step, or discards. Keys stay on the user's machine: OS keychain on desktop, the tab's memory in the browser by default. All five provider families can be called straight from the browser with no server. First version: Anthropic and any OpenAI-compatible endpoint, the assistant from Cmd-K with the review card, and `vxr mcp` editing `.vox` files on disk. Driving a running desktop app from the terminal comes second. Not built: a text-to-voxel generator.
+**Answer.** Build one typed **scene edit API** in Rust (a new crate, `vxr-ops`) and put everything AI on top of it: the in-app assistant calls it through the model's tool calling, and `vxr mcp` (a stdio MCP server) exposes the same operations to Claude Code and other terminal agents. The model sees the scene as a short text summary plus slices and, for vision models, a rendered picture of the view; it never gets the raw voxels. Every assistant change lands as a staged edit that the user previews (ghost voxels plus counts) and then applies as one undo step, or discards; a terminal agent's edits apply straight away, one undo step each, in plain view. Keys stay on the user's machine: OS keychain on desktop, the tab's memory in the browser by default. All five provider families can be called straight from the browser with no server. First version: Anthropic and any OpenAI-compatible endpoint, the assistant as a docked chat panel with Cmd-K "Ask AI" as a shortcut into the same conversation, the review card, and `vxr mcp` editing `.vox` files on disk. Driving a running desktop app from the terminal comes second. Not built: a text-to-voxel generator.
 
 ## Mocks
 
@@ -11,11 +11,12 @@ Throwaway HTML mocks in the Hybrid look, in the git-ignored `.scratch/ai-mocks/`
 | Mock | File | What it shows |
 |---|---|---|
 | Assistant, direction A | `assistant-panel.html` | A docked panel on the right (Cmd-J or the sparkles button): conversation, the tool calls each answer made, model and cost line, composer with "send a picture of the view" and Stop |
-| Assistant, direction B | `assistant-inline.html`, `assistant-inline-result.html` | Cmd-K "Ask AI" (Tab asks AI from any row); then a one-line prompt bar at the top and a "Proposed change" card beside the edited area. No chat history |
+| Assistant, direction B | `assistant-inline.html`, `assistant-inline-result.html` | Cmd-K "Ask AI" (Tab asks AI from any row); then a one-line prompt bar at the top and a "Proposed change" card beside the edited area, with "Show steps" opening the full review |
 | Review step | `review.html` | The proposed change drawn as ghost voxels (added, removed, repainted), counts, per-step checkboxes, Before/After, Apply (Enter), Discard (Esc), "Ask for changes" |
 | Keys, desktop | `keys.html` | Providers, default models, masked keys with Test, "Stored in the macOS Keychain", a change-size limit and a spend reminder |
 | Keys, browser | `keys-web.html` | The same, with "This tab only" (default) against "Remember in this browser" and what each risks |
-| MCP setup | `mcp.html` | The `claude mcp add` line and the JSON snippet, Files and Live modes, the pairing token, connected clients and the tool list. It shows the "review every agent change" variant of open question 5 |
+| MCP setup | `mcp.html` | The `claude mcp add` line and the JSON snippet, Files and Live modes, the pairing token, connected clients and the tool list |
+| MCP live | `mcp-live.html` | A terminal agent editing the window: a "Claude Code is editing" bar with Stop, and an "Agent edits" card listing each applied call with its own Undo |
 
 ## 1. Bring your own key
 
@@ -117,7 +118,8 @@ Both, through one binary:
 - **Live mode (second).** The running desktop app listens on a local socket when the user turns on "Allow terminal agents to edit this window". `vxr mcp --live` connects to it and forwards the same operations. vengi works this way: its MCP process "joins VoxEdit's network as a normal client" with a host, port and password ([MCP.md](https://github.com/vengi-voxel/vengi/blob/master/docs/voxedit/MCP.md)).
   - Use a **Unix domain socket** (a named pipe on Windows) in the user's runtime directory, not a TCP port. A web page cannot open one, so DNS rebinding, the attack the MCP spec warns about for local HTTP servers ([Streamable HTTP, Security](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http.md)), does not apply. Blockbench's plugin listens on HTTP with "no authentication" and a JavaScript `risky_eval` tool; vxr should not repeat that.
   - Pairing: the app writes a random token to a file only the user can read (mode 0600) next to the socket, and `vxr mcp --live` reads it. Regenerate turns old clients away.
-  - Each MCP edit call is staged like the assistant's and applied as one undo step labelled with the client's name ("Claude Code: paint 412 voxels"); a chip in the hint bar shows a connected agent with a Stop button. MCP clients already ask the user before each tool call, so a second review card per call would be noise; a "review every agent change" switch covers users who want it.
+  - Each MCP edit call is applied straight away as one undo step labelled with the client's name ("Claude Code: paint 412 voxels"); a chip in the hint bar shows a connected agent with a Stop button. MCP clients already ask the user before each tool call, so a second review card per call would be noise; a "review every agent change" switch covers users who want it. An "Agent edits" card lists the calls with an Undo on each, and the agent can call `undo` itself when the user asks it to take something back (`mcp-live.html`).
+- **Whose model.** The model runs in the user's agent, so its use counts against that agent's plan: from Claude Code, the user's Claude subscription. `vxr mcp` makes no model calls and needs no key. The in-app assistant is different: a third-party app cannot sign in with a Claude subscription, so it needs an API key.
 - **The browser build** cannot host a socket or a stdio server. The only route is the page opening a WebSocket to a local `vxr mcp` process, which needs a pairing code, an Origin check and Chrome's Local Network Access prompt. Not worth it for a first version: the MCP setup screen in the browser says to use the desktop app or files mode.
 
 ### Tools and resources
@@ -184,13 +186,13 @@ What leaves the machine, only to the provider the user picked: the prompt, the s
 
 1. `vxr-ops`: the typed operation set with JSON Schemas, its limits, the scene summary, slices and `render_view`, with unit tests and a `--shot` section that drives a scripted tool-call sequence through the same staging and review path.
 2. The **review step** in the editor: staged edit, ghost overlay, review card, one undo step, Stop.
-3. The **assistant from Cmd-K (direction B)** first: it fits Hybrid (no permanent panel, single-letter keys, Cmd-K for everything) and keeps each request short, which keeps it cheap. The docked panel (direction A) can follow if people want conversation history.
+3. **The assistant as both directions, sharing one conversation:** the docked chat panel (direction A, Cmd-J) is its home, with history and the tool calls; Cmd-K "Ask AI" (direction B) is the quick way in, and its result card can open in the panel. Small changes review in the card; bigger ones open the step list (`review.html`). The owner picked this on 2026-10-25.
 4. **Providers:** Anthropic Messages and one OpenAI-compatible client (OpenAI, Gemini's OpenAI endpoint, OpenRouter with PKCE, Ollama, LM Studio). Keys in the keychain natively and per tab in the browser.
 5. `vxr mcp` **files mode**, then **live mode** over a local socket.
 
 ### Small enough to ship first
 
-Assistant in Cmd-K with review, Anthropic plus OpenAI-compatible, 12 operations (`scene_summary`, `render_view`, `place`, `erase`, `box`, `line`, `sphere`, `fill`, `paint`, `select`, `palette_set`, `done`), natively and in the browser. `vxr mcp` files mode with the same 12 plus `open` and `save`. No scripts, no live mode, no conversation panel.
+Assistant in the docked panel and from Cmd-K, with review, Anthropic plus OpenAI-compatible, 12 operations (`scene_summary`, `render_view`, `place`, `erase`, `box`, `line`, `sphere`, `fill`, `paint`, `select`, `palette_set`, `done`), natively and in the browser. `vxr mcp` files mode with the same 12 plus `undo`, `open` and `save`. No scripts, no live mode.
 
 ### Risk tests first (like Phase 2)
 
@@ -199,8 +201,8 @@ Listed with thresholds in `docs/plan.md`, phase "AI". In short: can models actua
 ### Open questions for the owner
 
 1. Is AI still out of v1 (decisions.md says so), with this as the first phase after it, or does the assistant ship in v1?
-2. Direction A (panel) or B (Cmd-K and a card) for the assistant?
+2. ~~Direction A (panel) or B (Cmd-K and a card) for the assistant?~~ Answered 2026-10-25: both, sharing one conversation, with the panel as home.
 3. Should vxr ever offer a hosted key or proxy (a paid tier from the market research), or stay strictly bring-your-own-key?
 4. Is "remember in this browser" worth offering at all, given what it cannot protect against?
-5. Live MCP: apply each agent call straight away with undo, or review every call?
+5. ~~Live MCP: apply each agent call straight away with undo, or review every call?~~ Answered 2026-10-25: apply straight away, one undo step each, visible on screen, and the agent can undo on request.
 6. Script mode (b) on the same API: Lua (vengi-compatible scripts) or Rhai/JS in a wasm sandbox?
