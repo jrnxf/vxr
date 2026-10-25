@@ -4,21 +4,26 @@
 //! Axes: vxr is y-up right-handed. MagicaVoxel is z-up right-handed, so a file voxel at
 //! (x, y, z) is the vxr cell (x, z, -y). Map cell `p` is the world cell `p + origin`, so
 //! the map can start at zero while the scene keeps its file coordinates.
+//!
+//! An opened file is a [`World`] of objects. The map holds either one object's model, in
+//! world axes where it shows (model mode, where every tool edits), or every shown object
+//! composed into one map (world mode, where voxels cannot be edited and world edits move,
+//! copy, group and hide objects). A new scene has no world: the map is its one model.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use vxr_vox::build::Builder;
-use vxr_vox::scene::Rule;
 use vxr_vox::{Document, Material};
 
 use crate::brickmap::BrickMap;
-use crate::history::{Bounds, BoundsChange, Change, ColorChange, History, MaterialChange, SelectionChange, Step};
+use crate::history::{
+    At, Bounds, BoundsChange, Change, ColorChange, History, MaterialChange, SelectionChange, Step, WorldChange,
+};
 use crate::select::Clip;
+use crate::world::World;
 
 /// Largest scene extent per axis, in voxels. The brick grid for 2048^3 is 64 MiB.
 pub const MAX_EXTENT: u32 = 2048;
-/// Free space kept around a loaded model so it can grow in every direction.
-pub const PAD: u32 = 16;
 
 pub struct Scene {
     pub map: BrickMap,
@@ -54,6 +59,11 @@ pub struct Scene {
     /// Bumped whenever the map is replaced by a resize or crop (or their undo), so the
     /// renderer knows to upload it again.
     reshapes: u64,
+    /// The objects of the opened file, or None for a new scene. While the map holds an
+    /// object's model (`at` is [`At::Object`]), the world's copy of that model is stale.
+    world: Option<World>,
+    /// What the map holds.
+    at: At,
 }
 
 /// The changes of the edit in progress: one entry per cell or palette slot, first old value
@@ -99,68 +109,45 @@ impl Scene {
             selected_cache: Default::default(),
             clipboard: None,
             reshapes: 0,
+            world: None,
+            at: At::Map,
         }
     }
 
-    /// Read a `.vox` file. Every instance in the scene graph is flattened into one map,
-    /// hidden ones included, with MagicaVoxel's overlap rule.
+    /// Read a `.vox` file as a world of objects, hidden ones included. A file with one
+    /// object opens in model mode on it, any other in world mode.
     pub fn from_vox(bytes: &[u8]) -> Result<Scene, String> {
         let doc = Document::read(bytes).map_err(|e| e.to_string())?;
         let vs = doc.scene().map_err(|e| e.to_string())?;
-        let world: Vec<([i32; 3], u8)> =
-            vs.world_voxels(Rule::Compose).into_iter().map(|(p, c)| (vox_to_world(p), c)).collect();
-        let (mut lo, mut hi) = ([0i32; 3], [0i32; 3]);
-        if let Some(first) = world.first() {
-            (lo, hi) = (first.0, first.0);
-        }
-        for (p, _) in &world {
-            for a in 0..3 {
-                lo[a] = lo[a].min(p[a]);
-                hi[a] = hi[a].max(p[a]);
-            }
-        }
-        let mut size = [0u32; 3];
-        for a in 0..3 {
-            let extent = (hi[a] as i64 - lo[a] as i64 + 1) as u64;
-            if extent > MAX_EXTENT as u64 {
-                return Err(format!("scene is {extent} voxels on one axis; the limit is {MAX_EXTENT}"));
-            }
-            size[a] = extent as u32 + 2 * PAD;
-        }
-        let mut s = Scene::new(size);
+        let world = World::from_doc(&doc)?;
+        let objects = world.objects();
+        let mut s = Scene::new([1, 1, 1]);
         for (i, c) in s.palette.iter_mut().enumerate() {
             *c = vs.color(i as u8);
         }
         for i in 1..=255u8 {
             s.materials[i as usize] = doc.material(i);
         }
-        s.origin = lo.map(|l| l - PAD as i32);
-        s.floor = PAD as i32;
-        // The file's planes x = 0 and y = 0. vxr z is the negated file y, so file cell y
-        // lands on z = -y and the plane y = 0 (between cells -1 and 0) is z = 1.
-        s.pivot = [0, lo[1] + hi[1] + 1, 2];
-        for (p, c) in world {
-            let m = s.to_map(p);
-            s.map.set(m[0], m[1], m[2], c);
-        }
         s.source = Some(doc);
+        s.world = Some(world);
+        s.load(if objects.len() == 1 { At::Object(objects[0]) } else { At::World })?;
+        s.reshapes = 0;
         Ok(s)
     }
 
     /// Write the scene as a `.vox` file. A scene opened from a file is saved losslessly:
-    /// the edits are applied to that file through [`Document::set_world`] and
-    /// [`Document::set_palette`], so every chunk they do not touch keeps its bytes. A new
-    /// scene is written as a fresh version 200 file, split into models of at most 256^3.
+    /// the world is written into that file through [`World::save_into`] and the palette and
+    /// materials through [`Document::set_palette`] and [`Document::set_material`], so every
+    /// chunk they do not touch keeps its bytes. A new scene is written as a fresh version
+    /// 200 file, split into models of at most 256^3.
     pub fn to_vox(&self) -> Vec<u8> {
-        let mut world = BTreeMap::new();
-        self.for_each_voxel(|p, c| {
-            world.insert(world_to_vox(self.to_world(p)), c);
-        });
-        if let Some(doc) = &self.source
-            && let Some(bytes) = self.save_into(doc.clone(), &world)
+        if let (Some(doc), Some(world)) = (&self.source, &self.world)
+            && let Some(bytes) = self.save_into(doc.clone(), world.clone())
         {
             return bytes;
         }
+        let world: BTreeMap<[i32; 3], u8> =
+            self.world_voxels(false).into_iter().map(|(p, c)| (world_to_vox(p), c)).collect();
         let mut b = Builder::new(200);
         b.palette = Some((0..256).map(|k| self.palette[(k + 1) % 256]).collect());
         b.materials = (1..=255u8)
@@ -171,7 +158,7 @@ impl Scene {
         b.build().write()
     }
 
-    fn save_into(&self, mut doc: Document, world: &BTreeMap<[i32; 3], u8>) -> Option<Vec<u8>> {
+    fn save_into(&self, mut doc: Document, mut world: World) -> Option<Vec<u8>> {
         let file = doc.scene().ok()?;
         for i in 1..=255u8 {
             if file.color(i) != self.palette[i as usize] {
@@ -181,8 +168,144 @@ impl Scene {
                 doc.set_material(i, &self.materials[i as usize]).ok()?;
             }
         }
-        doc.set_world(world).ok()?;
+        if let At::Object(i) = self.at {
+            world.store(i, &self.map, self.origin);
+        }
+        world.save_into(&mut doc).ok()?;
         Some(doc.write())
+    }
+
+    /// Every voxel of the scene by world cell: every object's (only shown ones with
+    /// `shown_only`) with the overlap rule, the current model's edits included.
+    pub fn world_voxels(&self, shown_only: bool) -> BTreeMap<[i32; 3], u8> {
+        let Some(w) = &self.world else {
+            let mut out = BTreeMap::new();
+            self.for_each_voxel(|p, c| {
+                out.insert(self.to_world(p), c);
+            });
+            return out;
+        };
+        match self.at {
+            At::Object(i) => {
+                let mut w = w.clone();
+                w.store(i, &self.map, self.origin);
+                w.world_voxels(shown_only)
+            }
+            _ => w.world_voxels(shown_only),
+        }
+    }
+
+    /// The objects of the opened file, or None for a new scene. While an object's model
+    /// is being edited, the world's copy of it is stale: read voxels through the scene.
+    pub fn world(&self) -> Option<&World> {
+        self.world.as_ref()
+    }
+
+    /// What the map holds: a new scene's model, the world, or one object's model.
+    pub fn at(&self) -> At {
+        self.at
+    }
+
+    /// Edit object `i`'s model (model mode), keeping the edits made to the one before.
+    /// False if there is no world, `i` is not an object, or it is already being edited.
+    pub fn edit_object(&mut self, i: usize) -> bool {
+        self.world.as_ref().is_some_and(|w| w.model_of(i).is_some())
+            && self.at != At::Object(i)
+            && self.switch(At::Object(i)).is_ok()
+    }
+
+    /// Show every object (world mode), keeping the edits made to the current model. False
+    /// if there is no world, it is already shown, or it is over [`MAX_EXTENT`] on an axis.
+    pub fn show_world(&mut self) -> bool {
+        self.world.is_some() && self.at != At::World && self.switch(At::World).is_ok()
+    }
+
+    /// A world edit as one undo step, in world mode: `f` may change the tree (move, copy,
+    /// group, hide, rename, layers) and add models (a duplicate's own). None outside world
+    /// mode, or if the result would be over [`MAX_EXTENT`] on an axis (then nothing changes).
+    pub fn edit_world<R>(&mut self, f: impl FnOnce(&mut World) -> R) -> Option<R> {
+        if self.at != At::World {
+            return None;
+        }
+        self.commit();
+        let w = self.world.as_mut()?;
+        let (old, models) = (w.tree.clone(), w.models.len());
+        let r = f(w);
+        if w.tree == old && w.models.len() == models {
+            return Some(r);
+        }
+        let change = WorldChange { old, new: w.tree.clone(), models, added: w.models[models..].to_vec() };
+        if self.load(At::World).is_err() {
+            let w = self.world.as_mut()?;
+            w.tree = change.old;
+            w.models.truncate(models);
+            return None;
+        }
+        self.history.push(Step { world: Some(Box::new(change)), at: At::World, ..Step::default() });
+        Some(r)
+    }
+
+    /// Store the current model into the world and load `at` into the map.
+    fn switch(&mut self, at: At) -> Result<(), String> {
+        self.commit();
+        if let (At::Object(i), Some(w)) = (self.at, &mut self.world) {
+            w.store(i, &self.map, self.origin);
+        }
+        self.load(at)
+    }
+
+    /// Fill the map from the world: one object's model in world axes, or every shown object.
+    fn load(&mut self, at: At) -> Result<(), String> {
+        let w = self.world.as_ref().ok_or("no world")?;
+        let (mut map, lo) = match at {
+            At::Object(i) => w.object_map(i).ok_or("not an object")?,
+            At::World => {
+                let (mut lo, mut hi) = ([i32::MAX; 3], [i32::MIN; 3]);
+                for i in w.objects() {
+                    if let (true, Some((l, size))) = (w.shown(i), w.placement(i)) {
+                        for a in 0..3 {
+                            lo[a] = lo[a].min(l[a]);
+                            hi[a] = hi[a].max(l[a] + size[a] as i32 - 1);
+                        }
+                    }
+                }
+                if lo[0] > hi[0] {
+                    (lo, hi) = ([0; 3], [0; 3]);
+                }
+                let mut size = [0u32; 3];
+                for a in 0..3 {
+                    let extent = hi[a] as i64 - lo[a] as i64 + 1;
+                    if extent > MAX_EXTENT as i64 {
+                        return Err(format!("scene is {extent} voxels on one axis; the limit is {MAX_EXTENT}"));
+                    }
+                    size[a] = extent as u32;
+                }
+                let mut map = BrickMap::new(size);
+                w.for_each_voxel(true, |_, p, c| {
+                    let m: [i32; 3] = std::array::from_fn(|a| p[a] - lo[a]);
+                    if map.get(m[0], m[1], m[2]) == 0 {
+                        map.set(m[0], m[1], m[2], c);
+                    }
+                });
+                (map, lo)
+            }
+            At::Map => return Err("no world".into()),
+        };
+        map.track_dirty(self.map.tracking());
+        let size = map.size_voxels();
+        self.map = map;
+        self.origin = lo;
+        self.floor = 0;
+        // Mirror across the middle of the model on every axis.
+        self.pivot = std::array::from_fn(|a| 2 * lo[a] + size[a] as i32);
+        self.at = at;
+        if !self.selection.is_empty() {
+            self.selection.clear();
+        }
+        self.selection_version += 1;
+        self.selected_cache.set(None);
+        self.reshapes += 1;
+        Ok(())
     }
 
     pub fn to_map(&self, world: [i32; 3]) -> [i32; 3] {
@@ -216,6 +339,9 @@ impl Scene {
 
     /// Set one map cell inside the open edit (opening one if needed). Returns true if it changed.
     pub fn put(&mut self, p: [i32; 3], v: u8) -> bool {
+        if self.at == At::World {
+            return false;
+        }
         let old = self.map.get(p[0], p[1], p[2]);
         if !self.map.set(p[0], p[1], p[2], v) {
             return false;
@@ -315,6 +441,8 @@ impl Scene {
             materials: s.materials.into_iter().filter(|c| c.old != c.new).collect(),
             selection,
             bounds: s.bounds.filter(|b| b.old != b.new),
+            world: None,
+            at: self.at,
         };
         let n = step.voxels.len();
         if !step.is_empty() {
@@ -370,6 +498,10 @@ impl Scene {
     pub fn undo(&mut self) -> bool {
         self.commit();
         let Some(mut step) = self.history.undo().cloned() else { return false };
+        if step.needs_map() && step.at != self.at && self.switch(step.at).is_err() {
+            self.history.redo();
+            return false;
+        }
         self.apply(&mut step, true);
         true
     }
@@ -377,6 +509,10 @@ impl Scene {
     pub fn redo(&mut self) -> bool {
         self.commit();
         let Some(mut step) = self.history.redo().cloned() else { return false };
+        if step.needs_map() && step.at != self.at && self.switch(step.at).is_err() {
+            self.history.undo();
+            return false;
+        }
         self.apply(&mut step, false);
         true
     }
@@ -389,6 +525,17 @@ impl Scene {
     /// (revert) or after they are dropped (apply), so the step's cells are always in the
     /// map they name.
     fn apply(&mut self, step: &mut Step, revert: bool) {
+        if let (Some(c), Some(w)) = (&step.world, &mut self.world) {
+            if revert {
+                w.tree = c.old.clone();
+                w.models.truncate(c.models);
+            } else {
+                w.tree = c.new.clone();
+                w.models.extend(c.added.iter().cloned());
+            }
+            // It fitted when it was made, so it fits again.
+            let _ = self.load(At::World);
+        }
         if revert && let Some(b) = step.bounds {
             let d = self.reshape(b.old);
             step.translate(d);
@@ -443,7 +590,7 @@ impl Scene {
     /// [`MAX_EXTENT`].
     pub fn set_bounds(&mut self, lo: [i32; 3], size: [u32; 3]) -> Option<usize> {
         self.commit();
-        if size.iter().any(|&s| s == 0 || s > MAX_EXTENT) {
+        if self.at == At::World || size.iter().any(|&s| s == 0 || s > MAX_EXTENT) {
             return None;
         }
         let old = self.bounds();
@@ -492,7 +639,7 @@ impl Scene {
             .collect();
         self.selection_version += 1;
         self.selected_cache.set(None);
-        self.history.translate(d);
+        self.history.translate(self.at, d);
         if let Some(c) = &mut self.clipboard {
             c.from = shift(c.from);
         }

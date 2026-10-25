@@ -241,12 +241,19 @@ async () => {
   await key('z', cmd);
   step('hollow and fill inside are one undo step each', same(bytes(), original), `${st().voxels}`);
   // Crop to content and resize through the Bounds panel, one undo step each. The island
-  // opens with 16 cells of room on every side, so crop takes 32 off each axis.
+  // opens at its model's exact size, so first grow it 20 cells on X (10 on each side) for
+  // crop to take off again.
+  const fitted = st().bounds;
+  await chip('resize');
+  await typeInto('bounds-x', String(fitted[0] + 20));
+  await key('Escape');
   const bounds0 = st().bounds;
+  const grown = bytes();
+  step('the Bounds panel grows the island', bounds0[0] === fitted[0] + 20 && st().voxels === solid, `${fitted} -> ${bounds0}`);
   await chip('crop');
   const bounds1 = st().bounds;
-  step('the flyout crops the bounds to the island', bounds1.every((v, i) => v === bounds0[i] - 32) && st().voxels === solid, `${bounds0} -> ${bounds1}`);
-  step('crop keeps every voxel: the save is still the original bytes', same(bytes(), original));
+  step('the flyout crops the bounds to the island', bounds1.every((v, i) => v === fitted[i]) && st().voxels === solid, `${bounds0} -> ${bounds1}`);
+  step('crop keeps every voxel: the save is the original bytes again', same(bytes(), original));
   await key('z', cmd);
   step('crop is one undo step', st().bounds.join() === bounds0.join(), `${st().bounds}`);
   step('Resize… opens the Bounds panel', (await chip('resize')) && st().boundsPanel && !!at('bounds-x'));
@@ -254,7 +261,7 @@ async () => {
   const narrowed = st().voxels;
   step('the X field resizes the bounds and erases what falls outside', st().bounds[0] === bounds0[0] - 40 && narrowed < solid, `${st().bounds} ${solid} -> ${narrowed}`);
   await key('z', cmd);
-  step('resize is one undo step', same(bytes(), original) && st().bounds.join() === bounds0.join(), `${st().bounds}`);
+  step('resize is one undo step', same(bytes(), grown) && st().bounds.join() === bounds0.join(), `${st().bounds}`);
   await key('Escape');
   step('Escape closes the Bounds panel', !st().boundsPanel);
   await key('k', cmd);
@@ -263,6 +270,8 @@ async () => {
   const bounds2 = st().bounds;
   await key('z', cmd);
   step('Cmd-K crops to content, and undo restores the bounds', bounds2.join() === bounds1.join() && st().bounds.join() === bounds0.join(), `${bounds2}`);
+  await key('z', cmd);
+  step('undoing the grow gives back the opened island', same(bytes(), original) && st().bounds.join() === fitted.join());
   await key('a');
   step('undo after every tool returns to the island', same(bytes(), original));
 
@@ -318,6 +327,22 @@ async () => {
   step("Cmd-K 'Show bounds' hides and shows the bounds", boundsOff && st().guides[2]);
   await key('Escape');
   step('Escape closes the View flyout', !st().viewPanel);
+
+  // World mode: the island is one object, so Tab shows the same voxels as the world and back.
+  const m0 = st();
+  await key('Tab');
+  const inWorld = st();
+  await key('Tab');
+  step('Tab shows the world and goes back to the model',
+    m0.mode === 'object' && inWorld.mode === 'world' && inWorld.voxels === m0.voxels && st().mode === 'object',
+    `${m0.mode} ${inWorld.mode} ${st().mode}`);
+  await key('k', cmd);
+  for (const ch of 'world mode') await key(ch);
+  await key('Enter');
+  const cmdWorld = st().mode;
+  await key('Tab');
+  step("Cmd-K 'World mode / edit model'; switching adds no undo step",
+    cmdWorld === 'world' && st().mode === 'object' && st().undo === m0.undo);
   await key('.');
 
   // Camera.

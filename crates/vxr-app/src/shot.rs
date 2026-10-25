@@ -252,6 +252,7 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     selection(dir)?;
     model_tools(dir)?;
     views(dir)?;
+    world(dir)?;
     render(&mut s, dir)?;
     materials(&mut s, dir)?;
 
@@ -677,6 +678,71 @@ fn model_tools(dir: &Path) -> Result<(), String> {
     check(
         cropped == [5, 5, 5] && s.ed.scene.bounds().size == [128; 3] && s.voxels() == 125,
         "Cmd-K 'Crop to content' and its undo".into(),
+    )?;
+    Ok(())
+}
+
+/// The world: a file of several objects opens in world mode, where voxels cannot be edited;
+/// Tab edits an object's model and goes back, Cmd-K does the same, and undo goes back into
+/// the model it edits.
+fn world(dir: &Path) -> Result<(), String> {
+    use vxr_core::history::At;
+    let bytes = vxr_vox::fixtures::all()
+        .into_iter()
+        .find(|f| f.name == "22-world")
+        .ok_or("no 22-world fixture")?
+        .builder
+        .build()
+        .write();
+    let mut s = Shot::new(Scene::from_vox(&bytes)?, "22-world.vox", 2.0)?;
+    s.ed.ui.coach = false;
+    s.frames(3);
+    let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    let tab = |s: &mut Shot| s.frames_with(2, vec![key(egui::Key::Tab, egui::Modifiers::NONE)]);
+    let world = s.ed.scene.world().ok_or("no world")?;
+    let (objects, shown) = (world.objects(), world.world_voxels(true).len() as u64);
+    check(
+        s.ed.scene.at() == At::World && s.voxels() == shown,
+        format!("a file of {} objects opens in world mode, showing {shown} voxels", objects.len()),
+    )?;
+    s.tool(Tool::Add, Shape::Voxel);
+    let mid = [s.ed.width as f32 / 2.0, s.ed.height as f32 / 2.0];
+    let p = s.top_face_pixel(mid)?;
+    s.stroke(p, &[]);
+    check(s.voxels() == shown && !s.ed.scene.history().can_undo(), "a click in world mode edits no voxel".into())?;
+    s.frames(2);
+    s.save_png(&dir.join("app-2x-world.png"))?;
+
+    tab(&mut s);
+    let first = objects[0];
+    let w = s.ed.scene.world().ok_or("no world")?;
+    let model = w.models[w.model_of(first).ok_or("not an object")?].voxels;
+    check(
+        s.ed.scene.at() == At::Object(first) && s.voxels() == model,
+        format!("Tab edits the first object's model ({model} voxels)"),
+    )?;
+    s.ed.frame_scene();
+    s.frames(2);
+    // The slab is one voxel tall and its bounds are its model's size, so erase rather than add.
+    s.tool(Tool::Erase, Shape::Voxel);
+    let p = s.top_face_pixel(mid)?;
+    s.stroke(p, &[]);
+    check(s.voxels() == model - 1, "an erase in model mode".into())?;
+    tab(&mut s);
+    check(
+        s.ed.scene.at() == At::World && s.voxels() == shown - 1,
+        format!("Tab shows the world with the edit ({} voxels, {:?})", s.voxels(), s.ed.scene.at()),
+    )?;
+    tab(&mut s);
+    check(s.ed.scene.at() == At::Object(first), "Tab goes back to the model last edited".into())?;
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("world mode".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    check(s.ed.scene.at() == At::World, "Cmd-K 'World mode / edit model'".into())?;
+    s.frames_with(2, vec![key(egui::Key::Z, egui::Modifiers::COMMAND)]);
+    check(
+        s.ed.scene.at() == At::Object(first) && s.voxels() == model && s.ed.scene.to_vox() == bytes,
+        "undo goes back into the model and the save is byte-identical again".into(),
     )?;
     Ok(())
 }

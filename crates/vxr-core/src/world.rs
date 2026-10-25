@@ -15,6 +15,7 @@ use vxr_vox::{Document, WorldSave};
 use crate::brickmap::BrickMap;
 use crate::scene::{MAX_EXTENT, vox_to_world, world_to_vox};
 
+#[derive(Clone)]
 pub struct World {
     pub tree: Tree,
     /// One brick map per model, in vxr axes: the file's model voxel (x, y, z) is map cell
@@ -38,6 +39,14 @@ pub fn vox_to_local(size: [i32; 3], v: [i32; 3]) -> [i32; 3] {
 /// The file's model voxel of map cell `u` in a model of file size `size`.
 pub fn local_to_vox(size: [i32; 3], u: [i32; 3]) -> [i32; 3] {
     [u[0], size[1] - 1 - u[2], u[1]]
+}
+
+/// The model voxel of world cell `q` (file axes) for a model of file size `size` placed by
+/// `w`: the inverse of [`vxr_vox::Scene::world_cell`]. It may fall outside the model.
+pub fn local_of(w: &Affine, size: [i32; 3], q: [i32; 3]) -> [i32; 3] {
+    let d: [i32; 3] = std::array::from_fn(|a| 2 * q[a] + 1 - 2 * w.t[a]);
+    let c = mat_vec(&transpose(&w.r), d);
+    std::array::from_fn(|a| (c[a] - 1).div_euclid(2) + size[a] / 2)
 }
 
 fn transpose(r: &[[i32; 3]; 3]) -> [[i32; 3]; 3] {
@@ -139,6 +148,62 @@ impl World {
             out.entry(p).or_insert(c);
         });
         out
+    }
+
+    /// Where object `i`'s model lands in the world: the vxr cell of its low corner and its
+    /// size in vxr axes. None for a group.
+    pub fn placement(&self, i: usize) -> Option<([i32; 3], [u32; 3])> {
+        let m = self.model_of(i)?;
+        let size = vox_size(&self.models[m]);
+        let w = self.world_transform(i);
+        let a = vox_to_world(vxr_vox::Scene::world_cell(&w, size, [0, 0, 0]));
+        let b = vox_to_world(vxr_vox::Scene::world_cell(&w, size, size.map(|k| k - 1)));
+        Some((std::array::from_fn(|k| a[k].min(b[k])), std::array::from_fn(|k| (a[k] - b[k]).unsigned_abs() + 1)))
+    }
+
+    /// Object `i`'s model as a map in vxr world axes (rotated and mirrored as it shows),
+    /// with the world cell of its low corner, for the model editor. None for a group.
+    pub fn object_map(&self, i: usize) -> Option<(BrickMap, [i32; 3])> {
+        let (lo, size) = self.placement(i)?;
+        let map = &self.models[self.model_of(i)?];
+        let (w, vs) = (self.world_transform(i), vox_size(map));
+        let mut out = BrickMap::new(size);
+        map.for_each(|u, c| {
+            let p = vox_to_world(vxr_vox::Scene::world_cell(&w, vs, local_to_vox(vs, u)));
+            out.set(p[0] - lo[0], p[1] - lo[1], p[2] - lo[2], c);
+        });
+        Some((out, lo))
+    }
+
+    /// Put back object `i`'s model from `map`, a map in world axes whose cell (0, 0, 0) is
+    /// world cell `lo` (what [`World::object_map`] gave, edited, maybe resized). The model
+    /// takes the map's bounds as its size; when they moved, every object showing the model
+    /// is moved to match, so nothing shifts in the world. Linked copies change with it.
+    pub fn store(&mut self, i: usize, map: &BrickMap, lo: [i32; 3]) {
+        let Some(m) = self.model_of(i) else { return };
+        let (w, s) = (self.world_transform(i), vox_size(&self.models[m]));
+        let size = map.size_voxels();
+        let hi: [i32; 3] = std::array::from_fn(|k| lo[k] + size[k] as i32 - 1);
+        let (p, q) = (local_of(&w, s, world_to_vox(lo)), local_of(&w, s, world_to_vox(hi)));
+        let a: [i32; 3] = std::array::from_fn(|k| p[k].min(q[k]));
+        let ns: [i32; 3] = std::array::from_fn(|k| (p[k] - q[k]).abs() + 1);
+        let mut model = BrickMap::new([ns[0] as u32, ns[2] as u32, ns[1] as u32]);
+        map.for_each(|c, v| {
+            let l = local_of(&w, s, world_to_vox(std::array::from_fn(|k| lo[k] + c[k])));
+            let u = vox_to_local(ns, std::array::from_fn(|k| l[k] - a[k]));
+            model.set(u[0], u[1], u[2], v);
+        });
+        if ns != s || a != [0; 3] {
+            // Model voxel v is now v - a: shift each copy by r * d in its parent's frame.
+            let d: [i32; 3] = std::array::from_fn(|k| ns[k] / 2 - s[k] / 2 + a[k]);
+            for n in &mut self.tree.nodes {
+                if n.kind == Kind::Object(m) {
+                    let r = mat_vec(&n.local.r, d);
+                    n.local.t = std::array::from_fn(|k| n.local.t[k] + r[k]);
+                }
+            }
+        }
+        self.models[m] = model;
     }
 
     /// Move node `i` by `d` world cells (vxr axes).

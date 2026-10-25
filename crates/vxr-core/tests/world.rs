@@ -216,3 +216,137 @@ fn every_file_keeps_its_other_chunks_through_world_edits() {
         assert_eq!(back.tree.layers, w.tree.layers, "{name}");
     }
 }
+
+/// Scene files: the fixtures that fit in a scene, plus the island.
+fn scene_files() -> Vec<(String, Vec<u8>)> {
+    files().into_iter().filter(|(n, _)| n != "20-far-positions").collect()
+}
+
+#[test]
+fn scenes_open_as_objects_and_switching_modes_keeps_saves_byte_identical() {
+    use vxr_core::history::At;
+    for (name, bytes) in scene_files() {
+        let mut s = vxr_core::Scene::from_vox(&bytes).unwrap();
+        let w = s.world().unwrap();
+        let objects = w.objects();
+        let all = w.world_voxels(false);
+        let shown = w.world_voxels(true);
+        if objects.len() == 1 {
+            assert_eq!(s.at(), At::Object(objects[0]), "{name}: one object opens in model mode");
+        } else {
+            assert_eq!(s.at(), At::World, "{name}: several objects open in world mode");
+            let mut map = BTreeMap::new();
+            s.for_each_voxel(|p, c| {
+                map.insert(s.to_world(p), c);
+            });
+            assert_eq!(map, shown, "{name}: the world map shows every shown object");
+        }
+        for &i in &objects {
+            assert!(s.edit_object(i) || s.at() == At::Object(i), "{name}");
+            let mut n = 0;
+            s.for_each_voxel(|_, _| n += 1);
+            let w = s.world().unwrap();
+            assert_eq!(n as u64, w.models[w.model_of(i).unwrap()].voxels, "{name}: object {i}'s model");
+            assert_eq!(s.world_voxels(false), all, "{name}");
+        }
+        assert!(s.show_world() || objects.len() <= 1, "{name}");
+        assert!(s.to_vox() == bytes, "{name}: still byte-identical");
+    }
+}
+
+#[test]
+fn growing_and_cropping_a_model_keeps_every_object_in_place() {
+    for (name, bytes) in scene_files() {
+        let mut s = vxr_core::Scene::from_vox(&bytes).unwrap();
+        let all = s.world_voxels(false);
+        for i in s.world().unwrap().objects() {
+            s.edit_object(i);
+            let b = s.bounds();
+            let size = b.size.map(|k| (k + 5).min(vxr_core::scene::MAX_EXTENT));
+            s.set_bounds([b.lo[0] - 2, b.lo[1] - 3, b.lo[2] - 1], size).unwrap();
+            assert_eq!(s.world_voxels(false), all, "{name}: object {i} grown");
+            s.show_world();
+            assert_eq!(s.world_voxels(false), all, "{name}: object {i} grown, in world mode");
+        }
+        let grown = s.to_vox();
+        let again = vxr_core::Scene::from_vox(&grown).unwrap();
+        assert_eq!(again.world_voxels(false), all, "{name}: grown models saved");
+        for i in s.world().unwrap().objects() {
+            s.edit_object(i);
+            let before = s.bounds().size;
+            s.crop();
+            let w = s.world().unwrap();
+            if w.models[w.model_of(i).unwrap()].voxels > 0 {
+                assert!(s.bounds().size.iter().zip(before).all(|(a, b)| *a <= b), "{name}: object {i} cropped");
+            }
+        }
+        assert_eq!(s.world_voxels(false), all, "{name}: cropped");
+        let again = vxr_core::Scene::from_vox(&s.to_vox()).unwrap();
+        assert_eq!(again.world_voxels(false), all, "{name}: cropped models saved");
+        // Every step undoes, across modes, back to the opened file.
+        while s.undo() {}
+        assert!(s.to_vox() == bytes, "{name}: undone to the file");
+    }
+}
+
+#[test]
+fn world_edits_and_model_edits_undo_in_order_across_modes() {
+    use vxr_core::history::At;
+    let bytes = fixture("22-world");
+    let mut s = vxr_core::Scene::from_vox(&bytes).unwrap();
+    assert_eq!(s.at(), At::World);
+    let opened = s.world_voxels(false);
+    let w = s.world().unwrap();
+    let (slab, tree_a, tree_b) = (find(w, "slab"), find(w, "tree a"), find(w, "tree b"));
+    let tree_model = w.model_of(tree_a).unwrap();
+    assert_eq!(w.model_of(tree_b), Some(tree_model), "linked copies");
+
+    // Voxels cannot be edited in world mode.
+    let mut cell = None;
+    s.for_each_voxel(|p, _| cell = Some(p));
+    assert_eq!(s.edit([(cell.unwrap(), 0)]), 0);
+
+    // A model edit on tree a shows on every linked copy.
+    assert!(s.edit_object(tree_a));
+    let mut cells = Vec::new();
+    s.for_each_voxel(|p, _| cells.push(p));
+    let n = s.map.voxels;
+    assert_eq!(s.edit([(cells[0], 0)]), 1);
+    assert!(s.show_world());
+    let edited = s.world_voxels(false);
+    assert_eq!(opened.len() - edited.len(), 3, "one voxel gone from each of three copies");
+
+    // A move, a duplicate and a hide, each one step.
+    s.edit_world(|w| w.move_by(slab, [0, 0, 4])).unwrap();
+    let copy = s.edit_world(|w| w.copy(tree_b, false)).unwrap().unwrap();
+    s.edit_world(|w| w.move_by(copy, [0, 6, 0])).unwrap();
+    s.edit_world(|w| w.set_hidden(slab, true)).unwrap();
+    let w = s.world().unwrap();
+    assert_ne!(w.model_of(copy), Some(tree_model), "a duplicate has its own model");
+    let models = w.models.len();
+    let done = (s.world_voxels(false), s.world_voxels(true));
+    assert!(!done.1.keys().any(|p| opened.contains_key(p) && !done.0.contains_key(p)));
+    let saved = s.to_vox();
+    let again = vxr_core::Scene::from_vox(&saved).unwrap();
+    assert_eq!((again.world_voxels(false), again.world_voxels(true)), done, "saved and reopened");
+    assert_eq!(again.world().unwrap().models.len(), models);
+
+    // Undo the four world edits, then the model edit (which goes back into tree a).
+    for _ in 0..4 {
+        assert!(s.undo());
+        assert_eq!(s.at(), At::World);
+    }
+    assert_eq!(s.world_voxels(false), edited);
+    assert_eq!(s.world().unwrap().models.len(), models - 1, "the duplicate's model is gone");
+    assert!(s.undo());
+    assert_eq!(s.at(), At::Object(tree_a), "undo goes back to the model it edits");
+    assert_eq!(s.map.voxels, n);
+    assert!(s.to_vox() == bytes, "undone: byte-identical");
+    assert!(!s.undo());
+
+    // Redo all of it, across modes again.
+    while s.redo() {}
+    assert_eq!(s.at(), At::World);
+    assert_eq!((s.world_voxels(false), s.world_voxels(true)), done);
+    assert!(s.to_vox() == saved, "redone: the same file");
+}

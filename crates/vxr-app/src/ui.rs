@@ -207,6 +207,8 @@ pub enum Action {
     Resize([u32; 3]),
     /// Fit the model bounds to the voxels.
     Crop,
+    /// Switch between editing a model and the world of every object (Tab).
+    ToggleWorld,
     Copy,
     Cut,
     Paste,
@@ -388,6 +390,7 @@ const COMMANDS: &[Command] = &[
     Command { label: "Lock axis Y", keys: &[], run: |h| h.toggle_lock(1) },
     Command { label: "Lock axis Z", keys: &[], run: |h| h.toggle_lock(2) },
     Command { label: "Cycle axis lock", keys: &["K"], run: |h| h.cycle_lock() },
+    Command { label: "World mode / edit model", keys: &["Tab"], run: |h| h.actions.push(Action::ToggleWorld) },
     Command { label: "Frame scene", keys: &["."], run: |h| h.actions.push(Action::Frame) },
     Command { label: "View options", keys: &[], run: |h| h.view_panel = !h.view_panel },
     Command { label: "Perspective", keys: &["O"], run: |h| h.actions.push(Action::Ortho(false)) },

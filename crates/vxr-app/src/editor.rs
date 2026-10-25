@@ -4,6 +4,7 @@
 
 use glam::Vec3;
 use vxr_core::Scene;
+use vxr_core::history::At;
 use vxr_core::material::Material;
 use vxr_core::select::{Mode, MoveDrag, Transform};
 use vxr_core::tools::{Brush, Gesture, Press, Shape, Target, Tool, plane_cell};
@@ -93,6 +94,8 @@ pub struct Editor {
     export_fits: [bool; 4],
     /// The scene's map replacements and origin the GPU map was built at (see `Scene::reshapes`).
     shape: (u64, [i32; 3]),
+    /// The object last edited, where Tab goes back to from world mode.
+    last_object: Option<usize>,
 }
 
 impl Editor {
@@ -151,6 +154,7 @@ impl Editor {
             exported: None,
             export_fits: [false; 4],
             shape: (0, [0; 3]),
+            last_object: None,
         };
         e.shape = (e.scene.reshapes(), e.scene.origin);
         e.export_fits = EXPORT_SIZES.map(|(w, h)| Preview::fits(&e.gpu.device, w, h));
@@ -171,6 +175,7 @@ impl Editor {
         self.export = None;
         self.shape = (scene.reshapes(), scene.origin);
         self.scene = scene;
+        self.last_object = None;
         self.ui.scene_name = name.into();
         self.gesture = None;
         self.moving = None;
@@ -560,6 +565,19 @@ impl Editor {
     /// Run the UI, apply what it asked for, and draw a frame onto `view`. Returns the actions
     /// the host handles (open, save, embed) and egui's platform output.
     pub fn frame(&mut self, input: egui::RawInput, view: &wgpu::TextureView) -> (Vec<Action>, egui::PlatformOutput) {
+        let mut input = input;
+        // Tab switches between the world and a model. egui would move keyboard focus with it
+        // before the UI could consume it, so it never reaches egui unless a field is typing.
+        let mut tabs = 0;
+        if !self.ctx.egui_wants_keyboard_input() {
+            input.events.retain(|e| match e {
+                egui::Event::Key { key: egui::Key::Tab, pressed, modifiers, .. } if modifiers.is_none() => {
+                    tabs += *pressed as usize;
+                    false
+                }
+                _ => true,
+            });
+        }
         let now = now_ms();
         if !input.events.is_empty() {
             self.last_input = now;
@@ -586,6 +604,7 @@ impl Editor {
         let ui = &mut self.ui;
         let out = self.ctx.run_ui(input, |u| actions = ui.ui(u.ctx(), &stats));
         let mut host = Vec::new();
+        actions.extend(std::iter::repeat_n(Action::ToggleWorld, tabs));
         for a in actions {
             match a {
                 Action::Undo => self.undo(),
@@ -621,6 +640,7 @@ impl Editor {
                 | Action::Copy
                 | Action::Cut
                 | Action::Paste => self.selection_action(a),
+                Action::ToggleWorld => self.toggle_world(),
                 Action::ExportPng => self.start_export(),
                 Action::CancelExport => {
                     self.export = None;
@@ -639,6 +659,38 @@ impl Editor {
             host.push(done);
         }
         (host, out.platform_output)
+    }
+
+    /// Tab: show the world of every object, or go back to editing the last object's model
+    /// (the first object's if none was edited yet).
+    pub fn toggle_world(&mut self) {
+        self.gesture = None;
+        self.moving = None;
+        self.marquee = None;
+        let s = &mut self.scene;
+        let msg = match (s.at(), s.world()) {
+            (_, None) => "A new scene is one model".to_string(),
+            (At::World, Some(w)) => {
+                let objects = w.objects();
+                let i = self.last_object.filter(|i| objects.contains(i)).or(objects.first().copied());
+                match i {
+                    Some(i) if s.edit_object(i) => format!("Editing {}", object_name(s.world().unwrap(), i)),
+                    _ => "No object to edit".into(),
+                }
+            }
+            (at, Some(_)) => {
+                if s.show_world() {
+                    if let At::Object(i) = at {
+                        self.last_object = Some(i);
+                    }
+                    let n = s.world().unwrap().objects().len();
+                    format!("World: {n} object{}", if n == 1 { "" } else { "s" })
+                } else {
+                    format!("The world is over {} voxels on an axis", vxr_core::scene::MAX_EXTENT)
+                }
+            }
+        };
+        self.ui.toast(&self.ctx, msg);
     }
 
     /// The file name for a render export: the scene's name with `-render.png`.
@@ -686,7 +738,7 @@ impl Editor {
         self.cursor = None;
         self.preview.restart();
         if self.export.take().is_some() {
-            self.ui.toast(&self.ctx, "Export cancelled: the model bounds changed");
+            self.ui.toast(&self.ctx, "Export cancelled: the scene changed");
         }
     }
 
@@ -818,4 +870,12 @@ fn used(scene: &Scene) -> [bool; 256] {
         u[i] = *c > 0;
     }
     u
+}
+
+/// An object's name, or "object N" (its place among the objects) when it has none.
+pub fn object_name(w: &vxr_core::World, i: usize) -> String {
+    match &w.tree.nodes[i].name {
+        Some(n) => String::from_utf8_lossy(n).into_owned(),
+        None => format!("object {}", w.objects().iter().position(|&k| k == i).map_or(i, |k| k + 1)),
+    }
 }

@@ -67,8 +67,8 @@ Feature names below follow the update log [S1] unless another source is given.
 | Feature | MagicaVoxel | vxr | Priority | Why |
 |---|---|---|---|---|
 | Model size up to 256^3 | Canvas size per object [S1 0.99.5] | done, and past it: one sparse map up to 2048 voxels per axis, split into 256^3 models on save | P1 | - |
-| Resize model bounds | Crop tool resizes the canvas live [S1 0.99.5.1] | done [6] (Resize… in the selection flyout opens a Bounds panel with X, Y and Z fields; keeps the bottom and the centre; one undo step. Not yet saved as the file's model size: item 8) | P2 | - |
-| Crop to content and fit | Fit sizes several objects [S1 0.99.5.1] | partial [6] (Crop in the selection flyout and Cmd-K fits the bounds to the voxels; fitting several objects waits for item 8) | P2 | - |
+| Resize model bounds | Crop tool resizes the canvas live [S1 0.99.5.1] | done [6] (Resize… in the selection flyout opens a Bounds panel with X, Y and Z fields; keeps the bottom and the centre; one undo step; saved as the object's model size [8]) | P2 | - |
+| Crop to content and fit | Fit sizes several objects [S1 0.99.5.1] | partial [6] (Crop in the selection flyout and Cmd-K fits the bounds to the voxels; saved as the object's model size [8]; fitting several objects at once waits for the world UI) | P2 | - |
 | Hollow and fill | Edit tools (also in vengi [S4]) | done [6] (selection flyout and Cmd-K: Hollow keeps the voxels seen from outside, Fill inside fills enclosed space; the selection or the whole model) | P2 | sculpt |
 | Boolean operations | Groups and objects [S1 0.99.6.2] | missing | P3 | - |
 | Statistics | `log`: model count, scene size, voxels per colour [S1 0.99.6.2] | partial (voxel count in the header; per-colour count kept in the brick map, not shown) | P3 | - |
@@ -136,7 +136,7 @@ Feature names below follow the update log [S1] unless another source is given.
 
 | Feature | MagicaVoxel | vxr | Priority | Why |
 |---|---|---|---|---|
-| Multiple objects per scene | Tab switches model and world editors [S1 0.99] | partial: every model of an opened file is flattened into one editable map in the editor; the core world model (objects, groups, linked copies, layers, lossless save) is built and tested, not yet in the editor [8] | P1 | lossless |
+| Multiple objects per scene | Tab switches model and world editors [S1 0.99] | partial: files open as separate objects (world mode with several, model mode with one); Tab and Cmd-K switch between editing one model (edits reach every linked copy) and the world, undo follows edits across modes, and saving writes models, nodes and layers losslessly; the scene tree, object moves, duplicate, instance, groups and layers are in the core, not yet in the UI [8] | P1 | lossless |
 | Move, rotate, flip objects | Gizmo, explicit position, 90 degree rotate gizmo [S1 0.99, 0.99.7.0, 0.99.7.2] | missing [8] | P2 | - |
 | Groups | Enter and leave with Tab or double-click [S1 0.99, 0.99.5.1] | missing [8] | P2 | - |
 | References (instances) and duplicates | Shift+drag; Ref-R converts [S1 0.99, 0.99.5.1] | missing [8] | P2 | - |
