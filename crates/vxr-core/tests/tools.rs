@@ -267,3 +267,48 @@ fn voxel_brush_size_stamps_a_cube_out_of_the_face_for_add_and_into_it_for_erase_
     let n = drag(&mut s, m, top([2, 0, 2], 3), &[]);
     assert!(n > 27, "mirror adds the cube's image too: {n}");
 }
+
+#[test]
+fn box_height_lifts_the_base_along_the_drag_axis_as_one_step() {
+    // Add: a 2x1x3 base on the slab's top, lifted 3 layers high.
+    let mut s = slab();
+    let before = s.map.voxels;
+    let Press::Drag(mut g) = s.press(brush(Tool::Add, Shape::Box), top([1, 0, 1], 3)) else { panic!() };
+    g.move_to(&mut s, [2, 1, 3]);
+    assert_eq!(s.map.voxels, before + 6, "the base");
+    g.lift();
+    assert!(g.lifting);
+    // Looking along -z at the far corner's column: the ray's height picks the layer.
+    let ro = [2.5, 3.5, 20.0];
+    assert_eq!(g.lift_cell(ro, [0.0, 0.0, -1.0]), Some(3));
+    assert_eq!(g.lift_cell([2.5, 1.5, 20.0], [0.0, 0.0, -1.0]), Some(1), "at release the box is one layer high");
+    assert_eq!(g.lift_cell([2.5, 9.0, 3.5], [0.0, -1.0, 0.0]), None, "a ray along the axis says nothing");
+    g.lift_to(&mut s, 3);
+    assert_eq!(g.extent(), ([1, 1, 1], [2, 3, 3]));
+    assert_eq!(s.map.voxels, before + 18);
+    g.lift_to(&mut s, 2);
+    assert_eq!(s.map.voxels, before + 12, "lowering redraws");
+    assert_eq!(g.release(&mut s), 12);
+    assert!(s.undo());
+    assert_eq!(s.map.voxels, before, "base and height are one undo step");
+
+    // Erase: a 4x1x2 base on the top layer of a 3-high block, pushed down into it.
+    let mut s = Scene::new([32, 32, 32]);
+    s.edit((0..4).flat_map(|x| (0..3).flat_map(move |y| (0..2).map(move |z| ([x, y, z], 3)))).collect::<Vec<_>>());
+    let Press::Drag(mut g) = s.press(brush(Tool::Erase, Shape::Box), top([0, 2, 0], 3)) else { panic!() };
+    g.move_to(&mut s, [3, 2, 1]);
+    g.lift();
+    let h = g.lift_cell([3.5, 0.2, 20.0], [0.0, 0.0, -1.0]).unwrap();
+    assert_eq!(h, 0);
+    g.lift_to(&mut s, h);
+    assert_eq!(g.release(&mut s), 24);
+    assert_eq!(s.map.voxels, 0);
+
+    // Other shapes never lift.
+    let mut s = slab();
+    let Press::Drag(mut g) = s.press(brush(Tool::Add, Shape::Line), top([1, 0, 1], 3)) else { panic!() };
+    g.lift();
+    assert!(!g.lifting);
+    g.lift_to(&mut s, 5);
+    assert_eq!(g.extent(), ([1, 1, 1], [1, 1, 1]));
+}

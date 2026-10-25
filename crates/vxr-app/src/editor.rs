@@ -283,6 +283,12 @@ impl Editor {
             return;
         }
         if let Some(g) = &mut self.gesture {
+            if g.lifting {
+                if let Some(h) = g.lift_cell(o, d) {
+                    g.lift_to(&mut self.scene, h);
+                }
+                return;
+            }
             let cell = if g.on_plane() {
                 plane_cell(o, d, g.axis, g.layer)
             } else {
@@ -301,8 +307,14 @@ impl Editor {
         self.last_input = now_ms();
         if !pressed {
             if b == Button::Left {
-                if let Some(g) = self.gesture.take() {
-                    g.release(&mut self.scene);
+                if let Some(mut g) = self.gesture.take() {
+                    // A box's base is drawn: its height follows the pointer until a click.
+                    g.lift();
+                    if g.lifting {
+                        self.gesture = Some(g);
+                    } else {
+                        g.release(&mut self.scene);
+                    }
                 }
                 if let Some(g) = self.moving.take() {
                     let still = g.offset == [0; 3];
@@ -324,8 +336,12 @@ impl Editor {
             self.cam_drag = None;
             return;
         }
+        if b == Button::Left && self.lifting() {
+            self.place_box();
+            return;
+        }
         if over_ui
-            || self.gesture.is_some()
+            || self.gesture.as_ref().is_some_and(|g| !g.lifting)
             || self.moving.is_some()
             || self.marquee.is_some()
             || self.world_drag.is_some()
@@ -366,6 +382,26 @@ impl Editor {
             }
             Press::Drag(g) => self.gesture = Some(g),
             Press::Done(_) | Press::Nothing => {}
+        }
+    }
+
+    /// Whether a box brush's height follows the pointer, waiting for a click or Enter.
+    pub fn lifting(&self) -> bool {
+        self.gesture.as_ref().is_some_and(|g| g.lifting)
+    }
+
+    /// Place the box whose height is being set, as one undo step with its base.
+    pub fn place_box(&mut self) {
+        if let Some(g) = self.gesture.take_if(|g| g.lifting) {
+            g.release(&mut self.scene);
+        }
+    }
+
+    /// Drop the box whose height is being set, base and all (Escape).
+    pub fn cancel_box(&mut self) {
+        if self.gesture.take_if(|g| g.lifting).is_some() {
+            self.scene.revert_voxels();
+            self.scene.commit();
         }
     }
 
@@ -729,6 +765,7 @@ impl Editor {
         self.ui.has_clip = self.scene.clipboard.is_some();
         self.ui.bounds = self.scene.bounds().size;
         self.ui.world = self.scene.at() == At::World;
+        self.ui.lifting = self.lifting();
         self.ui.picked = self.scene.picked().map(|i| node_name(self.scene.world().unwrap(), i));
         self.ui.picked_node = self.scene.picked();
         self.ui.tree = tree_rows(&self.scene);
@@ -749,6 +786,10 @@ impl Editor {
         let out = self.ctx.run_ui(input, |u| actions = ui.ui(u.ctx(), &stats));
         let mut host = Vec::new();
         actions.extend(std::iter::repeat_n(Action::ToggleWorld, tabs));
+        // Any other command places a box whose height is being set first.
+        if actions.iter().any(|a| *a != Action::CancelBox) {
+            self.place_box();
+        }
         for a in actions {
             match a {
                 Action::Undo => self.undo(),
@@ -802,6 +843,8 @@ impl Editor {
                     None => self.ui.toast(&self.ctx, "Pick an object in the world to hide its layer"),
                 },
                 Action::AddLayer => self.add_layer(),
+                Action::PlaceBox => self.place_box(),
+                Action::CancelBox => self.cancel_box(),
                 Action::ExportPng => self.start_export(),
                 Action::CancelExport => {
                     self.export = None;

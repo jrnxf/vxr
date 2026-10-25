@@ -31,7 +31,7 @@ Feature names below follow the update log [S1] unless another source is given.
 | Pick colour from a voxel | Alt-click; Alt+drag picks from the screen [S1 0.99] | done (pick tool and Alt) | P1 | palette |
 | Voxel brush (V) with size | Cube, sphere, square, disc, surface; keys 1-9 set size; Ctrl+Alt+drag resizes [S1 0.97.1, 0.99.5.1] | done (sizes 1 to 16 as a cube grown from the face: `-` `=`, the size flyout from V again, Cmd-K; drags on the plane; no sphere or surface shape, which the center brush covers in part) | P1 | sculpt |
 | Face brush (F) | Extrude or peel a connected face by dragging, several modes [S1 0.97] | done (click extrudes or peels the whole face, paint fills it) | P1 | sculpt, minutes |
-| Box brush (B) | Drag a rectangle, resizable with a gizmo, Enter commits [S1 0.99.5.1] | partial (drag a rectangle; no gizmo or height drag) | P1 | minutes |
+| Box brush (B) | Drag a rectangle, resizable with a gizmo, Enter commits [S1 0.99.5.1] | done (drag a rectangle, then the pointer sets its height until a click or Enter places it, Escape drops it; no gizmo) | P1 | minutes |
 | Line brush (L) | Line, square and circle in one geometry mode since 0.99.6.2 [S1 0.99.6.2] | done (L: drag a line on the drag plane, shown live) | P1 | sculpt |
 | Center brush (C) | Square or circle from a center point, even diameters [S1 0.97, 0.97.1] | done (C: circle on the drag plane from its center, C again for a sphere; no square or even diameters) | P1 | sculpt |
 | Pattern brush (P) | Stamp a pattern made from a selection, rotate and offset it [S1 0.98.1] | missing | P2 | minutes |

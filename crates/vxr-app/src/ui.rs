@@ -246,6 +246,10 @@ pub enum Action {
     Copy,
     Cut,
     Paste,
+    /// Place the box whose height is being set (a click, Enter).
+    PlaceBox,
+    /// Drop the box whose height is being set (Escape).
+    CancelBox,
 }
 
 /// One row of the scene tree: an object or a group, in tree order (set by the editor).
@@ -423,6 +427,8 @@ pub struct Hybrid {
     pub renamed: Option<(Named, String)>,
     /// The box being dragged with the select tool, in points.
     pub marquee: Option<Rect>,
+    /// A box brush's base is drawn and its height follows the pointer (set by the editor).
+    pub lifting: bool,
     /// Swatch being dragged with Cmd (swap) or Cmd+Shift (copy).
     drag_from: Option<u8>,
     /// The slot the swatch grid last scrolled to.
@@ -490,6 +496,8 @@ const COMMANDS: &[Command] = &[
     Command { label: "Bigger brush", keys: &["="], run: |h| h.step_size(1) },
     Command { label: "Smaller brush", keys: &["-"], run: |h| h.step_size(-1) },
     Command { label: "Box brush", keys: &["B"], run: |h| h.shape = Shape::Box },
+    Command { label: "Place box", keys: &["↵"], run: |h| h.actions.push(Action::PlaceBox) },
+    Command { label: "Cancel box", keys: &["Esc"], run: |h| h.actions.push(Action::CancelBox) },
     Command { label: "Face brush", keys: &["F"], run: |h| h.shape = Shape::Face },
     Command { label: "Line brush", keys: &["L"], run: |h| h.shape = Shape::Line },
     Command { label: "Center brush: circle", keys: &["C"], run: |h| h.shape = Shape::Circle },
@@ -607,6 +615,7 @@ impl Hybrid {
             rename_focus: false,
             renamed: None,
             marquee: None,
+            lifting: false,
             drag_from: None,
             shown_slot: 28,
             shift: false,
@@ -851,6 +860,14 @@ impl Hybrid {
             }
             if self.cmdk.is_some() || typing {
                 return;
+            }
+            if self.lifting {
+                if i.consume_key(Modifiers::NONE, Key::Enter) {
+                    self.actions.push(Action::PlaceBox);
+                }
+                if i.consume_key(Modifiers::NONE, Key::Escape) {
+                    self.actions.push(Action::CancelBox);
+                }
             }
             if i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z) {
                 self.actions.push(Action::Redo);
@@ -2736,6 +2753,10 @@ impl Hybrid {
                 };
                 vec![("Click", armed.as_str()), ("Esc", "cancel")]
             }
+            (None, _, _) if self.lifting => {
+                let v = [("Move", "set the height"), ("Click or ↵", "place"), ("Esc", "cancel")];
+                return self.hint_panel(ctx, screen, &v);
+            }
             (None, _, _) if self.world => {
                 let mut v = vec![("Click", "pick an object"), ("Drag", "move it")];
                 if self.picked.is_some() {
@@ -2765,13 +2786,13 @@ impl Hybrid {
     fn tool_hints(&self, t: Tool, shape: Shape) -> Vec<(&'static str, &'static str)> {
         match (t, shape) {
             (Tool::Add, Shape::Voxel) => vec![("Click", "add"), ("Drag", "draw on that plane")],
-            (Tool::Add, Shape::Box) => vec![("Drag", "fill a rectangle")],
+            (Tool::Add, Shape::Box) => vec![("Drag", "draw a rectangle, then lift it")],
             (Tool::Add, Shape::Face) => vec![("Click", "extrude the whole face")],
             (Tool::Erase, Shape::Voxel) => vec![("Click", "erase"), ("Drag", "erase as you go")],
-            (Tool::Erase, Shape::Box) => vec![("Drag", "clear a rectangle")],
+            (Tool::Erase, Shape::Box) => vec![("Drag", "clear a rectangle, then deepen it")],
             (Tool::Erase, Shape::Face) => vec![("Click", "peel the whole face")],
             (Tool::Paint, Shape::Voxel) => vec![("Click", "paint"), ("Drag", "paint as you go")],
-            (Tool::Paint, Shape::Box) => vec![("Drag", "paint a rectangle")],
+            (Tool::Paint, Shape::Box) => vec![("Drag", "paint a rectangle, then deepen it")],
             (Tool::Paint, Shape::Face) => vec![("Click", "fill the connected face")],
             (Tool::Add, Shape::Line) => vec![("Drag", "draw a line")],
             (Tool::Erase, Shape::Line) => vec![("Drag", "erase along a line")],

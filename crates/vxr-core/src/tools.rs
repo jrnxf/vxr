@@ -79,6 +79,9 @@ pub const MAX_FACE: usize = 120_000;
 /// Largest circle or sphere radius, in voxels (a ball of about 1.1 million cells).
 pub const MAX_RADIUS: i32 = 64;
 
+/// Most layers a box brush's height drag spans.
+pub const MAX_HEIGHT: i32 = 256;
+
 /// Largest voxel brush size.
 pub const MAX_SIZE: u8 = 16;
 
@@ -111,6 +114,9 @@ pub struct Gesture {
     normal: [i32; 3],
     /// The radius a circle or sphere was last drawn at.
     drawn: i32,
+    /// A box whose base is drawn and whose height now follows the pointer along the drag
+    /// axis ([`Gesture::lift`]), until a click or Enter places it.
+    pub lifting: bool,
 }
 
 impl Scene {
@@ -259,7 +265,17 @@ impl Scene {
         let axis = brush.lock.unwrap_or(axis_of(t.normal));
         self.begin();
         let normal = t.normal;
-        let g = Gesture { brush, axis, layer: start[axis], start, end: start, last: start, normal, drawn: 0 };
+        let g = Gesture {
+            brush,
+            axis,
+            layer: start[axis],
+            start,
+            end: start,
+            last: start,
+            normal,
+            drawn: 0,
+            lifting: false,
+        };
         if brush.shape == Shape::Voxel {
             self.stamp(&brush, start, normal);
         } else {
@@ -310,6 +326,45 @@ impl Gesture {
             scene.revert_voxels();
             self.draw(scene);
         }
+    }
+
+    /// Box brush: the base rectangle is drawn; from now on the pointer sets the box's height
+    /// along the drag axis ([`Gesture::lift_cell`], [`Gesture::lift_to`]) until the host
+    /// releases the gesture, which places the box as one undo step with its base.
+    pub fn lift(&mut self) {
+        self.lifting = self.brush.shape == Shape::Box;
+    }
+
+    /// While lifting: the layer on the drag axis nearest a ray, measured on the line along
+    /// that axis through the centre of the base's far corner (where the pointer let go, so
+    /// the box starts one layer high). `None` when the ray runs along the axis, so the
+    /// height cannot be read from it (a straight-on view).
+    pub fn lift_cell(&self, ro: [f32; 3], dir: [f32; 3]) -> Option<i32> {
+        let a = self.axis;
+        let p: [f32; 3] =
+            std::array::from_fn(|k| if k == a { self.layer as f32 + 0.5 } else { self.end[k] as f32 + 0.5 });
+        let w: [f32; 3] = std::array::from_fn(|k| p[k] - ro[k]);
+        let dot = |u: [f32; 3], v: [f32; 3]| u[0] * v[0] + u[1] * v[1] + u[2] * v[2];
+        let (b, c) = (dir[a], dot(dir, dir));
+        let den = c - b * b;
+        if den < 1e-4 * c {
+            return None;
+        }
+        // Closest points of the line p + s * axis and the ray ro + t * dir.
+        let s = (b * dot(dir, w) - c * w[a]) / den;
+        let h = (p[a] + s).floor() as i32;
+        Some(h.clamp(self.layer - MAX_HEIGHT + 1, self.layer + MAX_HEIGHT - 1))
+    }
+
+    /// While lifting: make the box reach layer `h` on the drag axis, redrawing it live.
+    pub fn lift_to(&mut self, scene: &mut Scene, h: i32) {
+        if !self.lifting || self.end[self.axis] == h {
+            return;
+        }
+        self.end[self.axis] = h;
+        self.last = self.end;
+        scene.revert_voxels();
+        self.draw(scene);
     }
 
     /// Radius of a circle or sphere: the distance from the press to the pointer, rounded.

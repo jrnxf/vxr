@@ -211,6 +211,7 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     s.stroke(p, &[[60.0, 20.0], [120.0, 40.0]]);
     let v2 = s.voxels();
     check(v2 > v1, format!("add box drag: {v1} -> {v2}"))?;
+    s.ed.place_box();
 
     s.tool(Tool::Paint, Shape::Face);
     s.ed.ui.slot = 12;
@@ -253,6 +254,7 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     palette(&mut s, dir)?;
     brushes(dir)?;
     brush_size(dir)?;
+    box_height(dir)?;
     selection(dir)?;
     model_tools(dir)?;
     views(dir)?;
@@ -397,6 +399,7 @@ fn brushes(dir: &Path) -> Result<(), String> {
         }
     });
     let b = (lo, hi);
+    s.ed.place_box();
     check(
         s.ed.ui.lock == Some(0) && s.ed.ui.hits.contains_key("lock-x") && lo[0] == hi[0] && hi[1] > lo[1],
         format!("K locks X: a box drag builds a wall across x ({b:?})"),
@@ -504,6 +507,121 @@ fn brush_size(dir: &Path) -> Result<(), String> {
         s.ed.ui.size == 1 && open && !s.ed.ui.hits.contains_key("size-plus"),
         "- steps back to 1 and stops; Escape closes the flyout".into(),
     )
+}
+
+/// The bounds of every voxel, inclusive, and whether they fill that box exactly.
+fn solid_box(s: &Shot) -> ([i32; 3], [i32; 3], bool) {
+    let (mut lo, mut hi) = ([i32::MAX; 3], [i32::MIN; 3]);
+    s.ed.scene.for_each_voxel(|p, _| {
+        for a in 0..3 {
+            (lo[a], hi[a]) = (lo[a].min(p[a]), hi[a].max(p[a]));
+        }
+    });
+    let cells: i64 = (0..3).map(|a| (hi[a] - lo[a] + 1).max(0) as i64).product();
+    (lo, hi, s.voxels() > 0 && cells == s.voxels() as i64)
+}
+
+/// The box brush's height: a drag draws the base, then the pointer lifts it live until a
+/// click, Enter or Cmd-K places it (one undo step with its base) or Escape drops it; erase
+/// pushes a base down into a box.
+fn box_height(dir: &Path) -> Result<(), String> {
+    let mut s = Shot::new(Scene::new(NEW_SIZE), "Untitled", 2.0)?;
+    s.frames(3);
+    let mid = [s.ed.width as f32 / 2.0, s.ed.height as f32 / 2.0];
+    let k = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    let none = egui::Modifiers::NONE;
+    s.ed.ui.coach = false;
+    s.tool(Tool::Add, Shape::Voxel);
+    s.frames_with(2, vec![k(egui::Key::B, none)]);
+    let end = [mid[0] + 160.0, mid[1] + 40.0];
+    s.stroke(mid, &[[80.0, 20.0], [160.0, 40.0]]);
+    s.frames(1);
+    let (lo, hi, solid) = solid_box(&s);
+    let base = s.voxels();
+    check(
+        s.ed.ui.shape == Shape::Box && s.ed.ui.lifting && solid && lo[1] == 0 && hi[1] == 0 && base > 4,
+        format!("B: a drag draws the base and lets go into its height ({base} voxels, {lo:?} to {hi:?})"),
+    )?;
+    s.ed.pointer_moved(Some([end[0], end[1] - 160.0]));
+    s.frames(1);
+    let (lo2, hi2, solid) = solid_box(&s);
+    let high = hi2[1] + 1;
+    let span = s.ed.span().map(|(_, v)| v).unwrap_or_default();
+    check(
+        solid
+            && lo2 == lo
+            && high > 1
+            && s.voxels() == base * high as u64
+            && span.split('×').nth(1) == Some(&*high.to_string()),
+        format!("moving up lifts it live: {high} layers, {} voxels, BOX {span}", s.voxels()),
+    )?;
+    s.save_png(&dir.join("app-2x-box.png"))?;
+    s.ed.pointer_moved(Some(end));
+    check(s.voxels() == base, format!("back down to where it let go: one layer ({})", s.voxels()))?;
+    s.ed.pointer_moved(Some([end[0], end[1] - 160.0]));
+    s.stroke([end[0], end[1] - 160.0], &[]);
+    let placed = s.voxels();
+    check(!s.ed.lifting() && placed == base * high as u64, format!("a click places it ({placed} voxels)"))?;
+    s.ed.undo();
+    let undone = s.voxels();
+    s.ed.redo();
+    check(undone == 0 && s.voxels() == placed, "base and height are one undo step, and redo".into())?;
+
+    // Escape drops a box, base and all; Enter and Cmd-K 'Place box' place one.
+    let beside = [mid[0] - 300.0, mid[1] + 160.0];
+    s.stroke(beside, &[[60.0, 20.0]]);
+    s.ed.pointer_moved(Some([beside[0] + 60.0, beside[1] - 100.0]));
+    s.frames(1);
+    let lifted = s.voxels() > placed;
+    s.frames_with(2, vec![k(egui::Key::Escape, none)]);
+    s.ed.undo();
+    check(
+        lifted && !s.ed.lifting() && s.voxels() == 0,
+        format!("Escape drops a lifted box, leaving no undo step ({} after one undo)", s.voxels()),
+    )?;
+    s.ed.redo();
+    s.stroke(beside, &[[60.0, 20.0]]);
+    s.ed.pointer_moved(Some([beside[0] + 60.0, beside[1] - 100.0]));
+    s.frames_with(2, vec![k(egui::Key::Enter, none)]);
+    let entered = s.voxels();
+    s.ed.undo();
+    check(
+        entered > placed && s.voxels() == placed && !s.ed.lifting(),
+        format!("Enter places it, one undo step ({entered} voxels)"),
+    )?;
+    s.stroke(beside, &[[60.0, 20.0]]);
+    s.frames_with(2, vec![k(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("place box".into())]);
+    s.frames_with(2, vec![k(egui::Key::Enter, none)]);
+    let flat = s.voxels() - placed;
+    s.ed.undo();
+    check(
+        !s.ed.lifting() && flat > 0 && s.voxels() == placed,
+        format!("Cmd-K 'Place box' places it one layer high ({flat} voxels)"),
+    )?;
+
+    // Erase: a base on the placed box's top, pushed down to the ground, clears that column.
+    s.ed.ui.tool = Tool::Erase;
+    let (lo, hi, _) = solid_box(&s);
+    let a = [lo[0] + 1, hi[1], lo[2]];
+    let b = [lo[0] + 2, hi[1], lo[2] + 1];
+    let at = |c: [i32; 3]| [c[0] as f32 + 0.5, c[1] as f32 + 1.0, c[2] as f32 + 0.5];
+    // The far corner is aimed at its cell's middle, where the drag plane crosses it.
+    let pa = project(&s.ed, at(a));
+    let pb = project(&s.ed, [b[0] as f32 + 0.5, b[1] as f32 + 0.5, b[2] as f32 + 0.5]);
+    s.stroke(pa, &[[pb[0] - pa[0], pb[1] - pa[1]]]);
+    let top_only = placed - s.voxels();
+    let floor = project(&s.ed, [b[0] as f32 + 0.5, 0.2, b[2] as f32 + 0.5]);
+    s.ed.pointer_moved(Some(floor));
+    s.stroke(floor, &[]);
+    let gone = placed - s.voxels();
+    let hole = (0..=hi[1]).all(|y| s.ed.scene.map.get(a[0], y, a[2]) == 0 && s.ed.scene.map.get(b[0], y, b[2]) == 0);
+    check(
+        top_only == 4 && gone == 4 * (hi[1] + 1) as u64 && hole,
+        format!("erase: a 2x2 base on top ({top_only}), pushed down, clears the {gone} cells under it"),
+    )?;
+    s.ed.undo();
+    check(s.voxels() == placed, "erase: one undo step".into())
 }
 
 /// Where a point in map space lands on screen, in pixels.
