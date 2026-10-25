@@ -419,5 +419,16 @@ impl Scene {
             self.selection = (if revert { &c.old } else { &c.new }).iter().copied().collect();
             self.selection_version += 1;
         }
+        if !self.selection.is_empty() {
+            let mut emptied = false;
+            for c in &step.voxels {
+                if (if revert { c.old } else { c.new }) == 0 && self.selection.remove(&c.pos) {
+                    emptied = true;
+                }
+            }
+            if emptied {
+                self.selection_version += 1;
+            }
+        }
     }
 }

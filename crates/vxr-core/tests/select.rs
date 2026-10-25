@@ -70,6 +70,21 @@ fn erased_voxels_leave_the_selection() {
 }
 
 #[test]
+fn voxels_emptied_by_undo_leave_the_selection() {
+    let mut s = scene();
+    let v = [O + 9, O, O];
+    s.edit([(v, 4)]);
+    s.select_all();
+    assert!(s.is_selected(v));
+    assert!(s.undo(), "the add");
+    s.edit([(v, 4)]);
+    assert!(!s.is_selected(v), "a voxel added where undo emptied a selected cell is not selected");
+    assert_eq!(s.selected_count(), 5);
+    s.delete_selection();
+    assert_eq!(voxels(&s).get(&v), Some(&4), "delete leaves the unselected voxel");
+}
+
+#[test]
 fn move_drag_is_live_and_one_undo_step() {
     let mut s = scene();
     let before = voxels(&s);
