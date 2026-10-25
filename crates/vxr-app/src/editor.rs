@@ -323,7 +323,7 @@ impl Editor {
                         && (p[0] - at[0]).abs() < CLICK_PX
                         && (p[1] - at[1]).abs() < CLICK_PX
                     {
-                        self.scene.select_color(t.value, Mode::Replace);
+                        self.scene.select_region(&t, self.ui.region, Mode::Replace);
                     }
                 }
                 if let Some(m) = self.marquee.take() {
@@ -509,7 +509,8 @@ impl Editor {
     }
 
     /// A select tool press: on a selected voxel it starts moving the selection on the plane
-    /// of the face pressed; anywhere else it starts a box (or, without a drag, a colour select).
+    /// of the face pressed; anywhere else it starts a box (or, without a drag, selects the
+    /// colour, face or volume clicked).
     fn press_select(&mut self, p: [f32; 2], t: Option<Target>) {
         let mode = self.select_mode();
         if mode == Mode::Replace
@@ -527,7 +528,7 @@ impl Editor {
         let (dx, dy) = (m.end[0] - m.start[0], m.end[1] - m.start[1]);
         if dx.abs() < CLICK_PX && dy.abs() < CLICK_PX {
             match m.target.filter(|t| !t.ground) {
-                Some(t) => self.scene.select_color(t.value, m.mode),
+                Some(t) => self.scene.select_region(&t, self.ui.region, m.mode),
                 None if m.mode == Mode::Replace => self.scene.deselect(),
                 None => {}
             }

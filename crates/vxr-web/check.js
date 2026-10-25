@@ -327,6 +327,20 @@ async () => {
   await key('Enter');
   step('Cmd-K Invert selection selects every voxel but the clicked colour, with no edit', st().selected === st().voxels - byColor && same(bytes(), original), `${st().selected} of ${st().voxels}, ${byColor}`);
   await key('Escape');
+  // Region select: the flyout's Face takes the clicked face of its colour, Cmd-K Click
+  // selects volume every voxel connected to it, Color the colour again; no edit.
+  await chip('click-face');
+  await click(mx, my);
+  const face = [st().region, st().selected];
+  await key('k', cmd);
+  for (const ch of 'click selects volume') await key(ch);
+  await key('Enter');
+  await click(mx, my);
+  const volume = [st().region, st().selected];
+  await chip('click-color');
+  await click(mx, my);
+  step('a click selects the face, the volume (Cmd-K) or the colour, with no edit', face[0] === 'Face' && face[1] > 0 && face[1] <= byColor && volume[0] === 'Volume' && volume[1] >= face[1] && st().region === 'Color' && st().selected === byColor && same(bytes(), original), JSON.stringify([face, volume, st().selected, byColor]));
+  await key('Escape');
   // Model tools on the whole island: hollow, fill inside, one undo step each.
   const solid = st().voxels;
   const hollowed = await chip('hollow') && st().voxels;

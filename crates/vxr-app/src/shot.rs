@@ -6,7 +6,7 @@ use std::path::Path;
 
 use vxr_app::Editor;
 use vxr_app::editor::{Button, NEW_SIZE};
-use vxr_app::ui::{Action, Shape, Tool};
+use vxr_app::ui::{Action, Region, Shape, Tool};
 use vxr_core::Scene;
 use vxr_render::Gpu;
 use vxr_render::gpu::read_texture;
@@ -774,6 +774,36 @@ fn selection(dir: &Path) -> Result<(), String> {
         color > 0 && rest == 32 - color && count(&s) == 32 && s.ed.scene.to_vox() == saved,
         format!(
             "Cmd-K Invert selection turns one colour's {color} voxels into the other {rest}; All selects 32; no edit"
+        ),
+    )?;
+    s.ui_click("deselect")?;
+
+    // Region select: the flyout's Face takes block A's top layer of its colour (12 cells,
+    // less the marker), Cmd-K Click selects volume all of block A and not B (24), Shift adds
+    // B's volume, and Color goes back to the colour (23). None of it is an edit.
+    s.ui_click("click-face")?;
+    s.stroke(a_top, &[]);
+    let face = (s.ed.ui.region, count(&s), bounds(&s));
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("click selects volume".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, none)]);
+    s.stroke(a_top, &[]);
+    let volume = (s.ed.ui.region, count(&s));
+    s.hold(egui::Modifiers::SHIFT);
+    s.stroke(b_top, &[]);
+    s.hold(none);
+    let both = count(&s);
+    s.ui_click("click-color")?;
+    s.stroke(a_top, &[]);
+    check(
+        face == (Region::Face, 11, Some(([50, 1, 60], [4, 1, 3])))
+            && volume == (Region::Volume, 24)
+            && both == 32
+            && count(&s) == 23
+            && s.ed.scene.to_vox() == saved,
+        format!(
+            "a click selects the face {face:?}, Cmd-K the volume {volume:?}, Shift adds ({both}), Color the colour ({}); no edit",
+            count(&s)
         ),
     )?;
     s.ui_click("deselect")?;

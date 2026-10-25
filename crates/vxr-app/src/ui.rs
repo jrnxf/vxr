@@ -156,7 +156,7 @@ mod icon {
     pub const FILE_OUTPUT: char = '\u{e0c8}';
 }
 
-pub use vxr_core::select::Transform;
+pub use vxr_core::select::{Region, Transform};
 pub use vxr_core::tools::{MAX_SIZE, Shape, Tool};
 pub use vxr_render::View;
 
@@ -350,6 +350,8 @@ pub struct Hybrid {
     pub lock: Option<usize>,
     /// The voxel brush's size, 1 to [`MAX_SIZE`] (- and = step it).
     pub size: u8,
+    /// What a select click on a voxel takes: its colour, its face or its volume.
+    pub region: Region,
     /// The size flyout beside the voxel brush button is open (V again, or a click on the
     /// button while the voxel brush is on). It also shows while the size is above 1.
     pub size_panel: bool,
@@ -457,6 +459,9 @@ const COMMANDS: &[Command] = &[
     Command { label: "Select all", keys: &["⌘", "A"], run: |h| h.actions.push(Action::SelectAll) },
     Command { label: "Invert selection", keys: &["⌘", "⇧", "I"], run: |h| h.actions.push(Action::InvertSelection) },
     Command { label: "Select color", keys: &[], run: |h| h.actions.push(Action::SelectColor) },
+    Command { label: "Click selects color", keys: &[], run: |h| h.set_region(Region::Color) },
+    Command { label: "Click selects face", keys: &[], run: |h| h.set_region(Region::Face) },
+    Command { label: "Click selects volume", keys: &[], run: |h| h.set_region(Region::Volume) },
     Command { label: "Deselect", keys: &["Esc"], run: |h| h.actions.push(Action::Deselect) },
     Command { label: "Delete selection", keys: &["⌫"], run: |h| h.actions.push(Action::DeleteSelection) },
     Command { label: "Fill selection", keys: &[], run: |h| h.actions.push(Action::FillSelection) },
@@ -570,6 +575,7 @@ impl Hybrid {
             mirror_on: [true, false, false],
             lock: None,
             size: 1,
+            region: Region::Color,
             size_panel: false,
             slot: 28,
             palette,
@@ -1671,16 +1677,24 @@ impl Hybrid {
         }
     }
 
+    /// Choose what a select click takes, and switch to the select tool.
+    pub fn set_region(&mut self, region: Region) {
+        self.region = region;
+        self.tool = Tool::Select;
+    }
+
     // The selection flyout beside the rail's select button, shown with the select tool or a
     // selection: the count, ROTATE / FLIP / LOOP X Y Z and hollow and fill inside (the
-    // whole model when nothing is selected), crop and resize of the model bounds, and fill,
-    // copy, cut, paste and delete. Built like the axis flyout.
+    // whole model when nothing is selected), crop and resize of the model bounds, select all
+    // and invert, what a click selects (colour, face or volume), and fill, copy, cut, paste
+    // and delete. Built like the axis flyout.
     fn selection_panel(&mut self, ctx: &Context) {
         if self.world || (self.tool != Tool::Select && self.selected == 0) {
             return;
         }
-        let rect = Rect::from_min_size(pos2(self.flyout_x(), self.select_y - 6.0), vec2(162.0, 276.0));
+        let rect = Rect::from_min_size(pos2(self.flyout_x(), self.select_y - 6.0), vec2(162.0, 310.0));
         let (selected, has_clip) = (self.selected, self.has_clip);
+        let mut region = self.region;
         let bounds_open = self.bounds_panel.is_some();
         let mut toggle_bounds = false;
         let mut run = Vec::new();
@@ -1787,7 +1801,18 @@ impl Hybrid {
                     }
                 }
             }
-            let cy = hy + 30.0 + 6.0 * 34.0 + 4.0;
+            // What a click on a voxel selects.
+            let row = Rect::from_min_size(pos2(rect.left() + 12.0, hy + 30.0 + 6.0 * 34.0 - 13.0), vec2(138.0, 26.0));
+            let mut seg = Vec::new();
+            let labels = ["Color", "Face", "Volume"].map(String::from);
+            let names = ["click-color", "click-face", "click-volume"];
+            let regions = [Region::Color, Region::Face, Region::Volume];
+            let on = regions.iter().position(|&r| r == region).unwrap_or(0);
+            if let Some(k) = segmented(ui, row, &names, &labels, on, &[true; 3], inter(10.5), &mut seg) {
+                region = regions[k];
+            }
+            hits.extend(seg.into_iter().map(|(n, r)| (n.to_string(), r)));
+            let cy = hy + 30.0 + 7.0 * 34.0 + 4.0;
             ui.painter().line_segment(
                 [pos2(rect.left() + 10.0, cy - 20.5), pos2(rect.right() - 10.0, cy - 20.5)],
                 Stroke::new(1.0, LINE),
@@ -1828,6 +1853,7 @@ impl Hybrid {
         });
         self.hits.extend(hits);
         self.actions.extend(run);
+        self.region = region;
         if toggle_bounds {
             self.toggle_bounds_panel();
         }
@@ -2818,7 +2844,15 @@ impl Hybrid {
             (Tool::Select, _) if self.selected > 0 => {
                 vec![("Drag", "box select"), ("Drag selection", "move it"), ("Arrows", "nudge"), ("⌫", "delete")]
             }
-            (Tool::Select, _) => vec![("Drag", "box select"), ("Click", "select that color")],
+            (Tool::Select, _) => vec![("Drag", "box select"), ("Click", self.region_hint())],
+        }
+    }
+
+    fn region_hint(&self) -> &'static str {
+        match self.region {
+            Region::Color => "select that color",
+            Region::Face => "select that face",
+            Region::Volume => "select that volume",
         }
     }
 
