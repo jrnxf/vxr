@@ -32,8 +32,9 @@ pub struct Scene {
     /// bottom of the opened model, or 0 in a new scene.
     pub floor: i32,
     /// Twice the world coordinate of each mirror plane: world cell `q` mirrors to
-    /// `pivot - 1 - q`. Planes are x = 0 and z = 0 (MagicaVoxel models are centred on their
-    /// translation) and the middle of the opened model's height, or of a new scene's map.
+    /// `pivot - 1 - q`. Planes are the opened file's x = 0 and y = 0 (MagicaVoxel models are
+    /// centred on their translation), or x = 0 and z = 0 in a new scene, and the middle of the
+    /// opened model's height, or of a new scene's map.
     pub pivot: [i32; 3],
     /// The file this scene was opened from. Saving applies the edits to it, so whatever
     /// vxr does not edit (materials, layers, cameras, names, unknown chunks) is kept.
@@ -126,7 +127,9 @@ impl Scene {
         }
         s.origin = lo.map(|l| l - PAD as i32);
         s.floor = PAD as i32;
-        s.pivot = [0, lo[1] + hi[1] + 1, 0];
+        // The file's planes x = 0 and y = 0. vxr z is the negated file y, so file cell y
+        // lands on z = -y and the plane y = 0 (between cells -1 and 0) is z = 1.
+        s.pivot = [0, lo[1] + hi[1] + 1, 2];
         for (p, c) in world {
             let m = s.to_map(p);
             s.map.set(m[0], m[1], m[2], c);

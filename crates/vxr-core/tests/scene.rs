@@ -131,6 +131,20 @@ fn axes_follow_magicavoxel_z_up() {
 }
 
 #[test]
+fn an_opened_model_mirrors_across_its_own_centre() {
+    // A 4x4x4 model at the origin spans file cells -2..=1 on each axis; its centre planes are
+    // file x = 0 and y = 0. Cells 0 and 3 of the model mirror to each other on both.
+    let mut b = Builder::new(200);
+    let m = b.model([4, 4, 4], vec![[0, 0, 1, 7], [3, 3, 1, 7]]);
+    b.root.push(vxr_vox::build::SceneNode::shape(m, None, [0, 0, 0]));
+    let s = Scene::from_vox(&b.build().write()).unwrap();
+    let cells: Vec<[i32; 3]> = world_voxels(&s).into_keys().map(|p| s.to_map(p)).collect();
+    assert_eq!(cells.len(), 2);
+    let mirrored = s.mirror(s.mirror(cells[0], 0), 2);
+    assert_eq!(mirrored, cells[1], "X and Z mirror map one corner onto the other");
+}
+
+#[test]
 fn every_vox_fixture_opens_and_saves_with_the_same_voxels_and_palette() {
     for f in vxr_vox::fixtures::all() {
         let bytes = f.builder.build().write();
