@@ -10,6 +10,9 @@ publish = false
 [workspace.dependencies]
 vxr-vox = { path = "crates/vxr-vox" }
 vxr-core = { path = "crates/vxr-core" }
+vxr-render = { path = "crates/vxr-render" }
+glam = { version = "0.34", features = ["bytemuck"] }
+bytemuck = { version = "1", features = ["derive"] }
 
 [profile.release]
 debug = 0

@@ -18,7 +18,7 @@ fast voxel scenes: an open-source voxel scene editor (Rust, wgpu) with a one-tag
 
 ## Where things live
 
-- `crates/vxr-vox`: the `.vox` codec (from `spikes/vox`). `crates/vxr-core`: the editable scene (brick map, undo/redo, `.vox` open and save), no GPU.
+- `crates/vxr-vox`: the `.vox` codec (from `spikes/vox`). `crates/vxr-core`: the editable scene (brick map, undo/redo, `.vox` open and save), no GPU. `crates/vxr-render`: the GPU renderer (from `spikes/engine`: compacted brick map upload, `trace_h` march, blit, orbit camera); its tests render on the real GPU and compare every pixel with the CPU ray cast, and skip when there is no adapter.
 
 - `docs/plan.md`: what to research and test next, in order. Ask the owner before starting each phase.
 - `docs/decisions.md`: every settled decision and why. Update it when a decision changes; do not duplicate it here.

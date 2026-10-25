@@ -62,6 +62,7 @@ Phase 1 picks from `docs/research/recommendation.md`, now confirmed or changed b
 - **Axes:** vxr is y-up; a MagicaVoxel voxel at (x, y, z) is the vxr cell (x, z, -y). The brick map starts at zero and the scene keeps an `origin`, so files keep their coordinates.
 - **Opening a file** flattens every instance (hidden ones too) into one brick map with 16 voxels of free space on each side, up to 2048 voxels per axis. Instancing in the editor is later work.
 - **Saving** writes a fresh version 200 file (palette plus voxels, split into 256^3 models). It does not yet keep an opened file's materials, layers, cameras or scene graph; the lossless path is to apply edits through `vxr_vox::Document` instead.
+- **Renderer** (`crates/vxr-render`): only the compacted layout and `trace_h` came over from the engine spike; the dense layout, the other traversals, the heat map and the bench hooks stayed behind. The background is the mockups' dark radial gradient (#262b37 to #0d0f14) instead of the spike's light sky, so the translucent panels read as in the mockups. The hovered voxel is tinted in the march shader, so the cursor costs no extra pass.
 - **Undo** stores each action as the cells it changed (old and new value) or the palette slot it recoloured, with no cap. The brick map keeps a voxel count per palette slot, so the used-colour dots need no rescan.
 
 ## What the prototype proved
