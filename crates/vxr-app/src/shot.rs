@@ -243,6 +243,7 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     check(s.ed.ui.cmdk.is_none(), "Escape closes it".into())?;
 
     palette(&mut s, dir)?;
+    brushes(dir)?;
     render(&mut s, dir)?;
     materials(&mut s, dir)?;
 
@@ -277,6 +278,134 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
         frame_times(p)?;
     }
     Ok(())
+}
+
+/// Cells within the circle or sphere brush's reach (r^2 + r/2, see `Gesture::draw`) at or
+/// above the centre's layer: `dims` 2 for a circle, 3 for a ball cut by the floor.
+fn round_cells(r: i32, dims: usize) -> u64 {
+    let r2 = (r * r) as f32 + r as f32 / 2.0;
+    let mut n = 0;
+    for a in -r..=r {
+        for b in -r..=r {
+            for c in if dims == 3 { 0..=r } else { 0..=0 } {
+                n += u64::from(((a * a + b * b + c * c) as f32) <= r2);
+            }
+        }
+    }
+    n
+}
+
+/// Line and center brushes, mirror on X, Y and Z and the axis lock, on an empty scene so
+/// every count is exact. Drives the keys and the rail and flyout buttons through egui.
+fn brushes(dir: &Path) -> Result<(), String> {
+    let mut s = Shot::new(Scene::new(NEW_SIZE), "Untitled", 2.0)?;
+    s.frames(3);
+    let mid = [s.ed.width as f32 / 2.0, s.ed.height as f32 / 2.0];
+    let key = |key| egui::Event::Key {
+        key,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    };
+    s.ed.ui.tool = Tool::Add;
+    s.ed.ui.coach = false;
+
+    // L, then a drag that shows the line live and shrinks it again before the release.
+    s.frames_with(2, vec![key(egui::Key::L)]);
+    s.ed.pointer_moved(Some(mid));
+    s.ed.button(Button::Left, true, false);
+    s.ed.pointer_moved(Some([mid[0] + 240.0, mid[1] + 60.0]));
+    let long = s.voxels();
+    s.ed.pointer_moved(Some([mid[0] + 160.0, mid[1] + 40.0]));
+    let span = s.ed.span();
+    let n = s.voxels();
+    s.ed.button(Button::Left, false, false);
+    check(
+        s.ed.ui.shape == Shape::Line && long > n && n > 3 && span == Some(("LINE", n.to_string())) && s.voxels() == n,
+        format!("L line drag: shown live ({long} voxels, then {n} after moving back), {span:?}"),
+    )?;
+    s.ed.undo();
+    check(s.voxels() == 0, "line: one undo step".into())?;
+
+    // C: a circle from its centre; C again: a sphere, cut by the floor.
+    s.frames_with(2, vec![key(egui::Key::C)]);
+    s.stroke(mid, &[[40.0, 0.0], [90.0, 0.0]]);
+    let r_circle = s.voxels();
+    s.ed.undo();
+    s.ed.pointer_moved(Some(mid));
+    s.ed.button(Button::Left, true, false);
+    s.ed.pointer_moved(Some([mid[0] + 90.0, mid[1]]));
+    let r: i32 = s.ed.span().and_then(|(_, v)| v.parse().ok()).unwrap_or(0);
+    s.ed.button(Button::Left, false, false);
+    check(
+        s.ed.ui.shape == Shape::Circle && r >= 2 && r_circle == round_cells(r, 2),
+        format!("C circle drag: radius {r}, {r_circle} voxels on one layer"),
+    )?;
+    s.ed.undo();
+    s.frames_with(2, vec![key(egui::Key::C)]);
+    s.stroke(mid, &[[90.0, 0.0]]);
+    let ball = s.voxels();
+    check(
+        s.ed.ui.shape == Shape::Sphere && ball == round_cells(r, 3),
+        format!("C again: sphere drag of radius {r}, {ball} voxels above the floor"),
+    )?;
+
+    // Mirror through the rail button and the flyout's axis chips: one click adds 8 voxels.
+    s.ed.ui.shape = Shape::Voxel;
+    s.ui_click("mirror")?;
+    s.ui_click("mirror-y")?;
+    s.ui_click("mirror-z")?;
+    let v = s.voxels();
+    s.stroke([mid[0] - 220.0, mid[1] + 80.0], &[]);
+    check(
+        s.ed.ui.mirror_axes() == [true; 3] && s.voxels() == v + 8,
+        format!("mirror X, Y and Z from the flyout: one click adds {} voxels", s.voxels() - v),
+    )?;
+    s.ui_click("mirror-x")?;
+    s.ui_click("mirror-y")?;
+    check(s.ed.ui.mirror_axes() == [false, false, true], "flyout chips toggle single axes".into())?;
+    s.ui_click("mirror-z")?;
+    check(!s.ed.ui.mirror && !s.ed.ui.hits.contains_key("mirror-x"), "the last axis off turns mirror off".into())?;
+
+    // K locks X: a box drag on the ground builds a wall across x instead of a floor tile.
+    s.frames_with(2, vec![key(egui::Key::K)]);
+    s.frames(1);
+    s.ed.ui.shape = Shape::Box;
+    s.ed.undo();
+    s.ed.undo();
+    s.stroke([mid[0] + 40.0, mid[1] + 40.0], &[[-60.0, -60.0], [-120.0, -100.0]]);
+    let (mut lo, mut hi) = ([i32::MAX; 3], [i32::MIN; 3]);
+    s.ed.scene.for_each_voxel(|p, _| {
+        for a in 0..3 {
+            (lo[a], hi[a]) = (lo[a].min(p[a]), hi[a].max(p[a]));
+        }
+    });
+    let b = (lo, hi);
+    check(
+        s.ed.ui.lock == Some(0) && s.ed.ui.hits.contains_key("lock-x") && lo[0] == hi[0] && hi[1] > lo[1],
+        format!("K locks X: a box drag builds a wall across x ({b:?})"),
+    )?;
+    s.ed.undo();
+    let k = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    s.frames_with(2, vec![k(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("lock axis z".into())]);
+    s.frames_with(2, vec![k(egui::Key::Enter, egui::Modifiers::NONE)]);
+    check(s.ed.ui.lock == Some(2), "Cmd-K 'Lock axis Z'".into())?;
+
+    // A scene for the screenshot: a sphere, a mirrored line and the flyout open.
+    s.ed.ui.lock = None;
+    s.ed.ui.shape = Shape::Sphere;
+    s.stroke(mid, &[[70.0, 0.0]]);
+    s.ed.ui.shape = Shape::Line;
+    s.ed.ui.mirror = true;
+    s.ed.ui.mirror_on = [true, false, true];
+    s.ed.ui.slot = 12;
+    s.stroke([mid[0] - 300.0, mid[1] + 120.0], &[[200.0, -40.0]]);
+    s.ed.ui.lock = Some(1);
+    s.ed.pointer_moved(Some([mid[0] + 300.0, mid[1] + 100.0]));
+    s.frames(4);
+    s.save_png(&dir.join("app-2x-brushes.png"))
 }
 
 /// The live render corner: it shows, converges, follows an edit without restarting, and

@@ -136,6 +136,10 @@ mod icon {
     pub const APERTURE: char = '\u{e040}';
     pub const IMAGE_DOWN: char = '\u{e53c}';
     pub const SUN: char = '\u{e178}';
+    pub const SLASH: char = '\u{e51d}';
+    pub const CIRCLE_DOT: char = '\u{e345}';
+    pub const GLOBE: char = '\u{e0e8}';
+    pub const LOCK: char = '\u{e10b}';
 }
 
 pub use vxr_core::tools::{Shape, Tool};
@@ -211,7 +215,8 @@ pub struct Stats {
     pub frame_ms: f32,
     pub cursor: Option<[i32; 3]>,
     /// Size of the box being dragged, shown in place of the cursor.
-    pub box_size: Option<[i32; 3]>,
+    /// What a shape drag in progress spans: ("BOX", "4×1×3"), ("LINE", "12"), ("RADIUS", "5").
+    pub span: Option<(&'static str, String)>,
     /// The render corner's samples per pixel and whether it is still sampling, if shown.
     pub render: Option<(f32, bool)>,
     /// A render export in progress: its size, samples per pixel so far and the target.
@@ -223,7 +228,11 @@ pub struct Stats {
 pub struct Hybrid {
     pub tool: Tool,
     pub shape: Shape,
+    /// Mirror on (M), and on which axes when it is.
     pub mirror: bool,
+    pub mirror_on: [bool; 3],
+    /// Axis lock (K cycles X, Y, Z, off).
+    pub lock: Option<usize>,
     pub slot: u8,
     /// RGBA by voxel index, as the scene stores it.
     pub palette: [[u8; 4]; 256],
@@ -252,6 +261,8 @@ pub struct Hybrid {
     /// Where each clickable part of the UI was last drawn, in points, by name, for the
     /// headless checks ("edit-color", "sv", "hue", "swap", "copy", "sw<slot>", ...).
     pub hits: HashMap<String, Rect>,
+    /// Top of the mirror button in the rail, where the axis flyout lines up.
+    axes_y: f32,
     /// Swatch being dragged with Cmd (swap) or Cmd+Shift (copy).
     drag_from: Option<u8>,
     /// The slot the swatch grid last scrolled to.
@@ -276,7 +287,17 @@ const COMMANDS: &[Command] = &[
     Command { label: "Voxel brush", keys: &["V"], run: |h| h.shape = Shape::Voxel },
     Command { label: "Box brush", keys: &["B"], run: |h| h.shape = Shape::Box },
     Command { label: "Face brush", keys: &["F"], run: |h| h.shape = Shape::Face },
-    Command { label: "Mirror X", keys: &["M"], run: |h| h.mirror = !h.mirror },
+    Command { label: "Line brush", keys: &["L"], run: |h| h.shape = Shape::Line },
+    Command { label: "Center brush: circle", keys: &["C"], run: |h| h.shape = Shape::Circle },
+    Command { label: "Center brush: sphere", keys: &["C", "C"], run: |h| h.shape = Shape::Sphere },
+    Command { label: "Mirror", keys: &["M"], run: |h| h.mirror = !h.mirror },
+    Command { label: "Mirror X", keys: &[], run: |h| h.toggle_mirror_axis(0) },
+    Command { label: "Mirror Y", keys: &[], run: |h| h.toggle_mirror_axis(1) },
+    Command { label: "Mirror Z", keys: &[], run: |h| h.toggle_mirror_axis(2) },
+    Command { label: "Lock axis X", keys: &[], run: |h| h.toggle_lock(0) },
+    Command { label: "Lock axis Y", keys: &[], run: |h| h.toggle_lock(1) },
+    Command { label: "Lock axis Z", keys: &[], run: |h| h.toggle_lock(2) },
+    Command { label: "Cycle axis lock", keys: &["K"], run: |h| h.cycle_lock() },
     Command { label: "Frame scene", keys: &["."], run: |h| h.actions.push(Action::Frame) },
     Command { label: "Undo", keys: &["⌘", "Z"], run: |h| h.actions.push(Action::Undo) },
     Command { label: "Redo", keys: &["⌘", "⇧", "Z"], run: |h| h.actions.push(Action::Redo) },
@@ -298,6 +319,8 @@ impl Hybrid {
             tool: Tool::Add,
             shape: Shape::Voxel,
             mirror: false,
+            mirror_on: [true, false, false],
+            lock: None,
             slot: 28,
             palette,
             materials: [Material::default(); 256],
@@ -316,6 +339,7 @@ impl Hybrid {
             render: RenderSettings::default(),
             sun_hex: String::new(),
             hits: HashMap::new(),
+            axes_y: 0.0,
             drag_from: None,
             shown_slot: 28,
             shift: false,
@@ -344,6 +368,43 @@ impl Hybrid {
         } else {
             self.tool
         }
+    }
+
+    /// The axes edits are mirrored on now.
+    pub fn mirror_axes(&self) -> [bool; 3] {
+        if self.mirror { self.mirror_on } else { [false; 3] }
+    }
+
+    /// Turn mirroring on one axis on or off. Mirror turns on with it, and off with the last axis.
+    pub fn toggle_mirror_axis(&mut self, a: usize) {
+        if !self.mirror {
+            self.mirror = true;
+            self.mirror_on = [false; 3];
+        }
+        self.mirror_on[a] = !self.mirror_on[a];
+        if self.mirror_on == [false; 3] {
+            self.mirror = false;
+            self.mirror_on = [a == 0, a == 1, a == 2];
+        }
+    }
+
+    /// Lock drags across axis `a`, or unlock if it is already locked.
+    pub fn toggle_lock(&mut self, a: usize) {
+        self.lock = if self.lock == Some(a) { None } else { Some(a) };
+    }
+
+    /// K: lock X, then Y, then Z, then off.
+    pub fn cycle_lock(&mut self) {
+        self.lock = match self.lock {
+            None => Some(0),
+            Some(a) if a < 2 => Some(a + 1),
+            Some(_) => None,
+        };
+    }
+
+    /// C: the center brush, switching between circle and sphere when it is already on.
+    pub fn center_brush(&mut self) {
+        self.shape = if self.shape == Shape::Circle { Shape::Sphere } else { Shape::Circle };
     }
 
     /// Open the colour editor on the current slot.
@@ -415,6 +476,7 @@ impl Hybrid {
         let screen = ctx.content_rect();
         self.top_bar(ctx, screen);
         self.rail(ctx);
+        self.axes(ctx);
         self.palette_panel(ctx, screen);
         self.color_editor(ctx, screen);
         if self.coach {
@@ -464,7 +526,10 @@ impl Hybrid {
                 (Key::V, |h| h.shape = Shape::Voxel),
                 (Key::B, |h| h.shape = Shape::Box),
                 (Key::F, |h| h.shape = Shape::Face),
+                (Key::L, |h| h.shape = Shape::Line),
+                (Key::C, |h| h.center_brush()),
                 (Key::M, |h| h.mirror = !h.mirror),
+                (Key::K, |h| h.cycle_lock()),
                 (Key::R, |h| h.toggle_render_panel()),
                 (Key::Escape, |h| h.escape()),
                 // The coach card's "? for every key": the command list shows every key.
@@ -559,7 +624,7 @@ impl Hybrid {
 
     // #rail
     fn rail(&mut self, ctx: &Context) {
-        let h = 6.0 + rail_label_h() + 4.0 * 42.0 + 11.0 + rail_label_h() + 3.0 * 42.0 + 11.0 + 2.0 * 42.0 + 6.0 - 2.0;
+        let h = 6.0 + rail_label_h() + 4.0 * 42.0 + 11.0 + rail_label_h() + 5.0 * 42.0 + 11.0 + 3.0 * 42.0 + 6.0 - 2.0;
         let rect = Rect::from_min_size(pos2(12.0, 68.0), vec2(52.0, h));
         Self::panel(ctx, "rail", rect, Order::Middle, |ui, rect| {
             let x = rect.left() + 6.0;
@@ -584,21 +649,99 @@ impl Hybrid {
                 (Shape::Voxel, icon::POINTER, "V"),
                 (Shape::Box, icon::SQUARE_DASHED, "B"),
                 (Shape::Face, icon::LAYERS, "F"),
+                (Shape::Line, icon::SLASH, "L"),
             ] {
                 if tool_button(ui, pos2(x, y), ic, k, shape == s).clicked() {
                     self.shape = s;
                 }
                 y += 42.0;
             }
+            // One button for the center brush; its icon shows circle or sphere.
+            let center = matches!(shape, Shape::Circle | Shape::Sphere);
+            let ic = if shape == Shape::Sphere { icon::GLOBE } else { icon::CIRCLE_DOT };
+            let r = tool_button(ui, pos2(x, y), ic, "C", center);
+            self.hits.insert("center".into(), r.rect);
+            if r.clicked() {
+                self.center_brush();
+            }
+            y += 42.0;
             rail_sep(ui, rect, &mut y);
-            if tool_button(ui, pos2(x, y), icon::FLIP, "M", self.mirror).clicked() {
+            self.axes_y = y;
+            let r = tool_button(ui, pos2(x, y), icon::FLIP, "M", self.mirror);
+            self.hits.insert("mirror".into(), r.rect);
+            if r.clicked() {
                 self.mirror = !self.mirror;
+            }
+            y += 42.0;
+            let r = tool_button(ui, pos2(x, y), icon::LOCK, "K", self.lock.is_some());
+            self.hits.insert("lock".into(), r.rect);
+            if r.clicked() {
+                self.cycle_lock();
             }
             y += 42.0;
             if tool_button(ui, pos2(x, y), icon::SCAN, ".", false).clicked() {
                 self.actions.push(Action::Frame);
             }
         });
+    }
+
+    // The axis flyout beside the rail's mirror and lock buttons, shown while either is on:
+    // MIRROR X Y Z (any of them) and LOCK X Y Z (one of them).
+    fn axes(&mut self, ctx: &Context) {
+        if !self.mirror && self.lock.is_none() {
+            return;
+        }
+        let rect =
+            Rect::from_min_size(pos2(12.0 + 52.0 + 8.0, self.axes_y - 6.0), vec2(150.0, 6.0 + 2.0 * 40.0 + 2.0 + 6.0));
+        let (mirror, lock) = (self.mirror_axes(), self.lock);
+        let mut clicked = (None, None);
+        let mut hits = Vec::new();
+        Self::panel(ctx, "axes", rect, Order::Middle, |ui, rect| {
+            for (row, label) in ["MIRROR", "LOCK"].into_iter().enumerate() {
+                let cy = rect.top() + 6.0 + 20.0 + row as f32 * 42.0;
+                let g = ui.painter().layout_job(spaced(label, inter(9.0), FAINT, 0.72));
+                ui.painter().galley(pos2(rect.left() + 12.0, cy - g.size().y / 2.0), g, FAINT);
+                for (a, name) in ["X", "Y", "Z"].into_iter().enumerate() {
+                    let on = if row == 0 { mirror[a] } else { lock == Some(a) };
+                    let c =
+                        Rect::from_min_size(pos2(rect.left() + 58.0 + a as f32 * 28.0, cy - 13.0), vec2(26.0, 26.0));
+                    let id = format!("{}-{}", if row == 0 { "mirror" } else { "lock" }, name.to_lowercase());
+                    let resp = ui.interact(c, Id::unique(&id), Sense::click());
+                    hits.push((id, c));
+                    let p = ui.painter();
+                    let color = if on {
+                        p.rect(
+                            c,
+                            CornerRadius::same(7),
+                            ACCENT_BG,
+                            Stroke::new(1.0, Color32::from_rgba_unmultiplied(142, 162, 255, 89)),
+                            StrokeKind::Inside,
+                        );
+                        ACCENT
+                    } else {
+                        let hover = resp.hovered();
+                        let border = if hover { Color32::from_white_alpha(64) } else { LINE2 };
+                        p.rect_stroke(c, CornerRadius::same(7), Stroke::new(1.0, border), StrokeKind::Inside);
+                        if hover { TEXT } else { MUTED }
+                    };
+                    p.text(c.center(), Align2::CENTER_CENTER, name, mono_medium(11.5), color);
+                    if resp.clicked() {
+                        if row == 0 {
+                            clicked.0 = Some(a);
+                        } else {
+                            clicked.1 = Some(a);
+                        }
+                    }
+                }
+            }
+        });
+        self.hits.extend(hits);
+        if let Some(a) = clicked.0 {
+            self.toggle_mirror_axis(a);
+        }
+        if let Some(a) = clicked.1 {
+            self.toggle_lock(a);
+        }
     }
 
     // #palette
@@ -1176,8 +1319,8 @@ impl Hybrid {
             ("VOXELS", group_thousands(s.voxels), TEXT),
             ("FPS", if s.fps > 0.0 { format!("{:.0}", s.fps) } else { "-".into() }, fps_color),
             ("FRAME", format!("{:.1}ms", s.frame_ms), TEXT),
-            match s.box_size {
-                Some(b) => ("BOX", format!("{}×{}×{}", b[0], b[1], b[2]), TEXT),
+            match &s.span {
+                Some((label, v)) => (*label, v.clone(), TEXT),
                 None => (
                     "CURSOR",
                     s.cursor.map(|c| format!("{},{},{}", c[0], c[1], c[2])).unwrap_or_else(|| "-".into()),
@@ -1462,6 +1605,15 @@ impl Hybrid {
             (Tool::Paint, Shape::Voxel) => vec![("Click", "paint"), ("Drag", "paint as you go")],
             (Tool::Paint, Shape::Box) => vec![("Drag", "paint a rectangle")],
             (Tool::Paint, Shape::Face) => vec![("Click", "fill the connected face")],
+            (Tool::Add, Shape::Line) => vec![("Drag", "draw a line")],
+            (Tool::Erase, Shape::Line) => vec![("Drag", "erase along a line")],
+            (Tool::Paint, Shape::Line) => vec![("Drag", "paint along a line")],
+            (Tool::Add, Shape::Circle) => vec![("Drag", "grow a circle from its center"), ("C", "sphere")],
+            (Tool::Erase, Shape::Circle) => vec![("Drag", "clear a circle"), ("C", "sphere")],
+            (Tool::Paint, Shape::Circle) => vec![("Drag", "paint a circle"), ("C", "sphere")],
+            (Tool::Add, Shape::Sphere) => vec![("Drag", "grow a sphere from its center"), ("C", "circle")],
+            (Tool::Erase, Shape::Sphere) => vec![("Drag", "carve a sphere"), ("C", "circle")],
+            (Tool::Paint, Shape::Sphere) => vec![("Drag", "paint a sphere"), ("C", "circle")],
             (Tool::Pick, _) => vec![("Click", "take that color")],
         }
     }

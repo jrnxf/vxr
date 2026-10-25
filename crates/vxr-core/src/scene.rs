@@ -30,6 +30,10 @@ pub struct Scene {
     /// Map layer the ground plane sits on: clicks that miss every voxel land here. It is the
     /// bottom of the opened model, or 0 in a new scene.
     pub floor: i32,
+    /// Twice the world coordinate of each mirror plane: world cell `q` mirrors to
+    /// `pivot - 1 - q`. Planes are x = 0 and z = 0 (MagicaVoxel models are centred on their
+    /// translation) and the middle of the opened model's height, or of a new scene's map.
+    pub pivot: [i32; 3],
     /// The file this scene was opened from. Saving applies the edits to it, so whatever
     /// vxr does not edit (materials, layers, cameras, names, unknown chunks) is kept.
     source: Option<Document>,
@@ -66,8 +70,9 @@ impl Scene {
             map: BrickMap::new(size),
             palette,
             materials: [Material::default(); 256],
-            origin: [0; 3],
+            origin: [-(size[0] as i32 / 2), 0, -(size[2] as i32 / 2)],
             floor: 0,
+            pivot: [0, size[1] as i32, 0],
             source: None,
             history: History::default(),
             stroke: None,
@@ -108,6 +113,7 @@ impl Scene {
         }
         s.origin = lo.map(|l| l - PAD as i32);
         s.floor = PAD as i32;
+        s.pivot = [0, lo[1] + hi[1] + 1, 0];
         for (p, c) in world {
             let m = s.to_map(p);
             s.map.set(m[0], m[1], m[2], c);
@@ -257,6 +263,17 @@ impl Scene {
         self.commit();
         self.put_material(index, m);
         self.commit();
+    }
+
+    /// Put back every cell the open edit changed, keeping the edit open (its colour and
+    /// material changes stay). Shape drags redraw from scratch on each move this way.
+    pub fn revert_voxels(&mut self) {
+        let Some(s) = &mut self.stroke else { return };
+        let changes = std::mem::take(&mut s.changes);
+        s.index.clear();
+        for c in changes.iter().rev() {
+            self.map.set(c.pos[0], c.pos[1], c.pos[2], c.old);
+        }
     }
 
     /// Close the open edit as one undo step. Cells and slots that ended where they started

@@ -136,6 +136,47 @@ async () => {
   }
   step('M mirror adds the mirrored voxel too', st().mirror && pair);
   await key('m');
+
+  // Line and center brushes: shown live while dragging, one undo step each.
+  await key('l');
+  ptr('pointermove', mx - 60, my); await frames();
+  ptr('pointerdown', mx - 60, my); await frames();
+  for (let i = 1; i <= 8; i++) { ptr('pointermove', mx - 60 + i * 15, my + i * 2); await frames(1); }
+  s = st();
+  ptr('pointerup', mx + 60, my + 16); await frames();
+  step('L line drag shows the line live', s.shape === 'Line' && s.span && s.span[0] === 'LINE' && s.voxels > s0.voxels + 3 && st().voxels === s.voxels,
+    JSON.stringify([s.span, s0.voxels, s.voxels, st().voxels]));
+  await key('z', cmd);
+  await key('c');
+  ptr('pointermove', mx, my); await frames();
+  ptr('pointerdown', mx, my); await frames();
+  for (let i = 1; i <= 8; i++) { ptr('pointermove', mx + i * 8, my); await frames(1); }
+  s = st();
+  ptr('pointerup', mx + 64, my); await frames();
+  const circle = st().voxels - s0.voxels;
+  step('C circle drag grows from its centre', s.shape === 'Circle' && s.span && s.span[0] === 'RADIUS' && circle > 4, JSON.stringify([s.span, circle]));
+  await key('z', cmd);
+  await key('c');
+  await drag(mx, my, mx + 64, my);
+  step('C again: a sphere drag adds more than the circle', st().shape === 'Sphere' && st().voxels - s0.voxels > circle,
+    `${st().voxels - s0.voxels} vs ${circle}`);
+  await key('z', cmd);
+  await key('v');
+
+  // Mirror axes from the flyout, and the axis lock.
+  await key('m');
+  const chip = async (name) => { const h = window.vxr.hit(name); if (h.length) await click(h[0], h[1]); return h.length > 0; };
+  const shown = await chip('mirror-y');
+  step('the mirror flyout adds Y', shown && JSON.stringify(st().mirrorAxes) === '[true,true,false]', JSON.stringify(st().mirrorAxes));
+  await chip('mirror-x');
+  await chip('mirror-y');
+  step('turning off the last axis turns mirror off', !st().mirror && window.vxr.hit('mirror-x').length === 0, JSON.stringify(st()));
+  await key('k');
+  step('K locks X', st().lock === 'X' && window.vxr.hit('lock-x').length === 2, JSON.stringify(st().lock));
+  await key('k');
+  await key('k');
+  await key('k');
+  step('K again locks Y, Z, then off', st().lock === null);
   step('undo after every tool returns to the island', same(bytes(), original));
 
   // Camera.

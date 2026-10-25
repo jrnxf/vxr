@@ -32,11 +32,11 @@ Feature names below follow the update log [S1] unless another source is given.
 | Voxel brush (V) with size | Cube, sphere, square, disc, surface; keys 1-9 set size; Ctrl+Alt+drag resizes [S1 0.97.1, 0.99.5.1] | partial (single voxel and drag-on-plane; no size, no sphere or surface shape) | P1 | sculpt |
 | Face brush (F) | Extrude or peel a connected face by dragging, several modes [S1 0.97] | done (click extrudes or peels the whole face, paint fills it) | P1 | sculpt, minutes |
 | Box brush (B) | Drag a rectangle, resizable with a gizmo, Enter commits [S1 0.99.5.1] | partial (drag a rectangle; no gizmo or height drag) | P1 | minutes |
-| Line brush (L) | Line, square and circle in one geometry mode since 0.99.6.2 [S1 0.99.6.2] | missing [4] | P1 | sculpt |
-| Center brush (C) | Square or circle from a center point, even diameters [S1 0.97, 0.97.1] | missing [4] (merged into L since 0.99.6.2) | P1 | sculpt |
+| Line brush (L) | Line, square and circle in one geometry mode since 0.99.6.2 [S1 0.99.6.2] | done (L: drag a line on the drag plane, shown live) | P1 | sculpt |
+| Center brush (C) | Square or circle from a center point, even diameters [S1 0.97, 0.97.1] | done (C: circle on the drag plane from its center, C again for a sphere; no square or even diameters) | P1 | sculpt |
 | Pattern brush (P) | Stamp a pattern made from a selection, rotate and offset it [S1 0.98.1] | missing | P2 | minutes |
-| Mirror X, Y, Z | Per-axis mirror on every brush [S1 0.97] | partial (X only) [4] | P1 | sculpt |
-| Axis lock | Brush option "axis" [S1 0.97, 0.99.5.1] | missing [4] | P1 | sculpt |
+| Mirror X, Y, Z | Per-axis mirror on every brush [S1 0.97] | done (M toggles; X, Y, Z chips in the axis flyout; x and z planes at world 0, y at the middle of the model's height) | P1 | sculpt |
+| Axis lock | Brush option "axis" [S1 0.97, 0.99.5.1] | done (K cycles X, Y, Z, off: drags stay on the plane across that axis) | P1 | sculpt |
 | Diagonal symmetry | Command `dia [axis]` [S1 0.98.1] | missing | P3 | - |
 | Region options | Brushes act on selected or unselected voxels only [S1 0.98.1, 0.99.5.1] | missing [5] | P2 | sculpt |
 | Replace colour and remove colour brushes | Act on every voxel of one colour [S1 0.98.1] | missing (paint face covers part) | P2 | palette |
@@ -194,4 +194,4 @@ Design note: `.vox` animation is a list of `nSHP` models with `_f` frame indices
 
 1. Lossless save [1] was the one blocking gap for anyone with existing files. It is done: saving an opened MagicaVoxel scene keeps its materials, layers, cameras and names.
 2. The palette [2] and the renderer [3] were the two loved features vxr lacked most visibly. Palette editing is done (picker, live recolour, swap and copy); multi-select, sorting and palette import/export remain. The live path-traced corner, the Render panel (sun, sky, exposure, depth of field, samples), PNG export and per-slot materials (diffuse, metal, glass, emissive, saved as MATL) are in; refraction, plastic and the newer blend and cloud types remain.
-3. Brushes [4] and selection [5] close the sculpting gap. After them, the world editor [8] matters most for MagicaVoxel scenes with many objects.
+3. Brushes [4] are in (line, center circle and sphere, mirror on X, Y and Z, axis lock); selection [5] closes the rest of the sculpting gap. After them, the world editor [8] matters most for MagicaVoxel scenes with many objects.

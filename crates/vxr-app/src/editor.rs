@@ -5,7 +5,7 @@
 use glam::Vec3;
 use vxr_core::Scene;
 use vxr_core::material::Material;
-use vxr_core::tools::{Brush, Gesture, Press, Target, plane_cell};
+use vxr_core::tools::{Brush, Gesture, Press, Shape, Target, plane_cell};
 use vxr_render::{EditBox, Gpu, GpuMap, OrbitCamera, Preview, Renderer, brickmap_layout, gpu::now_ms};
 
 use crate::render::{EXPORT_SIZES, Export};
@@ -178,7 +178,13 @@ impl Editor {
     }
 
     fn brush(&self) -> Brush {
-        Brush { tool: self.ui.effective_tool(), shape: self.ui.shape, mirror: self.ui.mirror, color: self.ui.slot }
+        Brush {
+            tool: self.ui.effective_tool(),
+            shape: self.ui.shape,
+            mirror: self.ui.mirror_axes(),
+            lock: self.ui.lock,
+            color: self.ui.slot,
+        }
     }
 
     /// The pointer moved to `p` (pixels), or left the view (`None`).
@@ -276,6 +282,20 @@ impl Editor {
         self.scene.redo();
     }
 
+    /// What a shape drag in progress spans, for the stats panel.
+    pub fn span(&self) -> Option<(&'static str, String)> {
+        self.gesture.as_ref().and_then(|g| {
+            let (lo, hi) = g.extent();
+            let d: [i32; 3] = std::array::from_fn(|a| hi[a] - lo[a] + 1);
+            match g.brush().shape {
+                Shape::Box => Some(("BOX", format!("{}×{}×{}", d[0], d[1], d[2]))),
+                Shape::Line => Some(("LINE", format!("{}", d.into_iter().max().unwrap_or(1)))),
+                Shape::Circle | Shape::Sphere => Some(("RADIUS", format!("{}", g.radius()))),
+                Shape::Voxel | Shape::Face => None,
+            }
+        })
+    }
+
     fn stats(&self) -> Stats {
         let n = self.frames.len();
         let (fps, frame_ms) = if n >= 2 {
@@ -285,10 +305,7 @@ impl Editor {
             (0.0, 0.0)
         };
         let cursor = self.cursor.filter(|t| !t.ground).map(|t| self.scene.to_world(t.voxel));
-        let box_size = self.gesture.as_ref().filter(|g| g.brush().shape == vxr_core::tools::Shape::Box).map(|g| {
-            let (lo, hi) = g.extent();
-            std::array::from_fn(|a| hi[a] - lo[a] + 1)
-        });
+        let span = self.span();
         let render = self.ui.show_render.then(|| (self.preview.samples(), self.preview.last_rows > 0));
         let export = self.export.as_ref().map(|x| {
             let (done, of) = x.progress();
@@ -299,7 +316,7 @@ impl Editor {
             fps: fps as f32,
             frame_ms: frame_ms as f32,
             cursor,
-            box_size,
+            span,
             render,
             export,
             export_fits: self.export_fits,
