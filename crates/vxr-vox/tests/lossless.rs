@@ -207,3 +207,44 @@ fn palette_and_materials_survive_a_voxel_edit() {
 fn is_geometry(c: &Chunk) -> bool {
     [chunk::SIZE, chunk::XYZI, chunk::TDCZ, chunk::NTRN, chunk::NGRP, chunk::NSHP].iter().any(|id| c.is(id))
 }
+
+#[test]
+fn a_voxel_added_inside_a_hidden_model_goes_into_a_shown_one() {
+    // 13-hidden-node: a shown cube and a hidden copy at x = 6, both from one 3^3 model. Erase
+    // a cell of each, then put them back: the hidden one's cell must not land in the hidden
+    // model, or MagicaVoxel would not show it.
+    for name in ["13-hidden-node", "12-layers"] {
+        let f = vxr_vox::fixtures::all().into_iter().find(|f| f.name == name).unwrap();
+        let mut doc = Document::read(&f.builder.build().write()).unwrap();
+        let scene = doc.scene().unwrap();
+        let (inst, _) = scene.instances(Rule::Compose);
+        let hidden_layers: Vec<i32> =
+            scene.layers.iter().filter(|l| l.attrs.is_true("_hidden")).map(|l| l.id).collect();
+        let hidden = |i: &vxr_vox::scene::Instance| i.hidden || hidden_layers.contains(&i.layer);
+        let shown_world = |doc: &Document| {
+            let s = doc.scene().unwrap();
+            let (inst, _) = s.instances(Rule::Compose);
+            let mut out = BTreeMap::new();
+            for i in inst.iter().filter(|i| !hidden(i)) {
+                let m = &s.models[i.model];
+                for v in m.effective_voxels() {
+                    let p =
+                        vxr_vox::scene::Scene::world_cell(&i.world, m.size, [v[0] as i32, v[1] as i32, v[2] as i32]);
+                    out.insert(p, v[3]);
+                }
+            }
+            out
+        };
+        assert!(inst.iter().any(hidden), "{name} has a hidden model");
+        let mut w = world(&doc);
+        let shown_before = shown_world(&doc);
+        let cell = *w.keys().find(|p| !shown_before.contains_key(*p)).unwrap();
+        let c = w.remove(&cell).unwrap();
+        doc.set_world(&w).unwrap();
+        w.insert(cell, c);
+        doc.set_world(&w).unwrap();
+        let again = Document::read(&doc.write()).unwrap();
+        assert_eq!(world(&again), w, "{name}");
+        assert_eq!(shown_world(&again).get(&cell), Some(&c), "{name}: the re-added voxel shows");
+    }
+}

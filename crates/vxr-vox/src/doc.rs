@@ -196,9 +196,10 @@ impl Document {
 
     /// Make the file's world voxels (MagicaVoxel z-up coordinates, the
     /// [`Scene::world_voxels`] view with [`Rule::Compose`]) equal `world`, touching as little
-    /// as possible. Erased cells are cleared in every model that covers them, added and
-    /// painted cells go into the model that shows them (or would, by the overlap rule), and
-    /// cells no model covers become new models of at most 256^3 under the root group. Only
+    /// as possible. Erased cells are cleared in every model that covers them, painted cells
+    /// go into the model that shows them (or would, by the overlap rule), added cells into
+    /// the first shown model that covers them (not a hidden node or layer, where MagicaVoxel
+    /// would not show them), and cells no shown model covers become new models of at most 256^3 under the root group. Only
     /// the data chunks of edited models and the root group are re-encoded; everything else
     /// stays byte for byte. If that cannot reproduce `world` exactly, the models and scene
     /// graph are rebuilt instead (see [`WorldSave`]).
@@ -220,7 +221,9 @@ impl Document {
         }
         let want: BTreeMap<[i32; 3], u8> = world.iter().filter(|(_, c)| **c != 0).map(|(p, c)| (*p, *c)).collect();
         let mut kept = self.clone();
-        if kept.apply_changes(&changes).is_ok() && kept.scene().is_ok_and(|s| s.world_voxels(Rule::Compose) == want) {
+        if kept.apply_changes(&changes, &old).is_ok()
+            && kept.scene().is_ok_and(|s| s.world_voxels(Rule::Compose) == want)
+        {
             *self = kept;
             return Ok(WorldSave::Kept);
         }
@@ -228,7 +231,8 @@ impl Document {
         Ok(WorldSave::Rebuilt)
     }
 
-    fn apply_changes(&mut self, changes: &BTreeMap<[i32; 3], u8>) -> Result<()> {
+    /// Apply `changes` to the models that cover them; `old` is the world before them.
+    fn apply_changes(&mut self, changes: &BTreeMap<[i32; 3], u8>, old: &BTreeMap<[i32; 3], u8>) -> Result<()> {
         let scene = self.scene()?;
         let (mut inst, _) = scene.instances(Rule::Compose);
         // From version 200 the earlier instance wins an overlap, before 200 the later one.
@@ -238,19 +242,31 @@ impl Document {
         // Edits per instance (index into `inst`), so a linked copy can be split off.
         let mut edits: BTreeMap<usize, BTreeMap<[u8; 3], u8>> = BTreeMap::new();
         let mut added: BTreeMap<[i32; 3], u8> = BTreeMap::new();
+        let hidden_layers: Vec<i32> =
+            scene.layers.iter().filter(|l| l.attrs.is_true("_hidden")).map(|l| l.id).collect();
+        let shown = |i: &Instance| !i.hidden && !hidden_layers.contains(&i.layer);
         for (&p, &c) in changes {
             let mut covering = inst
                 .iter()
                 .enumerate()
                 .filter_map(|(k, i)| model_cell(&i.world, scene.models[i.model].size, p).map(|v| (k, v)));
-            if c == 0 {
+            let into = if c == 0 {
                 for (k, v) in covering {
                     edits.entry(k).or_default().insert(v, 0);
                 }
-            } else if let Some((k, v)) = covering.next() {
-                edits.entry(k).or_default().insert(v, c);
+                continue;
+            } else if old.contains_key(&p) {
+                covering.next()
             } else {
-                added.insert(p, c);
+                covering.find(|&(k, _)| shown(&inst[k]))
+            };
+            match into {
+                Some((k, v)) => {
+                    edits.entry(k).or_default().insert(v, c);
+                }
+                None => {
+                    added.insert(p, c);
+                }
             }
         }
         let mut model_uses: HashMap<usize, usize> = HashMap::new();
