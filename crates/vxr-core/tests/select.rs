@@ -166,6 +166,27 @@ fn rotate_flip_loop_selection_and_whole_model() {
 }
 
 #[test]
+fn a_transform_that_leaves_the_map_changes_nothing() {
+    // A row along x on the floor of a 32^3 map: turned upright about Z, it would reach y = -14.
+    let mut s = Scene::new([32, 32, 32]);
+    s.edit((1..31).map(|x| ([x, 0, 5], 3)));
+    let before = voxels(&s);
+    assert_eq!(s.transform(Transform::Rotate(2)), None);
+    assert_eq!(s.transform(Transform::Move([2, 0, 0])), None, "x = 31 fits, 32 does not");
+    assert_eq!(voxels(&s), before);
+    assert!(s.undo() && !s.undo(), "only the scene's own edit is a step");
+    // A drag stops at the edge instead of dropping what crosses it.
+    let mut s = scene();
+    s.select_color(5, Mode::Replace);
+    let mut g = s.start_move(1, [O + 5, O, O + 5]).unwrap();
+    g.move_to(&mut s, [O + 8, O, O + 5]);
+    g.move_to(&mut s, [O + 40, O, O + 5]);
+    assert_eq!(g.offset, [3, 0, 0]);
+    g.release(&mut s);
+    assert_eq!(s.map.get(O + 8, O, O + 5), 5);
+}
+
+#[test]
 fn moving_onto_other_voxels_overwrites_and_undo_restores_them() {
     let mut s = scene();
     let before = voxels(&s);

@@ -407,7 +407,9 @@ impl Editor {
         let s = &mut self.scene;
         match a {
             Action::Transform(t) => {
-                s.transform(t);
+                if s.transform(t).is_none() {
+                    self.ui.toast(&self.ctx, "No room in the scene for that");
+                }
             }
             Action::SelectAll => s.select_all(),
             Action::SelectColor => {

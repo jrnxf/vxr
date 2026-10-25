@@ -157,22 +157,29 @@ impl Scene {
         (out, false)
     }
 
+    /// Whether every cell of `cells` stays inside the map where `t` puts it.
+    fn fits(&self, cells: &[([i32; 3], u8)], t: Transform) -> bool {
+        let Some((lo, hi)) = bounds(cells.iter().map(|c| c.0)) else { return true };
+        let size = self.map.size_voxels();
+        cells.iter().all(|&(p, _)| {
+            let q = t.apply(p, lo, hi);
+            (0..3).all(|a| q[a] >= 0 && q[a] < size[a] as i32)
+        })
+    }
+
     /// Lift `cells` and set them down where `t` puts them, inside the open edit. The
-    /// selection follows them when `selected`. Cells moved outside the map are dropped.
+    /// selection follows them when `selected`. Every target must be inside the map
+    /// ([`Scene::fits`]).
     fn place(&mut self, cells: &[([i32; 3], u8)], t: Transform, selected: bool) {
         let Some((lo, hi)) = bounds(cells.iter().map(|c| c.0)) else { return };
         for &(p, _) in cells {
             self.put(p, 0);
         }
-        let size = self.map.size_voxels();
-        let inside = |q: [i32; 3]| (0..3).all(|a| q[a] >= 0 && q[a] < size[a] as i32);
         let mut moved = HashSet::with_capacity(cells.len());
         for &(p, v) in cells {
             let q = t.apply(p, lo, hi);
-            if inside(q) {
-                self.put(q, v);
-                moved.insert(q);
-            }
+            self.put(q, v);
+            moved.insert(q);
         }
         if selected {
             self.put_selection(moved);
@@ -180,13 +187,17 @@ impl Scene {
     }
 
     /// Move, rotate, flip or loop the selection (or the whole model when nothing is
-    /// selected) as one undo step. Returns how many voxels changed.
-    pub fn transform(&mut self, t: Transform) -> usize {
+    /// selected) as one undo step. Returns how many voxels changed, or `None`, changing
+    /// nothing, when the result would not fit in the map.
+    pub fn transform(&mut self, t: Transform) -> Option<usize> {
         self.commit();
         let (cells, selected) = self.subject();
+        if !self.fits(&cells, t) {
+            return None;
+        }
         self.begin();
         self.place(&cells, t, selected);
-        self.commit()
+        Some(self.commit())
     }
 
     /// Erase the selected voxels as one undo step; the selection empties.
@@ -284,9 +295,10 @@ impl MoveDrag {
         self.shift_to(scene, d);
     }
 
-    /// Show the selection moved by `d` from where the drag started.
+    /// Show the selection moved by `d` from where the drag started. An offset that would
+    /// push any of it out of the map is ignored, so it stops at the edge.
     pub fn shift_to(&mut self, scene: &mut Scene, d: [i32; 3]) {
-        if d == self.offset {
+        if d == self.offset || !scene.fits(&self.cells, Transform::Move(d)) {
             return;
         }
         self.offset = d;
