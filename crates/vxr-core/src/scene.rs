@@ -5,7 +5,7 @@
 //! (x, y, z) is the vxr cell (x, z, -y). Map cell `p` is the world cell `p + origin`, so
 //! the map can start at zero while the scene keeps its file coordinates.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use vxr_vox::Document;
 use vxr_vox::build::Builder;
@@ -25,7 +25,18 @@ pub struct Scene {
     pub palette: [[u8; 4]; 256],
     /// World cell of map cell (0, 0, 0).
     pub origin: [i32; 3],
+    /// Map layer the ground plane sits on: clicks that miss every voxel land here. It is the
+    /// bottom of the opened model, or 0 in a new scene.
+    pub floor: i32,
     history: History,
+    stroke: Option<Stroke>,
+}
+
+/// The changes of the edit in progress: one entry per cell, first old value and last new value.
+#[derive(Default)]
+struct Stroke {
+    changes: Vec<Change>,
+    index: HashMap<[i32; 3], usize>,
 }
 
 pub fn vox_to_world(p: [i32; 3]) -> [i32; 3] {
@@ -43,7 +54,7 @@ impl Scene {
         for (i, c) in palette.iter_mut().enumerate() {
             *c = vxr_vox::default_palette::DEFAULT_PALETTE[(i + 255) % 256];
         }
-        Scene { map: BrickMap::new(size), palette, origin: [0; 3], history: History::default() }
+        Scene { map: BrickMap::new(size), palette, origin: [0; 3], floor: 0, history: History::default(), stroke: None }
     }
 
     /// Read a `.vox` file. Every instance in the scene graph is flattened into one map,
@@ -76,6 +87,7 @@ impl Scene {
             *c = vs.color(i as u8);
         }
         s.origin = lo.map(|l| l - PAD as i32);
+        s.floor = PAD as i32;
         for (p, c) in world {
             let m = s.to_map(p);
             s.map.set(m[0], m[1], m[2], c);
@@ -134,13 +146,41 @@ impl Scene {
     /// Set map cells as one undoable step. Cells outside the map and cells that already
     /// hold the value are skipped. Returns how many voxels changed.
     pub fn edit(&mut self, cells: impl IntoIterator<Item = ([i32; 3], u8)>) -> usize {
-        let mut changes = Vec::new();
+        self.begin();
         for (p, v) in cells {
-            let old = self.map.get(p[0], p[1], p[2]);
-            if self.map.set(p[0], p[1], p[2], v) {
-                changes.push(Change { pos: p, old, new: v });
+            self.put(p, v);
+        }
+        self.commit()
+    }
+
+    /// Start an edit that spans many calls, such as a drag. Cells set with [`Scene::put`]
+    /// show at once and become one undo step at [`Scene::commit`].
+    pub fn begin(&mut self) {
+        self.stroke.get_or_insert_default();
+    }
+
+    /// Set one map cell inside the open edit (opening one if needed). Returns true if it changed.
+    pub fn put(&mut self, p: [i32; 3], v: u8) -> bool {
+        let old = self.map.get(p[0], p[1], p[2]);
+        if !self.map.set(p[0], p[1], p[2], v) {
+            return false;
+        }
+        let s = self.stroke.get_or_insert_default();
+        match s.index.get(&p) {
+            Some(&i) => s.changes[i].new = v,
+            None => {
+                s.index.insert(p, s.changes.len());
+                s.changes.push(Change { pos: p, old, new: v });
             }
         }
+        true
+    }
+
+    /// Close the open edit as one undo step. Cells that ended where they started are dropped.
+    /// Returns how many voxels changed.
+    pub fn commit(&mut self) -> usize {
+        let Some(s) = self.stroke.take() else { return 0 };
+        let changes: Vec<Change> = s.changes.into_iter().filter(|c| c.old != c.new).collect();
         let n = changes.len();
         if n > 0 {
             self.history.push(Step::Voxels(changes));
@@ -150,6 +190,7 @@ impl Scene {
 
     /// Recolour one palette slot as an undoable step.
     pub fn set_color(&mut self, index: u8, rgba: [u8; 4]) {
+        self.commit();
         let old = self.palette[index as usize];
         if old != rgba {
             self.palette[index as usize] = rgba;
@@ -158,12 +199,14 @@ impl Scene {
     }
 
     pub fn undo(&mut self) -> bool {
+        self.commit();
         let Some(step) = self.history.undo().cloned() else { return false };
         self.apply(&step, true);
         true
     }
 
     pub fn redo(&mut self) -> bool {
+        self.commit();
         let Some(step) = self.history.redo().cloned() else { return false };
         self.apply(&step, false);
         true

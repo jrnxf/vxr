@@ -4,3 +4,7 @@ prototype/demo/
 .scratch/
 # Cargo build output.
 /target/
+# UI fonts, fetched by crates/vxr-app/fetch-fonts.
+/crates/vxr-app/fonts/
+# Evidence screenshots from the app.
+/crates/vxr-app/shots/

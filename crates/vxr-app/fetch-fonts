@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Fetch the UI fonts into fonts/ (git-ignored): Inter 4.1 and JetBrains Mono 2.304 (both OFL),
+# and the Lucide icon font 1.61.0 (ISC) for the toolbar icons. Pinned versions, checked by sha256.
+set -euo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
+out="$here/fonts"
+mkdir -p "$out"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+curl -fsSL -o "$tmp/inter.zip" https://github.com/rsms/inter/releases/download/v4.1/Inter-4.1.zip
+curl -fsSL -o "$tmp/jbm.zip" https://github.com/JetBrains/JetBrainsMono/releases/download/v2.304/JetBrainsMono-2.304.zip
+curl -fsSL -o "$out/lucide.ttf" https://unpkg.com/lucide-static@1.61.0/font/lucide.ttf
+unzip -o -q -j "$tmp/inter.zip" 'extras/ttf/Inter-Regular.ttf' 'extras/ttf/Inter-Medium.ttf' 'extras/ttf/Inter-SemiBold.ttf' -d "$out"
+unzip -o -q -j "$tmp/jbm.zip" 'fonts/ttf/JetBrainsMono-Regular.ttf' 'fonts/ttf/JetBrainsMono-Medium.ttf' -d "$out"
+cd "$out" && shasum -a 256 -c "$here/fonts.sha256"

@@ -1,0 +1,343 @@
+//! The editor, independent of the window: the scene on the GPU, the camera, the Hybrid UI
+//! and the editing gestures. A host (the native window, or a headless run for screenshots)
+//! feeds it pointer events in physical pixels and egui input, and gives it a target to draw to.
+
+use glam::Vec3;
+use vxr_core::Scene;
+use vxr_core::tools::{Brush, Gesture, Press, Target, plane_cell};
+use vxr_render::{Gpu, GpuMap, OrbitCamera, Renderer, brickmap_layout, gpu::now_ms};
+
+use crate::ui::{Action, FontBytes, Hybrid, Stats};
+
+/// Size of a new, empty scene.
+pub const NEW_SIZE: [u32; 3] = [128, 128, 128];
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Button {
+    Left,
+    Right,
+    Middle,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CamDrag {
+    Orbit,
+    Pan,
+}
+
+pub struct Editor {
+    pub gpu: Gpu,
+    pub scene: Scene,
+    layout: wgpu::BindGroupLayout,
+    map: GpuMap,
+    renderer: Renderer,
+    pub cam: OrbitCamera,
+    pub ctx: egui::Context,
+    egui: egui_wgpu::Renderer,
+    pub ui: Hybrid,
+    /// Target size in pixels and pixels per point.
+    pub width: u32,
+    pub height: u32,
+    pub ppp: f32,
+    gesture: Option<Gesture>,
+    cam_drag: Option<CamDrag>,
+    /// Pointer position in pixels, if it is over the view.
+    pointer: Option<[f32; 2]>,
+    cursor: Option<Target>,
+    /// Space held: left-drag orbits.
+    pub space: bool,
+    palette: [[u8; 4]; 256],
+    frames: Vec<f64>,
+    /// Where the scene was opened from or last saved to.
+    pub path: Option<std::path::PathBuf>,
+}
+
+impl Editor {
+    pub fn new(
+        gpu: Gpu,
+        scene: Scene,
+        name: &str,
+        format: wgpu::TextureFormat,
+        size: (u32, u32),
+        ppp: f32,
+        fonts: Option<FontBytes>,
+    ) -> Result<Self, String> {
+        let layout = brickmap_layout(&gpu.device);
+        let mut scene = scene;
+        scene.map.track_dirty(true);
+        let map = GpuMap::new(&gpu.device, &gpu.queue, &layout, &scene.map, &scene.palette)?;
+        let (width, height) = (size.0.max(1), size.1.max(1));
+        let renderer = Renderer::new(&gpu.device, &layout, format, width, height, false);
+        let egui = egui_wgpu::Renderer::new(&gpu.device, format, egui_wgpu::RendererOptions::default());
+        let ctx = egui::Context::default();
+        crate::ui::install(&ctx, fonts);
+        let ui = Hybrid::new(scene.palette, used(&scene), name);
+        let palette = scene.palette;
+        let mut e = Self {
+            gpu,
+            scene,
+            layout,
+            map,
+            renderer,
+            cam: OrbitCamera::framing(Vec3::ZERO, Vec3::ONE),
+            ctx,
+            egui,
+            ui,
+            width,
+            height,
+            ppp,
+            gesture: None,
+            cam_drag: None,
+            pointer: None,
+            cursor: None,
+            space: false,
+            palette,
+            frames: Vec::new(),
+            path: None,
+        };
+        e.frame_scene();
+        Ok(e)
+    }
+
+    /// Replace the scene (after Open), reframing the camera.
+    pub fn load(&mut self, scene: Scene, name: &str) -> Result<(), String> {
+        let mut scene = scene;
+        scene.map.track_dirty(true);
+        self.map = GpuMap::new(&self.gpu.device, &self.gpu.queue, &self.layout, &scene.map, &scene.palette)?;
+        self.palette = scene.palette;
+        self.scene = scene;
+        self.ui.scene_name = name.into();
+        self.gesture = None;
+        self.cursor = None;
+        self.frame_scene();
+        Ok(())
+    }
+
+    pub fn resize(&mut self, width: u32, height: u32, ppp: f32) {
+        let (width, height) = (width.max(1), height.max(1));
+        self.renderer.resize(&self.gpu.device, width, height);
+        (self.width, self.height, self.ppp) = (width, height, ppp);
+    }
+
+    /// Frame the model (or the floor of an empty scene), like MagicaVoxel's `.`.
+    pub fn frame_scene(&mut self) {
+        let (lo, hi) = match self.scene.map.occupied_bounds() {
+            Some(b) => b,
+            None => {
+                let s = self.scene.map.size_voxels();
+                let f = self.scene.floor.max(0) as u32;
+                ([0, f, 0], [s[0], f + 1, s[2]])
+            }
+        };
+        let v = |a: [u32; 3]| Vec3::new(a[0] as f32, a[1] as f32, a[2] as f32);
+        self.cam = OrbitCamera::framing_aspect(v(lo), v(hi), self.width as f32 / self.height as f32);
+    }
+
+    /// What the pointer is over, if anything.
+    pub fn cursor(&self) -> Option<Target> {
+        self.cursor
+    }
+
+    fn ray(&self, p: [f32; 2]) -> ([f32; 3], [f32; 3]) {
+        let (o, d) = self.cam.ray(p[0], p[1], self.width as f32, self.height as f32);
+        (o.to_array(), d.to_array())
+    }
+
+    fn brush(&self) -> Brush {
+        Brush { tool: self.ui.effective_tool(), shape: self.ui.shape, mirror: self.ui.mirror, color: self.ui.slot }
+    }
+
+    /// The pointer moved to `p` (pixels), or left the view (`None`).
+    pub fn pointer_moved(&mut self, p: Option<[f32; 2]>) {
+        let last = self.pointer;
+        self.pointer = p;
+        let Some(p) = p else {
+            self.cursor = None;
+            return;
+        };
+        if let (Some(drag), Some(last)) = (self.cam_drag, last) {
+            let (dx, dy) = (p[0] - last[0], p[1] - last[1]);
+            match drag {
+                CamDrag::Orbit => self.cam.orbit(dx, dy),
+                CamDrag::Pan => self.cam.pan(dx, dy, self.height as f32),
+            }
+            return;
+        }
+        let (o, d) = self.ray(p);
+        if let Some(g) = &mut self.gesture {
+            let cell = if g.on_plane() {
+                plane_cell(o, d, g.axis, g.layer)
+            } else {
+                self.scene.target(o, d).filter(|t| !t.ground).map(|t| t.voxel)
+            };
+            if let Some(c) = cell {
+                g.move_to(&mut self.scene, c);
+            }
+            return;
+        }
+        self.cursor = self.scene.target(o, d);
+    }
+
+    /// A mouse button changed. `over_ui` is true when egui has the pointer.
+    pub fn button(&mut self, b: Button, pressed: bool, over_ui: bool) {
+        if !pressed {
+            if let Some(g) = self.gesture.take()
+                && b == Button::Left
+            {
+                g.release(&mut self.scene);
+            }
+            self.cam_drag = None;
+            return;
+        }
+        if over_ui || self.gesture.is_some() || self.cam_drag.is_some() {
+            return;
+        }
+        let (shift, _) = self.ui.modifiers();
+        self.cam_drag = match b {
+            Button::Right if shift => Some(CamDrag::Pan),
+            Button::Right => Some(CamDrag::Orbit),
+            Button::Middle => Some(CamDrag::Pan),
+            Button::Left if self.space => Some(CamDrag::Orbit),
+            Button::Left => None,
+        };
+        if b != Button::Left || self.space {
+            return;
+        }
+        self.ui.coach = false;
+        let Some(p) = self.pointer else { return };
+        let (o, d) = self.ray(p);
+        let Some(t) = self.scene.target(o, d) else { return };
+        match self.scene.press(self.brush(), t) {
+            Press::Picked(v) => {
+                self.ui.slot = v;
+                let c = self.scene.palette[v as usize];
+                self.ui.toast(&self.ctx, format!("Picked #{:02X}{:02X}{:02X}", c[0], c[1], c[2]));
+            }
+            Press::Drag(g) => self.gesture = Some(g),
+            Press::Done(_) | Press::Nothing => {}
+        }
+    }
+
+    /// Wheel zoom toward the point under the pointer, in notches (positive zooms in).
+    pub fn scroll(&mut self, notches: f32) {
+        let hit = self.pointer.and_then(|p| {
+            let (o, d) = self.ray(p);
+            self.scene.map.raycast(o, d, 1e5).map(|h| (Vec3::from(d), h.t))
+        });
+        self.cam.zoom(notches, hit);
+    }
+
+    pub fn undo(&mut self) {
+        self.gesture = None;
+        self.scene.undo();
+    }
+
+    pub fn redo(&mut self) {
+        self.gesture = None;
+        self.scene.redo();
+    }
+
+    fn stats(&self) -> Stats {
+        let n = self.frames.len();
+        let (fps, frame_ms) = if n >= 2 {
+            let span = self.frames[n - 1] - self.frames[0];
+            ((n - 1) as f64 * 1000.0 / span, span / (n - 1) as f64)
+        } else {
+            (0.0, 0.0)
+        };
+        let cursor = self.cursor.filter(|t| !t.ground).map(|t| self.scene.to_world(t.voxel));
+        let box_size = self.gesture.as_ref().filter(|g| g.brush().shape == vxr_core::tools::Shape::Box).map(|g| {
+            let (lo, hi) = g.extent();
+            std::array::from_fn(|a| hi[a] - lo[a] + 1)
+        });
+        Stats { voxels: self.scene.map.voxels, fps: fps as f32, frame_ms: frame_ms as f32, cursor, box_size }
+    }
+
+    /// Run the UI, apply what it asked for, and draw a frame onto `view`. Returns the actions
+    /// the host handles (open, save, embed) and egui's platform output.
+    pub fn frame(&mut self, input: egui::RawInput, view: &wgpu::TextureView) -> (Vec<Action>, egui::PlatformOutput) {
+        let now = now_ms();
+        self.frames.push(now);
+        let keep = self.frames.iter().position(|&t| now - t <= 500.0).unwrap_or(0);
+        self.frames.drain(..keep);
+
+        self.ui.palette = self.scene.palette;
+        self.ui.used = used(&self.scene);
+        self.ui.can_undo = self.scene.history().can_undo();
+        self.ui.can_redo = self.scene.history().can_redo();
+        let stats = self.stats();
+        let mut actions = Vec::new();
+        let ui = &mut self.ui;
+        let out = self.ctx.run_ui(input, |u| actions = ui.ui(u.ctx(), &stats));
+        let mut host = Vec::new();
+        for a in actions {
+            match a {
+                Action::Undo => self.undo(),
+                Action::Redo => self.redo(),
+                Action::Frame => self.frame_scene(),
+                other => host.push(other),
+            }
+        }
+        self.draw(out.shapes, out.pixels_per_point, out.textures_delta, view);
+        (host, out.platform_output)
+    }
+
+    fn draw(
+        &mut self,
+        shapes: Vec<egui::epaint::ClippedShape>,
+        ppp: f32,
+        textures: egui::TexturesDelta,
+        view: &wgpu::TextureView,
+    ) {
+        let (dev, queue) = (&self.gpu.device, &self.gpu.queue);
+        if self.scene.palette != self.palette {
+            self.palette = self.scene.palette;
+            self.map.set_palette(queue, &self.palette);
+        }
+        if let Err(e) = self.map.upload_dirty(dev, queue, &mut self.scene.map, &self.scene.palette) {
+            eprintln!("upload failed: {e}");
+        }
+        let tint = if self.gesture.is_none() { self.cursor.filter(|t| !t.ground).map(|t| t.voxel) } else { None };
+        self.renderer.set_camera(queue, &self.cam, tint);
+        let mut enc = dev.create_command_encoder(&Default::default());
+        self.renderer.march(&mut enc, &self.map, None);
+        self.renderer.blit(&mut enc, view, None);
+        let jobs = self.ctx.tessellate(shapes, ppp);
+        for (id, deltas) in &textures.set {
+            for delta in deltas {
+                self.egui.update_texture(dev, queue, *id, delta);
+            }
+        }
+        let screen = egui_wgpu::ScreenDescriptor { size_in_pixels: [self.width, self.height], pixels_per_point: ppp };
+        let extra = self.egui.update_buffers(dev, queue, &mut enc, &jobs, &screen);
+        {
+            let pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("egui"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            self.egui.render(&mut pass.forget_lifetime(), &jobs, &screen);
+        }
+        for id in &textures.free {
+            self.egui.free_texture(id);
+        }
+        queue.submit(extra.into_iter().chain([enc.finish()]));
+    }
+}
+
+/// Palette indices with voxels in the scene, from the map's per-colour counts.
+fn used(scene: &Scene) -> [bool; 256] {
+    let mut u = [false; 256];
+    for (i, c) in scene.map.counts.iter().enumerate().skip(1) {
+        u[i] = *c > 0;
+    }
+    u
+}
