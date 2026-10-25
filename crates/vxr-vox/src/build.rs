@@ -102,28 +102,8 @@ impl Builder {
     /// Add world-space voxels, split into models of at most 256^3, each placed by its
     /// own nTRN so that model voxel `v` lands at the world cell it came from.
     pub fn add_world(&mut self, voxels: &BTreeMap<[i32; 3], u8>) {
-        let mut blocks: BTreeMap<[i32; 3], Vec<([i32; 3], u8)>> = BTreeMap::new();
-        for (p, &c) in voxels {
-            if c != 0 {
-                blocks.entry(p.map(|x| x.div_euclid(256))).or_default().push((*p, c));
-            }
-        }
-        for (_, vs) in blocks {
-            let mut lo = [i32::MAX; 3];
-            let mut hi = [i32::MIN; 3];
-            for (p, _) in &vs {
-                for k in 0..3 {
-                    lo[k] = lo[k].min(p[k]);
-                    hi[k] = hi[k].max(p[k]);
-                }
-            }
-            let size = [hi[0] - lo[0] + 1, hi[1] - lo[1] + 1, hi[2] - lo[2] + 1];
-            let local = vs
-                .iter()
-                .map(|(p, c)| [(p[0] - lo[0]) as u8, (p[1] - lo[1]) as u8, (p[2] - lo[2]) as u8, *c])
-                .collect();
+        for (size, local, t) in world_blocks(voxels) {
             let m = self.model(size, local);
-            let t = [lo[0] + size[0] / 2, lo[1] + size[1] / 2, lo[2] + size[2] / 2];
             self.root.push(SceneNode::shape(m, None, t));
         }
     }
@@ -187,6 +167,36 @@ impl Builder {
         }
         RawFile { version: self.version, main_content: vec![], chunks, trailing: vec![] }
     }
+}
+
+/// One model cut out of world voxels: its size, its voxels, and the translation that puts
+/// model voxel `v` back at its world cell.
+pub type Block = ([i32; 3], Vec<[u8; 4]>, [i32; 3]);
+
+/// World-space voxels split into models of at most 256^3.
+pub fn world_blocks(voxels: &BTreeMap<[i32; 3], u8>) -> Vec<Block> {
+    let mut blocks: BTreeMap<[i32; 3], Vec<([i32; 3], u8)>> = BTreeMap::new();
+    for (p, &c) in voxels {
+        if c != 0 {
+            blocks.entry(p.map(|x| x.div_euclid(256))).or_default().push((*p, c));
+        }
+    }
+    let mut out = Vec::new();
+    for (_, vs) in blocks {
+        let mut lo = [i32::MAX; 3];
+        let mut hi = [i32::MIN; 3];
+        for (p, _) in &vs {
+            for k in 0..3 {
+                lo[k] = lo[k].min(p[k]);
+                hi[k] = hi[k].max(p[k]);
+            }
+        }
+        let size = [hi[0] - lo[0] + 1, hi[1] - lo[1] + 1, hi[2] - lo[2] + 1];
+        let local =
+            vs.iter().map(|(p, c)| [(p[0] - lo[0]) as u8, (p[1] - lo[1]) as u8, (p[2] - lo[2]) as u8, *c]).collect();
+        out.push((size, local, [lo[0] + size[0] / 2, lo[1] + size[1] / 2, lo[2] + size[2] / 2]));
+    }
+    out
 }
 
 fn emit(n: &SceneNode, trn_id: i32, chunks: &mut Vec<Chunk>) {

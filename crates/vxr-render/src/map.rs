@@ -161,12 +161,13 @@ fn runs(v: &[u32]) -> Vec<(u32, u32)> {
     out
 }
 
-fn srgb_to_linear(c: u8) -> f32 {
+/// An sRGB channel as linear light, 0 to 1.
+pub fn srgb_to_linear(c: u8) -> f32 {
     let c = c as f32 / 255.0;
     if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
 }
 
-fn palette_linear(p: &[[u8; 4]; 256]) -> Vec<[f32; 4]> {
+pub(crate) fn palette_linear(p: &[[u8; 4]; 256]) -> Vec<[f32; 4]> {
     p.iter().map(|c| [srgb_to_linear(c[0]), srgb_to_linear(c[1]), srgb_to_linear(c[2]), c[3] as f32 / 255.0]).collect()
 }
 

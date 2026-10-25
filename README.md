@@ -2,7 +2,7 @@
 
 fast voxel scenes
 
-Early stage. The real build is a Rust workspace in `crates/`, and the first desktop editor runs: open a MagicaVoxel `.vox` file, add, erase, paint and pick with the voxel, box and face brushes (and X mirror), orbit, pan and zoom, undo and redo, and save. It uses the Hybrid UI (tool rail, palette, hint bar, Cmd-K) drawn with egui, and shows the voxel count and FPS. The same editor runs in the browser with WebGPU (open and save there go through a file picker and a download). See `AGENTS.md` for how to build and run both.
+Early stage. The real build is a Rust workspace in `crates/`, and the first desktop editor runs: open a MagicaVoxel `.vox` file, add, erase, paint and pick with the voxel, box, face, line and center (circle or sphere) brushes, drawn live as you drag, with mirror on X, Y and Z and an axis lock, select by box or colour and then move, copy, paste, delete, fill, rotate, flip or loop the selection (or the whole model), orbit, pan and zoom, undo and redo, and save. The palette is editable: all 255 slots, a colour editor with hex, RGB and HSV that recolours every voxel using the slot instantly, and swap and copy of slots as in MagicaVoxel, each one undo step. Saving an opened file is lossless: materials, layers, cameras, names and anything vxr does not understand are kept, and an unedited save is byte for byte the same file. A live path-traced render sits in the corner while you edit: it keeps sampling in the background, updates only around an edit, and recolours instantly. A Render panel sets the sun, sky, exposure, depth of field and sample count, and exports a PNG up to 4K while you keep editing (a download in the browser). Each palette slot can be diffuse, metal, glass or emissive, with roughness and the type's settings; the render shows it, and it is saved in MagicaVoxel's `MATL` chunks so MagicaVoxel reads it back. It uses the Hybrid UI (tool rail, palette, hint bar, Cmd-K) drawn with egui, and shows the voxel count and FPS. The same editor runs in the browser with WebGPU (open and save there go through a file picker and a download). See `AGENTS.md` for how to build and run both.
 
 ## What is here
 
@@ -10,6 +10,7 @@ Early stage. The real build is a Rust workspace in `crates/`, and the first desk
   - `prototype/demo/` is the built version and is not in git: run `node prototype/src/build.mjs` (no dependencies) to create it, including the starter island `scene.vox`. Serve it with any static server, for example `python3 -m http.server -d prototype/demo`, then open `index.html` (`?scene=terrain` loads a 3.9M-voxel stress scene) or `embed.html`.
   - `prototype/src/` holds the sources and `build.mjs`.
 - `docs/market-research.md` - whether there is a market for an open-source voxel editor, and which wedge to take.
+- `docs/research/ai.md` - research and a proposal for AI in vxr: a bring-your-own-key assistant that edits the scene through tool calls with a review step, and a `vxr mcp` server for terminal agents. Not built; the AI phase in `docs/plan.md` waits for the owner's go.
 - `ui-directions.html` (in `vxr-design-references.zip` on the `design-references` GitHub release) - four UI directions for the editor. The pick is **D, Hybrid**.
 
 ## Direction

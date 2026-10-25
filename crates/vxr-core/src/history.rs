@@ -1,6 +1,8 @@
 //! Undo and redo. Each step is one user action (a click, a drag, a recolour) stored as
 //! the cells it changed with their old and new values, so undo is exact and cheap.
 
+use vxr_vox::Material;
+
 /// One voxel that an edit changed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Change {
@@ -9,10 +11,45 @@ pub struct Change {
     pub new: u8,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Step {
-    Voxels(Vec<Change>),
-    Palette { index: u8, old: [u8; 4], new: [u8; 4] },
+/// One palette slot that an edit recoloured.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ColorChange {
+    pub index: u8,
+    pub old: [u8; 4],
+    pub new: [u8; 4],
+}
+
+/// One palette slot whose material an edit changed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MaterialChange {
+    pub index: u8,
+    pub old: Material,
+    pub new: Material,
+}
+
+/// The selection before and after a step that moved or changed it (map cells).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SelectionChange {
+    pub old: Vec<[i32; 3]>,
+    pub new: Vec<[i32; 3]>,
+}
+
+/// One undo step: the voxels, palette colours and materials a single action changed. A
+/// recolour has only colours, a swap of two slots has all three (the colours and materials
+/// swapped, and the voxels remapped to keep their look). Steps that move a selection (move,
+/// rotate, paste, delete) also record it, so undo puts the selection back with the voxels.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Step {
+    pub voxels: Vec<Change>,
+    pub colors: Vec<ColorChange>,
+    pub materials: Vec<MaterialChange>,
+    pub selection: Option<Box<SelectionChange>>,
+}
+
+impl Step {
+    pub fn is_empty(&self) -> bool {
+        self.voxels.is_empty() && self.colors.is_empty() && self.materials.is_empty() && self.selection.is_none()
+    }
 }
 
 #[derive(Clone, Debug, Default)]

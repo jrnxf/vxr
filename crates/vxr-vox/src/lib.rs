@@ -6,6 +6,7 @@
 //!   the bytes it did not consume, so `encode(parse(c)) == c` for every chunk.
 //! - [`scene`]: the semantic view (models, palette, scene graph, world instances).
 //! - [`doc`]: a raw file plus edits that re-encode only the chunks they touch.
+//! - [`material`]: palette slot materials (`MATL`) as typed values.
 //! - [`build`]: writes new files from scratch (fixtures, property tests).
 //!
 //! The reader is bounds checked everywhere and returns `Err` on malformed input.
@@ -16,11 +17,13 @@ pub mod chunk;
 pub mod default_palette;
 pub mod doc;
 pub mod fixtures;
+pub mod material;
 pub mod raw;
 pub mod scene;
 
 pub use bytes::Dict;
-pub use doc::Document;
+pub use doc::{Document, WorldSave};
+pub use material::{Kind, Material};
 pub use raw::{Chunk, RawFile};
 pub use scene::{Affine, Instance, Scene};
 

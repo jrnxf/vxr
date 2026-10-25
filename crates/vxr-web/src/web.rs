@@ -192,7 +192,8 @@ impl App {
         .into()
     }
 
-    /// Draw a frame at `time` seconds. Returns what the page must do: "open", "save" or "embed".
+    /// Draw a frame at `time` seconds. Returns what the page must do: "open", "save", "embed"
+    /// or "exported" (a render export is ready: `take_export`).
     pub fn frame(&mut self, time: f64) -> Vec<String> {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
@@ -222,6 +223,7 @@ impl App {
                 Action::Open => Some("open".into()),
                 Action::Save => Some("save".into()),
                 Action::Embed => Some("embed".into()),
+                Action::Exported => Some("exported".into()),
                 _ => None,
             })
             .collect()
@@ -241,9 +243,88 @@ impl App {
         self.editor.scene.to_vox()
     }
 
+    /// The finished render export's PNG (empty if none), for the page to download.
+    pub fn take_export(&mut self) -> Vec<u8> {
+        self.editor.exported.take().map(|(png, _)| png).unwrap_or_default()
+    }
+
+    /// The file name for the render export.
+    pub fn export_name(&self) -> String {
+        self.editor.export_name()
+    }
+
     /// The scene's file name.
     pub fn name(&self) -> String {
         self.editor.ui.scene_name.clone()
+    }
+
+    /// The editor's state as JSON, for the headless browser check (`crates/vxr-web/check`)
+    /// and the console.
+    pub fn state(&self) -> String {
+        let e = &self.editor;
+        let (c, h) = (&e.cam, e.scene.history());
+        format!(
+            r#"{{"voxels":{},"tool":"{:?}","shape":"{:?}","mirror":{},"mirrorAxes":[{},{},{}],"lock":{},"span":{},"selected":{},"hasClip":{},"slot":{},"colorEdit":{},"slotOp":"{:?}","undo":{},"redo":{},"cmdk":{},"coach":{},"name":{:?},"size":[{},{}],"ppp":{},"cam":[{},{},{},{},{},{}],"render":{{"shown":{},"spp":{},"rows":{},"restarts":{},"timestamps":{},"panel":{},"maxSpp":{},"exposure":{},"aperture":{},"sky":{},"export":{}}}}}"#,
+            e.scene.map.voxels,
+            e.ui.tool,
+            e.ui.shape,
+            e.ui.mirror,
+            e.ui.mirror_on[0],
+            e.ui.mirror_on[1],
+            e.ui.mirror_on[2],
+            e.ui.lock.map_or("null".into(), |a| format!("\"{}\"", ["X", "Y", "Z"][a])),
+            e.span().map_or("null".into(), |(l, v)| format!("[\"{l}\",\"{v}\"]")),
+            e.scene.selected_count(),
+            e.scene.clipboard.is_some(),
+            e.ui.slot,
+            e.ui.color_edit.is_some(),
+            e.ui.slot_op,
+            h.can_undo(),
+            h.can_redo(),
+            e.ui.cmdk.is_some(),
+            e.ui.coach,
+            e.ui.scene_name,
+            self.config.width,
+            self.config.height,
+            e.ppp,
+            c.target.x,
+            c.target.y,
+            c.target.z,
+            c.yaw,
+            c.pitch,
+            c.distance,
+            e.ui.render_rect.is_some() && e.ui.show_render,
+            e.preview.samples(),
+            e.preview.last_rows,
+            e.preview.restarts,
+            e.gpu.timestamps,
+            e.ui.render_panel,
+            e.preview.max_spp,
+            e.preview.lighting.exposure,
+            e.preview.lighting.aperture,
+            e.preview.lighting.sky_backdrop,
+            e.export.as_ref().map_or("null".into(), |x| format!("{:?}", x.progress().0)),
+        )
+    }
+
+    /// The RGBA colour of palette slot `slot` and how many voxels use it.
+    pub fn color(&self, slot: u8) -> Vec<u32> {
+        let c = self.editor.scene.palette[slot as usize];
+        vec![c[0] as u32, c[1] as u32, c[2] as u32, c[3] as u32, self.editor.scene.map.counts[slot as usize]]
+    }
+
+    /// The material of palette slot `slot`: type (0 diffuse, 1 metal, 2 glass, 3 emit),
+    /// roughness, metalness, refractive index, transparency, emission and power.
+    pub fn material(&self, slot: u8) -> Vec<f32> {
+        let m = self.editor.scene.materials[slot as usize];
+        let kind = vxr_core::material::Kind::ALL.iter().position(|&k| k == m.kind).unwrap_or(0);
+        vec![kind as f32, m.rough, m.metal, m.ior, m.trans, m.emit, m.flux]
+    }
+
+    /// The middle of a named part of the UI in CSS pixels (see `Hybrid::hits`), or an empty
+    /// array if it is not on screen. For the browser check.
+    pub fn hit(&self, name: &str) -> Vec<f32> {
+        self.editor.ui.hits.get(name).map(|r| vec![r.center().x, r.center().y]).unwrap_or_default()
     }
 
     /// Show a short message in the editor.

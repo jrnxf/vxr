@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# Check the browser build end to end in headless Chrome (chrome-devtools-axi on the PATH):
+# serve crates/vxr-web/dist/ on 127.0.0.1, run check.js in the page (every tool, camera,
+# undo/redo, Cmd-K, Open, Save, resize), check the no-WebGPU message in a browser without
+# WebGPU, and write 1x and 2x screenshots into the git-ignored crates/vxr-web/shots/.
+# Prints ok or FAIL per step and exits 1 on any failure. Run crates/vxr-web/build first.
+set -euo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
+root="$(cd "$here/../.." && pwd)"
+dist="$here/dist"
+shots="$here/shots"
+port="${VXR_CHECK_PORT:-4801}"
+url="http://127.0.0.1:$port/"
+[ -f "$dist/pkg/vxr_web_bg.wasm" ] || { echo "no $dist: run crates/vxr-web/build first" >&2; exit 1; }
+command -v chrome-devtools-axi >/dev/null || { echo "chrome-devtools-axi is not on the PATH" >&2; exit 1; }
+mkdir -p "$shots"
+
+cd "$root"
+./dev node -e "
+const http = require('node:http'), fs = require('node:fs'), path = require('node:path');
+const types = { '.html': 'text/html', '.js': 'text/javascript', '.wasm': 'application/wasm' };
+http.createServer((req, res) => {
+  const p = path.join(process.argv[1], decodeURIComponent(new URL(req.url, 'http://x').pathname));
+  const f = p.endsWith('/') ? p + 'index.html' : p;
+  fs.readFile(f, (err, data) => {
+    if (err) { res.writeHead(404); res.end(); return; }
+    res.writeHead(200, { 'content-type': types[path.extname(f)] || 'application/octet-stream' });
+    res.end(data);
+  });
+}).listen(+process.argv[2], '127.0.0.1');
+" "$dist" "$port" &
+server=$!
+gpu=vxr-check-$$
+nogpu=vxr-check-nogpu-$$
+cleanup() {
+  CHROME_DEVTOOLS_AXI_SESSION=$gpu chrome-devtools-axi stop >/dev/null 2>&1 || true
+  CHROME_DEVTOOLS_AXI_SESSION=$nogpu chrome-devtools-axi stop >/dev/null 2>&1 || true
+  kill "$server" 2>/dev/null || true
+}
+trap cleanup EXIT
+for _ in $(seq 50); do curl -sf "$url" >/dev/null && break; sleep 0.1; done
+
+# eval prints the returned string JSON-quoted twice; unwrap it to plain lines.
+unwrap() { sed -n 's/^result: //p' | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{let v=JSON.parse(s);while(typeof v==='string'&&v.startsWith('\"'))v=JSON.parse(v);console.log(v)})"; }
+
+export CHROME_DEVTOOLS_AXI_SESSION=$gpu
+export CHROME_DEVTOOLS_AXI_CHROME_ARGS='--enable-unsafe-webgpu --ignore-gpu-blocklist'
+axi() { chrome-devtools-axi "$@"; }
+axi open "$url" >/dev/null
+for scale in 1 2; do
+  axi emulate --viewport "1280x800x$scale" >/dev/null
+  axi open "$url" >/dev/null
+  axi eval "async () => { for (let i = 0; i < 300 && !window.vxr; i++) await new Promise(r => setTimeout(r, 50)); await new Promise(r => setTimeout(r, 500)); return 'ready' }" >/dev/null
+  axi screenshot "$shots/web-${scale}x.png" >/dev/null
+  echo "wrote $shots/web-${scale}x.png"
+done
+axi emulate --viewport "1280x800x1" >/dev/null
+axi open "$url" >/dev/null
+results="$(axi eval "$(sed -n '/^async/,$p' "$here/check.js")" | unwrap)"
+axi screenshot "$shots/web-1x-checked.png" >/dev/null
+
+export CHROME_DEVTOOLS_AXI_SESSION=$nogpu
+export CHROME_DEVTOOLS_AXI_CHROME_ARGS='--disable-gpu --disable-webgpu'
+axi open "$url" >/dev/null
+axi emulate --viewport "1280x800x1" >/dev/null
+axi open "$url" >/dev/null
+msg="$(axi eval "async () => { await new Promise(r => setTimeout(r, 1000)); return document.getElementById('msg').innerText }" | unwrap)"
+if [[ "$msg" == "This browser has no WebGPU."* ]]; then
+  results+=$'\nok without WebGPU the page says so'
+else
+  results+=$'\nFAIL without WebGPU the page says so: '"$msg"
+fi
+axi screenshot "$shots/web-no-webgpu.png" >/dev/null
+
+echo "$results"
+! grep -q '^FAIL' <<<"$results"

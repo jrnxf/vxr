@@ -11,17 +11,18 @@ path = "src/main.rs"
 
 [dependencies]
 vxr-core.workspace = true
+vxr-vox.workspace = true
 vxr-render.workspace = true
 glam.workspace = true
 egui = "0.37"
 egui-wgpu = { version = "0.37", default-features = false }
+png = "0.18"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 wgpu = "30.0.1"
 winit = "0.30"
 egui-winit = { version = "0.37", default-features = false, features = ["clipboard", "links", "wayland", "x11"] }
 pollster = "1"
-png = "0.18"
 rfd = "0.15"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
