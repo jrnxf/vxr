@@ -200,9 +200,9 @@ Listed with thresholds in `docs/plan.md`, phase "AI". In short: can models actua
 
 ### Open questions for the owner
 
-1. Is AI still out of v1 (decisions.md says so), with this as the first phase after it, or does the assistant ship in v1?
+1. ~~Is AI still out of v1 (decisions.md says so), with this as the first phase after it, or does the assistant ship in v1?~~ Answered 2026-10-25: the assistant and `vxr mcp` both ship in v1.
 2. ~~Direction A (panel) or B (Cmd-K and a card) for the assistant?~~ Answered 2026-10-25: both, sharing one conversation, with the panel as home.
-3. Should vxr ever offer a hosted key or proxy (a paid tier from the market research), or stay strictly bring-your-own-key?
+3. ~~Should vxr ever offer a hosted key or proxy (a paid tier from the market research), or stay strictly bring-your-own-key?~~ Answered 2026-10-25: do not plan the hosted tier yet.
 4. Is "remember in this browser" worth offering at all, given what it cannot protect against?
 5. ~~Live MCP: apply each agent call straight away with undo, or review every call?~~ Answered 2026-10-25: apply straight away, one undo step each, visible on screen, and the agent can undo on request.
-6. Script mode (b) on the same API: Lua (vengi-compatible scripts) or Rhai/JS in a wasm sandbox?
+6. ~~Script mode (b) on the same API: Lua (vengi-compatible scripts) or Rhai/JS in a wasm sandbox?~~ Answered 2026-10-25: pass on scripting for now; the script language is decided when script mode is planned.
