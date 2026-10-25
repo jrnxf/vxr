@@ -15,6 +15,7 @@ What has been settled for vxr so far, and why. Newest context first within each 
 - v1 must keep what MagicaVoxel users love: results in minutes, the hand-sculpting feel, a palette-first workflow, a beautiful built-in renderer.
 - v1 must fix the loudest complaints: the 256^3 cap, render being a separate mode, platform gaps, capped undo.
 - Out of v1: collaboration, rigging, AI generation, accounts, cloud storage.
+- Feature gaps against MagicaVoxel are tracked in `docs/research/magicavoxel-gap.md`, ranked by which loved trait they serve. The order to close them: lossless save first (without it, saving an opened MagicaVoxel scene loses its materials, layers and cameras, so no existing user can switch), then palette editing and the renderer (the two loved features vxr lacks most visibly), then line and center brushes with XYZ mirror, then selection and transform. Shaders and animation wait: they are loved by fewer users and the shader runtime should share the edit API the AI work will need.
 
 ## UI: Hybrid (direction D)
 

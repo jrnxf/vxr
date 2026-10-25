@@ -26,7 +26,7 @@ fast voxel scenes: an open-source voxel scene editor (Rust, wgpu) with a one-tag
 
 - `docs/plan.md`: what to research and test next, in order. Ask the owner before starting each phase.
 - `docs/decisions.md`: every settled decision and why. Update it when a decision changes; do not duplicate it here.
-- `docs/research/`: Phase 1 desk research, one file per topic.
+- `docs/research/`: Phase 1 desk research, one file per topic. `docs/research/magicavoxel-gap.md` lists every MagicaVoxel feature with vxr's status and priority; update its row when a feature lands.
 - `docs/market-research.md`: the market case. Reference only.
 - `ui-directions.html` and the prototype screenshots: the UI options that led to Hybrid (direction D) and the mockups test 3 compares against. Reference only, in `vxr-design-references.zip` on the `design-references` GitHub release, not in git.
 - `spikes/`: Phase 2 risk tests (engine, preview, vox, embed), each with a `RESULTS.md`. Throwaway, but the engine and the `.vox` codec are the starting point for Phase 3.

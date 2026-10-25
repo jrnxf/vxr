@@ -1,0 +1,197 @@
+# MagicaVoxel gap list
+
+Every MagicaVoxel 0.99.6 / 0.99.7 feature we could find in public sources, with vxr's status and a priority. Desk research only: MagicaVoxel was not launched. Keep the table current as each feature lands.
+
+Status as of 2026-10-25 (Phase 3, after the browser build was checked end to end).
+
+## How to read it
+
+- **Status**: done (works natively and in the browser build, with tests and `--shot` steps), partial (some of it, or native only), missing.
+- **Priority**: P1 is needed before a MagicaVoxel user could switch, P2 is expected soon after, P3 is nice to have or out of scope for now.
+- **Why**: which reason people love MagicaVoxel it serves (see `docs/market-research.md`, "Why it is loved"): **minutes** (results in minutes), **sculpt** (the hand-sculpting feel), **palette** (palette-first work), **render** (a beautiful built-in renderer), **lossless** (lossless `.vox`). A dash means it serves none of them directly.
+- **Build order**: the numbers in brackets, such as [1], are the Part 3 order in the current run (1 lossless save, 2 palette editing, 3 preview, render and materials, 4 line and center brushes, 5 selection and transform, 6 model tools, 7 camera and view, 8 world editor, 9 export).
+
+MagicaVoxel versions: 0.99.7.2 (July 2025) is the current build and is Windows-only. The Mac build stopped at 0.99.6.2 (September 2020) [S1]. A user switching from the Mac build expects the 0.99.6 set; a Windows user expects 0.99.7's palette groups, layer sorting and animation timeline.
+
+## Sources
+
+- [S1] MagicaVoxel site and full update log, 0.96 to 0.99.7.2: [ephtracy.github.io mv_main](https://ephtracy.github.io/index.html?page=mv_main), source [mv_main.html](https://github.com/ephtracy/ephtracy.github.io/blob/master/mv_main.html). Release downloads: [GitHub releases](https://github.com/ephtracy/ephtracy.github.io/releases).
+- [S2] The `.vox` format and its scene, layer, material, camera and note chunks: [MagicaVoxel-file-format-vox.txt](https://github.com/ephtracy/voxel-model/blob/master/MagicaVoxel-file-format-vox.txt), [MagicaVoxel-file-format-vox-extension.txt](https://github.com/ephtracy/voxel-model/blob/master/MagicaVoxel-file-format-vox-extension.txt). Our own notes: `docs/research/vox-format.md`.
+- [S3] Community voxel shaders (679 stars, last push February 2025): [lachlanmcdonald/magicavoxel-shaders](https://github.com/lachlanmcdonald/magicavoxel-shaders).
+- [S4] vengi's feature list, for comparison: [vengi docs/voxedit/Features.md](https://github.com/vengi-voxel/vengi/blob/master/docs/voxedit/Features.md).
+- [S5] `docs/market-research.md` for the loved list and complaints.
+
+Feature names below follow the update log [S1] unless another source is given.
+
+## Editing modes and brushes
+
+| Feature | MagicaVoxel | vxr | Priority | Why |
+|---|---|---|---|---|
+| Attach, erase, paint actions | Attach/Erase/Paint on every brush [S1 0.98.1] | done (add, erase, paint; Shift erases, Alt picks) | P1 | sculpt |
+| Pick colour from a voxel | Alt-click; Alt+drag picks from the screen [S1 0.99] | done (pick tool and Alt) | P1 | palette |
+| Voxel brush (V) with size | Cube, sphere, square, disc, surface; keys 1-9 set size; Ctrl+Alt+drag resizes [S1 0.97.1, 0.99.5.1] | partial (single voxel and drag-on-plane; no size, no sphere or surface shape) | P1 | sculpt |
+| Face brush (F) | Extrude or peel a connected face by dragging, several modes [S1 0.97] | done (click extrudes or peels the whole face, paint fills it) | P1 | sculpt, minutes |
+| Box brush (B) | Drag a rectangle, resizable with a gizmo, Enter commits [S1 0.99.5.1] | partial (drag a rectangle; no gizmo or height drag) | P1 | minutes |
+| Line brush (L) | Line, square and circle in one geometry mode since 0.99.6.2 [S1 0.99.6.2] | missing [4] | P1 | sculpt |
+| Center brush (C) | Square or circle from a center point, even diameters [S1 0.97, 0.97.1] | missing [4] (merged into L since 0.99.6.2) | P1 | sculpt |
+| Pattern brush (P) | Stamp a pattern made from a selection, rotate and offset it [S1 0.98.1] | missing | P2 | minutes |
+| Mirror X, Y, Z | Per-axis mirror on every brush [S1 0.97] | partial (X only) [4] | P1 | sculpt |
+| Axis lock | Brush option "axis" [S1 0.97, 0.99.5.1] | missing [4] | P1 | sculpt |
+| Diagonal symmetry | Command `dia [axis]` [S1 0.98.1] | missing | P3 | - |
+| Region options | Brushes act on selected or unselected voxels only [S1 0.98.1, 0.99.5.1] | missing [5] | P2 | sculpt |
+| Replace colour and remove colour brushes | Act on every voxel of one colour [S1 0.98.1] | missing (paint face covers part) | P2 | palette |
+| Sculpt brushes | Applied to selected or unselected regions [S1 0.99.5.1] | missing | P3 | sculpt |
+| SDF brush | Box brush plus a voxel shader [S1 0.99.5.1] | missing (see Shaders) | P3 | - |
+| Scale and wrap transform brushes | Live point-sampled scale; live wrap and crop with mirroring [S1 0.99.6.2] | missing | P3 | - |
+| Rotate transform brush | Axis, screen and sphere rotate with 5 and 15 degree snaps [S1 0.99.6.2] | missing (90 degree rotate is [5]) | P3 | - |
+| Undo and redo | Up to 100 compressed steps [S1 0.99.5] | done (unlimited, one step per stroke) | P1 | minutes |
+
+## Selection and transform
+
+| Feature | MagicaVoxel | vxr | Priority | Why |
+|---|---|---|---|---|
+| Box select | Shift adds, Shift+Alt subtracts [S1 0.98.1] | missing [5] | P1 | sculpt |
+| Rect (screen) select | Select voxels in a screen rectangle [S1 0.98.1] | missing | P2 | - |
+| Region select: same volume, face, colour | [S1 0.98.1]; select voxels by colour from the palette menu [S1 0.99.5] | missing [5] (by colour first) | P1 | palette |
+| Deselect, invert, select all | Edit->Select [S1 0.98.1] | missing [5] | P1 | - |
+| Copy, paste, delete, fill selection | [S1 0.98.1] | missing [5] | P1 | minutes |
+| Move selection | Move brush on selected voxels [S1 0.98.1]; Ctrl / Ctrl+Shift / Ctrl+Shift+Alt for 1, 2 or normal-axis moves [S1 0.99.7.2] | missing [5] | P1 | sculpt |
+| Flip, rotate 90, loop (shift) | Transform tools on the selection around its local center [S1 0.98.1] | missing [5] | P1 | minutes |
+| Scale and repeat | Console commands `scale`, `repeat` [S1 0.98] | missing | P3 | - |
+| Shear | Command `shear z 0.2 0.2` [S1 0.99.6.2] | missing | P3 | - |
+| Mask and texture with a pattern model | Modify->Mask/Texture [S1 0.99.6.2] | missing | P3 | - |
+| Export only the selection | [S1 0.98.1] | missing | P2 | - |
+
+## Model tools
+
+| Feature | MagicaVoxel | vxr | Priority | Why |
+|---|---|---|---|---|
+| Model size up to 256^3 | Canvas size per object [S1 0.99.5] | done, and past it: one sparse map up to 2048 voxels per axis, split into 256^3 models on save | P1 | - |
+| Resize model bounds | Crop tool resizes the canvas live [S1 0.99.5.1] | missing [6] | P2 | - |
+| Crop to content and fit | Fit sizes several objects [S1 0.99.5.1] | missing [6] | P2 | - |
+| Hollow and fill | Edit tools (also in vengi [S4]) | missing [6] | P2 | sculpt |
+| Boolean operations | Groups and objects [S1 0.99.6.2] | missing | P3 | - |
+| Statistics | `log`: model count, scene size, voxels per colour [S1 0.99.6.2] | partial (voxel count in the header; per-colour count kept in the brick map, not shown) | P3 | - |
+| Auto-save and crash recovery | Every 25 steps to `cache/`, recover from `backup.vox` [S1 0.99, FAQ] | missing | P2 | - |
+
+## Palette
+
+| Feature | MagicaVoxel | vxr | Priority | Why |
+|---|---|---|---|---|
+| 256-slot palette, recolour by editing a slot | Core workflow [S1, S5] | partial (64 swatches shown, slot picked, hex shown; the Edit button does nothing yet) [2] | P1 | palette |
+| Colour picker: HSV, RGB, hex | [S1 0.99.4.2] | missing [2] | P1 | palette |
+| Swap colours | Ctrl+drag swaps; Alt+drag swapped without changing the model in 0.97.2 [S1 0.99.2, 0.97.2] | missing [2] | P1 | palette |
+| Duplicate (copy) a colour | Ctrl+Shift+drag [S1 0.99.2] | missing [2] | P1 | palette |
+| Multi-select colours, group HSV/RGB edits | Drag selects; group edits since 0.99.7.1 [S1 0.99.5, 0.99.7.1] | missing | P2 | palette |
+| Copy and paste colours between palettes | [S1 0.99.7.1] | missing | P2 | palette |
+| Sort palette | `pal sort [+-hsvrgb]` [S1 0.99.2] | missing | P3 | palette |
+| Mask unused colours | `pal mask` [S1 0.97.1]; vxr shows dots on used colours | partial (used dots) | P3 | palette |
+| Select voxels by colour and colours by voxels | Palette menu [S1 0.99.5] | missing [5] | P1 | palette |
+| Palette notes | A note per palette row, saved in NOTE [S1 0.99.5.1, S2] | missing (kept by lossless save [1]) | P3 | lossless |
+| Import and export palettes | IO panel, text and image [S1 0.99.5.1] | missing | P2 | palette |
+
+## Materials
+
+| Feature | MagicaVoxel | vxr | Priority | Why |
+|---|---|---|---|---|
+| Per-slot material | Matter->Sel per palette slot [S1 0.96.2] | missing [3] | P1 | render |
+| Diffuse, metal, glass, emissive | Plus plastic, roughness, IOR, attenuation, emission power [S1 0.96-0.98.2] | missing [3] | P1 | render |
+| Blend, SSS, media (cloud) | Unified material system [S1 0.99.6.2] | missing | P3 | render |
+| Saved to `.vox` MATL | [S1 0.98, S2] | missing [3]; MATL chunks of opened files are dropped on save until [1] | P1 | lossless, render |
+| Copy and paste materials | Ctrl+C/V [S1 0.99] | missing | P3 | - |
+
+## Render
+
+| Feature | MagicaVoxel | vxr | Priority | Why |
+|---|---|---|---|---|
+| Interactive path tracer | Progressive GPU path tracing [S1] | missing in the app [3]; proven in `spikes/preview` (640x360, A-trous denoise, 3 ms per frame) | P1 | render |
+| Sun direction and colour, sky | Atmospheric sky with Rayleigh and Mie, sun disk [S1 0.99.1, 0.99.2] | missing [3] | P1 | render |
+| Exposure, gamma, tone mapping, vignette | Post->E, Camera->G, ACES [S1 0.97.3, 0.98.1] | missing [3] (exposure first) | P1 | render |
+| Depth of field, bokeh | Click to set focus; bladed bokeh [S1 0.98.1, 0.99.1] | missing [3] | P2 | render |
+| Bloom | [S1 0.98.2, 0.99.1] | missing | P3 | render |
+| Fog and volumetrics | [S1 0.97.5, 0.99.4.1] | missing | P3 | render |
+| Image-based lighting (`.hdr`) | Sky->IBL [S1 0.99.4.1] | missing | P3 | render |
+| Denoiser | Intel OIDN plugin [S1 0.99.4.2] | missing [3] (A-trous in the spike) | P1 | render |
+| Export PNG at a chosen size | Photo mode up to 12000x12000 [S1 0.99.3] | missing [3] | P1 | render, minutes |
+| Turntable and animation render | [S1 0.99.3, 0.99.7.0] | missing | P3 | - |
+| Voxel shapes (Lego, marching cubes, clay) | [S1 0.96, 0.99.2] | missing | P3 | - |
+| Editor display modes | AO and constant shading, background fading, grid/edge colours [S1 0.99.5.1] | partial (one lit shading with the mockup background) | P3 | - |
+
+## Camera and view
+
+| Feature | MagicaVoxel | vxr | Priority | Why |
+|---|---|---|---|---|
+| Orbit, pan, zoom | Right-drag, middle-drag or Space+drag, wheel or Z+drag [S1 0.99, FAQ] | done (right-drag orbit, Shift+right or middle pan, wheel zoom) | P1 | minutes |
+| Frame the model | Hotkey 4 recenters [S1 0.99] | done (`.`) | P1 | minutes |
+| Set rotation center on a voxel | X+click [S1 0.99.3] | missing | P2 | sculpt |
+| Perspective, orthographic, isometric | Camera modes [S1 0.97.1] | missing [7] (perspective only) | P1 | - |
+| View cube and axis snap views | 26 standard views, hotkey 5 for face views [S1 0.99] | missing [7] | P2 | - |
+| Grid and ground | Frame grids with spacing, infinite ground [S1 0.98.1, 0.97.5] | missing [7] | P2 | minutes |
+| Bounding box display | Select on any of the six bounding box faces [S1 0.98.1] | missing [7] | P2 | - |
+| Save and load views | 7/8, F5/F7, camera slots [S1 0.99, 0.99.6.2] | missing (cameras kept by lossless save [1]) | P3 | - |
+| Camera control panel | FOV, position, pitch/yaw/roll [S1 0.99.6.2, 0.99.6.4] | missing | P3 | - |
+| Free (fly) camera | Pers/Free modes [S1 0.97.5, 0.99.6.4] | missing | P3 | - |
+
+## World editor
+
+| Feature | MagicaVoxel | vxr | Priority | Why |
+|---|---|---|---|---|
+| Multiple objects per scene | Tab switches model and world editors [S1 0.99] | partial: every model of an opened file is flattened into one editable map; no objects [8] | P1 | lossless |
+| Move, rotate, flip objects | Gizmo, explicit position, 90 degree rotate gizmo [S1 0.99, 0.99.7.0, 0.99.7.2] | missing [8] | P2 | - |
+| Groups | Enter and leave with Tab or double-click [S1 0.99, 0.99.5.1] | missing [8] | P2 | - |
+| References (instances) and duplicates | Shift+drag; Ref-R converts [S1 0.99, 0.99.5.1] | missing [8] | P2 | - |
+| Layers: show, hide, name, colour, sort | Layer panel [S1 0.99.6.4, 0.99.7.1] | missing [8] | P2 | - |
+| Scene outline panel | Rename, hide, reorder, multi-select [S1 0.99.6.4] | missing [8] (decisions: the tree appears once a second object exists) | P2 | - |
+| Pattern library | Drag assets in, match palettes [S1 0.99.6.4] | missing | P3 | minutes |
+| Copy and paste transforms | [S1 0.99.7.0] | missing | P3 | - |
+
+## Files and export
+
+| Feature | MagicaVoxel | vxr | Priority | Why |
+|---|---|---|---|---|
+| Open `.vox` (all versions, scene graph) | [S2] | done (every instance flattened, hidden ones included) | P1 | lossless |
+| Save `.vox` | [S2] | partial: writes a fresh v200 file with palette and voxels; materials, layers, cameras, names, notes and unknown chunks of an opened file are lost [1] | P1 | lossless |
+| Choose what is saved | IO panel [S1 0.99.5.1] | missing | P3 | - |
+| Recover from a corrupted file | IO->File->Recover [S1 0.99.7.2] | missing | P3 | lossless |
+| OBJ with palette texture | Color-based simplification [S1 0.96.1] | missing [9] | P2 | - |
+| PLY (marching cubes) | [S1 0.97.1] | missing | P3 | - |
+| Qubicle `.qb` | [S1 0.97.2] | missing | P3 | - |
+| Slices, cubes, point clouds | [S1 0.99.3]; `o slice` exports a volume as one image [S1 0.98.1] | missing [9] (PNG slices) | P2 | - |
+| Isometric sprites | Export->iso [S1 0.96.1] | missing | P3 | - |
+| Baked AO mesh | Export->bake [S1 0.97.2] | missing | P3 | - |
+| Import images | JPEG import, drag in sprites [S1 0.99.5, 0.99.7.2] | missing | P3 | - |
+| Web embed | none | partial: the `<voxel-scene>` embed is proven in `spikes/embed`; the app's Embed command shows "not built yet" | P2 | - |
+| Runs in a browser, on Apple Silicon and Linux | Windows and Intel Mac only [S5] | done (native wgpu app plus the WebGPU browser build) | P1 | - |
+
+## Shaders (out of scope tonight)
+
+| Feature | MagicaVoxel | vxr | Priority | Why |
+|---|---|---|---|---|
+| Voxel shaders (`xs`) | GLSL scripts that generate or change a volume, 16 arguments, iterations, frames [S1 0.97.1, 0.99.6.2] | missing | P2 | minutes |
+| Voxel shader brush | Run a shader interactively as a brush [S1 0.99.6.2] | missing | P2 | sculpt |
+| Community shader library | About 100 shaders in [S3] | missing | P3 | - |
+
+Design note: the community shaders are GLSL fragments that read `voxel(pos)` and `palette()` and return a palette index per voxel [S3]. vxr could run them as WGSL compute passes over the brick map's dense bricks (one dispatch per touched brick, results written back as one undo step). A small GLSL-to-WGSL shim (naga reads GLSL) would let the existing library run unchanged. Arguments map to sliders in a Shader panel, and a "shader brush" runs one inside the box brush's bounds. The same edit API the AI work needs (Part 4) is a better first target than a GPU shader runtime, so this waits for that design.
+
+## Animation (out of scope tonight)
+
+| Feature | MagicaVoxel | vxr | Priority | Why |
+|---|---|---|---|---|
+| Frame-based animation | Up to 24 frames in 0.98, a timeline with 0-360 range since 0.99.7 [S1 0.98, 0.99.7.0, 0.99.7.1] | missing (frames of an opened file are kept by lossless save [1]) | P3 | - |
+| Object keyframes | `nTRN` frames with `_f` [S2] | missing | P3 | - |
+| Onion skin, playback, import sprites | [S1 0.99.7.0, 0.99.7.2] | missing | P3 | - |
+
+Design note: `.vox` animation is a list of `nSHP` models with `_f` frame indices and `nTRN` keyframes [S2]. The lossless save keeps them untouched. A first editable version would add a frame strip under the viewport where each frame is a separate brick map sharing the palette (cheap: bricks are shared copy-on-write until edited), with Cmd-K entries for add, duplicate and delete frame, and play. Object keyframes belong with the world editor [8].
+
+## What vxr has that MagicaVoxel does not
+
+- Native Apple Silicon, Linux and the browser from one build [S5].
+- One sparse map well past 256^3 per model (2048 per axis today).
+- Unlimited undo; a command palette (Cmd-K) listing every command; a hint bar that explains the current tool.
+- Open source, and a web embed in progress.
+
+## Takeaways
+
+1. Lossless save [1] is the one blocking gap for anyone with existing files: today saving an opened MagicaVoxel scene drops its materials, layers, cameras and names.
+2. The palette [2] and the renderer [3] are the two loved features vxr lacks most visibly.
+3. Brushes [4] and selection [5] close the sculpting gap. After them, the world editor [8] matters most for MagicaVoxel scenes with many objects.
