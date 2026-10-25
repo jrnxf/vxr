@@ -64,7 +64,12 @@ function wire() {
     app.pointer_button(e.offsetX, e.offsetY, e.button, true);
     e.preventDefault();
   });
-  canvas.addEventListener('pointermove', (e) => { mods(e); app.pointer_move(e.offsetX, e.offsetY); });
+  canvas.addEventListener('pointermove', (e) => {
+    mods(e);
+    app.pointer_move(e.offsetX, e.offsetY);
+    // A second button pressed or released during a drag (a chord) comes as a pointermove.
+    if (e.button >= 0) app.pointer_button(e.offsetX, e.offsetY, e.button, (e.buttons & [1, 4, 2][e.button]) !== 0);
+  });
   canvas.addEventListener('pointerup', (e) => { mods(e); app.pointer_button(e.offsetX, e.offsetY, e.button, false); });
   canvas.addEventListener('pointerleave', () => app.pointer_leave());
   canvas.addEventListener('wheel', (e) => {
@@ -137,6 +142,7 @@ async function main() {
     font('JetBrainsMono-Regular.ttf'), font('JetBrainsMono-Medium.ttf'), font('lucide.ttf'),
   ]);
   app = await start(canvas, vox, 'island.vox', dpr(), ...fonts);
+  window.vxr = app; // for the console and crates/vxr-web/check
   msg.hidden = true;
   wire();
   canvas.focus();

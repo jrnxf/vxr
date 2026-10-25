@@ -41,12 +41,18 @@ impl Shot {
 
     /// Draw `n` frames (egui needs a couple to lay out and upload fonts).
     fn frames(&mut self, n: usize) {
+        self.frames_with(n, Vec::new());
+    }
+
+    /// Draw `n` frames, the first with `events` as egui input.
+    fn frames_with(&mut self, n: usize, mut events: Vec<egui::Event>) {
         let view = self.target.create_view(&Default::default());
         for i in 0..n {
             let size = egui::vec2(self.ed.width as f32 / self.ed.ppp, self.ed.height as f32 / self.ed.ppp);
             let mut input = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
                 time: Some(i as f64 / 60.0),
+                events: std::mem::take(&mut events),
                 ..Default::default()
             };
             input.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point = Some(self.ed.ppp);
@@ -177,6 +183,13 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
         s.ed.ui.slot == under && under == 40,
         format!("pick: slot {} (voxel under the pointer is {under})", s.ed.ui.slot),
     )?;
+
+    // "?" (as the coach card says) opens the command list, which lists every key.
+    let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    s.frames_with(2, vec![key(egui::Key::Questionmark, egui::Modifiers::SHIFT)]);
+    check(s.ed.ui.cmdk.is_some(), "? opens the command list".into())?;
+    s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+    check(s.ed.ui.cmdk.is_none(), "Escape closes it".into())?;
 
     // Save, reopen and compare.
     let bytes = s.ed.scene.to_vox();

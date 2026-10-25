@@ -246,6 +246,35 @@ impl App {
         self.editor.ui.scene_name.clone()
     }
 
+    /// The editor's state as JSON, for the headless browser check (`crates/vxr-web/check`)
+    /// and the console.
+    pub fn state(&self) -> String {
+        let e = &self.editor;
+        let (c, h) = (&e.cam, e.scene.history());
+        format!(
+            r#"{{"voxels":{},"tool":"{:?}","shape":"{:?}","mirror":{},"slot":{},"undo":{},"redo":{},"cmdk":{},"coach":{},"name":{:?},"size":[{},{}],"ppp":{},"cam":[{},{},{},{},{},{}]}}"#,
+            e.scene.map.voxels,
+            e.ui.tool,
+            e.ui.shape,
+            e.ui.mirror,
+            e.ui.slot,
+            h.can_undo(),
+            h.can_redo(),
+            e.ui.cmdk.is_some(),
+            e.ui.coach,
+            e.ui.scene_name,
+            self.config.width,
+            self.config.height,
+            e.ppp,
+            c.target.x,
+            c.target.y,
+            c.target.z,
+            c.yaw,
+            c.pitch,
+            c.distance,
+        )
+    }
+
     /// Show a short message in the editor.
     pub fn toast(&mut self, msg: &str) {
         let ctx = self.editor.ctx.clone();

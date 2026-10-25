@@ -8,6 +8,7 @@ prototype/demo/
 /crates/vxr-app/fonts/
 # Evidence screenshots from the app.
 /crates/vxr-app/shots/
-# The browser build, made by crates/vxr-web/build.
+# The browser build, made by crates/vxr-web/build, and its check screenshots.
 /crates/vxr-web/dist/
 /crates/vxr-web/.wrangler/
+/crates/vxr-web/shots/

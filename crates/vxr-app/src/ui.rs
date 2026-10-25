@@ -114,7 +114,8 @@ mod icon {
     pub const POINTER: char = '\u{e1c3}';
     pub const SQUARE_DASHED: char = '\u{e1cb}';
     pub const LAYERS: char = '\u{e529}';
-    pub const FLIP: char = '\u{e35e}';
+    /// The mockup's mirror glyph (Lucide 0.460 `flip-horizontal-2`, renamed `flip-vertical-2` in 1.x).
+    pub const FLIP: char = '\u{e360}';
     pub const SCAN: char = '\u{e257}';
     pub const FOLDER_OPEN: char = '\u{e247}';
     pub const DOWNLOAD: char = '\u{e0b2}';
@@ -297,6 +298,11 @@ impl Hybrid {
                 (Key::F, |h| h.shape = Shape::Face),
                 (Key::M, |h| h.mirror = !h.mirror),
                 (Key::Escape, |h| h.coach = false),
+                // The coach card's "? for every key": the command list shows every key.
+                (Key::Questionmark, |h| {
+                    h.cmdk = Some(String::new());
+                    h.cmdk_sel = 0;
+                }),
                 (Key::Period, |h| h.actions.push(Action::Frame)),
                 (Key::OpenBracket, |h| h.slot = h.slot.saturating_sub(1).max(1)),
                 (Key::CloseBracket, |h| h.slot = h.slot.saturating_add(1)),
@@ -403,7 +409,7 @@ impl Hybrid {
                 y += 42.0;
             }
             rail_sep(ui, rect, &mut y);
-            rail_label(ui, rect, &mut y, "SHAPE");
+            rail_label(ui, rect, &mut y, "BRUSH");
             let shape = self.shape;
             for (s, ic, k) in [
                 (Shape::Voxel, icon::POINTER, "V"),
