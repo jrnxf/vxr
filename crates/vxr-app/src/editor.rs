@@ -594,6 +594,7 @@ impl Editor {
                 }
             }
             Action::SelectAll => s.select_all(),
+            Action::InvertSelection => s.invert_selection(),
             Action::SelectColor => {
                 s.select_color(self.ui.slot, Mode::Replace);
                 self.ui.tool = Tool::Select;
@@ -814,6 +815,7 @@ impl Editor {
                 }
                 Action::Transform(_)
                 | Action::SelectAll
+                | Action::InvertSelection
                 | Action::SelectColor
                 | Action::Deselect
                 | Action::DeleteSelection

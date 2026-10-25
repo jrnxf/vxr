@@ -53,7 +53,7 @@ Feature names below follow the update log [S1] unless another source is given.
 | Box select | Shift adds, Shift+Alt subtracts [S1 0.98.1] | done [5] (a screen box through every depth; Shift adds, Alt subtracts) | P1 | sculpt |
 | Rect (screen) select | Select voxels in a screen rectangle [S1 0.98.1] | done [5] (the select tool's box) | P2 | - |
 | Region select: same volume, face, colour | [S1 0.98.1]; select voxels by colour from the palette menu [S1 0.99.5] | partial [5] (colour: click a voxel, or Cmd-K Select color; face and volume missing) | P1 | palette |
-| Deselect, invert, select all | Edit->Select [S1 0.98.1] | partial [5] (Cmd-A, Escape, the flyout's x; invert missing) | P1 | - |
+| Deselect, invert, select all | Edit->Select [S1 0.98.1] | done [5] (Cmd-A or the flyout's All, Escape or the flyout's x, Cmd-Shift-I or the flyout's Invert) | P1 | - |
 | Copy, paste, delete, fill selection | [S1 0.98.1] | done [5] (Cmd-C, Cmd-X, Cmd-V at the pointer, Backspace, fill with the current colour) | P1 | minutes |
 | Move selection | Move brush on selected voxels [S1 0.98.1]; Ctrl / Ctrl+Shift / Ctrl+Shift+Alt for 1, 2 or normal-axis moves [S1 0.99.7.2] | done [5] (drag on the pressed face's plane, live; arrows and Shift-Up/Down nudge) | P1 | sculpt |
 | Flip, rotate 90, loop (shift) | Transform tools on the selection around its local center [S1 0.98.1] | done [5] (selection, or the whole model with nothing selected) | P1 | minutes |

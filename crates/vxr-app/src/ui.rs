@@ -204,6 +204,7 @@ pub enum Action {
     /// Move, rotate, flip or loop the selection, or the whole model when nothing is selected.
     Transform(Transform),
     SelectAll,
+    InvertSelection,
     /// Select every voxel of the current colour.
     SelectColor,
     Deselect,
@@ -454,6 +455,7 @@ const COMMANDS: &[Command] = &[
     Command { label: "Pick color", keys: &["I"], run: |h| h.tool = Tool::Pick },
     Command { label: "Select", keys: &["S"], run: |h| h.tool = Tool::Select },
     Command { label: "Select all", keys: &["⌘", "A"], run: |h| h.actions.push(Action::SelectAll) },
+    Command { label: "Invert selection", keys: &["⌘", "⇧", "I"], run: |h| h.actions.push(Action::InvertSelection) },
     Command { label: "Select color", keys: &[], run: |h| h.actions.push(Action::SelectColor) },
     Command { label: "Deselect", keys: &["Esc"], run: |h| h.actions.push(Action::Deselect) },
     Command { label: "Delete selection", keys: &["⌫"], run: |h| h.actions.push(Action::DeleteSelection) },
@@ -883,6 +885,9 @@ impl Hybrid {
             }
             if i.consume_key(Modifiers::COMMAND, Key::A) {
                 self.actions.push(Action::SelectAll);
+            }
+            if i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::I) {
+                self.actions.push(Action::InvertSelection);
             }
             if i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::D) {
                 self.actions.push(Action::Duplicate { linked: true });
@@ -1674,7 +1679,7 @@ impl Hybrid {
         if self.world || (self.tool != Tool::Select && self.selected == 0) {
             return;
         }
-        let rect = Rect::from_min_size(pos2(self.flyout_x(), self.select_y - 6.0), vec2(162.0, 242.0));
+        let rect = Rect::from_min_size(pos2(self.flyout_x(), self.select_y - 6.0), vec2(162.0, 276.0));
         let (selected, has_clip) = (self.selected, self.has_clip);
         let bounds_open = self.bounds_panel.is_some();
         let mut toggle_bounds = false;
@@ -1742,13 +1747,15 @@ impl Hybrid {
                     }
                 }
             }
-            // Text buttons, two per row: hollow and fill inside, then crop and resize (which
-            // opens the Bounds panel, and shows on while it is open).
+            // Text buttons, two per row: hollow and fill inside, crop and resize (which opens
+            // the Bounds panel, and shows on while it is open), then select all and invert.
             for (k, (label, id, action)) in [
                 ("Hollow", "hollow", Some(Action::Hollow)),
                 ("Fill inside", "fill-in", Some(Action::FillInterior)),
                 ("Crop", "crop", Some(Action::Crop)),
                 ("Resize…", "resize", None),
+                ("All", "select-all", Some(Action::SelectAll)),
+                ("Invert", "invert", Some(Action::InvertSelection)),
             ]
             .into_iter()
             .enumerate()
@@ -1780,7 +1787,7 @@ impl Hybrid {
                     }
                 }
             }
-            let cy = hy + 30.0 + 5.0 * 34.0 + 4.0;
+            let cy = hy + 30.0 + 6.0 * 34.0 + 4.0;
             ui.painter().line_segment(
                 [pos2(rect.left() + 10.0, cy - 20.5), pos2(rect.right() - 10.0, cy - 20.5)],
                 Stroke::new(1.0, LINE),

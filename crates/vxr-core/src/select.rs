@@ -149,6 +149,18 @@ impl Scene {
         self.select(cells, Mode::Replace);
     }
 
+    /// Select every voxel that is not selected and drop the ones that are (with nothing
+    /// selected, every voxel). Not an undo step.
+    pub fn invert_selection(&mut self) {
+        let mut cells = Vec::new();
+        self.for_each_voxel(|p, _| {
+            if !self.selection.contains(&p) {
+                cells.push(p);
+            }
+        });
+        self.select(cells, Mode::Replace);
+    }
+
     pub fn deselect(&mut self) {
         if !self.selection.is_empty() {
             self.selection.clear();

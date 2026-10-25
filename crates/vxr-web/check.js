@@ -315,6 +315,17 @@ async () => {
   await key('z', cmd);
   await key('a', cmd);
   step('Cmd-A selects every voxel', st().selected === st().voxels, `${st().selected}`);
+  // Invert: everything inverts to nothing, nothing to everything (the flyout's Invert), one
+  // colour's voxels to the rest (Cmd-K); none of it edits the file.
+  await key('I', { metaKey: true, shiftKey: true });
+  const inverted = st().selected;
+  await chip('invert');
+  step('Cmd-Shift-I inverts all to none, the flyout\'s Invert none to all', inverted === 0 && st().selected === st().voxels, `${inverted} ${st().selected}`);
+  await click(mx, my);
+  await key('k', cmd);
+  for (const ch of 'invert selection') await key(ch);
+  await key('Enter');
+  step('Cmd-K Invert selection selects every voxel but the clicked colour, with no edit', st().selected === st().voxels - byColor && same(bytes(), original), `${st().selected} of ${st().voxels}, ${byColor}`);
   await key('Escape');
   // Model tools on the whole island: hollow, fill inside, one undo step each.
   const solid = st().voxels;

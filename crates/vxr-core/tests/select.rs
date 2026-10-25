@@ -46,6 +46,14 @@ fn select_by_box_and_colour_with_modes() {
     assert_eq!((s.selected_count(), s.selection_version() > v), (0, true));
     s.select_all();
     assert_eq!(s.selected_count(), 5);
+    s.select_color(3, Mode::Replace);
+    s.invert_selection();
+    assert_eq!(sel(&s), vec![[O + 5, O, O + 5]], "invert keeps only the voxels not selected");
+    s.invert_selection();
+    assert_eq!(s.selected_count(), 4, "inverting twice gives the selection back");
+    s.deselect();
+    s.invert_selection();
+    assert_eq!(s.selected_count(), 5, "inverting nothing selects every voxel");
     assert!(s.undo(), "the scene's own edit");
     assert!(!s.undo(), "selecting is not an undo step");
 }

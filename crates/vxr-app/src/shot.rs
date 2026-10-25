@@ -753,6 +753,31 @@ fn selection(dir: &Path) -> Result<(), String> {
     s.ui_click("deselect")?;
     check(all == 32 && count(&s) == 0, format!("Cmd-A selects all ({all}); the flyout's x deselects"))?;
 
+    // Invert: nothing selected inverts to every voxel, a colour's voxels to the rest, and
+    // the flyout's All selects every voxel again. None of it is an undo step.
+    let saved = s.ed.scene.to_vox();
+    s.ui_click("invert")?;
+    let whole = count(&s);
+    s.frames_with(2, vec![key(egui::Key::I, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT)]);
+    check(
+        whole == 32 && count(&s) == 0,
+        format!("the flyout's Invert selects every voxel ({whole}), Cmd-Shift-I none"),
+    )?;
+    s.stroke(a_top, &[]);
+    let color = count(&s);
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("invert selection".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, none)]);
+    let rest = count(&s);
+    s.ui_click("select-all")?;
+    check(
+        color > 0 && rest == 32 - color && count(&s) == 32 && s.ed.scene.to_vox() == saved,
+        format!(
+            "Cmd-K Invert selection turns one colour's {color} voxels into the other {rest}; All selects 32; no edit"
+        ),
+    )?;
+    s.ui_click("deselect")?;
+
     s.stroke(a_top, &[]);
     let before = bounds(&s);
     s.frames_with(2, vec![key(egui::Key::ArrowRight, none)]);
