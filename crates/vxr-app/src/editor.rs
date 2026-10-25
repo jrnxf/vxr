@@ -11,7 +11,7 @@ use vxr_core::tools::{Brush, Gesture, Press, Shape, Target, Tool, plane_cell};
 use vxr_render::{EditBox, Gpu, GpuMap, Guides, OrbitCamera, Preview, Renderer, brickmap_layout, gpu::now_ms};
 
 use crate::render::{EXPORT_SIZES, Export};
-use crate::ui::{Action, FontBytes, Hybrid, Stats, TreeRow};
+use crate::ui::{Action, FontBytes, Hybrid, LayerRow, Named, Stats, TreeRow};
 
 /// Input quiet for this long raises the preview's budget (spikes/preview/RESULTS.md).
 const IDLE_MS: f64 = 300.0;
@@ -731,6 +731,8 @@ impl Editor {
         self.ui.picked = self.scene.picked().map(|i| node_name(self.scene.world().unwrap(), i));
         self.ui.picked_node = self.scene.picked();
         self.ui.tree = tree_rows(&self.scene);
+        self.ui.layers = layer_rows(&self.scene);
+        self.ui.layer_on = self.scene.picked().zip(self.scene.world()).map(|(i, w)| w.tree.nodes[i].layer);
         self.ui.tree_on = match self.scene.at() {
             At::Object(i) => Some(i),
             _ => self.scene.picked(),
@@ -791,6 +793,14 @@ impl Editor {
                     (Some(i), Some(w)) => self.set_hidden(i, !w.tree.nodes[i].hidden),
                     _ => self.ui.toast(&self.ctx, "Pick an object in the world to hide it"),
                 },
+                Action::SetLayer(id) => self.put_on_layer(id),
+                Action::SetLayerHidden(id, hidden) => self.set_layer_hidden(id, hidden),
+                Action::ToggleLayer => match self.ui.layer_on.and_then(|id| self.ui.layers.iter().find(|l| l.id == id))
+                {
+                    Some(l) => self.set_layer_hidden(l.id, !l.hidden),
+                    None => self.ui.toast(&self.ctx, "Pick an object in the world to hide its layer"),
+                },
+                Action::AddLayer => self.add_layer(),
                 Action::ExportPng => self.start_export(),
                 Action::CancelExport => {
                     self.export = None;
@@ -799,8 +809,10 @@ impl Editor {
                 other => host.push(other),
             }
         }
-        if let Some((i, name)) = self.ui.renamed.take() {
-            self.rename(i, &name);
+        match self.ui.renamed.take() {
+            Some((Named::Node(i), name)) => self.rename(i, &name),
+            Some((Named::Layer(id), name)) => self.rename_layer(id, &name),
+            None => {}
         }
         for key in std::mem::take(&mut self.ui.arrows) {
             let d = self.arrow_offset(key);
@@ -895,6 +907,60 @@ impl Editor {
         }
         if self.scene.edit_world(|w| w.set_name(i, new)).is_some() {
             let msg = format!("Renamed to {}", node_name(self.scene.world().unwrap(), i));
+            self.ui.toast(&self.ctx, msg);
+        }
+    }
+
+    /// Put the picked object or group on layer `id`, as one undo step, in world mode.
+    pub fn put_on_layer(&mut self, id: i32) {
+        let Some(w) = self.scene.world() else { return };
+        let msg = match self.scene.picked() {
+            Some(i) if w.tree.nodes[i].layer == id => return,
+            Some(i) => {
+                let name = node_name(w, i);
+                self.scene.edit_world(|w| w.put_on_layer(i, id));
+                format!("Moved {name} to {}", layer_name(self.scene.world().unwrap(), id))
+            }
+            None => "Pick an object to move it to a layer".into(),
+        };
+        self.ui.toast(&self.ctx, msg);
+    }
+
+    /// Hide or show layer `id`, as one undo step, in world mode.
+    pub fn set_layer_hidden(&mut self, id: i32, hidden: bool) {
+        let Some(w) = self.scene.world() else { return };
+        let name = layer_name(w, id);
+        let msg = if self.scene.edit_world(|w| w.set_layer_hidden(id, hidden)).is_none() {
+            "Tab to the world to hide layers".to_string()
+        } else if hidden {
+            format!("Hid layer {name}")
+        } else {
+            format!("Showing layer {name}")
+        };
+        self.ui.toast(&self.ctx, msg);
+    }
+
+    /// Add a layer named "layer N", as one undo step, in world mode.
+    pub fn add_layer(&mut self) {
+        let Some(w) = self.scene.world() else { return };
+        let name = format!("layer {}", w.layers().iter().map(|l| l.id + 1).max().unwrap_or(0));
+        let msg = match self.scene.edit_world(|w| w.add_layer(&name)) {
+            Some(_) => format!("Added {name}"),
+            None => "Tab to the world to add layers".into(),
+        };
+        self.ui.toast(&self.ctx, msg);
+    }
+
+    /// Name layer `id` (an empty name clears it), as one undo step, in world mode.
+    pub fn rename_layer(&mut self, id: i32, name: &str) {
+        let name = name.trim();
+        let Some(w) = self.scene.world() else { return };
+        let new = (!name.is_empty()).then_some(name);
+        if w.layers().iter().find(|l| l.id == id).is_none_or(|l| l.name.as_deref() == new.map(str::as_bytes)) {
+            return;
+        }
+        if self.scene.edit_world(|w| w.set_layer_name(id, new)).is_some() {
+            let msg = format!("Renamed layer to {}", layer_name(self.scene.world().unwrap(), id));
             self.ui.toast(&self.ctx, msg);
         }
     }
@@ -1099,6 +1165,33 @@ pub fn node_name(w: &vxr_core::World, i: usize) -> String {
     }
 }
 
+/// A layer's name: its own, or "layer N" by its id.
+pub fn layer_name(w: &vxr_core::World, id: i32) -> String {
+    match w.layers().into_iter().find(|l| l.id == id).and_then(|l| l.name) {
+        Some(n) => String::from_utf8_lossy(&n).into_owned(),
+        None => format!("layer {id}"),
+    }
+}
+
+/// The LAYERS list under the scene tree: every layer by id with its object count, whenever
+/// the tree shows.
+pub fn layer_rows(s: &Scene) -> Vec<LayerRow> {
+    let Some(w) = s.world() else { return Vec::new() };
+    let objects = w.objects();
+    if objects.len() < 2 {
+        return Vec::new();
+    }
+    w.layers()
+        .into_iter()
+        .map(|l| LayerRow {
+            id: l.id,
+            name: layer_name(w, l.id),
+            objects: objects.iter().filter(|&&i| w.tree.nodes[i].layer == l.id).count(),
+            hidden: l.hidden,
+        })
+        .collect()
+}
+
 /// The scene tree's rows: every node under the root in tree order, once there are two
 /// objects or more (none otherwise, so a single model stays clean).
 pub fn tree_rows(s: &Scene) -> Vec<TreeRow> {
@@ -1140,6 +1233,7 @@ pub fn tree_rows(s: &Scene) -> Vec<TreeRow> {
                 size,
                 hidden: w.tree.nodes[i].hidden,
                 shown: w.shown(i),
+                layer: w.tree.nodes[i].layer,
             }
         })
         .collect()
@@ -1192,5 +1286,22 @@ mod tests {
         assert!(s.edit_object(slab));
         s.set_bounds([0, 0, 0], [8, 3, 8]);
         assert_eq!(tree_rows(&s)[0].size, [8, 3, 8]);
+    }
+
+    #[test]
+    fn layer_rows_list_every_layer_with_its_objects() {
+        assert!(layer_rows(&fixture("01-single-voxel")).is_empty());
+        let mut s = fixture("22-world");
+        let rows: Vec<_> = layer_rows(&s).into_iter().map(|l| (l.id, l.name, l.objects, l.hidden)).collect();
+        assert_eq!(
+            rows,
+            [(0, "ground".into(), 2, false), (1, "trees".into(), 3, false), (2, "secret".into(), 1, true)]
+        );
+        // A layer an object is on without a LAYR entry is listed by its id.
+        let gem = tree_rows(&s).into_iter().find(|r| r.name == "gem").unwrap().node;
+        s.edit_world(|w| w.put_on_layer(gem, 5));
+        let last = layer_rows(&s).pop().unwrap();
+        assert_eq!((last.id, last.name.as_str(), last.objects), (5, "layer 5", 1));
+        assert_eq!(tree_rows(&s).iter().find(|r| r.node == gem).unwrap().layer, 5);
     }
 }

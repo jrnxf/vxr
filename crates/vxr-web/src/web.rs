@@ -264,7 +264,7 @@ impl App {
         let e = &self.editor;
         let (c, h) = (&e.cam, e.scene.history());
         format!(
-            r#"{{"voxels":{},"tool":"{:?}","shape":"{:?}","mirror":{},"mirrorAxes":[{},{},{}],"lock":{},"span":{},"selected":{},"hasClip":{},"bounds":[{},{},{}],"boundsPanel":{},"slot":{},"colorEdit":{},"slotOp":"{:?}","undo":{},"redo":{},"cmdk":{},"coach":{},"name":{:?},"size":[{},{}],"ppp":{},"cam":[{},{},{},{},{},{}],"ortho":{},"view":{},"viewPanel":{},"guides":[{},{},{}],"mode":"{}","objects":{},"models":{},"picked":{},"tree":[{}],"treeOn":{},"render":{{"shown":{},"spp":{},"rows":{},"restarts":{},"timestamps":{},"panel":{},"maxSpp":{},"exposure":{},"aperture":{},"sky":{},"export":{}}}}}"#,
+            r#"{{"voxels":{},"tool":"{:?}","shape":"{:?}","mirror":{},"mirrorAxes":[{},{},{}],"lock":{},"span":{},"selected":{},"hasClip":{},"bounds":[{},{},{}],"boundsPanel":{},"slot":{},"colorEdit":{},"slotOp":"{:?}","undo":{},"redo":{},"cmdk":{},"coach":{},"name":{:?},"size":[{},{}],"ppp":{},"cam":[{},{},{},{},{},{}],"ortho":{},"view":{},"viewPanel":{},"guides":[{},{},{}],"mode":"{}","objects":{},"models":{},"picked":{},"tree":[{}],"treeOn":{},"layers":[{}],"layerOn":{},"render":{{"shown":{},"spp":{},"rows":{},"restarts":{},"timestamps":{},"panel":{},"maxSpp":{},"exposure":{},"aperture":{},"sky":{},"export":{}}}}}"#,
             e.scene.map.voxels,
             e.ui.tool,
             e.ui.shape,
@@ -317,12 +317,21 @@ impl App {
             e.ui.tree
                 .iter()
                 .map(|r| format!(
-                    r#"{{"node":{},"name":{:?},"depth":{},"group":{},"linked":{},"hidden":{},"shown":{}}}"#,
-                    r.node, r.name, r.depth, r.group, r.linked, r.hidden, r.shown
+                    r#"{{"node":{},"name":{:?},"depth":{},"group":{},"linked":{},"hidden":{},"shown":{},"layer":{}}}"#,
+                    r.node, r.name, r.depth, r.group, r.linked, r.hidden, r.shown, r.layer
                 ))
                 .collect::<Vec<_>>()
                 .join(","),
             e.ui.tree_on.map_or("null".into(), |n| n.to_string()),
+            e.ui.layers
+                .iter()
+                .map(|l| format!(
+                    r#"{{"id":{},"name":{:?},"objects":{},"hidden":{}}}"#,
+                    l.id, l.name, l.objects, l.hidden
+                ))
+                .collect::<Vec<_>>()
+                .join(","),
+            e.ui.layer_on.map_or("null".into(), |n| n.to_string()),
             e.ui.render_rect.is_some() && e.ui.show_render,
             e.preview.samples(),
             e.preview.last_rows,

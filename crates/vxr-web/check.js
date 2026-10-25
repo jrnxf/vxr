@@ -730,6 +730,42 @@ async () => {
     step("Cmd-K 'Ungroup' takes it out again", st().tree.length === 8 && st().picked === 'slab', JSON.stringify(st()));
     for (let i = 0; i < 2; i++) await key('z', cmd);
     step('every group edit undone gives back the file', same(bytes(), worldFile), JSON.stringify(st()));
+
+    // Layers: the LAYERS list, a layer's eye, a layer row click moving the picked object onto
+    // it, a double-click rename, + and Cmd-K 'New layer', one undo step each.
+    const layers = () => st().layers.map((l) => [l.id, l.name, l.objects, l.hidden].join(':')).join(',');
+    step('the LAYERS list shows the file layers', layers() === '0:ground:2:false,1:trees:3:false,2:secret:1:true' && window.vxr.hit('layer-add').length > 0, layers());
+    const l0 = st().voxels;
+    await chip('layer-eye-2');
+    step("a layer's eye shows the secret layer's gem", st().voxels === l0 + 1 && !st().layers[2].hidden, layers());
+    await key('z', cmd);
+    step('showing a layer is one undo step', st().voxels === l0 && same(bytes(), worldFile));
+    await pause();
+    await chip(`tree-${slab}`);
+    const onGround = st().layerOn === 0;
+    await chip('layer-1');
+    s = st();
+    step('a layer row click puts the picked object on that layer', onGround && s.layerOn === 1 && s.tree.find((r) => r.node === slab).layer === 1 && s.layers[1].objects === 4, layers());
+    await chip('layer-eye-1');
+    step('hiding that layer hides the object', st().voxels < l0 - 64, `${st().voxels}`);
+    await key('z', cmd);
+    await key('z', cmd);
+    step('moving to a layer and hiding it undo one step each', same(bytes(), worldFile) && st().layerOn === 0);
+    await dbl('layer-0');
+    const layerField = window.vxr.hit('tree-rename').length > 0;
+    await key('a', cmd);
+    for (const ch of 'floor') await key(ch);
+    await key('Enter');
+    step('a double-click renames a layer', layerField && st().layers[0].name === 'floor', layers());
+    await key('z', cmd);
+    await chip('layer-add');
+    const plus = st().layers.length === 4 && st().layers[3].name === 'layer 3';
+    await key('k', cmd);
+    for (const ch of 'new layer') await key(ch);
+    await key('Enter');
+    step("+ and Cmd-K 'New layer' add layers", plus && st().layers.length === 5, layers());
+    for (let i = 0; i < 2; i++) await key('z', cmd);
+    step('every layer edit undone gives back the file', same(bytes(), worldFile) && st().layers.length === 3, layers());
     await pause();
     await chip(`tree-${trees}`);
     await key('Tab');

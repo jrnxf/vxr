@@ -927,6 +927,7 @@ fn scene_tree(dir: &Path) -> Result<(), String> {
     )?;
 
     groups(&mut s, &bytes, dir)?;
+    layers(&mut s, &bytes, dir)?;
     s.frames(30);
     s.ui_click(&format!("tree-{slab}"))?;
 
@@ -1085,6 +1086,127 @@ fn groups(s: &mut Shot, bytes: &[u8], dir: &Path) -> Result<(), String> {
     check(
         editing && s.ed.scene.at() == At::World && s.ed.scene.to_vox() == bytes,
         "Tab with a group picked edits its first object; every group edit undone gives the file".into(),
+    )?;
+    Ok(())
+}
+
+/// Layers in world mode on 22-world: the LAYERS list under the tree, a layer's eye, a layer
+/// row click putting the picked object on it, a double-click rename, + and Cmd-K "New layer",
+/// Cmd-K "Hide or show layer", one undo step each, and no list in model mode. Leaves the
+/// world with every layer edit undone.
+fn layers(s: &mut Shot, bytes: &[u8], dir: &Path) -> Result<(), String> {
+    use vxr_app::editor::node_name;
+    let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    let cmd = egui::Modifiers::COMMAND;
+    let node = |s: &Shot, name: &str| {
+        let w = s.ed.scene.world().unwrap();
+        (0..w.tree.nodes.len()).find(|&i| node_name(w, i) == name).ok_or(format!("no node {name}"))
+    };
+    let list = |s: &Shot| -> Vec<(i32, String, usize, bool)> {
+        s.ed.ui.layers.iter().map(|l| (l.id, l.name.clone(), l.objects, l.hidden)).collect()
+    };
+    let cmdk = |s: &mut Shot, text: &str| {
+        s.frames_with(2, vec![key(egui::Key::K, cmd)]);
+        s.frames_with(1, vec![egui::Event::Text(text.into())]);
+        s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    };
+    s.frames(2);
+    let want = [(0, "ground".into(), 2, false), (1, "trees".into(), 3, false), (2, "secret".into(), 1, true)];
+    let tree_bottom =
+        s.ed.ui.tree.iter().map(|r| s.ed.ui.hits[&format!("tree-{}", r.node)].bottom()).fold(0.0, f32::max);
+    check(
+        list(s) == want
+            && (0..3).all(|id| s.ed.ui.hits.get(&format!("layer-{id}")).is_some_and(|r| r.top() > tree_bottom))
+            && s.ed.ui.hits.contains_key("layer-add"),
+        format!("the LAYERS list under the tree shows 22-world's layers ({:?})", list(s)),
+    )?;
+
+    // The eye shows the hidden secret layer and its gem, as one undo step.
+    let v0 = s.voxels();
+    s.ui_click("layer-eye-2")?;
+    let gem = node(s, "gem")?;
+    check(
+        s.voxels() == v0 + 1 && s.ed.scene.world().unwrap().shown(gem) && !s.ed.ui.layers[2].hidden,
+        "a layer's eye shows the hidden secret layer and its gem".into(),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
+    let undone = s.voxels() == v0;
+    s.frames_with(2, vec![key(egui::Key::Z, cmd | egui::Modifiers::SHIFT)]);
+    check(undone && s.voxels() == v0 + 1, "showing a layer is one undo step, and redo shows it again".into())?;
+
+    // A layer row click puts the picked object on that layer; hiding the layer hides it.
+    let slab = node(s, "slab")?;
+    s.frames(30);
+    s.ui_click(&format!("tree-{slab}"))?;
+    let on_ground = s.ed.ui.layer_on == Some(0);
+    s.ui_click("layer-1")?;
+    let row = s.ed.ui.tree.iter().find(|r| r.node == slab).cloned();
+    check(
+        on_ground
+            && s.ed.ui.layer_on == Some(1)
+            && row.is_some_and(|r| r.layer == 1)
+            && s.ed.ui.layers[1].objects == 4
+            && s.ed.ui.layers[0].objects == 1,
+        "a layer row click puts the picked slab on the trees layer".into(),
+    )?;
+    s.frames(2);
+    s.save_png(&dir.join("app-2x-layers.png"))?;
+    let v1 = s.voxels();
+    s.ui_click("layer-eye-1")?;
+    let w = s.ed.scene.world().unwrap();
+    let hidden_all = w.objects().iter().filter(|&&i| w.tree.nodes[i].layer == 1).all(|&i| !w.shown(i));
+    check(
+        hidden_all && s.voxels() < v1 - 64,
+        format!("hiding the trees layer hides the slab and the trees ({v1} to {} voxels)", s.voxels()),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
+    s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
+    check(
+        s.voxels() == v1 && s.ed.ui.layer_on == Some(0) && list(s)[1].2 == 3,
+        "hiding a layer and moving an object to it are one undo step each".into(),
+    )?;
+
+    // Cmd-K "Hide or show layer" hides the picked object's layer.
+    cmdk(s, "hide or show layer");
+    let hid = s.ed.ui.layers[0].hidden && !s.ed.scene.world().unwrap().shown(slab);
+    s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
+    check(hid && !s.ed.ui.layers[0].hidden, "Cmd-K 'Hide or show layer' hides the picked object's layer".into())?;
+
+    // A double-click renames a layer; Enter keeps the name.
+    s.frames(30);
+    s.ui_click("layer-0")?;
+    s.ui_click("layer-0")?;
+    let field = s.ed.ui.hits.contains_key("tree-rename");
+    s.frames_with(1, vec![key(egui::Key::A, cmd)]);
+    s.frames_with(1, vec![egui::Event::Text("floor".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    check(
+        field && list(s)[0].1 == "floor" && s.ed.ui.layer_on == Some(0),
+        format!("a double-click renames the layer ({}), and leaves the slab on it", list(s)[0].1),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
+    check(list(s)[0].1 == "ground", "renaming a layer is one undo step".into())?;
+
+    // + and Cmd-K "New layer" add layers.
+    s.ui_click("layer-add")?;
+    let added = list(s).last().is_some_and(|l| l.0 == 3 && l.1 == "layer 3" && l.2 == 0);
+    cmdk(s, "new layer");
+    check(
+        added && list(s).len() == 5 && list(s)[4].1 == "layer 4",
+        "+ and Cmd-K 'New layer' add layer 3 and layer 4".into(),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
+    s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
+    check(list(s).len() == 3, "adding a layer is one undo step".into())?;
+
+    // Model mode lists no layers.
+    s.frames_with(2, vec![key(egui::Key::Tab, egui::Modifiers::NONE)]);
+    let none = !s.ed.ui.hits.contains_key("layer-0") && !s.ed.ui.hits.contains_key("layer-add");
+    s.frames_with(2, vec![key(egui::Key::Tab, egui::Modifiers::NONE)]);
+    s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
+    check(
+        none && s.ed.ui.hits.contains_key("layer-0") && s.ed.scene.to_vox() == bytes,
+        "model mode lists no layers; every layer edit undone gives the file".into(),
     )?;
     Ok(())
 }

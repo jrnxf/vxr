@@ -505,3 +505,56 @@ fn groups_are_picked_moved_duplicated_grouped_and_ungrouped_in_world_mode() {
     while s.undo() {}
     assert!(s.to_vox() == bytes);
 }
+
+#[test]
+fn layers_are_shown_hidden_named_added_and_assigned_in_world_mode() {
+    let bytes = fixture("22-world");
+    let mut s = vxr_core::Scene::from_vox(&bytes).unwrap();
+    let w = s.world().unwrap();
+    let (slab, gem, trees) = (find(w, "slab"), find(w, "gem"), find(w, "trees"));
+    let layers = |s: &vxr_core::Scene| {
+        s.world()
+            .unwrap()
+            .layers()
+            .into_iter()
+            .map(|l| (l.id, l.name.map(|n| String::from_utf8(n).unwrap()).unwrap_or_default(), l.hidden))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(layers(&s), [(0, "ground".into(), false), (1, "trees".into(), false), (2, "secret".into(), true)]);
+    assert!(!s.world().unwrap().shown(gem), "the gem is on the hidden secret layer");
+
+    // Showing the secret layer shows the gem, as one undo step.
+    let voxels = s.world_voxels(true).len();
+    s.edit_world(|w| w.set_layer_hidden(2, false)).unwrap();
+    assert!(s.world().unwrap().shown(gem));
+    assert_eq!(s.world_voxels(true).len(), voxels + 1);
+    assert!(s.undo());
+    assert!(!s.world().unwrap().shown(gem));
+    assert!(s.redo());
+
+    // Renaming a layer and moving the slab onto the hidden secret layer hides it.
+    s.edit_world(|w| w.set_layer_name(0, Some("floor"))).unwrap();
+    s.edit_world(|w| w.set_layer_hidden(2, true)).unwrap();
+    s.edit_world(|w| w.put_on_layer(slab, 2)).unwrap();
+    assert!(!s.world().unwrap().shown(slab));
+    // A group goes onto a layer with every node under it.
+    s.edit_world(|w| w.put_on_layer(trees, 0)).unwrap();
+    let w = s.world().unwrap();
+    assert!(w.objects_under(trees).iter().all(|&i| w.tree.nodes[i].layer == 0));
+    // A new layer, and a layer an object is on without a LAYR entry.
+    let id = s.edit_world(|w| w.add_layer("props")).unwrap();
+    assert_eq!(id, 3);
+    s.edit_world(|w| w.put_on_layer(gem, 7)).unwrap();
+    assert_eq!(layers(&s).last().unwrap(), &(7, String::new(), false));
+    s.edit_world(|w| w.set_layer_name(7, Some("seven"))).unwrap();
+
+    // Everything survives save and reopen.
+    let want = layers(&s);
+    let again = vxr_core::Scene::from_vox(&s.to_vox()).unwrap();
+    assert_eq!(layers(&again), want);
+    assert_eq!(outline(again.world().unwrap()), outline(s.world().unwrap()));
+    assert_eq!(again.world_voxels(true), s.world_voxels(true));
+
+    while s.undo() {}
+    assert!(s.to_vox() == bytes);
+}

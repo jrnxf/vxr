@@ -369,6 +369,47 @@ impl World {
         self.tree.layers.iter_mut().find(|l| l.id == id)
     }
 
+    /// Every layer by id: the file's `LAYR` entries and any layer an object is on without
+    /// one (unnamed, shown).
+    pub fn layers(&self) -> Vec<LayerInfo> {
+        let mut out = self.tree.layers.clone();
+        for i in self.objects() {
+            let id = self.tree.nodes[i].layer;
+            if id >= 0 && !out.iter().any(|l| l.id == id) {
+                out.push(LayerInfo { id, name: None, hidden: false });
+            }
+        }
+        out.sort_by_key(|l| l.id);
+        out
+    }
+
+    /// Layer `id`'s entry, added (unnamed, shown) when the file has none, so saving writes it.
+    fn layer_entry(&mut self, id: i32) -> &mut LayerInfo {
+        if !self.tree.layers.iter().any(|l| l.id == id) {
+            self.tree.layers.push(LayerInfo { id, name: None, hidden: false });
+        }
+        self.layer_mut(id).unwrap()
+    }
+
+    pub fn set_layer_hidden(&mut self, id: i32, hidden: bool) {
+        self.layer_entry(id).hidden = hidden;
+    }
+
+    /// Name layer `id`; `None` clears the name.
+    pub fn set_layer_name(&mut self, id: i32, name: Option<&str>) {
+        self.layer_entry(id).name = name.map(|n| n.as_bytes().to_vec());
+    }
+
+    /// Put node `i` and every node under it on layer `id`.
+    pub fn put_on_layer(&mut self, i: usize, id: i32) {
+        self.tree.nodes[i].layer = id;
+        if let Kind::Group(kids) = self.tree.nodes[i].kind.clone() {
+            for k in kids {
+                self.put_on_layer(k, id);
+            }
+        }
+    }
+
     /// A model's voxels in the file's form: (x, y, z, index), sorted by position.
     pub fn vox_voxels(&self, m: usize) -> Vec<[u16; 4]> {
         let map = &self.models[m];

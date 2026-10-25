@@ -120,6 +120,7 @@ mod icon {
     pub const POINTER: char = '\u{e1c3}';
     pub const SQUARE_DASHED: char = '\u{e1cb}';
     pub const LAYERS: char = '\u{e529}';
+    pub const PLUS: char = '\u{e13d}';
     /// The mockup's mirror glyph (Lucide 0.460 `flip-horizontal-2`, renamed `flip-vertical-2` in 1.x).
     pub const FLIP: char = '\u{e360}';
     pub const SCAN: char = '\u{e257}';
@@ -226,6 +227,14 @@ pub enum Action {
     ToggleHidden,
     /// Put the picked object or group into a new group of its own (Cmd-G).
     Group,
+    /// Put the picked object or group on this layer (a layer row click in world mode).
+    SetLayer(i32),
+    /// Hide or show a layer (its row's eye).
+    SetLayerHidden(i32, bool),
+    /// Hide or show the picked object's layer (Cmd-K).
+    ToggleLayer,
+    /// Add a layer (the + beside LAYERS).
+    AddLayer,
     /// Move the picked group's children up into its parent (Cmd-Shift-G).
     Ungroup,
     Copy,
@@ -248,6 +257,24 @@ pub struct TreeRow {
     pub hidden: bool,
     /// Neither it nor a group above it is hidden or on a hidden layer.
     pub shown: bool,
+    pub layer: i32,
+}
+
+/// One row of the scene tree's LAYERS list, in world mode (set by the editor).
+#[derive(Clone, Debug, PartialEq)]
+pub struct LayerRow {
+    pub id: i32,
+    pub name: String,
+    /// Objects on the layer.
+    pub objects: usize,
+    pub hidden: bool,
+}
+
+/// What an in-place rename field names: a tree node or a layer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Named {
+    Node(usize),
+    Layer(i32),
 }
 
 /// The scene tree's width, and how many rows it shows before scrolling.
@@ -367,13 +394,17 @@ pub struct Hybrid {
     pub tree: Vec<TreeRow>,
     pub tree_on: Option<usize>,
     pub picked_node: Option<usize>,
+    /// The layers listed under the tree in world mode, and the picked node's layer.
+    pub layers: Vec<LayerRow>,
+    pub layer_on: Option<i32>,
     /// The first tree row shown, when there are more than fit.
     tree_scroll: usize,
-    /// The node being renamed and its field's text, and whether the field still needs focus.
-    renaming: Option<(usize, String)>,
+    /// The node or layer being renamed and its field's text, and whether the field still
+    /// needs focus.
+    renaming: Option<(Named, String)>,
     rename_focus: bool,
-    /// A finished rename for the editor to apply: node and new name.
-    pub renamed: Option<(usize, String)>,
+    /// A finished rename for the editor to apply: node or layer and new name.
+    pub renamed: Option<(Named, String)>,
     /// The box being dragged with the select tool, in points.
     pub marquee: Option<Rect>,
     /// Swatch being dragged with Cmd (swap) or Cmd+Shift (copy).
@@ -461,6 +492,9 @@ const COMMANDS: &[Command] = &[
     Command { label: "Rename object", keys: &[], run: |h| h.start_rename(h.picked_node) },
     Command { label: "Group object", keys: &["⌘", "G"], run: |h| h.actions.push(Action::Group) },
     Command { label: "Ungroup", keys: &["⌘", "⇧", "G"], run: |h| h.actions.push(Action::Ungroup) },
+    Command { label: "New layer", keys: &[], run: |h| h.actions.push(Action::AddLayer) },
+    Command { label: "Hide or show layer", keys: &[], run: |h| h.actions.push(Action::ToggleLayer) },
+    Command { label: "Rename layer", keys: &[], run: |h| h.start_layer_rename(h.layer_on) },
     Command { label: "Frame scene", keys: &["."], run: |h| h.actions.push(Action::Frame) },
     Command { label: "View options", keys: &[], run: |h| h.view_panel = !h.view_panel },
     Command { label: "Perspective", keys: &["O"], run: |h| h.actions.push(Action::Ortho(false)) },
@@ -534,6 +568,8 @@ impl Hybrid {
             tree_on: None,
             picked_node: None,
             tree_scroll: 0,
+            layers: Vec::new(),
+            layer_on: None,
             renaming: None,
             rename_focus: false,
             renamed: None,
@@ -660,7 +696,16 @@ impl Hybrid {
     pub fn start_rename(&mut self, node: Option<usize>) {
         let Some(row) = node.and_then(|n| self.tree.iter().find(|r| r.node == n)) else { return };
         if self.world {
-            self.renaming = Some((row.node, row.name.clone()));
+            self.renaming = Some((Named::Node(row.node), row.name.clone()));
+            self.rename_focus = true;
+        }
+    }
+
+    /// Open the rename field on layer `id`, in world mode.
+    pub fn start_layer_rename(&mut self, id: Option<i32>) {
+        let Some(row) = id.and_then(|id| self.layers.iter().find(|l| l.id == id)) else { return };
+        if self.world && !self.tree.is_empty() {
+            self.renaming = Some((Named::Layer(row.id), row.name.clone()));
             self.rename_focus = true;
         }
     }
@@ -1017,9 +1062,16 @@ impl Hybrid {
         let row_h = 28.0;
         let rows = self.tree.len().min(TREE_ROWS);
         self.tree_scroll = self.tree_scroll.min(self.tree.len() - rows);
-        let rect = Rect::from_min_size(pos2(12.0 + 52.0 + 8.0, 68.0), vec2(TREE_W, 36.0 + rows as f32 * row_h + 6.0));
+        let world = self.world;
+        // The LAYERS list sits under the rows in world mode: a rule, its header and a row each.
+        let layers: &[LayerRow] = if world { &self.layers } else { &[] };
+        let layers_h = if world { 1.0 + 30.0 + layers.len() as f32 * row_h } else { 0.0 };
+        let rect = Rect::from_min_size(
+            pos2(12.0 + 52.0 + 8.0, 68.0),
+            vec2(TREE_W, 36.0 + rows as f32 * row_h + layers_h + 6.0),
+        );
         let objects = self.tree.iter().filter(|r| !r.group).count();
-        let (world, on, scroll) = (self.world, self.tree_on, self.tree_scroll);
+        let (on, scroll, layer_on) = (self.tree_on, self.tree_scroll, self.layer_on);
         let mut renaming = self.renaming.take();
         let mut focus = std::mem::take(&mut self.rename_focus);
         let mut run = Vec::new();
@@ -1028,9 +1080,12 @@ impl Hybrid {
         let mut start_rename = None;
         let mut wheel = 0.0;
         Self::panel(ctx, "tree", rect, Order::Middle, |ui, rect| {
+            let header = |ui: &egui::Ui, y: f32, title: &str| {
+                let g = ui.painter().layout_job(spaced(title, inter(9.0), FAINT, 0.72));
+                ui.painter().galley(pos2(rect.left() + 12.0, y - g.size().y / 2.0), g, FAINT);
+            };
             let hy = rect.top() + 18.0;
-            let g = ui.painter().layout_job(spaced("SCENE", inter(9.0), FAINT, 0.72));
-            ui.painter().galley(pos2(rect.left() + 12.0, hy - g.size().y / 2.0), g, FAINT);
+            header(ui, hy, "SCENE");
             ui.painter().text(
                 pos2(rect.right() - 12.0, hy),
                 Align2::RIGHT_CENTER,
@@ -1038,8 +1093,10 @@ impl Hybrid {
                 inter(11.0),
                 FAINT,
             );
-            let body =
-                Rect::from_min_max(pos2(rect.left() + 6.0, rect.top() + 34.0), rect.right_bottom() - vec2(6.0, 6.0));
+            let body = Rect::from_min_size(
+                pos2(rect.left() + 6.0, rect.top() + 34.0),
+                vec2(rect.width() - 12.0, rows as f32 * row_h),
+            );
             if ui.rect_contains_pointer(body) {
                 wheel = ui.input(|i| i.smooth_scroll_delta.y);
             }
@@ -1084,66 +1141,94 @@ impl Hybrid {
                     right -= 8.0;
                 }
                 let name_r = Rect::from_min_max(pos2(x + 20.0, r.top() + 4.0), pos2(right, r.bottom() - 4.0));
+                let named = Named::Node(row.node);
                 match renaming.as_mut() {
-                    Some((n, text)) if *n == row.node => {
-                        let fid = Id::unique("tree-rename");
+                    Some((n, text)) if *n == named => {
                         hits.push(("tree-rename".to_string(), name_r));
-                        let p = ui.painter();
-                        p.rect(
-                            name_r.expand2(vec2(4.0, 0.0)),
-                            CornerRadius::same(6),
-                            Color32::from_white_alpha(9),
-                            Stroke::new(1.0, Color32::from_rgba_unmultiplied(142, 162, 255, 140)),
-                            StrokeKind::Inside,
-                        );
-                        let edit = egui::TextEdit::singleline(text)
-                            .id(fid)
-                            .font(inter(12.0))
-                            .text_color(TEXT)
-                            .frame(egui::Frame::NONE)
-                            .margin(egui::Margin::ZERO)
-                            .desired_width(name_r.width());
-                        let line = ui.fonts_mut(|f| f.row_height(&inter(12.0)));
-                        let text_r = Rect::from_center_size(name_r.center(), vec2(name_r.width(), line));
-                        let out = ui.put(text_r, edit);
-                        if std::mem::take(&mut focus) {
-                            out.request_focus();
-                        } else if out.lost_focus() {
-                            renamed = Some((row.node, text.clone()));
+                        if Self::rename_field(ui, name_r, text, &mut focus) {
+                            renamed = Some((named, text.clone()));
                             renaming = None;
                         }
                     }
-                    _ => {
-                        let mut job = LayoutJob::single_section(
-                            row.name.clone(),
-                            TextFormat { font_id: inter(12.0), color, ..Default::default() },
-                        );
-                        job.wrap = egui::text::TextWrapping {
-                            max_width: name_r.width().max(1.0),
-                            max_rows: 1,
-                            break_anywhere: true,
-                            overflow_character: Some('…'),
-                        };
-                        let g = ui.painter().layout_job(job);
-                        ui.painter().galley(pos2(name_r.left(), r.center().y - g.size().y / 2.0), g, color);
-                    }
+                    _ => Self::row_name(ui, name_r, r, &row.name, color),
                 }
-                if let Some(e) = &eye_resp
-                    && (row.hidden || hover)
-                {
-                    if e.hovered() {
-                        ui.painter().rect_filled(eye, CornerRadius::same(6), HOVER);
-                    }
-                    let glyph = if row.hidden { icon::EYE_OFF } else { icon::EYE };
-                    let c = if e.hovered() { TEXT } else { FAINT };
-                    ui.painter().text(eye.center(), Align2::CENTER_CENTER, glyph, icon_font(13.0), c);
+                if let Some(e) = &eye_resp {
+                    Self::eye(ui, eye, e, row.hidden, row.hidden || hover);
                 }
                 if eye_resp.as_ref().is_some_and(|e| e.clicked()) {
                     run.push(Action::SetHidden(row.node, !row.hidden));
                 } else if resp.double_clicked() {
-                    start_rename = Some(row.node);
+                    start_rename = Some(named);
                 } else if resp.clicked() {
                     run.push(Action::PickNode(row.node));
+                }
+            }
+            if !world {
+                return;
+            }
+            // LAYERS: a click puts the picked object or group on the layer (its row shows a
+            // dot), the eye hides and shows the layer, a double-click renames, + adds one.
+            let top = body.bottom() + 6.0;
+            ui.painter().hline(rect.left() + 12.0..=rect.right() - 12.0, top, Stroke::new(1.0, LINE));
+            let hy = top + 16.0;
+            header(ui, hy, "LAYERS");
+            let add = Rect::from_center_size(pos2(rect.right() - 21.0, hy), vec2(22.0, 22.0));
+            let add_resp = ui.interact(add, Id::unique("layer-add"), Sense::click());
+            hits.push(("layer-add".to_string(), add));
+            if add_resp.hovered() {
+                ui.painter().rect_filled(add, CornerRadius::same(6), HOVER);
+            }
+            let c = if add_resp.hovered() { TEXT } else { FAINT };
+            ui.painter().text(add.center(), Align2::CENTER_CENTER, icon::PLUS, icon_font(13.0), c);
+            if add_resp.clicked() {
+                run.push(Action::AddLayer);
+            }
+            for (k, l) in layers.iter().enumerate() {
+                let r =
+                    Rect::from_min_size(pos2(body.left(), top + 31.0 + k as f32 * row_h), vec2(body.width(), row_h));
+                let id = format!("layer-{}", l.id);
+                let resp = ui.interact(r, Id::unique(&id), Sense::click());
+                hits.push((id, r));
+                let eye = Rect::from_center_size(pos2(r.right() - 15.0, r.center().y), vec2(22.0, 22.0));
+                let eye_resp = ui.interact(eye, Id::unique(("layer-eye", l.id)), Sense::click());
+                hits.push((format!("layer-eye-{}", l.id), eye));
+                let hover = resp.hovered() || eye_resp.hovered();
+                let p = ui.painter();
+                if hover {
+                    p.rect_filled(r, CornerRadius::same(7), HOVER);
+                }
+                let color = match (l.hidden, hover) {
+                    (true, _) => FAINT,
+                    (false, true) => TEXT,
+                    (false, false) => MUTED,
+                };
+                let x = r.left() + 8.0;
+                p.text(pos2(x + 7.0, r.center().y), Align2::CENTER_CENTER, icon::LAYERS, icon_font(13.0), color);
+                if layer_on == Some(l.id) {
+                    p.circle_filled(pos2(r.left() + 3.0, r.center().y), 2.5, ACCENT);
+                }
+                let g = p.layout_no_wrap(l.objects.to_string(), mono(10.0), FAINT);
+                let right = eye.left() - 4.0 - g.size().x;
+                p.galley(pos2(right, r.center().y - g.size().y / 2.0), g, FAINT);
+                let name_r = Rect::from_min_max(pos2(x + 20.0, r.top() + 4.0), pos2(right - 8.0, r.bottom() - 4.0));
+                let named = Named::Layer(l.id);
+                match renaming.as_mut() {
+                    Some((n, text)) if *n == named => {
+                        hits.push(("tree-rename".to_string(), name_r));
+                        if Self::rename_field(ui, name_r, text, &mut focus) {
+                            renamed = Some((named, text.clone()));
+                            renaming = None;
+                        }
+                    }
+                    _ => Self::row_name(ui, name_r, r, &l.name, color),
+                }
+                Self::eye(ui, eye, &eye_resp, l.hidden, l.hidden || hover);
+                if eye_resp.clicked() {
+                    run.push(Action::SetLayerHidden(l.id, !l.hidden));
+                } else if resp.double_clicked() {
+                    start_rename = Some(named);
+                } else if resp.clicked() {
+                    run.push(Action::SetLayer(l.id));
                 }
             }
         });
@@ -1157,8 +1242,66 @@ impl Hybrid {
         self.renamed = renamed.or(self.renamed.take());
         self.hits.extend(hits);
         self.actions.extend(run);
-        if start_rename.is_some() {
-            self.start_rename(start_rename);
+        match start_rename {
+            Some(Named::Node(n)) => self.start_rename(Some(n)),
+            Some(Named::Layer(id)) => self.start_layer_rename(Some(id)),
+            None => {}
+        }
+    }
+
+    /// A tree or layer row's name, cut with an ellipsis to fit `name_r`.
+    fn row_name(ui: &egui::Ui, name_r: Rect, r: Rect, name: &str, color: Color32) {
+        let mut job = LayoutJob::single_section(
+            name.to_string(),
+            TextFormat { font_id: inter(12.0), color, ..Default::default() },
+        );
+        job.wrap = egui::text::TextWrapping {
+            max_width: name_r.width().max(1.0),
+            max_rows: 1,
+            break_anywhere: true,
+            overflow_character: Some('…'),
+        };
+        let g = ui.painter().layout_job(job);
+        ui.painter().galley(pos2(name_r.left(), r.center().y - g.size().y / 2.0), g, color);
+    }
+
+    /// A row's eye button, drawn when `show` (hovered or hidden).
+    fn eye(ui: &egui::Ui, eye: Rect, resp: &egui::Response, hidden: bool, show: bool) {
+        if !show {
+            return;
+        }
+        if resp.hovered() {
+            ui.painter().rect_filled(eye, CornerRadius::same(6), HOVER);
+        }
+        let glyph = if hidden { icon::EYE_OFF } else { icon::EYE };
+        let c = if resp.hovered() { TEXT } else { FAINT };
+        ui.painter().text(eye.center(), Align2::CENTER_CENTER, glyph, icon_font(13.0), c);
+    }
+
+    /// The in-place rename field over a row's name; true once it loses focus (done).
+    fn rename_field(ui: &mut egui::Ui, name_r: Rect, text: &mut String, focus: &mut bool) -> bool {
+        ui.painter().rect(
+            name_r.expand2(vec2(4.0, 0.0)),
+            CornerRadius::same(6),
+            Color32::from_white_alpha(9),
+            Stroke::new(1.0, Color32::from_rgba_unmultiplied(142, 162, 255, 140)),
+            StrokeKind::Inside,
+        );
+        let edit = egui::TextEdit::singleline(text)
+            .id(Id::unique("tree-rename"))
+            .font(inter(12.0))
+            .text_color(TEXT)
+            .frame(egui::Frame::NONE)
+            .margin(egui::Margin::ZERO)
+            .desired_width(name_r.width());
+        let line = ui.fonts_mut(|f| f.row_height(&inter(12.0)));
+        let text_r = Rect::from_center_size(name_r.center(), vec2(name_r.width(), line));
+        let out = ui.put(text_r, edit);
+        if std::mem::take(focus) {
+            out.request_focus();
+            false
+        } else {
+            out.lost_focus()
         }
     }
 
