@@ -121,6 +121,7 @@ mod icon {
     pub const SQUARE_DASHED: char = '\u{e1cb}';
     pub const LAYERS: char = '\u{e529}';
     pub const PLUS: char = '\u{e13d}';
+    pub const MINUS: char = '\u{e11c}';
     /// The mockup's mirror glyph (Lucide 0.460 `flip-horizontal-2`, renamed `flip-vertical-2` in 1.x).
     pub const FLIP: char = '\u{e360}';
     pub const SCAN: char = '\u{e257}';
@@ -156,7 +157,7 @@ mod icon {
 }
 
 pub use vxr_core::select::Transform;
-pub use vxr_core::tools::{Shape, Tool};
+pub use vxr_core::tools::{MAX_SIZE, Shape, Tool};
 pub use vxr_render::View;
 
 /// What the UI asks the app to do this frame.
@@ -342,6 +343,11 @@ pub struct Hybrid {
     pub mirror_on: [bool; 3],
     /// Axis lock (K cycles X, Y, Z, off).
     pub lock: Option<usize>,
+    /// The voxel brush's size, 1 to [`MAX_SIZE`] (- and = step it).
+    pub size: u8,
+    /// The size flyout beside the voxel brush button is open (V again, or a click on the
+    /// button while the voxel brush is on). It also shows while the size is above 1.
+    pub size_panel: bool,
     pub slot: u8,
     /// RGBA by voxel index, as the scene stores it.
     pub palette: [[u8; 4]; 256],
@@ -388,6 +394,7 @@ pub struct Hybrid {
     pub hits: HashMap<String, Rect>,
     /// Top of the mirror button in the rail, where the axis flyout lines up.
     axes_y: f32,
+    voxel_y: f32,
     /// Top of the view button in the rail, where the View flyout lines up.
     view_y: f32,
     /// Top of the select button in the rail, where the selection flyout lines up.
@@ -472,6 +479,16 @@ const COMMANDS: &[Command] = &[
         run: |h| h.actions.push(Action::Transform(Transform::Move([0, -1, 0]))),
     },
     Command { label: "Voxel brush", keys: &["V"], run: |h| h.shape = Shape::Voxel },
+    Command {
+        label: "Voxel brush size",
+        keys: &["V", "V"],
+        run: |h| {
+            h.shape = Shape::Voxel;
+            h.size_panel = true;
+        },
+    },
+    Command { label: "Bigger brush", keys: &["="], run: |h| h.step_size(1) },
+    Command { label: "Smaller brush", keys: &["-"], run: |h| h.step_size(-1) },
     Command { label: "Box brush", keys: &["B"], run: |h| h.shape = Shape::Box },
     Command { label: "Face brush", keys: &["F"], run: |h| h.shape = Shape::Face },
     Command { label: "Line brush", keys: &["L"], run: |h| h.shape = Shape::Line },
@@ -542,6 +559,8 @@ impl Hybrid {
             mirror: false,
             mirror_on: [true, false, false],
             lock: None,
+            size: 1,
+            size_panel: false,
             slot: 28,
             palette,
             materials: [Material::default(); 256],
@@ -571,6 +590,7 @@ impl Hybrid {
             frame: true,
             hits: HashMap::new(),
             axes_y: 0.0,
+            voxel_y: 0.0,
             view_y: 0.0,
             select_y: 0.0,
             selected: 0,
@@ -654,6 +674,29 @@ impl Hybrid {
     }
 
     /// C: the center brush, switching between circle and sphere when it is already on.
+    /// V: the voxel brush, or with it already on, open or close its size flyout.
+    pub fn voxel_brush(&mut self) {
+        if self.shape == Shape::Voxel {
+            self.size_panel = !self.size_panel;
+        }
+        self.shape = Shape::Voxel;
+    }
+
+    /// Step the voxel brush's size by `d`, within 1 to [`MAX_SIZE`].
+    pub fn step_size(&mut self, d: i32) {
+        self.size = (self.size as i32 + d).clamp(1, MAX_SIZE as i32) as u8;
+    }
+
+    /// Whether the size flyout shows: the voxel brush with add, erase or paint in model mode,
+    /// opened or above size 1, and no selection flyout in its place.
+    fn size_shown(&self) -> bool {
+        self.shape == Shape::Voxel
+            && matches!(self.tool, Tool::Add | Tool::Erase | Tool::Paint)
+            && !self.world
+            && self.selected == 0
+            && (self.size_panel || self.size > 1)
+    }
+
     pub fn center_brush(&mut self) {
         self.shape = if self.shape == Shape::Circle { Shape::Sphere } else { Shape::Circle };
     }
@@ -730,6 +773,9 @@ impl Hybrid {
         if std::mem::take(&mut self.view_panel) || std::mem::take(&mut self.export_menu) {
             return;
         }
+        if self.size_shown() && std::mem::take(&mut self.size_panel) {
+            return;
+        }
         if self.render_panel {
             self.render_panel = false;
         } else if self.selected > 0 {
@@ -765,6 +811,7 @@ impl Hybrid {
         self.rail(ctx);
         self.tree_panel(ctx);
         self.axes(ctx);
+        self.size_flyout(ctx);
         self.selection_panel(ctx);
         self.bounds_panel(ctx);
         self.view_panel(ctx);
@@ -873,7 +920,7 @@ impl Hybrid {
                 (Key::P, |h| h.tool = Tool::Paint),
                 (Key::I, |h| h.tool = Tool::Pick),
                 (Key::S, |h| h.tool = Tool::Select),
-                (Key::V, |h| h.shape = Shape::Voxel),
+                (Key::V, |h| h.voxel_brush()),
                 (Key::B, |h| h.shape = Shape::Box),
                 (Key::F, |h| h.shape = Shape::Face),
                 (Key::L, |h| h.shape = Shape::Line),
@@ -902,6 +949,9 @@ impl Hybrid {
                 (Key::Num4, |h| h.actions.push(Action::Snap(View::Right))),
                 (Key::Num5, |h| h.actions.push(Action::Snap(View::Top))),
                 (Key::Num6, |h| h.actions.push(Action::Snap(View::Bottom))),
+                (Key::Minus, |h| h.step_size(-1)),
+                (Key::Equals, |h| h.step_size(1)),
+                (Key::Plus, |h| h.step_size(1)),
                 (Key::OpenBracket, |h| h.slot = h.slot.saturating_sub(1).max(1)),
                 (Key::CloseBracket, |h| h.slot = h.slot.saturating_add(1)),
             ] {
@@ -1030,8 +1080,17 @@ impl Hybrid {
                 (Shape::Face, icon::LAYERS, "F"),
                 (Shape::Line, icon::SLASH, "L"),
             ] {
-                if tool_button(ui, pos2(x, y), ic, k, shape == s).clicked() {
-                    self.shape = s;
+                let r = tool_button(ui, pos2(x, y), ic, k, shape == s);
+                if s == Shape::Voxel {
+                    self.voxel_y = y;
+                    self.hits.insert("voxel".into(), r.rect);
+                }
+                if r.clicked() {
+                    if s == Shape::Voxel {
+                        self.voxel_brush();
+                    } else {
+                        self.shape = s;
+                    }
                 }
                 y += 42.0;
             }
@@ -1480,6 +1539,55 @@ impl Hybrid {
         if close {
             self.view_panel = false;
         }
+    }
+
+    // The size flyout beside the rail's voxel brush button: SIZE, minus, the size, plus.
+    // Built like the axis flyout.
+    fn size_flyout(&mut self, ctx: &Context) {
+        if !self.size_shown() {
+            return;
+        }
+        let rect = Rect::from_min_size(pos2(self.flyout_x(), self.voxel_y - 6.0), vec2(150.0, 6.0 + 40.0 + 6.0));
+        let size = self.size;
+        let mut step = 0;
+        let mut hits = Vec::new();
+        Self::panel(ctx, "size", rect, Order::Middle, |ui, rect| {
+            let cy = rect.center().y;
+            let g = ui.painter().layout_job(spaced("SIZE", inter(9.0), FAINT, 0.72));
+            ui.painter().galley(pos2(rect.left() + 12.0, cy - g.size().y / 2.0), g, FAINT);
+            for (k, (id, glyph, d)) in
+                [("size-minus", icon::MINUS, -1), ("size-plus", icon::PLUS, 1)].into_iter().enumerate()
+            {
+                let c = Rect::from_min_size(pos2(rect.left() + 58.0 + k as f32 * 56.0, cy - 13.0), vec2(26.0, 26.0));
+                let off = (d < 0 && size <= 1) || (d > 0 && size >= MAX_SIZE);
+                let resp = ui.interact(c, Id::unique(id), if off { Sense::hover() } else { Sense::click() });
+                hits.push((id.to_string(), c));
+                let hover = resp.hovered() && !off;
+                let border = if hover { Color32::from_white_alpha(64) } else { LINE2 };
+                let p = ui.painter();
+                p.rect_stroke(c, CornerRadius::same(7), Stroke::new(1.0, border), StrokeKind::Inside);
+                let color = if off {
+                    FAINT
+                } else if hover {
+                    TEXT
+                } else {
+                    MUTED
+                };
+                p.text(c.center(), Align2::CENTER_CENTER, glyph, icon_font(13.0), color);
+                if resp.clicked() {
+                    step = d;
+                }
+            }
+            ui.painter().text(
+                pos2(rect.left() + 58.0 + 26.0 + 15.0, cy),
+                Align2::CENTER_CENTER,
+                size.to_string(),
+                mono_medium(12.0),
+                TEXT,
+            );
+        });
+        self.hits.extend(hits);
+        self.step_size(step);
     }
 
     // The axis flyout beside the rail's mirror and lock buttons, shown while either is on:
@@ -2638,6 +2746,10 @@ impl Hybrid {
             }
             (None, t, shape) => self.tool_hints(t, shape),
         };
+        let size = format!("size {}", self.size);
+        if self.slot_op.is_none() && self.shape == Shape::Voxel && matches!(t, Tool::Add | Tool::Erase | Tool::Paint) {
+            items.push(("- =", size.as_str()));
+        }
         if self.slot_op.is_none() && t == Tool::Select {
             items.extend([("Shift", "add"), ("Alt", "subtract"), ("Right-drag", "orbit")]);
         } else if self.slot_op.is_none() {

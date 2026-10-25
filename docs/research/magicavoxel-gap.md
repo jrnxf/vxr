@@ -29,7 +29,7 @@ Feature names below follow the update log [S1] unless another source is given.
 |---|---|---|---|---|
 | Attach, erase, paint actions | Attach/Erase/Paint on every brush [S1 0.98.1] | done (add, erase, paint; Shift erases, Alt picks) | P1 | sculpt |
 | Pick colour from a voxel | Alt-click; Alt+drag picks from the screen [S1 0.99] | done (pick tool and Alt) | P1 | palette |
-| Voxel brush (V) with size | Cube, sphere, square, disc, surface; keys 1-9 set size; Ctrl+Alt+drag resizes [S1 0.97.1, 0.99.5.1] | partial (single voxel and drag-on-plane; no size, no sphere or surface shape) | P1 | sculpt |
+| Voxel brush (V) with size | Cube, sphere, square, disc, surface; keys 1-9 set size; Ctrl+Alt+drag resizes [S1 0.97.1, 0.99.5.1] | done (sizes 1 to 16 as a cube grown from the face: `-` `=`, the size flyout from V again, Cmd-K; drags on the plane; no sphere or surface shape, which the center brush covers in part) | P1 | sculpt |
 | Face brush (F) | Extrude or peel a connected face by dragging, several modes [S1 0.97] | done (click extrudes or peels the whole face, paint fills it) | P1 | sculpt, minutes |
 | Box brush (B) | Drag a rectangle, resizable with a gizmo, Enter commits [S1 0.99.5.1] | partial (drag a rectangle; no gizmo or height drag) | P1 | minutes |
 | Line brush (L) | Line, square and circle in one geometry mode since 0.99.6.2 [S1 0.99.6.2] | done (L: drag a line on the drag plane, shown live) | P1 | sculpt |

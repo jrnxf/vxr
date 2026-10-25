@@ -1,6 +1,6 @@
 //! The editing tools, as in the prototype editor (`prototype/src/editor.html`) and
 //! MagicaVoxel: add, erase, paint and pick, each with the voxel, box, face, line or center
-//! (circle or sphere) brush, an optional mirror on any of the three axes ([`Scene::pivot`])
+//! (circle or sphere) brush (the voxel brush in sizes up to [`MAX_SIZE`]), an optional mirror on any of the three axes ([`Scene::pivot`])
 //! and an optional axis lock that keeps drags on a plane across that axis. A gesture is a
 //! press, any number of moves and a release; the whole gesture is one undo step. All
 //! positions are map cells.
@@ -48,6 +48,10 @@ pub struct Brush {
     pub lock: Option<usize>,
     /// Palette index that add and paint use.
     pub color: u8,
+    /// Edge of the voxel brush's cube, 1 to [`MAX_SIZE`]: centred on the cell across the
+    /// pressed face and as deep as it is wide, out of the face for add and into it for erase
+    /// and paint.
+    pub size: u8,
 }
 
 /// What a ray points at: a voxel face, or the ground plane under the model.
@@ -75,6 +79,9 @@ pub const MAX_FACE: usize = 120_000;
 /// Largest circle or sphere radius, in voxels (a ball of about 1.1 million cells).
 pub const MAX_RADIUS: i32 = 64;
 
+/// Largest voxel brush size.
+pub const MAX_SIZE: u8 = 16;
+
 /// What a press did.
 #[derive(Debug)]
 pub enum Press {
@@ -100,6 +107,8 @@ pub struct Gesture {
     pub start: [i32; 3],
     pub end: [i32; 3],
     last: [i32; 3],
+    /// Normal of the face first pressed: the voxel brush's cube grows along it.
+    normal: [i32; 3],
     /// The radius a circle or sphere was last drawn at.
     drawn: i32,
 }
@@ -169,6 +178,29 @@ impl Scene {
         }
     }
 
+    /// One step of a voxel stroke at `p`: a single cell, or the brush's cube grown from it
+    /// along `normal` (outward for add, inward for erase and paint).
+    fn stamp(&mut self, brush: &Brush, p: [i32; 3], normal: [i32; 3]) {
+        let n = brush.size.clamp(1, MAX_SIZE) as i32;
+        if n == 1 {
+            return self.apply_voxel(brush, p);
+        }
+        let a = axis_of(normal);
+        let out = if brush.tool == Tool::Add { normal[a].signum() } else { -normal[a].signum() };
+        let lo = -(n - 1) / 2;
+        for i in 0..n {
+            for j in lo..lo + n {
+                for k in lo..lo + n {
+                    let mut q = p;
+                    q[a] += i * out;
+                    q[(a + 1) % 3] += j;
+                    q[(a + 2) % 3] += k;
+                    self.apply_voxel(brush, q);
+                }
+            }
+        }
+    }
+
     /// The face under a target: connected voxels of the same colour in its layer whose face
     /// along the normal is open, up to [`MAX_FACE`] cells.
     pub fn face_region(&self, t: &Target) -> Vec<[i32; 3]> {
@@ -226,9 +258,10 @@ impl Scene {
         let start = if brush.tool == Tool::Add { t.front() } else { t.voxel };
         let axis = brush.lock.unwrap_or(axis_of(t.normal));
         self.begin();
-        let g = Gesture { brush, axis, layer: start[axis], start, end: start, last: start, drawn: 0 };
+        let normal = t.normal;
+        let g = Gesture { brush, axis, layer: start[axis], start, end: start, last: start, normal, drawn: 0 };
         if brush.shape == Shape::Voxel {
-            self.apply_voxel(&brush, start);
+            self.stamp(&brush, start, normal);
         } else {
             g.draw(self);
         }
@@ -259,7 +292,7 @@ impl Gesture {
             let l = self.last;
             let steps = if self.on_plane() { (0..3).map(|a| (p[a] - l[a]).abs()).max().unwrap() } else { 1 };
             for q in line(l, p, steps).skip(1) {
-                scene.apply_voxel(&self.brush, q);
+                scene.stamp(&self.brush, q, self.normal);
             }
         }
         self.end = p;

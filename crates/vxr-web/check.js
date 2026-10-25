@@ -208,6 +208,43 @@ async () => {
   await key('k');
   step('K again locks Y, Z, then off', st().lock === null);
 
+  // The voxel brush's size: V again opens its flyout, + and -, the keys and Cmd-K, a size 3
+  // add and erase on the island, each one undo step; back to 1 and Escape closes it.
+  const before = bytes();
+  await key('v');
+  step('V again opens the size flyout', st().shape === 'Voxel' && st().sizePanel && !!at('size-plus'), JSON.stringify(st().sizePanel));
+  await chip('size-plus');
+  await chip('size-plus');
+  step('the flyout + steps the size', st().brushSize === 3, `${st().brushSize}`);
+  await key('-');
+  const down = st().brushSize;
+  await key('=');
+  step('- and = step the size', down === 2 && st().brushSize === 3, `${down} ${st().brushSize}`);
+  await key('k', cmd);
+  for (const ch of 'smaller brush') await key(ch);
+  await key('Enter');
+  const smaller = st().brushSize;
+  await key('=');
+  step('Cmd-K "Smaller brush"', smaller === 2 && st().brushSize === 3, `${smaller}`);
+  let n0 = st().voxels;
+  await click(mx, my);
+  const added = st().voxels - n0;
+  await key('z', cmd);
+  step('a size 3 click adds up to a 3x3x3 cube as one undo step', added > 9 && added <= 27 && same(bytes(), before), `${added}`);
+  await key('e');
+  n0 = st().voxels;
+  await click(mx, my);
+  const erased = n0 - st().voxels;
+  await key('z', cmd);
+  step('a size 3 erase takes up to 27 voxels into the face as one undo step', erased > 9 && erased <= 27 && same(bytes(), before), `${erased}`);
+  await key('a');
+  await chip('size-minus');
+  await chip('size-minus');
+  await key('-');
+  const one = st().brushSize;
+  await key('Escape');
+  step('- stops at 1 and Escape closes the size flyout', one === 1 && !st().sizePanel && !at('size-plus'), `${one}`);
+
   // Selection and transform: S, colour click, Escape, box select, a live move drag, the
   // flyout, copy and paste, Backspace and Cmd-A, hollow and fill inside, crop and resize, each
   // edit undone again.

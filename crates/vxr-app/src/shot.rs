@@ -252,6 +252,7 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
 
     palette(&mut s, dir)?;
     brushes(dir)?;
+    brush_size(dir)?;
     selection(dir)?;
     model_tools(dir)?;
     views(dir)?;
@@ -420,6 +421,89 @@ fn brushes(dir: &Path) -> Result<(), String> {
     s.ed.pointer_moved(Some([mid[0] + 300.0, mid[1] + 100.0]));
     s.frames(4);
     s.save_png(&dir.join("app-2x-brushes.png"))
+}
+
+/// The voxel brush's size: V again opens the size flyout, its buttons, - and =, Cmd-K, a
+/// cube added on the ground and one erased into a face, each one undo step.
+fn brush_size(dir: &Path) -> Result<(), String> {
+    let mut s = Shot::new(Scene::new(NEW_SIZE), "Untitled", 2.0)?;
+    s.frames(3);
+    let mid = [s.ed.width as f32 / 2.0, s.ed.height as f32 / 2.0];
+    let k = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    let none = egui::Modifiers::NONE;
+    s.ed.ui.coach = false;
+    s.tool(Tool::Add, Shape::Box);
+    s.frames_with(2, vec![k(egui::Key::V, none)]);
+    let closed = !s.ed.ui.hits.contains_key("size-plus");
+    s.frames_with(2, vec![k(egui::Key::V, none)]);
+    check(
+        s.ed.ui.shape == Shape::Voxel && closed && s.ed.ui.hits.contains_key("size-plus"),
+        "V picks the voxel brush, V again opens its size flyout".into(),
+    )?;
+    s.ui_click("size-plus")?;
+    s.ui_click("size-plus")?;
+    check(s.ed.ui.size == 3, format!("the flyout's + steps the size to {}", s.ed.ui.size))?;
+    s.frames_with(2, vec![k(egui::Key::Minus, none)]);
+    let down = s.ed.ui.size;
+    s.frames_with(2, vec![k(egui::Key::Equals, none)]);
+    check(down == 2 && s.ed.ui.size == 3, format!("- and = step it ({down}, then {})", s.ed.ui.size))?;
+    s.frames_with(2, vec![k(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("smaller brush".into())]);
+    s.frames_with(2, vec![k(egui::Key::Enter, none)]);
+    let cmdk = s.ed.ui.size;
+    s.frames_with(2, vec![k(egui::Key::Equals, none)]);
+    check(cmdk == 2 && s.ed.ui.size == 3, "Cmd-K 'Smaller brush'".into())?;
+
+    // Size 3 on the ground: a 3x3x3 cube standing on it, one undo step.
+    s.stroke(mid, &[]);
+    let (mut lo, mut hi) = ([i32::MAX; 3], [i32::MIN; 3]);
+    s.ed.scene.for_each_voxel(|p, _| {
+        for a in 0..3 {
+            (lo[a], hi[a]) = (lo[a].min(p[a]), hi[a].max(p[a]));
+        }
+    });
+    let cube = (0..3).all(|a| hi[a] - lo[a] == 2) && lo[1] == 0;
+    check(s.voxels() == 27 && cube, format!("a size 3 click on the ground adds a 3x3x3 cube ({lo:?} to {hi:?})"))?;
+    s.ed.undo();
+    let undone = s.voxels();
+    s.ed.redo();
+    check(undone == 0 && s.voxels() == 27, "one undo step, and redo".into())?;
+
+    // Size 2 erase into the cube's top face takes the 2x2x2 cells there that are filled.
+    s.frames_with(2, vec![k(egui::Key::Minus, none)]);
+    s.ed.ui.tool = Tool::Erase;
+    // The middle of the top face of the cube's middle column: x and z reach one cell further
+    // on the high side, so all 8 cells are inside the cube.
+    let c = [lo[0] + 1, hi[1], lo[2] + 1];
+    let at = project(&s.ed, [c[0] as f32 + 0.5, c[1] as f32 + 1.0, c[2] as f32 + 0.5]);
+    s.ed.pointer_moved(Some(at));
+    let aimed = s.ed.cursor().is_some_and(|t| t.voxel == c && t.normal == [0, 1, 0]);
+    s.stroke(at, &[]);
+    let gone = |x: i32, y: i32, z: i32| s.ed.scene.map.get(x, y, z) == 0;
+    check(
+        aimed && s.voxels() == 27 - 8 && gone(c[0] + 1, c[1] - 1, c[2] + 1) && !gone(c[0] - 1, c[1], c[2]),
+        format!("a size 2 erase on the top face takes the 2x2x2 cells under it ({} left)", s.voxels()),
+    )?;
+    s.ed.undo();
+    check(s.voxels() == 27, "erase: one undo step".into())?;
+
+    // The screenshot: the cube with the flyout open at size 3.
+    s.ed.ui.tool = Tool::Add;
+    s.frames_with(2, vec![k(egui::Key::Equals, none)]);
+    s.ed.pointer_moved(Some([mid[0] + 200.0, mid[1] + 60.0]));
+    s.frames(4);
+    s.save_png(&dir.join("app-2x-size.png"))?;
+
+    // - back to 1 (- stops there), then Escape closes the flyout.
+    s.ui_click("size-minus")?;
+    s.ui_click("size-minus")?;
+    s.frames_with(2, vec![k(egui::Key::Minus, none)]);
+    let open = s.ed.ui.hits.contains_key("size-plus");
+    s.frames_with(2, vec![k(egui::Key::Escape, none)]);
+    check(
+        s.ed.ui.size == 1 && open && !s.ed.ui.hits.contains_key("size-plus"),
+        "- steps back to 1 and stops; Escape closes the flyout".into(),
+    )
 }
 
 /// Where a point in map space lands on screen, in pixels.

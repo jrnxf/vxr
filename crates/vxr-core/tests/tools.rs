@@ -4,7 +4,7 @@ use vxr_core::Scene;
 use vxr_core::tools::{Brush, Press, Shape, Target, Tool, plane_cell};
 
 fn brush(tool: Tool, shape: Shape) -> Brush {
-    Brush { tool, shape, mirror: [false; 3], lock: None, color: 7 }
+    Brush { tool, shape, mirror: [false; 3], lock: None, color: 7, size: 1 }
 }
 
 /// A 4x1x4 slab of colour 3 at y = 0, with a 1x1 bump of colour 5 on top at (0, 1, 0).
@@ -227,4 +227,43 @@ fn a_sphere_dragged_out_and_back_matches_one_drawn_at_once() {
     assert_eq!(drag(&mut grown, b, ground, &path), n);
     assert_eq!(cells(&grown), cells(&once));
     assert!(grown.undo() && grown.map.voxels == 0, "one undo step");
+}
+
+#[test]
+fn voxel_brush_size_stamps_a_cube_out_of_the_face_for_add_and_into_it_for_erase_and_paint() {
+    // Add, size 3, on the slab's top at (2, 0, 2): a 3x3x3 cube resting on the face, centred
+    // on the cell above it.
+    let mut s = slab();
+    let before = s.map.voxels;
+    let b = Brush { size: 3, ..brush(Tool::Add, Shape::Voxel) };
+    assert_eq!(drag(&mut s, b, top([2, 0, 2], 3), &[]), 27);
+    assert_eq!(s.map.voxels, before + 27);
+    for (x, y, z) in [(1, 1, 1), (3, 3, 3), (2, 2, 2)] {
+        assert_eq!(s.map.get(x, y, z), 7, "{x},{y},{z}");
+    }
+    assert_eq!((s.map.get(2, 4, 2), s.map.get(4, 1, 2), s.map.get(2, 0, 2)), (0, 0, 3), "nothing outside");
+    // A drag on the plane stamps at every cell it crosses, as one undo step.
+    assert!(s.undo());
+    assert_eq!(drag(&mut s, b, top([2, 0, 2], 3), &[[4, 1, 2]]), 27 + 2 * 9);
+    assert!(s.undo());
+    assert_eq!(s.map.voxels, before);
+    // Even sizes reach one cell further on the high side.
+    let b2 = Brush { size: 2, ..b };
+    assert_eq!(drag(&mut s, b2, top([2, 0, 2], 3), &[]), 8);
+    assert_eq!((s.map.get(3, 2, 3), s.map.get(1, 1, 1)), (7, 0));
+    assert!(s.undo());
+    // Erase and paint go into the face and touch only filled cells: a size 3 erase on the
+    // slab's top removes the 3x3 under it (the slab is one layer deep), and a size 2 paint on
+    // the bump paints it and the slab under it.
+    let e = Brush { size: 3, ..brush(Tool::Erase, Shape::Voxel) };
+    assert_eq!(drag(&mut s, e, top([2, 0, 2], 3), &[]), 9);
+    assert!(s.undo());
+    let p = Brush { size: 2, ..brush(Tool::Paint, Shape::Voxel) };
+    assert_eq!(drag(&mut s, p, top([0, 1, 0], 5), &[]), 5, "the bump and the 2x2 of slab below");
+    assert_eq!((s.map.get(0, 1, 0), s.map.get(1, 0, 1), s.map.get(2, 0, 2)), (7, 7, 3));
+    // Mirror applies to every cell of the cube.
+    assert!(s.undo());
+    let m = Brush { mirror: [true, false, false], ..b };
+    let n = drag(&mut s, m, top([2, 0, 2], 3), &[]);
+    assert!(n > 27, "mirror adds the cube's image too: {n}");
 }

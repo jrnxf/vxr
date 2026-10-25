@@ -246,6 +246,7 @@ impl Editor {
             mirror: self.ui.mirror_axes(),
             lock: self.ui.lock,
             color: self.ui.slot,
+            size: self.ui.size,
         }
     }
 
