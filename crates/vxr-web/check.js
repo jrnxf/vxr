@@ -917,7 +917,16 @@ async () => {
     await key('h');
     step('H hides and shows the picked object', hHid && st().voxels === t0);
     const pause = () => new Promise((r) => setTimeout(r, 400));
-    const dbl = async (name) => { await pause(); await chip(name); await chip(name); };
+    // Two presses one frame apart, so they stay inside egui's 0.3 s double-click window even
+    // when headless Chrome draws slowly (two whole clicks are nine frames apart).
+    const dbl = async (name) => {
+      await pause();
+      const h = window.vxr.hit(name);
+      if (!h.length) return;
+      ptr('pointermove', h[0], h[1]); await frames();
+      for (const type of ['pointerdown', 'pointerup', 'pointerdown', 'pointerup']) { ptr(type, h[0], h[1]); await frames(1); }
+      await frames();
+    };
     await dbl(`tree-${slab}`);
     const field = window.vxr.hit('tree-rename').length > 0;
     await key('a', cmd);
