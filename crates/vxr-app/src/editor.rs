@@ -11,7 +11,7 @@ use vxr_core::tools::{Brush, Gesture, Press, Shape, Target, Tool, plane_cell};
 use vxr_render::{EditBox, Gpu, GpuMap, Guides, OrbitCamera, Preview, Renderer, brickmap_layout, gpu::now_ms};
 
 use crate::render::{EXPORT_SIZES, Export};
-use crate::ui::{Action, FontBytes, Hybrid, Stats};
+use crate::ui::{Action, FontBytes, Hybrid, Stats, TreeRow};
 
 /// Input quiet for this long raises the preview's budget (spikes/preview/RESULTS.md).
 const IDLE_MS: f64 = 300.0;
@@ -700,6 +700,12 @@ impl Editor {
         self.ui.bounds = self.scene.bounds().size;
         self.ui.world = self.scene.at() == At::World;
         self.ui.picked = self.scene.picked().map(|i| object_name(self.scene.world().unwrap(), i));
+        self.ui.picked_node = self.scene.picked();
+        self.ui.tree = tree_rows(&self.scene);
+        self.ui.tree_on = match self.scene.at() {
+            At::Object(i) => Some(i),
+            _ => self.scene.picked(),
+        };
         (self.ui.ortho, self.ui.view) = (self.cam.ortho, self.cam.view());
         self.ui.marquee = self.marquee.map(|m| {
             let (a, b) = (m.start, m.end);
@@ -748,6 +754,12 @@ impl Editor {
                 | Action::Paste
                 | Action::Duplicate { .. } => self.selection_action(a),
                 Action::ToggleWorld => self.toggle_world(),
+                Action::PickNode(i) => self.pick_node(i),
+                Action::SetHidden(i, hidden) => self.set_hidden(i, hidden),
+                Action::ToggleHidden => match (self.scene.picked(), self.scene.world()) {
+                    (Some(i), Some(w)) => self.set_hidden(i, !w.tree.nodes[i].hidden),
+                    _ => self.ui.toast(&self.ctx, "Pick an object in the world to hide it"),
+                },
                 Action::ExportPng => self.start_export(),
                 Action::CancelExport => {
                     self.export = None;
@@ -755,6 +767,9 @@ impl Editor {
                 }
                 other => host.push(other),
             }
+        }
+        if let Some((i, name)) = self.ui.renamed.take() {
+            self.rename(i, &name);
         }
         for key in std::mem::take(&mut self.ui.arrows) {
             let d = self.arrow_offset(key);
@@ -800,6 +815,55 @@ impl Editor {
             }
         };
         self.ui.toast(&self.ctx, msg);
+    }
+
+    /// A scene tree row was clicked: pick the object in world mode, or edit its model.
+    pub fn pick_node(&mut self, i: usize) {
+        let s = &mut self.scene;
+        match s.at() {
+            At::World => {
+                s.pick(Some(i));
+            }
+            At::Object(k) if k != i => {
+                self.gesture = None;
+                self.moving = None;
+                self.marquee = None;
+                if s.edit_object(i) {
+                    self.last_object = Some(i);
+                    let msg = format!("Editing {}", object_name(s.world().unwrap(), i));
+                    self.ui.toast(&self.ctx, msg);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Hide or show tree node `i` in world mode, as one undo step.
+    pub fn set_hidden(&mut self, i: usize, hidden: bool) {
+        let Some(w) = self.scene.world() else { return };
+        let name = node_name(w, i);
+        let msg = if self.scene.edit_world(|w| w.set_hidden(i, hidden)).is_none() {
+            "Tab to the world to hide objects".to_string()
+        } else if hidden {
+            format!("Hid {name}")
+        } else {
+            format!("Showing {name}")
+        };
+        self.ui.toast(&self.ctx, msg);
+    }
+
+    /// Name tree node `i` (an empty name clears it), as one undo step, in world mode.
+    pub fn rename(&mut self, i: usize, name: &str) {
+        let name = name.trim();
+        let Some(w) = self.scene.world() else { return };
+        let new = (!name.is_empty()).then_some(name);
+        if w.tree.nodes.get(i).is_none_or(|n| n.name.as_deref() == new.map(str::as_bytes)) {
+            return;
+        }
+        if self.scene.edit_world(|w| w.set_name(i, new)).is_some() {
+            let msg = format!("Renamed to {}", node_name(self.scene.world().unwrap(), i));
+            self.ui.toast(&self.ctx, msg);
+        }
     }
 
     /// The file name for a render export: the scene's name with `-render.png`.
@@ -987,5 +1051,113 @@ pub fn object_name(w: &vxr_core::World, i: usize) -> String {
     match &w.tree.nodes[i].name {
         Some(n) => String::from_utf8_lossy(n).into_owned(),
         None => format!("object {}", w.objects().iter().position(|&k| k == i).map_or(i, |k| k + 1)),
+    }
+}
+
+/// A tree node's name: its own, or "object N" / "group N" by its place among its kind.
+pub fn node_name(w: &vxr_core::World, i: usize) -> String {
+    match (&w.tree.nodes[i].name, w.model_of(i)) {
+        (Some(n), _) => String::from_utf8_lossy(n).into_owned(),
+        (None, Some(_)) => object_name(w, i),
+        (None, None) => {
+            let groups: Vec<usize> = w.tree.order().into_iter().skip(1).filter(|&k| w.model_of(k).is_none()).collect();
+            format!("group {}", groups.iter().position(|&k| k == i).map_or(i, |k| k + 1))
+        }
+    }
+}
+
+/// The scene tree's rows: every node under the root in tree order, once there are two
+/// objects or more (none otherwise, so a single model stays clean).
+pub fn tree_rows(s: &Scene) -> Vec<TreeRow> {
+    let Some(w) = s.world() else { return Vec::new() };
+    let objects = w.objects();
+    if objects.len() < 2 {
+        return Vec::new();
+    }
+    let parents = w.tree.parents();
+    let mut users = vec![0; w.models.len()];
+    for &i in &objects {
+        if let Some(m) = w.model_of(i) {
+            users[m] += 1;
+        }
+    }
+    w.tree
+        .order()
+        .into_iter()
+        .skip(1)
+        .map(|i| {
+            let (mut depth, mut k) = (0, parents[i]);
+            while let Some(p) = k {
+                depth += parents[p].is_some() as usize;
+                k = parents[p];
+            }
+            let model = w.model_of(i);
+            // The model being edited lives in the scene's map until it is stored back.
+            let size = match (model, s.at()) {
+                (Some(_), At::Object(e)) if w.model_of(e) == model => s.bounds().size,
+                (Some(m), _) => w.models[m].size_voxels(),
+                (None, _) => [0; 3],
+            };
+            TreeRow {
+                node: i,
+                depth,
+                name: node_name(w, i),
+                group: model.is_none(),
+                linked: model.map_or(0, |m| users[m]),
+                size,
+                hidden: w.tree.nodes[i].hidden,
+                shown: w.shown(i),
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture(name: &str) -> Scene {
+        let f = vxr_vox::fixtures::all().into_iter().find(|f| f.name == name).unwrap();
+        Scene::from_vox(&f.builder.build().write()).unwrap()
+    }
+
+    #[test]
+    fn tree_rows_show_from_the_second_object() {
+        assert!(tree_rows(&Scene::new(NEW_SIZE)).is_empty());
+        assert!(tree_rows(&fixture("01-single-voxel")).is_empty());
+        let mut s = fixture("22-world");
+        let rows = tree_rows(&s);
+        let names: Vec<_> = rows.iter().map(|r| (r.name.as_str(), r.depth, r.group)).collect();
+        assert_eq!(
+            names,
+            [
+                ("slab", 0, false),
+                ("trees", 0, true),
+                ("tree a", 1, false),
+                ("tree b", 1, false),
+                ("grove", 1, true),
+                ("tree c", 2, false),
+                ("gem", 0, false),
+                ("lost gem", 0, false),
+            ]
+        );
+        let row = |rows: &[TreeRow], n: &str| rows.iter().find(|r| r.name == n).unwrap().clone();
+        assert_eq!(row(&rows, "tree c").linked, 3);
+        assert_eq!(row(&rows, "slab").size, [8, 1, 8]);
+        assert!(row(&rows, "lost gem").hidden && !row(&rows, "gem").hidden && !row(&rows, "gem").shown);
+        // Hiding a group hides the rows under it; unnamed nodes get names by their kind.
+        let (trees, slab) = (row(&rows, "trees").node, row(&rows, "slab").node);
+        s.edit_world(|w| {
+            w.set_hidden(trees, true);
+            w.set_name(trees, None);
+            w.set_name(slab, None);
+        });
+        let rows = tree_rows(&s);
+        assert!(!row(&rows, "tree a").shown && !row(&rows, "group 1").shown);
+        assert_eq!(rows[0].name, "object 1");
+        // The model being edited reports the scene's bounds.
+        assert!(s.edit_object(slab));
+        s.set_bounds([0, 0, 0], [8, 3, 8]);
+        assert_eq!(tree_rows(&s)[0].size, [8, 3, 8]);
     }
 }

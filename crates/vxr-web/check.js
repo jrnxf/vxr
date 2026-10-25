@@ -650,6 +650,47 @@ async () => {
       for (let i = 0; i < 20 && st().undo; i++) await key('z', cmd);
       step('every world edit undone gives back the file', same(bytes(), worldFile) && st().objects === 6, JSON.stringify(st()));
     }
+
+    // The scene tree: rows, a row click picks, the eye and H hide, a double-click renames
+    // (Escape cancels), and in model mode a row click edits that object.
+    const rows = st().tree;
+    const node = (name) => (st().tree.find((r) => r.name === name) || {}).node;
+    const treeC = rows.find((r) => r.name === 'tree c');
+    step('the scene tree shows every object and group', rows.length === 8 && !!treeC && treeC.depth === 2 && treeC.linked === 3 && rows.some((r) => r.name === 'lost gem' && r.hidden), JSON.stringify(rows));
+    const slab = node('slab');
+    await chip(`tree-${slab}`);
+    step('a tree row click picks its object', st().picked === 'slab' && st().treeOn === slab, JSON.stringify(st()));
+    const t0 = st().voxels;
+    await chip(`tree-eye-${slab}`);
+    s = st();
+    step('the row eye hides the object as one undo step', s.voxels === t0 - 64 && s.undo, JSON.stringify(s));
+    await key('z', cmd);
+    step('undo shows it again', st().voxels === t0 && same(bytes(), worldFile));
+    await key('h');
+    const hHid = st().voxels === t0 - 64;
+    await key('h');
+    step('H hides and shows the picked object', hHid && st().voxels === t0);
+    const pause = () => new Promise((r) => setTimeout(r, 400));
+    const dbl = async (name) => { await pause(); await chip(name); await chip(name); };
+    await dbl(`tree-${slab}`);
+    const field = window.vxr.hit('tree-rename').length > 0;
+    await key('a', cmd);
+    for (const ch of 'floor') await key(ch);
+    await key('Enter');
+    step('a double-click on a row renames it', field && node('floor') === slab, JSON.stringify(st().tree));
+    await key('z', cmd);
+    step('the rename is one undo step', node('slab') === slab && same(bytes(), worldFile));
+    await dbl(`tree-${slab}`);
+    await key('x');
+    await key('Escape');
+    step('Escape cancels a rename', node('slab') === slab && st().picked === 'slab' && window.vxr.hit('tree-rename').length === 0);
+    await key('Tab');
+    const treeA = node('tree a');
+    await chip(`tree-${treeA}`);
+    s = st();
+    step('in model mode a tree row click edits that object', s.mode === 'object' && s.treeOn === treeA, JSON.stringify(s));
+    await key('Tab');
+    step('the tree leaves the file as it was', same(bytes(), worldFile) && st().mode === 'world');
   } finally {
     input.click = realClick;
     URL.createObjectURL = realUrl;

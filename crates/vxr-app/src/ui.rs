@@ -147,6 +147,10 @@ mod icon {
     pub const TRASH: char = '\u{e18e}';
     pub const X: char = '\u{e1b2}';
     pub const AXIS_3D: char = '\u{e2fe}';
+    pub const EYE: char = '\u{e0ba}';
+    pub const EYE_OFF: char = '\u{e0bb}';
+    pub const FOLDER: char = '\u{e0d7}';
+    pub const LINK: char = '\u{e102}';
 }
 
 pub use vxr_core::select::Transform;
@@ -214,10 +218,37 @@ pub enum Action {
     Duplicate {
         linked: bool,
     },
+    /// A scene tree row was clicked: pick that object in world mode, or edit its model.
+    PickNode(usize),
+    /// Hide or show a tree node in world mode (the row's eye).
+    SetHidden(usize, bool),
+    /// Hide or show the picked object (H).
+    ToggleHidden,
     Copy,
     Cut,
     Paste,
 }
+
+/// One row of the scene tree: an object or a group, in tree order (set by the editor).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TreeRow {
+    pub node: usize,
+    /// Groups above it, the root not counted.
+    pub depth: usize,
+    pub name: String,
+    pub group: bool,
+    /// Objects showing this object's model, itself included: more than 1 is a linked copy.
+    pub linked: usize,
+    /// The model's size, for objects.
+    pub size: [u32; 3],
+    pub hidden: bool,
+    /// Neither it nor a group above it is hidden or on a hidden layer.
+    pub shown: bool,
+}
+
+/// The scene tree's width, and how many rows it shows before scrolling.
+const TREE_W: f32 = 212.0;
+const TREE_ROWS: usize = 14;
 
 /// What the next swatch click does, armed from the colour editor or Cmd-K.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -327,6 +358,18 @@ pub struct Hybrid {
     /// World mode is showing (set by the editor), and the name of the object picked there.
     pub world: bool,
     pub picked: Option<String>,
+    /// The scene tree's rows, empty (no tree shown) unless there are two objects or more,
+    /// the row shown on (the picked object, or the object being edited) and the picked node.
+    pub tree: Vec<TreeRow>,
+    pub tree_on: Option<usize>,
+    pub picked_node: Option<usize>,
+    /// The first tree row shown, when there are more than fit.
+    tree_scroll: usize,
+    /// The node being renamed and its field's text, and whether the field still needs focus.
+    renaming: Option<(usize, String)>,
+    rename_focus: bool,
+    /// A finished rename for the editor to apply: node and new name.
+    pub renamed: Option<(usize, String)>,
     /// The box being dragged with the select tool, in points.
     pub marquee: Option<Rect>,
     /// Swatch being dragged with Cmd (swap) or Cmd+Shift (copy).
@@ -410,6 +453,8 @@ const COMMANDS: &[Command] = &[
         run: |h| h.actions.push(Action::Duplicate { linked: true }),
     },
     Command { label: "Delete object", keys: &["⌫"], run: |h| h.actions.push(Action::DeleteSelection) },
+    Command { label: "Hide or show object", keys: &["H"], run: |h| h.actions.push(Action::ToggleHidden) },
+    Command { label: "Rename object", keys: &[], run: |h| h.start_rename(h.picked_node) },
     Command { label: "Frame scene", keys: &["."], run: |h| h.actions.push(Action::Frame) },
     Command { label: "View options", keys: &[], run: |h| h.view_panel = !h.view_panel },
     Command { label: "Perspective", keys: &["O"], run: |h| h.actions.push(Action::Ortho(false)) },
@@ -479,6 +524,13 @@ impl Hybrid {
             has_clip: false,
             world: false,
             picked: None,
+            tree: Vec::new(),
+            tree_on: None,
+            picked_node: None,
+            tree_scroll: 0,
+            renaming: None,
+            rename_focus: false,
+            renamed: None,
             marquee: None,
             drag_from: None,
             shown_slot: 28,
@@ -593,6 +645,20 @@ impl Hybrid {
 
     /// Escape: cancel an armed swap or copy, else close the colour editor, the Bounds panel,
     /// the View flyout or the Render panel, else deselect, else the coach card.
+    /// Where flyouts beside the rail start: right of the rail, or of the scene tree when it shows.
+    fn flyout_x(&self) -> f32 {
+        12.0 + 52.0 + 8.0 + if self.tree.is_empty() { 0.0 } else { TREE_W + 8.0 }
+    }
+
+    /// Open the rename field on tree node `node`, in world mode.
+    pub fn start_rename(&mut self, node: Option<usize>) {
+        let Some(row) = node.and_then(|n| self.tree.iter().find(|r| r.node == n)) else { return };
+        if self.world {
+            self.renaming = Some((row.node, row.name.clone()));
+            self.rename_focus = true;
+        }
+    }
+
     fn escape(&mut self) {
         if self.slot_op.take().is_some() || self.color_edit.take().is_some() || self.bounds_panel.take().is_some() {
             return;
@@ -633,6 +699,7 @@ impl Hybrid {
         let screen = ctx.content_rect();
         self.top_bar(ctx, screen);
         self.rail(ctx);
+        self.tree_panel(ctx);
         self.axes(ctx);
         self.selection_panel(ctx);
         self.bounds_panel(ctx);
@@ -660,6 +727,12 @@ impl Hybrid {
         ctx.input_mut(|i| {
             self.shift = i.modifiers.shift;
             self.alt = i.modifiers.alt;
+            // egui drops focus on Escape before the UI runs, so the rename field's Escape
+            // (cancel) is handled here, ahead of the keys Escape would otherwise reach.
+            if self.renaming.is_some() && i.consume_key(Modifiers::NONE, Key::Escape) {
+                self.renaming = None;
+                return;
+            }
             if i.consume_key(Modifiers::COMMAND, Key::K) {
                 self.cmdk = if self.cmdk.is_some() { None } else { Some(String::new()) };
                 self.cmdk_sel = 0;
@@ -746,6 +819,11 @@ impl Hybrid {
                 (Key::Period, |h| h.actions.push(Action::Frame)),
                 (Key::O, |h| h.actions.push(Action::Ortho(!h.ortho))),
                 (Key::G, |h| h.grid = !h.grid),
+                (Key::H, |h| {
+                    if h.world {
+                        h.actions.push(Action::ToggleHidden)
+                    }
+                }),
                 (Key::Num0, |h| h.actions.push(Action::Snap(View::Iso))),
                 (Key::Num1, |h| h.actions.push(Action::Snap(View::Front))),
                 (Key::Num2, |h| h.actions.push(Action::Snap(View::Back))),
@@ -915,6 +993,163 @@ impl Hybrid {
         });
     }
 
+    // The scene tree (Diorama's .tree, kept for Hybrid): beside the rail once a second object
+    // exists. A row per object and group in tree order, indented under its groups, with the
+    // model's size and an eye. A click picks the object in world mode or edits its model;
+    // in world mode the eye hides and shows, and a double-click renames.
+    fn tree_panel(&mut self, ctx: &Context) {
+        if self.tree.is_empty() {
+            self.renaming = None;
+            return;
+        }
+        let row_h = 28.0;
+        let rows = self.tree.len().min(TREE_ROWS);
+        self.tree_scroll = self.tree_scroll.min(self.tree.len() - rows);
+        let rect = Rect::from_min_size(pos2(12.0 + 52.0 + 8.0, 68.0), vec2(TREE_W, 36.0 + rows as f32 * row_h + 6.0));
+        let objects = self.tree.iter().filter(|r| !r.group).count();
+        let (world, on, scroll) = (self.world, self.tree_on, self.tree_scroll);
+        let mut renaming = self.renaming.take();
+        let mut focus = std::mem::take(&mut self.rename_focus);
+        let mut run = Vec::new();
+        let mut hits = Vec::new();
+        let mut renamed = None;
+        let mut start_rename = None;
+        let mut wheel = 0.0;
+        Self::panel(ctx, "tree", rect, Order::Middle, |ui, rect| {
+            let hy = rect.top() + 18.0;
+            let g = ui.painter().layout_job(spaced("SCENE", inter(9.0), FAINT, 0.72));
+            ui.painter().galley(pos2(rect.left() + 12.0, hy - g.size().y / 2.0), g, FAINT);
+            ui.painter().text(
+                pos2(rect.right() - 12.0, hy),
+                Align2::RIGHT_CENTER,
+                format!("{objects} objects"),
+                inter(11.0),
+                FAINT,
+            );
+            let body =
+                Rect::from_min_max(pos2(rect.left() + 6.0, rect.top() + 34.0), rect.right_bottom() - vec2(6.0, 6.0));
+            if ui.rect_contains_pointer(body) {
+                wheel = ui.input(|i| i.smooth_scroll_delta.y);
+            }
+            for (k, row) in self.tree.iter().skip(scroll).take(rows).enumerate() {
+                let r =
+                    Rect::from_min_size(pos2(body.left(), body.top() + k as f32 * row_h), vec2(body.width(), row_h));
+                let id = format!("tree-{}", row.node);
+                let resp = ui.interact(r, Id::unique(&id), Sense::click());
+                hits.push((id, r));
+                let eye = Rect::from_center_size(pos2(r.right() - 15.0, r.center().y), vec2(22.0, 22.0));
+                let eye_resp = world.then(|| ui.interact(eye, Id::unique(("tree-eye", row.node)), Sense::click()));
+                if world {
+                    hits.push((format!("tree-eye-{}", row.node), eye));
+                }
+                let hover = resp.hovered() || eye_resp.as_ref().is_some_and(|e| e.hovered());
+                let is_on = on == Some(row.node);
+                let p = ui.painter();
+                if is_on {
+                    p.rect_filled(r, CornerRadius::same(7), ACCENT_BG);
+                } else if hover {
+                    p.rect_filled(r, CornerRadius::same(7), HOVER);
+                }
+                let color = match (is_on, row.shown) {
+                    (true, _) => Color32::WHITE,
+                    (false, true) if hover => TEXT,
+                    (false, true) => MUTED,
+                    (false, false) => FAINT,
+                };
+                let x = r.left() + 8.0 + row.depth as f32 * 14.0;
+                let glyph = match (row.group, row.linked > 1) {
+                    (true, _) => icon::FOLDER,
+                    (false, true) => icon::LINK,
+                    (false, false) => icon::BOX,
+                };
+                p.text(pos2(x + 7.0, r.center().y), Align2::CENTER_CENTER, glyph, icon_font(13.0), color);
+                let mut right = eye.left() - 4.0;
+                if !row.group {
+                    let s = row.size;
+                    let g = p.layout_no_wrap(format!("{}×{}×{}", s[0], s[1], s[2]), mono(10.0), FAINT);
+                    right -= g.size().x;
+                    p.galley(pos2(right, r.center().y - g.size().y / 2.0), g, FAINT);
+                    right -= 8.0;
+                }
+                let name_r = Rect::from_min_max(pos2(x + 20.0, r.top() + 4.0), pos2(right, r.bottom() - 4.0));
+                match renaming.as_mut() {
+                    Some((n, text)) if *n == row.node => {
+                        let fid = Id::unique("tree-rename");
+                        hits.push(("tree-rename".to_string(), name_r));
+                        let p = ui.painter();
+                        p.rect(
+                            name_r.expand2(vec2(4.0, 0.0)),
+                            CornerRadius::same(6),
+                            Color32::from_white_alpha(9),
+                            Stroke::new(1.0, Color32::from_rgba_unmultiplied(142, 162, 255, 140)),
+                            StrokeKind::Inside,
+                        );
+                        let edit = egui::TextEdit::singleline(text)
+                            .id(fid)
+                            .font(inter(12.0))
+                            .text_color(TEXT)
+                            .frame(egui::Frame::NONE)
+                            .margin(egui::Margin::ZERO)
+                            .desired_width(name_r.width());
+                        let line = ui.fonts_mut(|f| f.row_height(&inter(12.0)));
+                        let text_r = Rect::from_center_size(name_r.center(), vec2(name_r.width(), line));
+                        let out = ui.put(text_r, edit);
+                        if std::mem::take(&mut focus) {
+                            out.request_focus();
+                        } else if out.lost_focus() {
+                            renamed = Some((row.node, text.clone()));
+                            renaming = None;
+                        }
+                    }
+                    _ => {
+                        let mut job = LayoutJob::single_section(
+                            row.name.clone(),
+                            TextFormat { font_id: inter(12.0), color, ..Default::default() },
+                        );
+                        job.wrap = egui::text::TextWrapping {
+                            max_width: name_r.width().max(1.0),
+                            max_rows: 1,
+                            break_anywhere: true,
+                            overflow_character: Some('…'),
+                        };
+                        let g = ui.painter().layout_job(job);
+                        ui.painter().galley(pos2(name_r.left(), r.center().y - g.size().y / 2.0), g, color);
+                    }
+                }
+                if let Some(e) = &eye_resp
+                    && (row.hidden || hover)
+                {
+                    if e.hovered() {
+                        ui.painter().rect_filled(eye, CornerRadius::same(6), HOVER);
+                    }
+                    let glyph = if row.hidden { icon::EYE_OFF } else { icon::EYE };
+                    let c = if e.hovered() { TEXT } else { FAINT };
+                    ui.painter().text(eye.center(), Align2::CENTER_CENTER, glyph, icon_font(13.0), c);
+                }
+                if eye_resp.as_ref().is_some_and(|e| e.clicked()) {
+                    run.push(Action::SetHidden(row.node, !row.hidden));
+                } else if resp.double_clicked() {
+                    start_rename = Some(row.node);
+                } else if resp.clicked() && !row.group {
+                    run.push(Action::PickNode(row.node));
+                }
+            }
+        });
+        if wheel != 0.0 {
+            let steps = (wheel / row_h).round() as isize;
+            let steps = if steps == 0 { -(wheel.signum() as isize) } else { -steps };
+            self.tree_scroll = self.tree_scroll.saturating_add_signed(steps).min(self.tree.len() - rows);
+        }
+        self.renaming = renaming;
+        self.rename_focus = focus;
+        self.renamed = renamed.or(self.renamed.take());
+        self.hits.extend(hits);
+        self.actions.extend(run);
+        if start_rename.is_some() {
+            self.start_rename(start_rename);
+        }
+    }
+
     // The View flyout beside the rail's view button: the projection (perspective,
     // orthographic, isometric) and the six side views with their number keys. Built like the
     // selection flyout, its bottom level with the button's; the view the camera is at shows on.
@@ -923,7 +1158,7 @@ impl Hybrid {
             return;
         }
         // The button is the last in the rail, so the flyout grows up from its bottom edge.
-        let rect = Rect::from_min_size(pos2(12.0 + 52.0 + 8.0, self.view_y + 40.0 + 6.0 - 210.0), vec2(204.0, 210.0));
+        let rect = Rect::from_min_size(pos2(self.flyout_x(), self.view_y + 40.0 + 6.0 - 210.0), vec2(204.0, 210.0));
         let (ortho, view) = (self.ortho, self.view);
         let mut guides = [self.grid, self.ground, self.frame];
         let mut run = Vec::new();
@@ -1009,7 +1244,7 @@ impl Hybrid {
             return;
         }
         let rect =
-            Rect::from_min_size(pos2(12.0 + 52.0 + 8.0, self.axes_y - 6.0), vec2(150.0, 6.0 + 2.0 * 40.0 + 2.0 + 6.0));
+            Rect::from_min_size(pos2(self.flyout_x(), self.axes_y - 6.0), vec2(150.0, 6.0 + 2.0 * 40.0 + 2.0 + 6.0));
         let (mirror, lock) = (self.mirror_axes(), self.lock);
         let mut clicked = (None, None);
         let mut hits = Vec::new();
@@ -1069,7 +1304,7 @@ impl Hybrid {
         if self.world || (self.tool != Tool::Select && self.selected == 0) {
             return;
         }
-        let rect = Rect::from_min_size(pos2(12.0 + 52.0 + 8.0, self.select_y - 6.0), vec2(162.0, 242.0));
+        let rect = Rect::from_min_size(pos2(self.flyout_x(), self.select_y - 6.0), vec2(162.0, 242.0));
         let (selected, has_clip) = (self.selected, self.has_clip);
         let bounds_open = self.bounds_panel.is_some();
         let mut toggle_bounds = false;
@@ -1239,7 +1474,7 @@ impl Hybrid {
         let h = 36.0 + 28.0 + 12.0 + note.size().y + 14.0;
         // The fields' row lines up with the Resize button (its centre is select_y + 178).
         let top = self.select_y + 178.0 - 50.0;
-        let rect = Rect::from_min_size(pos2(12.0 + 52.0 + 8.0 + 162.0 + 8.0, top), vec2(w, h));
+        let rect = Rect::from_min_size(pos2(self.flyout_x() + 162.0 + 8.0, top), vec2(w, h));
         let mut close = false;
         let mut resize = None;
         let mut hits = Vec::new();

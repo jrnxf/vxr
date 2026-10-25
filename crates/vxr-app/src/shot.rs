@@ -253,6 +253,7 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     model_tools(dir)?;
     views(dir)?;
     world(dir)?;
+    scene_tree(dir)?;
     render(&mut s, dir)?;
     materials(&mut s, dir)?;
 
@@ -827,6 +828,115 @@ fn world(dir: &Path) -> Result<(), String> {
     )?;
     while s.ed.scene.undo() {}
     check(s.ed.scene.to_vox() == bytes, "every world edit undone: byte-identical save".into())?;
+    Ok(())
+}
+
+/// The scene tree on the generated `22-world` file: its rows and indentation, flyouts moved
+/// beside it, a row click picks, the eye and H hide and show (one undo step each), a
+/// double-click and Cmd-K rename (Escape cancels), and in model mode a row click edits that
+/// object. A single model shows no tree.
+fn scene_tree(dir: &Path) -> Result<(), String> {
+    use vxr_app::editor::{node_name, tree_rows};
+    use vxr_core::history::At;
+    let fixture =
+        |name: &str| vxr_vox::fixtures::all().into_iter().find(|f| f.name == name).map(|f| f.builder.build().write());
+    let bytes = fixture("22-world").ok_or("no 22-world fixture")?;
+    let single = Scene::from_vox(&fixture("01-single-voxel").ok_or("no 01-single-voxel fixture")?)?;
+    check(
+        tree_rows(&single).is_empty() && tree_rows(&Scene::new(NEW_SIZE)).is_empty(),
+        "a single model or a new scene shows no scene tree".into(),
+    )?;
+    let mut s = Shot::new(Scene::from_vox(&bytes)?, "22-world.vox", 2.0)?;
+    s.ed.ui.coach = false;
+    s.frames(3);
+    let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    let node = |s: &Shot, name: &str| {
+        let w = s.ed.scene.world().unwrap();
+        (0..w.tree.nodes.len()).find(|&i| node_name(w, i) == name).ok_or(format!("no node {name}"))
+    };
+    let rows = s.ed.ui.tree.clone();
+    let (tree_c, grove) = (node(&s, "tree c")?, node(&s, "grove")?);
+    let row = |n| rows.iter().find(|r| r.node == n);
+    check(
+        rows.len() == 8
+            && row(tree_c).is_some_and(|r| r.depth == 2 && r.linked == 3)
+            && row(grove).is_some_and(|r| r.group && r.depth == 1)
+            && row(node(&s, "lost gem")?).is_some_and(|r| r.hidden && !r.shown)
+            && row(node(&s, "gem")?).is_some_and(|r| !r.hidden && !r.shown)
+            && rows.iter().all(|r| s.ed.ui.hits.contains_key(&format!("tree-{}", r.node))),
+        format!("22-world shows a scene tree of {} rows: groups indented, linked copies, hidden rows", rows.len()),
+    )?;
+    let tree_right = rows.iter().map(|r| s.ed.ui.hits[&format!("tree-{}", r.node)].right()).fold(0.0, f32::max);
+    s.ui_click("view")?;
+    let flyout = s.ed.ui.hits.get("view-persp").map(|r| r.left()).unwrap_or(0.0);
+    s.ui_click("view")?;
+    check(flyout > tree_right, "the View flyout opens beside the scene tree, not over it".into())?;
+
+    let slab = node(&s, "slab")?;
+    let slab_voxels = s.ed.scene.world().unwrap().extent(slab).is_some();
+    s.ui_click(&format!("tree-{slab}"))?;
+    check(
+        slab_voxels && s.ed.scene.picked() == Some(slab) && s.ed.ui.tree_on == Some(slab),
+        "a row click picks its object".into(),
+    )?;
+    let v0 = s.voxels();
+    s.ui_click(&format!("tree-eye-{slab}"))?;
+    let hidden = s.ed.scene.world().unwrap().tree.nodes[slab].hidden;
+    check(hidden && s.voxels() == v0 - 64, format!("the row's eye hides the slab ({v0} to {} voxels)", s.voxels()))?;
+    s.frames(2);
+    s.save_png(&dir.join("app-2x-tree.png"))?;
+    s.frames_with(2, vec![key(egui::Key::Z, egui::Modifiers::COMMAND)]);
+    let undone = s.voxels() == v0;
+    s.frames_with(2, vec![key(egui::Key::Z, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT)]);
+    check(undone && s.voxels() == v0 - 64, "hiding is one undo step, and redo hides it again".into())?;
+    s.ui_click(&format!("tree-eye-{slab}"))?;
+    check(s.voxels() == v0, "the eye shows it again".into())?;
+    s.frames_with(2, vec![key(egui::Key::H, egui::Modifiers::NONE)]);
+    let h_hid = s.voxels() == v0 - 64;
+    s.frames_with(2, vec![key(egui::Key::H, egui::Modifiers::NONE)]);
+    check(h_hid && s.voxels() == v0, "H hides and shows the picked object".into())?;
+
+    // Rename: double-click, type, Enter; Escape cancels; Cmd-K opens the field too.
+    let name_of = |s: &Shot, n: usize| node_name(s.ed.scene.world().unwrap(), n);
+    // Half a second after the last click, so egui does not count a triple click.
+    s.frames(30);
+    s.ui_click(&format!("tree-{slab}"))?;
+    s.ui_click(&format!("tree-{slab}"))?;
+    let field = s.ed.ui.hits.contains_key("tree-rename");
+    s.frames_with(1, vec![key(egui::Key::A, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("floor".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    check(
+        field && name_of(&s, slab) == "floor" && !s.ed.ui.hits.contains_key("tree-rename"),
+        format!("a double-click renames the row ({})", name_of(&s, slab)),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::Z, egui::Modifiers::COMMAND)]);
+    check(name_of(&s, slab) == "slab", "renaming is one undo step".into())?;
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("rename object".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    let opened = s.ed.ui.hits.contains_key("tree-rename");
+    s.frames_with(1, vec![egui::Event::Text(" x".into())]);
+    s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+    check(
+        opened
+            && name_of(&s, slab) == "slab"
+            && !s.ed.ui.hits.contains_key("tree-rename")
+            && s.ed.scene.picked() == Some(slab),
+        "Cmd-K 'Rename object' opens the field, and Escape cancels it".into(),
+    )?;
+
+    // Model mode: the edited object's row is on, and a row click edits another object.
+    s.frames_with(2, vec![key(egui::Key::Tab, egui::Modifiers::NONE)]);
+    let editing = s.ed.scene.at() == At::Object(slab) && s.ed.ui.tree_on == Some(slab);
+    let tree_a = node(&s, "tree a")?;
+    s.ui_click(&format!("tree-{tree_a}"))?;
+    check(
+        editing && s.ed.scene.at() == At::Object(tree_a) && s.ed.ui.tree_on == Some(tree_a),
+        "in model mode a row click edits that object's model".into(),
+    )?;
+    while s.ed.scene.undo() {}
+    check(s.ed.scene.to_vox() == bytes, "every tree edit undone: byte-identical save".into())?;
     Ok(())
 }
 
