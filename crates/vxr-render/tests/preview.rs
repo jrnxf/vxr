@@ -130,6 +130,22 @@ fn preview_matches_geometry_and_converges() {
 }
 
 #[test]
+fn orthographic_preview_matches_geometry() {
+    let Some(g) = gpu() else { return };
+    let scene = red_scene();
+    let mut rig = Rig::new(g, &scene);
+    for view in [vxr_render::View::Iso, vxr_render::View::Top] {
+        rig.cam.snap(view);
+        rig.cam.ortho = true;
+        rig.frames(30, None);
+        let cpu = cpu_values(&scene.map, &rig.cam);
+        assert!(cpu.iter().any(|&v| v != 0), "{view:?}: nothing in view");
+        let m = mismatch(&rig.image(), &cpu);
+        assert!(m < 0.01, "{view:?}: {:.2}% of pixels disagree with the CPU ray cast", m * 100.0);
+    }
+}
+
+#[test]
 fn edits_and_recolours_update_without_a_restart() {
     let Some(g) = gpu() else { return };
     let mut scene = red_scene();

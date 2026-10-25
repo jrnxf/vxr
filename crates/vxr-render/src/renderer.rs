@@ -234,10 +234,11 @@ impl Renderer {
         let vp = cam.view_proj(self.width as f32 / self.height as f32);
         let eye = cam.eye();
         let sun = glam::Vec3::new(0.45, 0.8, 0.35).normalize();
+        // eye.w = 0: orthographic, rays start on the near plane (see `primary_ray`).
         let c = cursor.unwrap_or([0; 3]);
         let u = CameraUniform {
             inv_vp: vp.inverse().to_cols_array_2d(),
-            eye: [eye.x, eye.y, eye.z, 1.0],
+            eye: [eye.x, eye.y, eye.z, if cam.ortho { 0.0 } else { 1.0 }],
             size: [self.width as f32, self.height as f32, 1.0 / self.width as f32, 1.0 / self.height as f32],
             sun: [sun.x, sun.y, sun.z, 0.0],
             cursor: [c[0], c[1], c[2], cursor.is_some() as i32],

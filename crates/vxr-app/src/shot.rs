@@ -251,6 +251,7 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     brushes(dir)?;
     selection(dir)?;
     model_tools(dir)?;
+    views(dir)?;
     render(&mut s, dir)?;
     materials(&mut s, dir)?;
 
@@ -680,6 +681,102 @@ fn model_tools(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Camera and view: the View flyout, orthographic and isometric, the six side views by key
+/// (the middle of the view lands on the matching face of a cube), Cmd-K and the O key,
+/// framing that keeps the view, and an edit made in orthographic.
+fn views(dir: &Path) -> Result<(), String> {
+    use vxr_render::View;
+    let mut s = Shot::new(Scene::new(NEW_SIZE), "Untitled", 2.0)?;
+    s.ed.ui.coach = false;
+    let mut cells = Vec::new();
+    for (x, y, z) in (60..68).flat_map(|x| (0..8).flat_map(move |y| (60..68).map(move |z| (x, y, z)))) {
+        cells.push(([x, y, z], 12));
+    }
+    s.ed.scene.edit(cells);
+    s.ed.frame_scene();
+    s.frames(3);
+    let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    let press = |s: &mut Shot, k| s.frames_with(2, vec![key(k, egui::Modifiers::NONE)]);
+    s.ui_click("view")?;
+    check(
+        s.ed.ui.view_panel && s.ed.ui.hits.contains_key("view-front"),
+        "the view button opens the View flyout".into(),
+    )?;
+    s.ui_click("view-ortho")?;
+    let (o0, d0) = s.ed.cam.ray(10.0, 10.0, 400.0, 300.0);
+    let (o1, d1) = s.ed.cam.ray(390.0, 290.0, 400.0, 300.0);
+    check(
+        s.ed.cam.ortho && (d0 - d1).length() < 1e-5 && (o0 - o1).length() > 1.0,
+        "Ortho: orthographic, every ray parallel".into(),
+    )?;
+    let mid = [s.ed.width as f32 / 2.0, s.ed.height as f32 / 2.0];
+    let normal_at_mid = |s: &mut Shot| {
+        s.ed.pointer_moved(Some(mid));
+        s.ed.cursor().filter(|t| !t.ground).map(|t| t.normal)
+    };
+    for (k, v, n) in [
+        (egui::Key::Num1, View::Front, [0, 0, 1]),
+        (egui::Key::Num2, View::Back, [0, 0, -1]),
+        (egui::Key::Num3, View::Left, [-1, 0, 0]),
+        (egui::Key::Num4, View::Right, [1, 0, 0]),
+        (egui::Key::Num6, View::Bottom, [0, -1, 0]),
+        (egui::Key::Num5, View::Top, [0, 1, 0]),
+    ] {
+        press(&mut s, k);
+        let got = normal_at_mid(&mut s);
+        check(
+            s.ed.ui.view == Some(v) && got == Some(n),
+            format!("key {:?}: {} view, the middle of the view is on the cube's {n:?} face ({got:?})", k, v.name()),
+        )?;
+    }
+    // Add in the top orthographic view: the click lands on the top face.
+    s.tool(Tool::Add, Shape::Voxel);
+    s.stroke(mid, &[]);
+    let added = s.voxels();
+    s.ed.undo();
+    check(added == 513 && s.voxels() == 512, format!("add from the top orthographic view: {added}, undo 512"))?;
+    press(&mut s, egui::Key::Period);
+    check(s.ed.cam.ortho && s.ed.ui.view == Some(View::Top), "frame (.) keeps the projection and the view".into())?;
+    s.ui_click("view-iso")?;
+    // Isometric: the cube's three edges from its top corner are the same length on screen.
+    let (w, h) = (s.ed.width as f32, s.ed.height as f32);
+    let vp = s.ed.cam.view_proj(w / h);
+    let at = |p: [f32; 3]| {
+        let c = vp.project_point3(glam::Vec3::from(p));
+        glam::Vec2::new(c.x * w, c.y * h) / 2.0
+    };
+    let o = at([68.0, 8.0, 68.0]);
+    let edges = [at([60.0, 8.0, 68.0]), at([68.0, 0.0, 68.0]), at([68.0, 8.0, 60.0])].map(|e| (e - o).length());
+    let even = edges.iter().all(|e| (e - edges[0]).abs() < 0.5);
+    check(
+        s.ed.cam.ortho && s.ed.ui.view == Some(View::Iso) && even,
+        format!("Iso: orthographic isometric, the cube's edges even on screen ({edges:.1?} px)"),
+    )?;
+    s.frames(3);
+    s.save_png(&dir.join("app-2x-view.png"))?;
+    s.ui_click("view-persp")?;
+    check(!s.ed.cam.ortho && s.ed.ui.view.is_none(), "Persp: back to perspective".into())?;
+    press(&mut s, egui::Key::O);
+    let o_on = s.ed.cam.ortho;
+    press(&mut s, egui::Key::O);
+    check(o_on && !s.ed.cam.ortho, "O toggles orthographic".into())?;
+    for (q, want) in [("orthographic", true), ("perspective", false)] {
+        s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+        s.frames_with(1, vec![egui::Event::Text(q.into())]);
+        s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+        check(s.ed.cam.ortho == want, format!("Cmd-K '{q}'"))?;
+    }
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("right view".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    check(s.ed.ui.view == Some(View::Right), "Cmd-K 'Right view'".into())?;
+    s.ui_click("view-front")?;
+    check(s.ed.ui.view == Some(View::Front), "the flyout's Front button".into())?;
+    press(&mut s, egui::Key::Escape);
+    check(!s.ed.ui.view_panel, "Escape closes the View flyout".into())?;
+    Ok(())
+}
+
 /// The live render corner: it shows, converges, follows an edit without restarting, and
 /// Cmd-K hides it.
 fn render(s: &mut Shot, dir: &Path) -> Result<(), String> {
@@ -945,10 +1042,13 @@ fn frame_times(scene: &Path) -> Result<(), String> {
     s.ed.scene.select_all();
     let selected = run(&mut s, false, true);
     s.ed.scene.deselect();
+    s.ed.cam.snap(vxr_render::View::Iso);
+    let iso = run(&mut s, true, true);
+    s.ed.cam.ortho = false;
     println!(
         "info frame time, island at 3024x1964 (median, CPU + GPU): {off:.2} ms without the render corner, \
-         {on:.2} ms with it while editing, {idle:.2} ms idle, {selected:.2} ms with every voxel selected; \
-         one 640x360 sample {ms:.2} ms ({})",
+         {on:.2} ms with it while editing, {idle:.2} ms idle, {selected:.2} ms with every voxel selected, \
+         {iso:.2} ms isometric with the render corner; one 640x360 sample {ms:.2} ms ({})",
         if measured { "timestamps" } else { "assumed" }
     );
     Ok(())

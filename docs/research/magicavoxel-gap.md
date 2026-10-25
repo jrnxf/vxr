@@ -124,8 +124,8 @@ Feature names below follow the update log [S1] unless another source is given.
 | Orbit, pan, zoom | Right-drag, middle-drag or Space+drag, wheel or Z+drag [S1 0.99, FAQ] | done (right-drag orbit, Shift+right or middle pan, wheel zoom) | P1 | minutes |
 | Frame the model | Hotkey 4 recenters [S1 0.99] | done (`.`) | P1 | minutes |
 | Set rotation center on a voxel | X+click [S1 0.99.3] | missing | P2 | sculpt |
-| Perspective, orthographic, isometric | Camera modes [S1 0.97.1] | missing [7] (perspective only) | P1 | - |
-| View cube and axis snap views | 26 standard views, hotkey 5 for face views [S1 0.99] | missing [7] | P2 | - |
+| Perspective, orthographic, isometric | Camera modes [S1 0.97.1] | done [7] (View flyout, O, 0) | P1 | - |
+| View cube and axis snap views | 26 standard views, hotkey 5 for face views [S1 0.99] | partial [7] (six side views and isometric on 0 to 6 and the View flyout; no 26-view cube) | P2 | - |
 | Grid and ground | Frame grids with spacing, infinite ground [S1 0.98.1, 0.97.5] | missing [7] | P2 | minutes |
 | Bounding box display | Select on any of the six bounding box faces [S1 0.98.1] | missing [7] | P2 | - |
 | Save and load views | 7/8, F5/F7, camera slots [S1 0.99, 0.99.6.2] | missing (cameras kept by lossless save [1]) | P3 | - |

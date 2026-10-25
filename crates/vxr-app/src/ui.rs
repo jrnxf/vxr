@@ -146,10 +146,12 @@ mod icon {
     pub const CLIPBOARD_PASTE: char = '\u{e3e8}';
     pub const TRASH: char = '\u{e18e}';
     pub const X: char = '\u{e1b2}';
+    pub const AXIS_3D: char = '\u{e2fe}';
 }
 
 pub use vxr_core::select::Transform;
 pub use vxr_core::tools::{Shape, Tool};
+pub use vxr_render::View;
 
 /// What the UI asks the app to do this frame.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -159,6 +161,10 @@ pub enum Action {
     Undo,
     Redo,
     Frame,
+    /// Look from one side, or isometric (which turns orthographic on).
+    Snap(View),
+    /// Orthographic (true) or perspective projection.
+    Ortho(bool),
     Embed,
     /// Show `rgba` in palette slot `slot` now, inside the open colour edit.
     Recolor {
@@ -290,11 +296,18 @@ pub struct Hybrid {
     /// The model bounds' size, and the Bounds panel's X, Y and Z fields while it is open.
     pub bounds: [u32; 3],
     pub bounds_panel: Option<[String; 3]>,
+    /// The camera's projection and the snap view it is at, if any (set by the editor).
+    pub ortho: bool,
+    pub view: Option<View>,
+    /// The View flyout beside the rail's view button is open.
+    pub view_panel: bool,
     /// Where each clickable part of the UI was last drawn, in points, by name, for the
     /// headless checks ("edit-color", "sv", "hue", "swap", "copy", "sw<slot>", ...).
     pub hits: HashMap<String, Rect>,
     /// Top of the mirror button in the rail, where the axis flyout lines up.
     axes_y: f32,
+    /// Top of the view button in the rail, where the View flyout lines up.
+    view_y: f32,
     /// Top of the select button in the rail, where the selection flyout lines up.
     select_y: f32,
     /// How many voxels are selected, and whether Copy or Cut has filled the clipboard.
@@ -372,6 +385,16 @@ const COMMANDS: &[Command] = &[
     Command { label: "Lock axis Z", keys: &[], run: |h| h.toggle_lock(2) },
     Command { label: "Cycle axis lock", keys: &["K"], run: |h| h.cycle_lock() },
     Command { label: "Frame scene", keys: &["."], run: |h| h.actions.push(Action::Frame) },
+    Command { label: "View options", keys: &[], run: |h| h.view_panel = !h.view_panel },
+    Command { label: "Perspective", keys: &["O"], run: |h| h.actions.push(Action::Ortho(false)) },
+    Command { label: "Orthographic", keys: &["O"], run: |h| h.actions.push(Action::Ortho(true)) },
+    Command { label: "Isometric view", keys: &["0"], run: |h| h.actions.push(Action::Snap(View::Iso)) },
+    Command { label: "Front view", keys: &["1"], run: |h| h.actions.push(Action::Snap(View::Front)) },
+    Command { label: "Back view", keys: &["2"], run: |h| h.actions.push(Action::Snap(View::Back)) },
+    Command { label: "Left view", keys: &["3"], run: |h| h.actions.push(Action::Snap(View::Left)) },
+    Command { label: "Right view", keys: &["4"], run: |h| h.actions.push(Action::Snap(View::Right)) },
+    Command { label: "Top view", keys: &["5"], run: |h| h.actions.push(Action::Snap(View::Top)) },
+    Command { label: "Bottom view", keys: &["6"], run: |h| h.actions.push(Action::Snap(View::Bottom)) },
     Command { label: "Undo", keys: &["⌘", "Z"], run: |h| h.actions.push(Action::Undo) },
     Command { label: "Redo", keys: &["⌘", "⇧", "Z"], run: |h| h.actions.push(Action::Redo) },
     Command { label: "Open .vox", keys: &["⌘", "O"], run: |h| h.actions.push(Action::Open) },
@@ -413,8 +436,12 @@ impl Hybrid {
             sun_hex: String::new(),
             bounds: [0; 3],
             bounds_panel: None,
+            ortho: false,
+            view: None,
+            view_panel: false,
             hits: HashMap::new(),
             axes_y: 0.0,
+            view_y: 0.0,
             select_y: 0.0,
             selected: 0,
             has_clip: false,
@@ -530,10 +557,13 @@ impl Hybrid {
         };
     }
 
-    /// Escape: cancel an armed swap or copy, else close the colour editor, the Bounds panel or
-    /// the Render panel, else deselect, else the coach card.
+    /// Escape: cancel an armed swap or copy, else close the colour editor, the Bounds panel,
+    /// the View flyout or the Render panel, else deselect, else the coach card.
     fn escape(&mut self) {
         if self.slot_op.take().is_some() || self.color_edit.take().is_some() || self.bounds_panel.take().is_some() {
+            return;
+        }
+        if std::mem::take(&mut self.view_panel) {
             return;
         }
         if self.render_panel {
@@ -572,6 +602,7 @@ impl Hybrid {
         self.axes(ctx);
         self.selection_panel(ctx);
         self.bounds_panel(ctx);
+        self.view_panel(ctx);
         self.marquee(ctx);
         self.palette_panel(ctx, screen);
         self.color_editor(ctx, screen);
@@ -673,6 +704,14 @@ impl Hybrid {
                     h.cmdk_sel = 0;
                 }),
                 (Key::Period, |h| h.actions.push(Action::Frame)),
+                (Key::O, |h| h.actions.push(Action::Ortho(!h.ortho))),
+                (Key::Num0, |h| h.actions.push(Action::Snap(View::Iso))),
+                (Key::Num1, |h| h.actions.push(Action::Snap(View::Front))),
+                (Key::Num2, |h| h.actions.push(Action::Snap(View::Back))),
+                (Key::Num3, |h| h.actions.push(Action::Snap(View::Left))),
+                (Key::Num4, |h| h.actions.push(Action::Snap(View::Right))),
+                (Key::Num5, |h| h.actions.push(Action::Snap(View::Top))),
+                (Key::Num6, |h| h.actions.push(Action::Snap(View::Bottom))),
                 (Key::OpenBracket, |h| h.slot = h.slot.saturating_sub(1).max(1)),
                 (Key::CloseBracket, |h| h.slot = h.slot.saturating_add(1)),
             ] {
@@ -759,7 +798,7 @@ impl Hybrid {
 
     // #rail
     fn rail(&mut self, ctx: &Context) {
-        let h = 6.0 + rail_label_h() + 5.0 * 42.0 + 11.0 + rail_label_h() + 5.0 * 42.0 + 11.0 + 3.0 * 42.0 + 6.0 - 2.0;
+        let h = 6.0 + rail_label_h() + 5.0 * 42.0 + 11.0 + rail_label_h() + 5.0 * 42.0 + 11.0 + 4.0 * 42.0 + 6.0 - 2.0;
         let rect = Rect::from_min_size(pos2(12.0, 68.0), vec2(52.0, h));
         Self::panel(ctx, "rail", rect, Order::Middle, |ui, rect| {
             let x = rect.left() + 6.0;
@@ -825,7 +864,111 @@ impl Hybrid {
             if tool_button(ui, pos2(x, y), icon::SCAN, ".", false).clicked() {
                 self.actions.push(Action::Frame);
             }
+            y += 42.0;
+            self.view_y = y;
+            let r = tool_button(ui, pos2(x, y), icon::AXIS_3D, "", self.view_panel);
+            self.hits.insert("view".into(), r.rect);
+            if r.clicked() {
+                self.view_panel = !self.view_panel;
+            }
         });
+    }
+
+    // The View flyout beside the rail's view button: the projection (perspective,
+    // orthographic, isometric) and the six side views with their number keys. Built like the
+    // selection flyout, its bottom level with the button's; the view the camera is at shows on.
+    fn view_panel(&mut self, ctx: &Context) {
+        if !self.view_panel {
+            return;
+        }
+        // The button is the last in the rail, so the flyout grows up from its bottom edge.
+        let rect = Rect::from_min_size(pos2(12.0 + 52.0 + 8.0, self.view_y + 40.0 + 6.0 - 156.0), vec2(204.0, 156.0));
+        let (ortho, view) = (self.ortho, self.view);
+        let mut run = Vec::new();
+        let mut hits = Vec::new();
+        let mut close = false;
+        Self::panel(ctx, "view", rect, Order::Middle, |ui, rect| {
+            let hy = rect.top() + 18.0;
+            let g = ui.painter().layout_job(spaced("VIEW", inter(9.0), FAINT, 0.72));
+            ui.painter().galley(pos2(rect.left() + 12.0, hy - g.size().y / 2.0), g, FAINT);
+            let x = Rect::from_center_size(pos2(rect.right() - 19.0, hy), vec2(22.0, 22.0));
+            let resp = ui.interact(x, Id::unique("view-close"), Sense::click());
+            hits.push(("view-close".to_string(), x));
+            if resp.hovered() {
+                ui.painter().rect_filled(x, CornerRadius::same(6), HOVER);
+            }
+            let c = if resp.hovered() { TEXT } else { MUTED };
+            ui.painter().text(x.center(), Align2::CENTER_CENTER, icon::X, icon_font(13.0), c);
+            close = resp.clicked();
+            ui.painter().text(
+                pos2(x.left() - 4.0, hy),
+                Align2::RIGHT_CENTER,
+                view.map_or("Free", |v| v.name()),
+                inter(11.0),
+                FAINT,
+            );
+            let iso = view == Some(View::Iso);
+            let sel = if iso { 2 } else { ortho as usize };
+            let row = Rect::from_min_size(pos2(rect.left() + 12.0, hy + 17.0), vec2(rect.width() - 24.0, 26.0));
+            let mut seg = Vec::new();
+            let labels = ["Persp", "Ortho", "Iso"].map(String::from);
+            let names = ["view-persp", "view-ortho", "view-iso"];
+            match segmented(ui, row, &names, &labels, sel, &[true; 3], inter(11.0), &mut seg) {
+                Some(0) => run.push(Action::Ortho(false)),
+                Some(1) if iso || !ortho => run.push(Action::Ortho(true)),
+                Some(2) => run.push(Action::Snap(View::Iso)),
+                _ => {}
+            }
+            hits.extend(seg.into_iter().map(|(n, r)| (n.to_string(), r)));
+            ui.painter().line_segment(
+                [pos2(rect.left() + 10.0, hy + 54.5), pos2(rect.right() - 10.0, hy + 54.5)],
+                Stroke::new(1.0, LINE),
+            );
+            let cw = (rect.width() - 24.0 - 8.0) / 3.0;
+            for (k, v) in View::ALL[..6].iter().copied().enumerate() {
+                let cy = hy + 78.0 + (k / 3) as f32 * 34.0;
+                let c = Rect::from_min_size(
+                    pos2(rect.left() + 12.0 + (k % 3) as f32 * (cw + 4.0), cy - 13.0),
+                    vec2(cw, 26.0),
+                );
+                let id = format!("view-{}", v.name().to_lowercase());
+                let resp = ui.interact(c, Id::unique(&id), Sense::click());
+                hits.push((id, c));
+                let (hover, on) = (resp.hovered(), view == Some(v));
+                let p = ui.painter();
+                let color = if on {
+                    p.rect(
+                        c,
+                        CornerRadius::same(7),
+                        ACCENT_BG,
+                        Stroke::new(1.0, Color32::from_rgba_unmultiplied(142, 162, 255, 89)),
+                        StrokeKind::Inside,
+                    );
+                    ACCENT
+                } else {
+                    let border = if hover { Color32::from_white_alpha(64) } else { LINE2 };
+                    p.rect_stroke(c, CornerRadius::same(7), Stroke::new(1.0, border), StrokeKind::Inside);
+                    if hover { TEXT } else { MUTED }
+                };
+                p.text(pos2(c.center().x - 3.0, c.center().y), Align2::CENTER_CENTER, v.name(), inter(11.0), color);
+                let kc = if on { ACCENT.gamma_multiply(0.8) } else { FAINT };
+                p.text(
+                    pos2(c.right() - 4.0, c.bottom() - 2.0),
+                    Align2::RIGHT_BOTTOM,
+                    (k + 1).to_string(),
+                    mono_medium(8.5),
+                    kc,
+                );
+                if resp.clicked() {
+                    run.push(Action::Snap(v));
+                }
+            }
+        });
+        self.hits.extend(hits);
+        self.actions.extend(run);
+        if close {
+            self.view_panel = false;
+        }
     }
 
     // The axis flyout beside the rail's mirror and lock buttons, shown while either is on:

@@ -3,7 +3,7 @@
 
 struct Camera {
     inv_vp: mat4x4<f32>,
-    eye: vec4<f32>,
+    eye: vec4<f32>,       // w = 0: orthographic
     size: vec4<f32>,      // width, height, 1/width, 1/height
     sun: vec4<f32>,       // xyz direction toward the sun
     cursor: vec4<i32>,    // voxel under the cursor (map coordinates); w = 1 to highlight it
@@ -36,11 +36,19 @@ override WRITE_GBUFFER: bool = false;
 override WG_X: u32 = 8u;
 override WG_Y: u32 = 8u;
 
-fn primary_ray(px: vec2<f32>) -> vec3<f32> {
+struct Ray {
+    o: vec3<f32>,
+    d: vec3<f32>,
+};
+
+// The ray through a pixel: from the eye in perspective, from the near plane (all parallel)
+// in orthographic.
+fn primary_ray(px: vec2<f32>) -> Ray {
     let ndc = vec2<f32>(px.x * cam.size.z * 2.0 - 1.0, 1.0 - px.y * cam.size.w * 2.0);
     let pn = cam.inv_vp * vec4<f32>(ndc, 0.0, 1.0);
     let pf = cam.inv_vp * vec4<f32>(ndc, 1.0, 1.0);
-    return normalize(pf.xyz / pf.w - pn.xyz / pn.w);
+    let o = select(cam.eye.xyz, pn.xyz / pn.w, cam.eye.w == 0.0);
+    return Ray(o, normalize(pf.xyz / pf.w - pn.xyz / pn.w));
 }
 
 fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
@@ -62,8 +70,9 @@ fn background(px: vec2<f32>) -> vec3<f32> {
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (f32(gid.x) >= cam.size.x || f32(gid.y) >= cam.size.y) { return; }
     let px = vec2<f32>(gid.xy) + 0.5;
-    let ro = cam.eye.xyz;
-    let d = primary_ray(px);
+    let ray = primary_ray(px);
+    let ro = ray.o;
+    let d = ray.d;
     let h = trace_h(ro, d, 0.0, 1e9);
     var col: vec3<f32>;
     if (h.axis != MISS) {

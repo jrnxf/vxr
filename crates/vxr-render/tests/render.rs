@@ -108,6 +108,25 @@ fn march_matches_cpu_raycast() {
 }
 
 #[test]
+fn orthographic_and_snap_views_match_cpu_raycast() {
+    let Some(g) = gpu() else { return };
+    let v = View::new(&g);
+    let scene = test_scene();
+    let map = GpuMap::new(&g.device, &g.queue, &v.layout, &scene.map, &scene.palette).unwrap();
+    for ortho in [false, true] {
+        for view in vxr_render::View::ALL {
+            let mut cam = camera_for(&scene.map);
+            cam.ortho = ortho;
+            cam.snap(view);
+            let gpu = v.values(&g, &map, &cam);
+            let label = format!("{view:?} ortho {}", cam.ortho);
+            assert_matches(&gpu, &cpu_values(&scene.map, &cam), &label);
+            assert!(gpu.iter().any(|&c| c != 0), "{label}: nothing in view");
+        }
+    }
+}
+
+#[test]
 fn partial_uploads_track_edits_undo_and_redo() {
     let Some(g) = gpu() else { return };
     let v = View::new(&g);

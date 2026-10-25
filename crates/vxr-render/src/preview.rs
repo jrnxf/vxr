@@ -238,7 +238,7 @@ pub struct Preview {
     cs_layout: wgpu::BindGroupLayout,
     cs_rect: wgpu::Buffer,
     sampler: wgpu::Sampler,
-    last_key: Option<[f32; 17]>,
+    last_key: Option<[f32; 18]>,
     last_exposure: f32,
     /// Sampling stops at this many samples per pixel until something changes.
     pub max_spp: u32,
@@ -560,7 +560,7 @@ impl Preview {
         (self.budget.ms_per_row * self.height as f64, self.budget.learnt)
     }
 
-    fn key(&self, cam: &OrbitCamera) -> [f32; 17] {
+    fn key(&self, cam: &OrbitCamera) -> [f32; 18] {
         let l = &self.lighting;
         [
             cam.target.x,
@@ -570,6 +570,7 @@ impl Preview {
             cam.pitch,
             cam.distance,
             cam.fov_y,
+            cam.ortho as u8 as f32,
             l.sun_dir.x,
             l.sun_dir.y,
             l.sun_dir.z,
@@ -591,14 +592,14 @@ impl Preview {
         let (lo, hi) = edit.map(|e| (e.lo, e.hi)).unwrap_or((Vec3::ZERO, Vec3::ZERO));
         let m = Vec3::splat(CAP_MARGIN);
         let v4 = |v: Vec3| [v.x, v.y, v.z, 0.0];
-        let fwd = (cam.target - eye).normalize_or(Vec3::NEG_Z);
-        let right = fwd.cross(Vec3::Y).normalize_or(Vec3::X);
-        let up = right.cross(fwd);
+        let (fwd, right, up) = cam.basis();
         let l = &self.lighting;
-        let focus = if l.focus > 0.0 { l.focus } else { cam.distance };
+        // The focus distance is from the orbit eye; orthographic rays start further back.
+        let behind = if cam.ortho { (cam.view_eye() - eye).length() } else { 0.0 };
+        let focus = if l.focus > 0.0 { l.focus } else { cam.distance } + behind;
         let u = FrameU {
             inv_vp: vp.inverse().to_cols_array_2d(),
-            eye: [eye.x, eye.y, eye.z, 1.0],
+            eye: [eye.x, eye.y, eye.z, if cam.ortho { 0.0 } else { 1.0 }],
             size: [self.width as f32, self.height as f32, 1.0 / self.width as f32, 1.0 / self.height as f32],
             sun: [sun.x, sun.y, sun.z, 0.9995],
             sun_col: [c.x, c.y, c.z, self.lighting.exposure],

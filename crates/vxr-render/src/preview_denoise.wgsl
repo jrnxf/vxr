@@ -39,7 +39,7 @@ fn init_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         code = 1.0 + f32((px.info >> 8u) & 7u) + select(0.0, 16.0, (px.info & SPEC_BIT) != 0u);
         if (px.t < 0.0) { code = 8.0; }
     }
-    aux[i] = vec4<f32>(frame.eye.xyz + d * max(px.t, 0.0), code);
+    aux[i] = vec4<f32>(camera_origin(vec2<f32>(p) + 0.5) + d * max(px.t, 0.0), code);
     if (px.n <= 0.0) {
         dst[i] = vec4<f32>(0.0, 0.0, 0.0, 1e4);
         return;

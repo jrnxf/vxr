@@ -3,7 +3,7 @@
 
 struct Frame {
     inv_vp: mat4x4<f32>,
-    eye: vec4<f32>,
+    eye: vec4<f32>,      // w = 0: orthographic
     size: vec4<f32>,     // width, height, 1/width, 1/height
     sun: vec4<f32>,      // xyz toward the sun, w = cos of the sun's angular radius
     sun_col: vec4<f32>,  // sun irradiance (linear rgb), w = exposure
@@ -51,6 +51,14 @@ fn camera_ray(px: vec2<f32>) -> vec3<f32> {
     let pn = frame.inv_vp * vec4<f32>(ndc, 0.0, 1.0);
     let pf = frame.inv_vp * vec4<f32>(ndc, 1.0, 1.0);
     return normalize(pf.xyz / pf.w - pn.xyz / pn.w);
+}
+
+// Where the ray through a pixel starts: the eye in perspective, the near plane in orthographic.
+fn camera_origin(px: vec2<f32>) -> vec3<f32> {
+    if (frame.eye.w != 0.0) { return frame.eye.xyz; }
+    let ndc = vec2<f32>(px.x * frame.size.z * 2.0 - 1.0, 1.0 - px.y * frame.size.w * 2.0);
+    let pn = frame.inv_vp * vec4<f32>(ndc, 0.0, 1.0);
+    return pn.xyz / pn.w;
 }
 
 // Normal from the packed code: axis * 2 + (normal is positive).

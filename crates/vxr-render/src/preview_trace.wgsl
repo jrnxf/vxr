@@ -209,16 +209,17 @@ fn reset_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = gid.y * w + gid.x;
     var px = pixels[i];
     let d = camera_ray(vec2<f32>(gid.xy) + 0.5);
+    let o = camera_origin(vec2<f32>(gid.xy) + 0.5);
     var redo = (frame.flags.x & 1u) != 0u;
     if (!redo && (frame.flags.x & 2u) != 0u) {
         let lo = frame.edit_lo.xyz;
         let hi = frame.edit_hi.xyz;
         let t_end = select(1e9, px.t + 0.5, px.t >= 0.0);
-        if (ray_box(frame.eye.xyz, d, lo, hi, 0.0, t_end)) {
+        if (ray_box(o, d, lo, hi, 0.0, t_end)) {
             redo = true;
         } else if (px.t >= 0.0) {
             let n = decode_normal(px.info);
-            let p = frame.eye.xyz + d * px.t;
+            let p = o + d * px.t;
             if (ray_box(p + n * EPS, frame.sun.xyz, lo, hi, 0.0, 1e9)) {
                 redo = true;
             } else if (in_box(p, frame.cap_lo.xyz, frame.cap_hi.xyz)) {
@@ -233,7 +234,7 @@ fn reset_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
     if (redo) {
-        let hit = tr(frame.eye.xyz, d, 0.0, 1e9);
+        let hit = tr(o, d, 0.0, 1e9);
         if (hit.axis != MISS) {
             px.t = hit.t;
             px.info = pack_info(hit, d);
@@ -260,7 +261,7 @@ fn trace_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let jitter = vec2<f32>(rand(&s), rand(&s));
     var d = camera_ray(vec2<f32>(f32(gid.x), f32(y)) + jitter);
-    var ro = frame.eye.xyz;
+    var ro = camera_origin(vec2<f32>(f32(gid.x), f32(y)) + jitter);
     let dof = (frame.flags.w & DOF) != 0u;
     if (dof) {
         // Thin lens: a point on the lens disc, aimed at the pixel's point on the focus plane.

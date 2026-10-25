@@ -187,7 +187,8 @@ impl Editor {
         (self.width, self.height, self.ppp) = (width, height, ppp);
     }
 
-    /// Frame the model (or the floor of an empty scene), like MagicaVoxel's `.`.
+    /// Frame the model (or the floor of an empty scene), like MagicaVoxel's `.`. Keeps the
+    /// projection, and the angle when the camera is at a snap view.
     pub fn frame_scene(&mut self) {
         let (lo, hi) = match self.scene.map.occupied_bounds() {
             Some(b) => b,
@@ -198,7 +199,14 @@ impl Editor {
             }
         };
         let v = |a: [u32; 3]| Vec3::new(a[0] as f32, a[1] as f32, a[2] as f32);
-        self.cam = OrbitCamera::framing_aspect(v(lo), v(hi), self.width as f32 / self.height as f32);
+        let aspect = self.width as f32 / self.height as f32;
+        let (ortho, view) = (self.cam.ortho, self.cam.view());
+        self.cam = OrbitCamera::framing_aspect(v(lo), v(hi), aspect);
+        self.cam.ortho = ortho;
+        if let Some(view) = view {
+            self.cam.snap(view);
+            self.cam.fit(v(lo), v(hi), aspect, 0.9);
+        }
     }
 
     /// What the pointer is over, if anything.
@@ -390,8 +398,9 @@ impl Editor {
     /// Where an arrow key moves the selection: one cell along the ground axis nearest to the
     /// view's right (left and right arrows) or forward (up and down) direction.
     fn arrow_offset(&self, key: egui::Key) -> [i32; 3] {
-        let f = self.cam.target - self.cam.eye();
-        let fwd = Vec3::new(f.x, 0.0, f.z);
+        // From the yaw, so a view straight down still has a forward direction.
+        let (sy, cy) = self.cam.yaw.sin_cos();
+        let fwd = Vec3::new(-sy, 0.0, -cy);
         let right = fwd.cross(Vec3::Y);
         let snap = |v: Vec3| -> [i32; 3] {
             if v.x.abs() >= v.z.abs() { [v.x.signum() as i32, 0, 0] } else { [0, 0, v.z.signum() as i32] }
@@ -485,7 +494,7 @@ impl Editor {
         self.last_input = now_ms();
         let hit = self.pointer.and_then(|p| {
             let (o, d) = self.ray(p);
-            self.scene.map.raycast(o, d, 1e5).map(|h| (Vec3::from(d), h.t))
+            self.scene.map.raycast(o, d, 1e5).map(|h| Vec3::from(o) + Vec3::from(d) * h.t)
         });
         self.cam.zoom(notches, hit);
     }
@@ -567,6 +576,7 @@ impl Editor {
         self.ui.selected = self.scene.selected_count();
         self.ui.has_clip = self.scene.clipboard.is_some();
         self.ui.bounds = self.scene.bounds().size;
+        (self.ui.ortho, self.ui.view) = (self.cam.ortho, self.cam.view());
         self.ui.marquee = self.marquee.map(|m| {
             let (a, b) = (m.start, m.end);
             egui::Rect::from_two_pos(egui::pos2(a[0], a[1]), egui::pos2(b[0], b[1])) / self.ppp
@@ -581,6 +591,8 @@ impl Editor {
                 Action::Undo => self.undo(),
                 Action::Redo => self.redo(),
                 Action::Frame => self.frame_scene(),
+                Action::Snap(v) => self.cam.snap(v),
+                Action::Ortho(on) => self.cam.ortho = on,
                 Action::Recolor { slot, rgba } => self.scene.put_color(slot, rgba),
                 Action::SetMaterial { slot, material } => self.scene.put_material(slot, material),
                 Action::CommitColor => {

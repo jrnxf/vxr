@@ -266,6 +266,38 @@ async () => {
   await key('a');
   step('undo after every tool returns to the island', same(bytes(), original));
 
+  // Camera and view: the View flyout, orthographic, the six side views by key, an edit from
+  // the top orthographic view, isometric, O, Cmd-K, then back to perspective and framed.
+  step('the view button opens the View flyout', (await chip('view')) && st().viewPanel && !!at('view-front'));
+  await chip('view-ortho');
+  step('Ortho turns orthographic on', st().ortho && st().view === null, JSON.stringify(st().cam));
+  const sideViews = [['1', 'Front'], ['2', 'Back'], ['3', 'Left'], ['4', 'Right'], ['6', 'Bottom'], ['5', 'Top']];
+  const seen = [];
+  for (const [k, name] of sideViews) { await key(k); seen.push(st().view); }
+  step('keys 1 to 6 snap to the side views', seen.join() === sideViews.map((v) => v[1]).join(), seen.join());
+  const vTop = st().voxels;
+  await click(640, 400);
+  const vAdded = st().voxels;
+  await key('z', cmd);
+  step('a click from the top orthographic view adds a voxel, undo removes it', vAdded === vTop + 1 && same(bytes(), original), `${vTop} -> ${vAdded}`);
+  await chip('view-iso');
+  step('Iso: orthographic isometric', st().ortho && st().view === 'Isometric', `${st().view}`);
+  await key('o');
+  const oOff = !st().ortho;
+  await key('o');
+  step('O toggles orthographic', oOff && st().ortho);
+  await key('k', cmd);
+  for (const ch of 'front view') await key(ch);
+  await key('Enter');
+  step("Cmd-K 'Front view'", st().view === 'Front', `${st().view}`);
+  await key('0');
+  step('0 snaps to isometric', st().view === 'Isometric' && st().ortho);
+  await chip('view-persp');
+  step('Persp: back to perspective', !st().ortho && st().view === null);
+  await key('Escape');
+  step('Escape closes the View flyout', !st().viewPanel);
+  await key('.');
+
   // Camera.
   let a = st();
   await drag(mx, my, mx + 80, my + 30, 2);
