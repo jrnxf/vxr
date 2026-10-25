@@ -8,16 +8,41 @@ description = "Phase 2 test 3: the Hybrid UI in egui and in HTML/CSS over the te
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# The egui Hybrid UI. The HTML/CSS build turns it off (--no-default-features) so its shell wasm
+# holds only the viewer.
+default = ["egui"]
+egui = ["dep:egui", "dep:egui-wgpu"]
+
 [dependencies]
-vxr-engine-spike = { path = "../engine" }
+vxr-engine-spike = { path = "../engine", default-features = false }
 wgpu = "30.0.1"
-egui = "0.37"
-egui-wgpu = { version = "0.37", default-features = false }
+egui = { version = "0.37", optional = true }
+egui-wgpu = { version = "0.37", default-features = false, optional = true }
 glam = "0.34"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 pollster = "1"
 png = "0.18"
 
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wgpu = { version = "30.0.1", default-features = false, features = ["webgpu", "wgsl", "std"] }
+wasm-bindgen = "=0.2.129"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["HtmlCanvasElement"] }
+console_error_panic_hook = "0.1"
+
 [profile.release]
 debug = 0
+
+# Shell size build, same settings as the test 5 embed: opt-level s, fat LTO, one codegen unit.
+[profile.wasm]
+inherits = "release"
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+strip = true
+
+[[bin]]
+name = "egui_shot"
+required-features = ["egui"]

@@ -20,5 +20,5 @@ pub mod gpu;
 pub mod scene;
 pub mod vox;
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "bench-web"))]
 mod web;

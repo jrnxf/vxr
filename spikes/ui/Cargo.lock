@@ -2240,12 +2240,16 @@ dependencies = [
 name = "vxr-ui-spike"
 version = "0.0.0"
 dependencies = [
+ "console_error_panic_hook",
  "egui",
  "egui-wgpu",
  "glam",
  "png",
  "pollster",
  "vxr-engine-spike",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
  "wgpu",
 ]
 

@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vxr test 3: Hybrid in HTML/CSS</title>
+<!--
+  Test 3, HTML/CSS build: the Hybrid UI as DOM over the test 1 renderer's canvas (pkg/, built by
+  build-web). The CSS is the prototype's (prototype/src/editor.html) with the same fonts and icon
+  font the egui build uses, served from fetched/. Query: ?cmdk=<text> opens Cmd-K with that text,
+  ?shot freezes the stats like the egui screenshots.
+-->
+<style>
+  @font-face { font-family: Inter; font-weight: 400; src: url(fetched/Inter-Regular.ttf); }
+  @font-face { font-family: Inter; font-weight: 500; src: url(fetched/Inter-Medium.ttf); }
+  @font-face { font-family: Inter; font-weight: 600; src: url(fetched/Inter-SemiBold.ttf); }
+  @font-face { font-family: 'JetBrains Mono'; font-weight: 400; src: url(fetched/JetBrainsMono-Regular.ttf); }
+  @font-face { font-family: 'JetBrains Mono'; font-weight: 500; src: url(fetched/JetBrainsMono-Medium.ttf); }
+  @font-face { font-family: lucide; src: url(fetched/lucide.ttf); }
+  :root {
+    --bg0: #0d0f14; --bg1: #1a1e27;
+    --panel: rgba(20, 23, 30, 0.78); --panel-solid: #161920;
+    --line: rgba(255, 255, 255, 0.08); --line2: rgba(255, 255, 255, 0.14);
+    --text: #e8eaf0; --muted: #8a90a0; --faint: #5b6070;
+    --accent: #8ea2ff; --accent-bg: rgba(142, 162, 255, 0.16);
+    --danger: #ff6b7a; --ok: #6ee7a8;
+    --r: 12px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: radial-gradient(120% 90% at 50% 35%, #262b37 0%, var(--bg0) 70%); color: var(--text); font: 13px/1.4 Inter, system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+  canvas#c { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; outline: none; }
+  .panel { position: fixed; background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); backdrop-filter: blur(18px) saturate(1.2); -webkit-backdrop-filter: blur(18px) saturate(1.2); box-shadow: 0 10px 30px rgba(0,0,0,.35); }
+  button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
+  .mono { font-family: 'JetBrains Mono', ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+  .i { font-family: lucide; font-style: normal; font-size: 16px; line-height: 1; }
+  kbd { font: 500 10.5px 'JetBrains Mono', monospace; color: var(--muted); border: 1px solid var(--line2); border-bottom-width: 2px; border-radius: 5px; padding: 0 4px; min-width: 18px; display: inline-block; text-align: center; line-height: 16px; }
+
+  /* top bar */
+  #top { top: 12px; left: 12px; right: 12px; height: 44px; display: flex; align-items: center; gap: 4px; padding: 0 6px 0 12px; }
+  #brand { display: flex; align-items: center; gap: 8px; font-weight: 600; letter-spacing: -0.01em; margin-right: 10px; white-space: nowrap; }
+  #brand .logo { width: 18px; height: 18px; }
+  .tbtn { height: 32px; padding: 0 10px; border-radius: 8px; display: inline-flex; align-items: center; gap: 6px; color: var(--muted); white-space: nowrap; }
+  .tbtn:hover { background: rgba(255,255,255,.06); color: var(--text); }
+  .tbtn[disabled] { opacity: .35; pointer-events: none; }
+  .sep { width: 1px; height: 20px; background: var(--line); margin: 0 6px; }
+  .grow { flex: 1; }
+  #scene-select { background: rgba(255,255,255,.04); border: 1px solid var(--line); color: var(--text); }
+  #scene-select .i { color: var(--muted); font-size: 14px; margin-left: 2px; }
+  .primary { background: var(--accent); color: #0d1020; font-weight: 600; }
+  .primary:hover { background: #a6b6ff; color: #0d1020; }
+
+  /* tool rail */
+  #rail { left: 12px; top: 68px; width: 52px; padding: 6px; display: flex; flex-direction: column; gap: 2px; }
+  .tool { position: relative; width: 40px; height: 40px; border-radius: 9px; display: grid; place-items: center; color: var(--muted); }
+  .tool .i { font-size: 19px; }
+  .tool:hover { background: rgba(255,255,255,.06); color: var(--text); }
+  .tool.on { background: var(--accent-bg); color: var(--accent); box-shadow: inset 0 0 0 1px rgba(142,162,255,.35); }
+  .tool .k { position: absolute; right: 3px; bottom: 2px; font: 500 8.5px 'JetBrains Mono', monospace; color: var(--faint); }
+  .tool.on .k { color: var(--accent); opacity: .8; }
+  .rail-sep { height: 1px; background: var(--line); margin: 5px 4px; }
+  .rail-label { font-size: 9px; text-transform: uppercase; letter-spacing: .08em; color: var(--faint); text-align: center; padding: 4px 0 2px; }
+  .tool[data-tip]:hover::after { content: attr(data-tip); position: absolute; left: 50px; top: 50%; transform: translateY(-50%); background: var(--panel-solid); border: 1px solid var(--line2); color: var(--text); padding: 5px 9px; border-radius: 7px; white-space: nowrap; font-size: 12px; pointer-events: none; z-index: 10; }
+
+  /* palette */
+  #palette { right: 12px; top: 68px; width: 232px; padding: 12px; }
+  .ph { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+  .ph h3 { margin: 0; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); font-weight: 600; }
+  #current { display: flex; align-items: center; gap: 10px; padding: 8px; border-radius: 9px; background: rgba(255,255,255,.035); border: 1px solid var(--line); margin-bottom: 10px; }
+  #current .chip { width: 34px; height: 34px; border-radius: 8px; box-shadow: inset 0 0 0 1px rgba(255,255,255,.15), 0 4px 12px rgba(0,0,0,.3); flex: none; }
+  #current .meta { flex: 1; min-width: 0; }
+  #current .hex { font-size: 13px; }
+  #current .sub { color: var(--faint); font-size: 11px; }
+  #edit-color { height: 28px; padding: 0 9px; border-radius: 7px; border: 1px solid var(--line2); color: var(--muted); font-size: 12px; }
+  #edit-color:hover { color: var(--text); border-color: rgba(255,255,255,.25); }
+  #swatches { display: grid; grid-template-columns: repeat(8, 1fr); gap: 4px; max-height: 240px; overflow-y: auto; padding: 2px; scrollbar-width: thin; }
+  .sw { aspect-ratio: 1; border-radius: 5px; box-shadow: inset 0 0 0 1px rgba(255,255,255,.08); transition: transform .08s ease-out; }
+  .sw:hover { transform: scale(1.12); z-index: 1; }
+  .sw.on { box-shadow: 0 0 0 2px var(--panel-solid), 0 0 0 3.5px #fff; transform: scale(1.05); }
+  .sw.used::after { content: ''; display: block; width: 4px; height: 4px; border-radius: 50%; background: rgba(255,255,255,.75); margin: auto; position: relative; top: calc(50% - 2px); mix-blend-mode: difference; }
+  .note { color: var(--faint); font-size: 11px; margin-top: 10px; line-height: 1.45; }
+
+  /* stats */
+  #stats { left: 12px; bottom: 12px; padding: 8px 12px; display: flex; gap: 16px; font-size: 11.5px; }
+  #stats .s { display: flex; flex-direction: column; }
+  #stats .l { color: var(--faint); font-size: 9.5px; text-transform: uppercase; letter-spacing: .08em; }
+  #stats .v { font-size: 13px; }
+  #fps.good { color: var(--ok); } #fps.mid { color: #ffd166; } #fps.bad { color: var(--danger); }
+
+  /* hint bar */
+  #hint { left: 50%; bottom: 12px; transform: translateX(-50%); padding: 8px 14px; display: flex; gap: 14px; align-items: center; color: var(--muted); font-size: 12px; white-space: nowrap; }
+  #hint b { color: var(--text); font-weight: 500; }
+  #hint span { display: inline-flex; align-items: center; gap: 5px; }
+
+  /* undo cluster */
+  #history { right: 12px; bottom: 12px; padding: 4px; display: flex; gap: 2px; }
+
+  /* coach card */
+  #welcome { left: 50%; top: 70px; transform: translateX(-50%); padding: 14px 16px; width: min(440px, calc(100% - 32px)); display: flex; gap: 14px; align-items: flex-start; }
+  #welcome h4 { margin: 0 0 4px; font-size: 14px; }
+  #welcome ol { margin: 8px 0 0; padding-left: 18px; color: var(--muted); font-size: 12.5px; }
+  #welcome li { margin: 2px 0; } #welcome li b { color: var(--text); font-weight: 500; }
+  #welcome .x { margin-left: auto; color: var(--faint); font-size: 18px; line-height: 1; padding: 2px 4px; }
+  #welcome.hide { display: none; }
+
+  /* Cmd-K, sized like the egui build */
+  #cmdk { left: 50%; top: max(70px, 18vh); transform: translateX(-50%); width: min(560px, calc(100% - 32px)); padding: 8px; display: none; z-index: 20; }
+  #cmdk.show { display: block; }
+  #cmdk .field { height: 40px; display: flex; align-items: center; gap: 10px; padding: 0 10px; }
+  #cmdk .field .i { color: var(--muted); }
+  #cmdk input { flex: 1; font: 14px Inter, system-ui, sans-serif; color: var(--text); background: none; border: 0; outline: none; }
+  #cmdk input::placeholder { color: var(--faint); }
+  #cmdk hr { border: 0; border-top: 1px solid var(--line); margin: 4px -8px; }
+  #cmdk ul { list-style: none; margin: 0; padding: 0; }
+  #cmdk li { height: 34px; display: flex; align-items: center; justify-content: space-between; padding: 0 10px; border-radius: 7px; cursor: pointer; }
+  #cmdk li.on { background: rgba(255,255,255,.06); }
+  #cmdk li span { display: inline-flex; gap: 4px; }
+  #cmdk .none { height: 34px; display: flex; align-items: center; padding: 0 10px; color: var(--faint); }
+</style>
+</head>
+<body>
+<canvas id="c" tabindex="0" aria-label="Voxel scene"></canvas>
+
+<div id="top" class="panel">
+  <div id="brand">
+    <svg class="logo" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 2.5l8.5 4.9v9.2L12 21.5l-8.5-4.9V7.4z" fill="#8ea2ff" opacity=".25"/><path d="M12 12l8.5-4.6M12 12v9.5M12 12L3.5 7.4M12 2.5l8.5 4.9v9.2L12 21.5l-8.5-4.9V7.4z" stroke="#8ea2ff" stroke-width="1.6" stroke-linejoin="round"/></svg>
+    <span>vxr</span>
+  </div>
+  <button class="tbtn" id="scene-select" title="Starter scenes">Island diorama<i class="i" aria-hidden="true">&#xe06d;</i></button>
+  <div class="sep"></div>
+  <button class="tbtn" id="open-btn" title="Open a .vox file"><i class="i" aria-hidden="true">&#xe247;</i>Open .vox</button>
+  <button class="tbtn" id="save-btn" title="Save as MagicaVoxel .vox"><i class="i" aria-hidden="true">&#xe0b2;</i>Save .vox</button>
+  <div class="grow"></div>
+  <button class="tbtn" id="help-btn" title="Commands (Cmd+K)" aria-label="Commands"><i class="i" aria-hidden="true">&#xe284;</i></button>
+  <button class="tbtn primary" id="embed-btn" title="See this scene as a one-tag embed"><i class="i" aria-hidden="true">&#xe206;</i>Embed</button>
+</div>
+
+<div id="rail" class="panel" role="toolbar" aria-label="Tools">
+  <div class="rail-label">Tool</div>
+  <button class="tool" data-tool="0" data-tip="Add · A" aria-label="Add"><i class="i" aria-hidden="true">&#xe061;</i><span class="k">A</span></button>
+  <button class="tool" data-tool="1" data-tip="Erase · E  (or hold Shift)" aria-label="Erase"><i class="i" aria-hidden="true">&#xe28f;</i><span class="k">E</span></button>
+  <button class="tool" data-tool="2" data-tip="Paint · P" aria-label="Paint"><i class="i" aria-hidden="true">&#xe2e7;</i><span class="k">P</span></button>
+  <button class="tool" data-tool="3" data-tip="Pick color · I  (or hold Alt)" aria-label="Pick color"><i class="i" aria-hidden="true">&#xe13b;</i><span class="k">I</span></button>
+  <div class="rail-sep"></div>
+  <div class="rail-label">Shape</div>
+  <button class="tool" data-shape="0" data-tip="Single voxel · V" aria-label="Voxel brush"><i class="i" aria-hidden="true">&#xe1c3;</i><span class="k">V</span></button>
+  <button class="tool" data-shape="1" data-tip="Box · drag a rectangle · B" aria-label="Box brush"><i class="i" aria-hidden="true">&#xe1cb;</i><span class="k">B</span></button>
+  <button class="tool" data-shape="2" data-tip="Face · whole connected surface · F" aria-label="Face brush"><i class="i" aria-hidden="true">&#xe529;</i><span class="k">F</span></button>
+  <div class="rail-sep"></div>
+  <button class="tool" id="mirror-btn" data-tip="Mirror X · M" aria-label="Mirror X"><i class="i" aria-hidden="true">&#xe35e;</i><span class="k">M</span></button>
+  <button class="tool" id="frame-btn" data-tip="Frame scene · ." aria-label="Frame scene"><i class="i" aria-hidden="true">&#xe257;</i><span class="k">.</span></button>
+</div>
+
+<div id="palette" class="panel">
+  <div class="ph"><h3>Palette</h3><span class="mono" style="color:var(--faint);font-size:11px" id="pal-count"></span></div>
+  <div id="current">
+    <div class="chip" id="cur-chip"></div>
+    <div class="meta"><div class="hex mono" id="cur-hex"></div><div class="sub" id="cur-sub"></div></div>
+    <button id="edit-color" title="Change this palette color everywhere it is used">Edit</button>
+  </div>
+  <div id="swatches" role="listbox" aria-label="Palette colors"></div>
+  <div class="note">Editing a color recolors every voxel that uses it, instantly. Dots mark colors in the scene. <kbd>[</kbd> <kbd>]</kbd> step colors.</div>
+</div>
+
+<div id="welcome" class="panel">
+  <div>
+    <h4>Sculpt in under a minute</h4>
+    <ol>
+      <li><b>Click</b> a surface to add a voxel. <b>Drag</b> to draw along that surface.</li>
+      <li><b>Right-drag</b> to orbit, <b>scroll</b> to zoom, <b>Shift+right-drag</b> to pan.</li>
+      <li>Hold <b>Shift</b> to erase, <b>Alt</b> to pick a color. <kbd>?</kbd> for every key.</li>
+    </ol>
+  </div>
+  <button class="x" id="welcome-x" aria-label="Dismiss">×</button>
+</div>
+
+<div id="stats" class="panel mono">
+  <div class="s"><span class="l">Voxels</span><span class="v" id="st-vox">0</span></div>
+  <div class="s"><span class="l">FPS</span><span class="v" id="fps">-</span></div>
+  <div class="s"><span class="l">Frame</span><span class="v" id="st-ms">-</span></div>
+  <div class="s"><span class="l">Cursor</span><span class="v" id="st-cur">-</span></div>
+</div>
+
+<div id="hint" class="panel"></div>
+
+<div id="history" class="panel">
+  <button class="tbtn" id="undo-btn" title="Undo (Cmd+Z)" aria-label="Undo" disabled><i class="i" aria-hidden="true">&#xe2a1;</i></button>
+  <button class="tbtn" id="redo-btn" title="Redo (Cmd+Shift+Z)" aria-label="Redo" disabled><i class="i" aria-hidden="true">&#xe2a0;</i></button>
+</div>
+
+<div id="cmdk" class="panel" role="dialog" aria-label="Commands">
+  <div class="field"><i class="i" aria-hidden="true">&#xe151;</i><input id="cmdk-input" placeholder="Type a command" aria-label="Command" autocomplete="off"></div>
+  <hr>
+  <ul id="cmdk-list" role="listbox"></ul>
+</div>
+
+<script type="module">
+import init, { create_viewer } from './pkg/vxr_ui_spike.js';
+
+const $ = (s) => document.querySelector(s);
+const q = new URLSearchParams(location.search);
+const shot = q.has('shot');
+const ui = { tool: 0, shape: 0, slot: 28, mirror: false, shift: false, alt: false };
+let viewer, palette, used, dirty = true;
+const hex = (c) => '#' + [c & 255, (c >> 8) & 255, (c >> 16) & 255].map((v) => v.toString(16).padStart(2, '0')).join('').toUpperCase();
+const commas = (n) => n.toLocaleString('en-US');
+
+const COMMANDS = [
+  ['Add', ['A'], () => setTool(0)], ['Erase', ['E'], () => setTool(1)], ['Paint', ['P'], () => setTool(2)],
+  ['Pick color', ['I'], () => setTool(3)], ['Voxel brush', ['V'], () => setShape(0)], ['Box brush', ['B'], () => setShape(1)],
+  ['Face brush', ['F'], () => setShape(2)], ['Mirror X', ['M'], () => toggleMirror()], ['Frame scene', ['.'], () => { viewer.frame_scene(); dirty = true; }],
+  ['Undo', ['⌘', 'Z'], () => {}], ['Redo', ['⌘', '⇧', 'Z'], () => {}], ['Open .vox', ['⌘', 'O'], () => {}],
+  ['Save .vox', ['⌘', 'S'], () => {}], ['Embed', [], () => {}],
+];
+
+function effectiveTool() { return ui.alt ? 3 : ui.shift ? 1 : ui.tool; }
+function setTool(t) { ui.tool = t; render(); }
+function setShape(s) { ui.shape = s; render(); }
+function toggleMirror() { ui.mirror = !ui.mirror; render(); }
+
+const HINTS = {
+  '0,0': [['Click', 'add'], ['Drag', 'draw on that plane']], '0,1': [['Drag', 'fill a rectangle']], '0,2': [['Click', 'extrude the whole face']],
+  '1,0': [['Click', 'erase'], ['Drag', 'erase as you go']], '1,1': [['Drag', 'clear a rectangle']], '1,2': [['Click', 'peel the whole face']],
+  '2,0': [['Click', 'paint'], ['Drag', 'paint as you go']], '2,1': [['Drag', 'paint a rectangle']], '2,2': [['Click', 'fill the connected face']],
+};
+
+function render() {
+  const t = effectiveTool();
+  document.querySelectorAll('[data-tool]').forEach((b) => b.classList.toggle('on', +b.dataset.tool === t));
+  document.querySelectorAll('[data-shape]').forEach((b) => b.classList.toggle('on', +b.dataset.shape === ui.shape));
+  $('#mirror-btn').classList.toggle('on', ui.mirror);
+  const items = (t === 3 ? [['Click', 'take that color']] : HINTS[t + ',' + ui.shape]).concat([['Shift', 'erase'], ['Alt', 'pick'], ['Right-drag', 'orbit']]);
+  $('#hint').innerHTML = items.map(([k, v]) => `<span><b>${k}</b> ${v}</span>`).join('');
+  $('#cur-chip').style.background = hex(palette[ui.slot]);
+  $('#cur-hex').textContent = hex(palette[ui.slot]);
+  $('#cur-sub').textContent = `Slot ${ui.slot}` + (used[ui.slot] ? ' · in scene' : '');
+  $('#pal-count').textContent = `${used.reduce((a, b) => a + b, 0)} used`;
+  const sw = $('#swatches');
+  if (!sw.children.length) {
+    for (let i = 1; i <= 64; i++) {
+      const b = document.createElement('button');
+      b.className = 'sw'; b.style.background = hex(palette[i]); b.setAttribute('role', 'option'); b.setAttribute('aria-label', `Slot ${i} ${hex(palette[i])}`);
+      b.onclick = () => { ui.slot = i; render(); };
+      sw.appendChild(b);
+    }
+  }
+  [...sw.children].forEach((b, i) => { b.classList.toggle('on', i + 1 === ui.slot); b.classList.toggle('used', !!used[i + 1]); b.setAttribute('aria-selected', i + 1 === ui.slot); });
+  $('#st-vox').textContent = commas(viewer.voxels());
+}
+
+// Cmd-K
+let cmdSel = 0;
+function cmdHits() { const s = $('#cmdk-input').value.toLowerCase(); return COMMANDS.filter((c) => c[0].toLowerCase().includes(s)); }
+function cmdRender() {
+  const hits = cmdHits().slice(0, 8);
+  cmdSel = Math.min(cmdSel, Math.max(0, hits.length - 1));
+  $('#cmdk-list').innerHTML = hits.length ? hits.map((c, n) => `<li role="option" class="${n === cmdSel ? 'on' : ''}" data-n="${n}">${c[0]}<span>${c[1].map((k) => `<kbd>${k}</kbd>`).join('')}</span></li>`).join('') : '<div class="none">No command matches</div>';
+  [...$('#cmdk-list').querySelectorAll('li')].forEach((li) => { li.onclick = () => cmdRun(hits[+li.dataset.n]); li.onmouseenter = () => { cmdSel = +li.dataset.n; cmdRender(); }; });
+}
+function cmdOpen(text = '') { $('#welcome').classList.add('hide'); $('#cmdk').classList.add('show'); $('#cmdk-input').value = text; cmdSel = 0; cmdRender(); $('#cmdk-input').focus(); }
+function cmdClose() { $('#cmdk').classList.remove('show'); $('#c').focus(); }
+function cmdRun(c) { cmdClose(); if (c) c[2](); }
+$('#cmdk-input').addEventListener('input', () => { cmdSel = 0; cmdRender(); });
+$('#cmdk-input').addEventListener('keydown', (e) => {
+  const hits = cmdHits();
+  if (e.key === 'Escape') cmdClose();
+  else if (e.key === 'ArrowDown') { cmdSel = Math.min(cmdSel + 1, hits.length - 1); cmdRender(); }
+  else if (e.key === 'ArrowUp') { cmdSel = Math.max(cmdSel - 1, 0); cmdRender(); }
+  else if (e.key === 'Enter') cmdRun(hits[cmdSel]);
+  else return;
+  e.preventDefault();
+});
+$('#help-btn').onclick = () => cmdOpen();
+$('#welcome-x').onclick = () => $('#welcome').classList.add('hide');
+document.querySelectorAll('[data-tool]').forEach((b) => b.onclick = () => setTool(+b.dataset.tool));
+document.querySelectorAll('[data-shape]').forEach((b) => b.onclick = () => setShape(+b.dataset.shape));
+$('#mirror-btn').onclick = toggleMirror;
+$('#frame-btn').onclick = () => { viewer.frame_scene(); dirty = true; };
+
+const KEYS = { a: () => setTool(0), e: () => setTool(1), p: () => setTool(2), i: () => setTool(3), v: () => setShape(0), b: () => setShape(1), f: () => setShape(2), m: toggleMirror,
+  '.': () => { viewer.frame_scene(); dirty = true; }, '[': () => { ui.slot = Math.max(1, ui.slot - 1); render(); }, ']': () => { ui.slot = Math.min(255, ui.slot + 1); render(); } };
+addEventListener('keydown', (e) => {
+  if ($('#cmdk').classList.contains('show')) return;
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); cmdOpen(); return; }
+  if (e.key === 'Shift' || e.key === 'Alt') { ui.shift = e.shiftKey; ui.alt = e.altKey; render(); return; }
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const f = KEYS[e.key.toLowerCase()];
+  if (f) { f(); e.preventDefault(); }
+});
+addEventListener('keyup', (e) => { if (e.key === 'Shift' || e.key === 'Alt') { ui.shift = e.shiftKey; ui.alt = e.altKey; render(); } });
+
+// Canvas input. Positions go to the viewer in device pixels.
+const canvas = $('#c');
+const dpr = () => devicePixelRatio || 1;
+let drag = null;
+// Click-to-voxel latency: the input event's time, the time the edit was uploaded, and the rAF
+// frame that drew it. The edit is written to the GPU queue inside the event handler, so the next
+// frame's submit (queue order) includes it.
+window.latency = [];
+let pendingEdit = null;
+canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+canvas.addEventListener('pointerdown', (e) => {
+  canvas.setPointerCapture(e.pointerId);
+  if (e.button === 2) { drag = { x: e.clientX, y: e.clientY, pan: e.shiftKey }; return; }
+  if (e.button !== 0) return;
+  ui.shift = e.shiftKey; ui.alt = e.altKey;
+  const t = effectiveTool();
+  const r = viewer.edit(e.offsetX * dpr(), e.offsetY * dpr(), t, ui.slot);
+  if (t === 3 && r > 0) { ui.slot = r; render(); return; }
+  if (r === 1) {
+    pendingEdit = { input: e.timeStamp, edited: performance.now(), frames: 0 };
+    used = viewer.used(); render(); dirty = true;
+  }
+});
+canvas.addEventListener('pointermove', (e) => {
+  if (drag) {
+    const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    drag.x = e.clientX; drag.y = e.clientY;
+    if (drag.pan) viewer.pan(dx * dpr(), dy * dpr()); else viewer.orbit(dx, dy);
+    dirty = true;
+  }
+  if (!shot) { const c = viewer.cursor(e.offsetX * dpr(), e.offsetY * dpr()); $('#st-cur').textContent = c.length ? c.join(',') : '-'; }
+});
+canvas.addEventListener('pointerup', () => { drag = null; });
+canvas.addEventListener('wheel', (e) => { e.preventDefault(); viewer.zoom(-e.deltaY / 100, e.offsetX * dpr(), e.offsetY * dpr()); dirty = true; }, { passive: false });
+
+function fit() {
+  canvas.width = Math.round(canvas.clientWidth * dpr());
+  canvas.height = Math.round(canvas.clientHeight * dpr());
+  if (viewer) { viewer.resize(canvas.width, canvas.height); dirty = true; }
+}
+
+let frames = 0, fpsT = performance.now();
+function tick(now) {
+  if (dirty || q.has('continuous')) {
+    const t0 = performance.now();
+    viewer.frame();
+    dirty = false;
+    if (!shot) $('#st-ms').textContent = (performance.now() - t0).toFixed(1) + 'ms';
+    if (pendingEdit) { window.latency.push({ input_to_frame_ms: now - pendingEdit.input, input_to_upload_ms: pendingEdit.edited - pendingEdit.input, frames_after_input: 1 }); pendingEdit = null; }
+  }
+  frames++;
+  if (!shot && now - fpsT > 500) {
+    const fps = Math.round(frames * 1000 / (now - fpsT));
+    $('#fps').textContent = fps; $('#fps').className = 'v ' + (fps >= 55 ? 'good' : fps >= 30 ? 'mid' : 'bad');
+    frames = 0; fpsT = now;
+  }
+  requestAnimationFrame(tick);
+}
+
+async function main() {
+  await init();
+  fit();
+  const vox = new Uint8Array(await (await fetch('/scene.vox')).arrayBuffer());
+  viewer = await create_viewer(canvas, vox);
+  palette = viewer.palette();
+  used = viewer.used();
+  addEventListener('resize', fit);
+  if (shot) { $('#fps').textContent = '120'; $('#fps').className = 'v good'; $('#st-ms').textContent = '0.0ms'; }
+  render();
+  await document.fonts.ready;
+  if (q.has('cmdk')) cmdOpen(q.get('cmdk'));
+  requestAnimationFrame(tick);
+  requestAnimationFrame(() => requestAnimationFrame(() => { document.title = 'ready'; }));
+}
+main().catch((e) => { document.title = 'error'; document.body.insertAdjacentHTML('beforeend', `<pre style="position:fixed;bottom:60px;left:12px;color:#ff6b7a">${e}</pre>`); });
+</script>
+</body>
+</html>

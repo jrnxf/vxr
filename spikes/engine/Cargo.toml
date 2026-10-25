@@ -29,5 +29,10 @@ js-sys = "0.3"
 web-sys = { version = "0.3", features = ["Window", "Performance", "Document", "HtmlCanvasElement", "console"] }
 console_error_panic_hook = "0.1"
 
+[features]
+# The test 1 browser bench entry points (src/web.rs). Off for crates that only want the library.
+default = ["bench-web"]
+bench-web = []
+
 [profile.release]
 debug = 0
