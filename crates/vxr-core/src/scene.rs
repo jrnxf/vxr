@@ -7,12 +7,12 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use vxr_vox::Document;
 use vxr_vox::build::Builder;
 use vxr_vox::scene::Rule;
+use vxr_vox::{Document, Material};
 
 use crate::brickmap::{B, BRICK_VOXELS, BrickMap, EMPTY, MASK_WORDS};
-use crate::history::{Change, ColorChange, History, Step};
+use crate::history::{Change, ColorChange, History, MaterialChange, Step};
 
 /// Largest scene extent per axis, in voxels. The brick grid for 2048^3 is 64 MiB.
 pub const MAX_EXTENT: u32 = 2048;
@@ -23,6 +23,8 @@ pub struct Scene {
     pub map: BrickMap,
     /// RGBA by voxel index. Index 0 is empty and never drawn.
     pub palette: [[u8; 4]; 256],
+    /// Material by voxel index, from the file's `MATL` chunks. Index 0 is unused.
+    pub materials: [Material; 256],
     /// World cell of map cell (0, 0, 0).
     pub origin: [i32; 3],
     /// Map layer the ground plane sits on: clicks that miss every voxel land here. It is the
@@ -42,6 +44,7 @@ struct Stroke {
     changes: Vec<Change>,
     index: HashMap<[i32; 3], usize>,
     colors: Vec<ColorChange>,
+    materials: Vec<MaterialChange>,
 }
 
 pub fn vox_to_world(p: [i32; 3]) -> [i32; 3] {
@@ -62,6 +65,7 @@ impl Scene {
         Scene {
             map: BrickMap::new(size),
             palette,
+            materials: [Material::default(); 256],
             origin: [0; 3],
             floor: 0,
             source: None,
@@ -99,6 +103,9 @@ impl Scene {
         for (i, c) in s.palette.iter_mut().enumerate() {
             *c = vs.color(i as u8);
         }
+        for i in 1..=255u8 {
+            s.materials[i as usize] = doc.material(i);
+        }
         s.origin = lo.map(|l| l - PAD as i32);
         s.floor = PAD as i32;
         for (p, c) in world {
@@ -125,6 +132,10 @@ impl Scene {
         }
         let mut b = Builder::new(200);
         b.palette = Some((0..256).map(|k| self.palette[(k + 1) % 256]).collect());
+        b.materials = (1..=255u8)
+            .filter(|&i| self.materials[i as usize] != Material::default())
+            .map(|i| (i as i32, self.materials[i as usize].to_dict()))
+            .collect();
         b.add_world(&world);
         b.build().write()
     }
@@ -134,6 +145,9 @@ impl Scene {
         for i in 1..=255u8 {
             if file.color(i) != self.palette[i as usize] {
                 doc.set_palette(i, self.palette[i as usize]).ok()?;
+            }
+            if doc.material(i) != self.materials[i as usize] {
+                doc.set_material(i, &self.materials[i as usize]).ok()?;
             }
         }
         doc.set_world(world).ok()?;
@@ -223,6 +237,28 @@ impl Scene {
         }
     }
 
+    /// Change one slot's material inside the open edit (opening one if needed), so a slider
+    /// dragged through many values becomes one undo step at [`Scene::commit`].
+    pub fn put_material(&mut self, index: u8, m: Material) {
+        let old = self.materials[index as usize];
+        if old == m || index == 0 {
+            return;
+        }
+        self.materials[index as usize] = m;
+        let s = self.stroke.get_or_insert_default();
+        match s.materials.iter_mut().find(|c| c.index == index) {
+            Some(c) => c.new = m,
+            None => s.materials.push(MaterialChange { index, old, new: m }),
+        }
+    }
+
+    /// Set one slot's material as an undoable step.
+    pub fn set_material(&mut self, index: u8, m: Material) {
+        self.commit();
+        self.put_material(index, m);
+        self.commit();
+    }
+
     /// Close the open edit as one undo step. Cells and slots that ended where they started
     /// are dropped. Returns how many voxels changed.
     pub fn commit(&mut self) -> usize {
@@ -230,6 +266,7 @@ impl Scene {
         let step = Step {
             voxels: s.changes.into_iter().filter(|c| c.old != c.new).collect(),
             colors: s.colors.into_iter().filter(|c| c.old != c.new).collect(),
+            materials: s.materials.into_iter().filter(|c| c.old != c.new).collect(),
         };
         let n = step.voxels.len();
         if !step.is_empty() {
@@ -245,14 +282,17 @@ impl Scene {
         self.commit();
     }
 
-    /// Give slot `to` the colour of slot `from`, as one undo step (MagicaVoxel's
-    /// Ctrl+Shift+drag). Voxels using `to` take the colour.
+    /// Give slot `to` the colour and material of slot `from`, as one undo step
+    /// (MagicaVoxel's Ctrl+Shift+drag). Voxels using `to` take them.
     pub fn copy_color(&mut self, from: u8, to: u8) {
-        self.set_color(to, self.palette[from as usize]);
+        self.commit();
+        self.put_color(to, self.palette[from as usize]);
+        self.put_material(to, self.materials[from as usize]);
+        self.commit();
     }
 
-    /// Swap the colours of two slots and the voxels that use them, as one undo step, so the
-    /// scene looks the same and only the palette order changes (MagicaVoxel's Ctrl+drag).
+    /// Swap the colours and materials of two slots and the voxels that use them, as one undo
+    /// step, so the scene looks the same and only the palette order changes (MagicaVoxel's Ctrl+drag).
     /// Returns how many voxels were remapped.
     pub fn swap_colors(&mut self, a: u8, b: u8) -> usize {
         if a == b || a == 0 || b == 0 {
@@ -262,6 +302,9 @@ impl Scene {
         let (ca, cb) = (self.palette[a as usize], self.palette[b as usize]);
         self.put_color(a, cb);
         self.put_color(b, ca);
+        let (ma, mb) = (self.materials[a as usize], self.materials[b as usize]);
+        self.put_material(a, mb);
+        self.put_material(b, ma);
         let mut cells = Vec::new();
         if self.map.counts[a as usize] > 0 || self.map.counts[b as usize] > 0 {
             self.for_each_voxel(|p, v| {
@@ -305,6 +348,9 @@ impl Scene {
         }
         for c in &step.colors {
             self.palette[c.index as usize] = if revert { c.old } else { c.new };
+        }
+        for c in &step.materials {
+            self.materials[c.index as usize] = if revert { c.old } else { c.new };
         }
     }
 }

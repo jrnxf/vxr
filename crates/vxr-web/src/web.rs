@@ -306,6 +306,14 @@ impl App {
         vec![c[0] as u32, c[1] as u32, c[2] as u32, c[3] as u32, self.editor.scene.map.counts[slot as usize]]
     }
 
+    /// The material of palette slot `slot`: type (0 diffuse, 1 metal, 2 glass, 3 emit),
+    /// roughness, metalness, refractive index, transparency, emission and power.
+    pub fn material(&self, slot: u8) -> Vec<f32> {
+        let m = self.editor.scene.materials[slot as usize];
+        let kind = vxr_core::material::Kind::ALL.iter().position(|&k| k == m.kind).unwrap_or(0);
+        vec![kind as f32, m.rough, m.metal, m.ior, m.trans, m.emit, m.flux]
+    }
+
     /// The middle of a named part of the UI in CSS pixels (see `Hybrid::hits`), or an empty
     /// array if it is not on screen. For the browser check.
     pub fn hit(&self, name: &str) -> Vec<f32> {

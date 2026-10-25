@@ -9,6 +9,8 @@ use egui::{
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use vxr_core::material::{Kind, Material};
+
 use crate::color::{Hsv, hex, parse_hex};
 use crate::render::{EXPORT_SIZES, RenderSettings, SPP_CHOICES};
 
@@ -139,7 +141,7 @@ mod icon {
 pub use vxr_core::tools::{Shape, Tool};
 
 /// What the UI asks the app to do this frame.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Action {
     Open,
     Save,
@@ -152,8 +154,13 @@ pub enum Action {
         slot: u8,
         rgba: [u8; 4],
     },
-    /// Close the colour edit in progress as one undo step.
+    /// Close the colour or material edit in progress as one undo step.
     CommitColor,
+    /// Give palette slot `slot` this material now, inside the open edit.
+    SetMaterial {
+        slot: u8,
+        material: Material,
+    },
     /// Swap two slots, keeping the scene's look.
     SwapColors(u8, u8),
     /// Give slot `to` the colour of slot `from`.
@@ -175,8 +182,17 @@ pub enum SlotOp {
     Copy,
 }
 
+/// The colour editor's two tabs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum EditTab {
+    #[default]
+    Color,
+    Material,
+}
+
 /// The colour editor's state. It edits the current slot.
 pub struct ColorEdit {
+    pub tab: EditTab,
     /// Kept between frames so the hue survives greys and black.
     hsv: Hsv,
     /// Text of the hex, R, G, B, H, S and V fields.
@@ -211,6 +227,8 @@ pub struct Hybrid {
     pub slot: u8,
     /// RGBA by voxel index, as the scene stores it.
     pub palette: [[u8; 4]; 256],
+    /// Material by voxel index.
+    pub materials: [Material; 256],
     /// Palette indices with voxels in the scene.
     pub used: [bool; 256],
     pub scene_name: String,
@@ -266,6 +284,7 @@ const COMMANDS: &[Command] = &[
     Command { label: "Save .vox", keys: &["⌘", "S"], run: |h| h.actions.push(Action::Save) },
     Command { label: "Embed", keys: &[], run: |h| h.actions.push(Action::Embed) },
     Command { label: "Edit color", keys: &[], run: |h| h.open_color_edit() },
+    Command { label: "Edit material", keys: &[], run: |h| h.open_material_edit() },
     Command { label: "Swap color with…", keys: &[], run: |h| h.slot_op = Some(SlotOp::Swap) },
     Command { label: "Copy color to…", keys: &[], run: |h| h.slot_op = Some(SlotOp::Copy) },
     Command { label: "Toggle render preview", keys: &[], run: |h| h.show_render = !h.show_render },
@@ -281,6 +300,7 @@ impl Hybrid {
             mirror: false,
             slot: 28,
             palette,
+            materials: [Material::default(); 256],
             used,
             scene_name: scene_name.into(),
             coach: true,
@@ -332,7 +352,19 @@ impl Hybrid {
         self.render_panel = false;
         if self.color_edit.is_none() {
             let c = self.palette[self.slot as usize];
-            self.color_edit = Some(ColorEdit { hsv: Hsv::from_rgb([c[0], c[1], c[2]]), fields: Default::default() });
+            self.color_edit = Some(ColorEdit {
+                tab: EditTab::Color,
+                hsv: Hsv::from_rgb([c[0], c[1], c[2]]),
+                fields: Default::default(),
+            });
+        }
+    }
+
+    /// Open the colour editor on its Material tab.
+    pub fn open_material_edit(&mut self) {
+        self.open_color_edit();
+        if let Some(ed) = &mut self.color_edit {
+            ed.tab = EditTab::Material;
         }
     }
 
@@ -708,6 +740,15 @@ impl Hybrid {
                 Stroke::new(1.0, Color32::from_white_alpha(20)),
                 StrokeKind::Inside,
             );
+            if self.materials[slot as usize].kind != Kind::Diffuse {
+                // A material other than diffuse: a light corner, like a glint.
+                let c = r.right_top() + vec2(-1.5, 1.5);
+                p.add(egui::Shape::convex_polygon(
+                    vec![c + vec2(-7.0, 0.0), c, c + vec2(0.0, 7.0)],
+                    Color32::from_white_alpha(200),
+                    Stroke::new(1.0, Color32::from_black_alpha(90)),
+                ));
+            }
             if self.used[slot as usize] {
                 // mix-blend-mode: difference against white at 75%.
                 let bg = self.color(slot);
@@ -782,10 +823,24 @@ impl Hybrid {
         }
         job.wrap.max_width = inner_w;
         let note = ctx.fonts_mut(|f| f.layout_job(job));
+        let mat = self.materials[slot as usize];
+        let mut mjob = LayoutJob::default();
+        let mat_note = match mat.kind {
+            Kind::Diffuse => "Matte, lit by the sun and the sky.",
+            Kind::Metal => "Reflects its surroundings in its own color. Rough metal blurs them.",
+            Kind::Glass => "Light passes through, tinted by the color, and the surface reflects.",
+            Kind::Emit => "Glows in its color and lights what is near it.",
+        };
+        mjob.append(mat_note, 0.0, fmt(MUTED));
+        mjob.append(" Shows in the render corner and export, and saves to the file's MATL chunks.", 0.0, fmt(FAINT));
+        mjob.wrap.max_width = inner_w;
+        let mat_note = ctx.fonts_mut(|f| f.layout_job(mjob));
         let sv_h = 136.0;
+        let tabs_h = 28.0 + 10.0;
         let h = 12.0
             + 15.0
             + 10.0
+            + tabs_h
             + sv_h
             + 10.0
             + 12.0
@@ -797,8 +852,28 @@ impl Hybrid {
             + 10.0
             + note.size().y
             + 12.0;
+        // The Material tab: type buttons, a slider per setting, the note.
+        let rows = match mat.kind {
+            Kind::Diffuse => 0.0,
+            Kind::Metal | Kind::Emit => 2.0,
+            Kind::Glass => 3.0,
+        };
+        let h = if ed.tab == EditTab::Material {
+            12.0 + 15.0
+                + 10.0
+                + tabs_h
+                + 28.0
+                + 12.0
+                + rows * 34.0
+                + if rows > 0.0 { 6.0 } else { 0.0 }
+                + mat_note.size().y
+                + 12.0
+        } else {
+            h
+        };
         let rect = Rect::from_min_size(pos2(screen.right() - 12.0 - 232.0 - 8.0 - w, 68.0), vec2(w, h));
         let (mut close, mut commit, mut live) = (false, false, false);
+        let mut new_mat = None;
         let mut op = None;
         let mut hits = Vec::new();
         let current = [
@@ -815,7 +890,8 @@ impl Hybrid {
             let p = ui.painter().clone();
             // .ph
             let hy = inner.top() + 7.5;
-            let g = p.layout_job(spaced("EDIT COLOR", inter_semibold(11.0), MUTED, 0.88));
+            let title = if ed.tab == EditTab::Material { "EDIT MATERIAL" } else { "EDIT COLOR" };
+            let g = p.layout_job(spaced(title, inter_semibold(11.0), MUTED, 0.88));
             p.galley(pos2(inner.left(), hy - g.size().y / 2.0), g, MUTED);
             let x = Rect::from_center_size(pos2(inner.right() - 6.0, hy), vec2(16.0, 22.0));
             let xr = ui.interact(x, Id::unique("color-edit-x"), Sense::click());
@@ -823,8 +899,61 @@ impl Hybrid {
             p.text(x.center(), Align2::CENTER_CENTER, "×", inter(18.0), if xr.hovered() { TEXT } else { FAINT });
             close |= xr.clicked();
             p.text(pos2(x.left() - 6.0, hy), Align2::RIGHT_CENTER, format!("Slot {slot}"), mono(11.0), FAINT);
+            // Color and Material tabs.
+            let tr = Rect::from_min_size(pos2(inner.left(), inner.top() + 25.0), vec2(inner.width(), 28.0));
+            let tabs = ["Color".to_string(), "Material".to_string()];
+            let sel = (ed.tab == EditTab::Material) as usize;
+            if let Some(k) =
+                segmented(ui, tr, &["tab-color", "tab-material"], &tabs, sel, &[true; 2], inter(12.0), &mut hits)
+            {
+                ed.tab = if k == 0 { EditTab::Color } else { EditTab::Material };
+            }
+            if ed.tab == EditTab::Material {
+                let mut y = tr.bottom() + 10.0;
+                let kinds = Kind::ALL.map(|k| k.name().to_string());
+                let sel = Kind::ALL.iter().position(|&k| k == mat.kind).unwrap_or(0);
+                let r = Rect::from_min_size(pos2(inner.left(), y), vec2(inner.width(), 28.0));
+                if let Some(k) =
+                    segmented(ui, r, &["mt0", "mt1", "mt2", "mt3"], &kinds, sel, &[true; 4], inter(12.0), &mut hits)
+                    && Kind::ALL[k] != mat.kind
+                {
+                    new_mat = Some((Material { kind: Kind::ALL[k], ..mat }, true));
+                }
+                y += 28.0 + 12.0;
+                let mut m = mat;
+                let pct: fn(f32) -> String = |v| format!("{:.0}%", v * 100.0);
+                let rows: Vec<SliderRow> = match mat.kind {
+                    Kind::Diffuse => vec![],
+                    Kind::Metal => vec![
+                        ("mat-rough", "Roughness", &mut m.rough, 0.0, 1.0, pct),
+                        ("mat-metal", "Metalness", &mut m.metal, 0.0, 1.0, pct),
+                    ],
+                    Kind::Glass => vec![
+                        ("mat-rough", "Roughness", &mut m.rough, 0.0, 1.0, pct),
+                        ("mat-trans", "Transparency", &mut m.trans, 0.0, 1.0, pct),
+                        ("mat-ior", "Refraction", &mut m.ior, 1.0, 3.0, |v| format!("{v:.2}")),
+                    ],
+                    Kind::Emit => vec![
+                        ("mat-emit", "Emission", &mut m.emit, 0.0, 1.0, pct),
+                        ("mat-flux", "Power", &mut m.flux, 0.0, 4.0, |v| format!("{v:.1}")),
+                    ],
+                };
+                let (mut changed, mut done) = (false, false);
+                for (id, label, v, lo, hi, f) in rows {
+                    let r = Rect::from_min_size(pos2(inner.left(), y), vec2(inner.width(), 34.0));
+                    hits.push((id, r));
+                    let (c, d) = slider(ui, r, id, label, v, lo, hi, f);
+                    (changed, done) = (changed | c, done | d);
+                    y += 34.0;
+                }
+                if changed || done {
+                    new_mat = Some((m, done));
+                }
+                p.galley(pos2(inner.left(), y + if mat.kind == Kind::Diffuse { 0.0 } else { 6.0 }), mat_note, FAINT);
+                return;
+            }
             // Saturation (across) and value (down) at the current hue.
-            let sv = Rect::from_min_size(pos2(inner.left(), inner.top() + 25.0), vec2(inner.width(), sv_h));
+            let sv = Rect::from_min_size(pos2(inner.left(), tr.bottom() + 10.0), vec2(inner.width(), sv_h));
             let hue = ed.hsv.h;
             gradient(&p, sv, 16, 8, |u, v| {
                 let c = Hsv { h: hue, s: u, v: 1.0 - v }.to_rgb();
@@ -928,6 +1057,12 @@ impl Hybrid {
         }
         if commit {
             self.actions.push(Action::CommitColor);
+        }
+        if let Some((material, done)) = new_mat {
+            self.actions.push(Action::SetMaterial { slot, material });
+            if done {
+                self.actions.push(Action::CommitColor);
+            }
         }
         if !close {
             self.color_edit = Some(ed);
@@ -1218,9 +1353,23 @@ impl Hybrid {
             let spp_labels = SPP_CHOICES.map(|n| if n >= 1024 { format!("{}K", n / 1024) } else { n.to_string() });
             let size_labels = EXPORT_SIZES.map(|(_, h)| if h >= 2160 { "4K".to_string() } else { format!("{h}p") });
             let n = s.export.map_or(String::new(), |_| " (exporting)".into());
-            for (name, label, labels, sel, ok) in [
-                ("rs-spp", format!("Samples{n}"), &spp_labels, &mut rs.spp, [true; 4]),
-                ("rs-size", "Export size".to_string(), &size_labels, &mut rs.size, s.export_fits),
+            for (name, names, label, labels, sel, ok) in [
+                (
+                    "rs-spp",
+                    ["rs-spp0", "rs-spp1", "rs-spp2", "rs-spp3"],
+                    format!("Samples{n}"),
+                    &spp_labels,
+                    &mut rs.spp,
+                    [true; 4],
+                ),
+                (
+                    "rs-size",
+                    ["rs-size0", "rs-size1", "rs-size2", "rs-size3"],
+                    "Export size".to_string(),
+                    &size_labels,
+                    &mut rs.size,
+                    s.export_fits,
+                ),
             ] {
                 let lr = next(14.0);
                 p.text(lr.left_center(), Align2::LEFT_CENTER, label, inter(12.0), MUTED);
@@ -1229,7 +1378,7 @@ impl Hybrid {
                     p.text(lr.right_center(), Align2::RIGHT_CENTER, format!("{w}×{h}"), mono(11.0), FAINT);
                 }
                 let r = next(28.0);
-                if let Some(k) = segmented(ui, r, name, labels, *sel, &ok, &mut hits) {
+                if let Some(k) = segmented(ui, r, &names, labels, *sel, &ok, mono(11.5), &mut hits) {
                     *sel = k;
                 }
                 next(10.0);
@@ -1672,9 +1821,19 @@ fn field(ui: &mut Ui, rect: Rect, label: &str, id: Id, text: &mut String) -> boo
 type SliderRow<'a> = (&'static str, &'static str, &'a mut f32, f32, f32, fn(f32) -> String);
 
 /// A labelled slider row: label and value on top, a thin track below. Dragging or clicking
-/// anywhere on the row sets the value. Returns true when the value changed.
+/// anywhere on the row sets the value. Returns whether the value changed, and whether the
+/// drag or click ended (the moment to make it one undo step).
 #[allow(clippy::too_many_arguments)]
-fn slider(ui: &mut Ui, r: Rect, id: &str, label: &str, v: &mut f32, lo: f32, hi: f32, fmt: fn(f32) -> String) -> bool {
+fn slider(
+    ui: &mut Ui,
+    r: Rect,
+    id: &str,
+    label: &str,
+    v: &mut f32,
+    lo: f32,
+    hi: f32,
+    fmt: fn(f32) -> String,
+) -> (bool, bool) {
     let resp = ui.interact(r, Id::unique(("slider", id)), Sense::click_and_drag());
     let track = Rect::from_min_size(pos2(r.left() + 1.0, r.top() + 22.0), vec2(r.width() - 2.0, 4.0));
     let mut changed = false;
@@ -1695,23 +1854,22 @@ fn slider(ui: &mut Ui, r: Rect, id: &str, label: &str, v: &mut f32, lo: f32, hi:
     p.rect_filled(Rect::from_min_size(track.min, vec2(track.width() * k, 4.0)), CornerRadius::same(2), ACCENT);
     let at = pos2(track.left() + track.width() * k, track.center().y);
     p.circle(at, 6.0, TEXT, Stroke::new(1.0, Color32::from_black_alpha(100)));
-    changed
+    (changed, resp.drag_stopped() || resp.clicked())
 }
 
 /// A row of equal buttons, one selected (the .tool.on look); `ok[k]` false greys one out.
-/// Records each as `<name><k>` in `hits` and returns the one clicked.
+/// Records each as `names[k]` in `hits` and returns the one clicked.
+#[allow(clippy::too_many_arguments)]
 fn segmented(
     ui: &mut Ui,
     r: Rect,
-    name: &str,
+    names: &[&'static str],
     labels: &[String],
     sel: usize,
     ok: &[bool],
+    font: FontId,
     hits: &mut Vec<(&'static str, Rect)>,
 ) -> Option<usize> {
-    const NAMES: [[&str; 4]; 2] =
-        [["rs-spp0", "rs-spp1", "rs-spp2", "rs-spp3"], ["rs-size0", "rs-size1", "rs-size2", "rs-size3"]];
-    let names = if name == "rs-spp" { NAMES[0] } else { NAMES[1] };
     let n = labels.len();
     let cw = (r.width() - 4.0 * (n - 1) as f32) / n as f32;
     let mut out = None;
@@ -1719,7 +1877,7 @@ fn segmented(
         let c = Rect::from_min_size(pos2(r.left() + k as f32 * (cw + 4.0), r.top()), vec2(cw, r.height()));
         hits.push((names[k], c));
         let enabled = ok[k];
-        let resp = ui.interact(c, Id::unique((name, k)), if enabled { Sense::click() } else { Sense::hover() });
+        let resp = ui.interact(c, Id::unique(names[k]), if enabled { Sense::click() } else { Sense::hover() });
         let p = ui.painter();
         let color = if k == sel {
             p.rect(
@@ -1746,7 +1904,7 @@ fn segmented(
                 MUTED
             }
         };
-        p.text(c.center(), Align2::CENTER_CENTER, label, mono(11.5), color);
+        p.text(c.center(), Align2::CENTER_CENTER, label, font.clone(), color);
         if enabled && resp.clicked() {
             out = Some(k);
         }

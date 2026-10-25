@@ -271,3 +271,64 @@ fn dirty_box_covers_every_changed_voxel() {
     assert!(s.undo());
     assert_eq!(s.map.take_dirty_box(), Some(([3, 2, 5], [10, 4, 7])));
 }
+
+#[test]
+fn materials_undo_swap_and_copy_with_their_slot() {
+    use vxr_vox::{Kind, Material};
+    let mut s = Scene::new([8, 8, 8]);
+    s.edit([([0, 0, 0], 3), ([1, 0, 0], 7)]);
+    let metal = Material { kind: Kind::Metal, rough: 0.3, ..Material::default() };
+    // A dragged slider is one step.
+    s.put_material(3, Material { rough: 0.9, ..metal });
+    s.put_material(3, metal);
+    s.commit();
+    assert_eq!(s.materials[3], metal);
+    assert!(s.undo());
+    assert_eq!(s.materials[3], Material::default());
+    assert!(s.redo());
+    assert_eq!(s.materials[3], metal);
+
+    s.swap_colors(3, 7);
+    assert_eq!((s.materials[3], s.materials[7]), (Material::default(), metal), "the material moves with the voxels");
+    assert!(s.undo());
+    assert_eq!(s.materials[3], metal);
+
+    s.copy_color(3, 9);
+    assert_eq!(s.materials[9], metal);
+    assert!(s.undo());
+    assert_eq!(s.materials[9], Material::default());
+}
+
+#[test]
+fn materials_open_and_save_as_matl() {
+    use vxr_vox::fixtures::{CYAN, ORANGE, YELLOW};
+    use vxr_vox::{Kind, Material};
+    let bytes =
+        vxr_vox::fixtures::all().into_iter().find(|f| f.name == "14-materials").unwrap().builder.build().write();
+    let mut s = Scene::from_vox(&bytes).unwrap();
+    assert_eq!(s.materials[YELLOW as usize].kind, Kind::Metal);
+    assert_eq!((s.materials[CYAN as usize].kind, s.materials[CYAN as usize].ior), (Kind::Glass, 1.5));
+    assert_eq!(s.materials[ORANGE as usize].kind, Kind::Emit);
+    assert!(s.to_vox() == bytes, "unedited: byte-identical");
+
+    // Edit one slot: only its MATL chunk changes, and the other keys in it stay.
+    let glass = Material { kind: Kind::Glass, rough: 0.05, ior: 1.6, trans: 0.7, ..Material::default() };
+    s.set_material(YELLOW, glass);
+    let saved = s.to_vox();
+    assert_eq!(Scene::from_vox(&saved).unwrap().materials, s.materials);
+    let (a, b) = (vxr_vox::RawFile::parse(&bytes).unwrap(), vxr_vox::RawFile::parse(&saved).unwrap());
+    assert_eq!(a.chunks.len(), b.chunks.len());
+    let changed: Vec<usize> = (0..a.chunks.len()).filter(|&i| a.chunks[i] != b.chunks[i]).collect();
+    assert_eq!(changed.len(), 1);
+    let d = vxr_vox::chunk::IdDict::parse(vxr_vox::chunk::MATL, &b.chunks[changed[0]].content).unwrap();
+    assert_eq!((d.id, d.dict.get_str("_type"), d.dict.get_str("_spec")), (YELLOW as i32, Some("_glass"), Some("1")));
+    assert!(s.undo());
+    assert!(s.to_vox() == bytes, "undone: byte-identical again");
+
+    // A new scene writes MATL chunks for the slots that are not plain diffuse.
+    let mut n = Scene::new([8, 8, 8]);
+    n.edit([([0, 0, 0], 5)]);
+    n.set_material(5, Material { kind: Kind::Emit, emit: 0.5, flux: 2.0, ..Material::default() });
+    let back = Scene::from_vox(&n.to_vox()).unwrap();
+    assert_eq!(back.materials, n.materials);
+}

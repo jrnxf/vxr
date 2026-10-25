@@ -323,6 +323,35 @@ async () => {
     await key('Escape');
     step('Escape closes the Render panel', !st().render.panel && st().render.maxSpp === 1024 && near(st().render.exposure, 1), JSON.stringify(st().render));
     step('the render steps leave the file as it was', same(bytes(), original));
+
+    // Materials: Cmd-K "Edit material", the type buttons and sliders, the render restarts,
+    // the download carries MATL chunks, and undo gives back the file.
+    const mat = (slot) => Array.from(window.vxr.material(slot));
+    await key('k', cmd);
+    for (const ch of 'edit material') await key(ch);
+    await key('Enter');
+    step('Cmd-K "Edit material" opens the Material tab', st().colorEdit && !!hit('mt1'), JSON.stringify(st()));
+    const slot = st().slot;
+    const rs0 = st().render.restarts;
+    await click(...hit('mt1'));
+    await frames(2);
+    step('Metal makes the slot metal and restarts the render', mat(slot)[0] === 1 && st().render.restarts > rs0, `${mat(slot)} ${st().render.restarts}`);
+    const ro = hit('mat-rough');
+    await drag(ro[0], ro[1], ro[0] - 150, ro[1]);
+    step('the roughness slider sets 0', mat(slot)[1] === 0, `${mat(slot)}`);
+    await key('z', cmd);
+    step('one undo returns the roughness', mat(slot)[0] === 1 && Math.abs(mat(slot)[1] - 0.1) < 1e-6, `${mat(slot)}`);
+    await click(...hit('mt3'));
+    const em = hit('mat-flux');
+    await drag(em[0], em[1], em[0] + 150, em[1]);
+    step('Emit and its power slider', mat(slot)[0] === 3 && mat(slot)[6] === 4, `${mat(slot)}`);
+    const saved = bytes();
+    let matl = 0;
+    for (let i = 0; i + 4 <= saved.length; i++) if (saved[i] === 77 && saved[i + 1] === 65 && saved[i + 2] === 84 && saved[i + 3] === 76) matl++;
+    step('the saved file has the material as a MATL chunk', matl >= 1, `${matl} MATL`);
+    while (st().undo && mat(slot)[0] !== 0) await key('z', cmd);
+    await key('Escape');
+    step('undoing the material edits gives back the file', same(bytes(), original) && !st().colorEdit);
   }
 
   // Save (download) and Open (file input).

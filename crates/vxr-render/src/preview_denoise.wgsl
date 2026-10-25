@@ -35,7 +35,8 @@ fn init_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let d = camera_ray(vec2<f32>(p) + 0.5);
     var code = 0.0;
     if (px.n > 0.0) {
-        code = 1.0 + f32((px.info >> 8u) & 7u);
+        // Metal and glass faces (stored in colour) only filter with each other.
+        code = 1.0 + f32((px.info >> 8u) & 7u) + select(0.0, 16.0, (px.info & SPEC_BIT) != 0u);
         if (px.t < 0.0) { code = 8.0; }
     }
     aux[i] = vec4<f32>(frame.eye.xyz + d * max(px.t, 0.0), code);
@@ -84,7 +85,7 @@ fn atrous_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         dst[i] = c;
         return;
     }
-    let n = decode_normal(u32(a.w - 1.0) << 8u);
+    let n = decode_normal((u32(a.w - 1.0) & 7u) << 8u);
     let lc = luminance(c.rgb);
     let sl = SIGMA_L * sqrt(max(c.a, 0.0)) + 1e-4;
     var k = array<f32, 5>(1.0 / 16.0, 1.0 / 4.0, 3.0 / 8.0, 1.0 / 4.0, 1.0 / 16.0);
@@ -149,10 +150,12 @@ fn resolve_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     // The editor's backdrop uses its encoding (gamma 2.2, no tonemap) so the two match.
     // Hits and the sky backdrop are tonemapped; with depth of field the samples are already in
-    // colour (a backdrop pixel's blurred edge mixes in a little of the scene, unmapped).
+    // colour (a backdrop pixel's blurred edge mixes in a little of the scene, unmapped), as are
+// metal and glass hits.
     var mapped = pow(clamp(irr, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(1.0 / 2.2));
     let dof = (frame.flags.w & DOF) != 0u;
-    if ((dof && px.t >= 0.0) || (px.t < 0.0 && (frame.flags.w & SKY_BACKDROP) != 0u)) {
+    let spec = (px.info & SPEC_BIT) != 0u;
+    if (((dof || spec) && px.t >= 0.0) || (px.t < 0.0 && (frame.flags.w & SKY_BACKDROP) != 0u)) {
         mapped = to_srgb(aces(irr * frame.sun_col.w));
     } else if (px.t >= 0.0) {
         mapped = to_srgb(aces(pal[px.info & 0xffu].rgb * irr * frame.sun_col.w));

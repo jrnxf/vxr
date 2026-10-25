@@ -94,10 +94,10 @@ Feature names below follow the update log [S1] unless another source is given.
 
 | Feature | MagicaVoxel | vxr | Priority | Why |
 |---|---|---|---|---|
-| Per-slot material | Matter->Sel per palette slot [S1 0.96.2] | missing [3] | P1 | render |
-| Diffuse, metal, glass, emissive | Plus plastic, roughness, IOR, attenuation, emission power [S1 0.96-0.98.2] | missing [3] | P1 | render |
+| Per-slot material | Matter->Sel per palette slot [S1 0.96.2] | done [3]: the colour editor's Material tab and Cmd-K "Edit material", one undo step per change; swap and copy carry it | P1 | render |
+| Diffuse, metal, glass, emissive | Plus plastic, roughness, IOR, attenuation, emission power [S1 0.96-0.98.2] | partial [3]: the four types with roughness, metalness, transparency, refractive index (reflection only: glass is thin, no bending), emission and power, path traced in the corner and export; no plastic, specular or attenuation | P1 | render |
 | Blend, SSS, media (cloud) | Unified material system [S1 0.99.6.2] | missing | P3 | render |
-| Saved to `.vox` MATL | [S1 0.98, S2] | missing [3]; MATL chunks of opened files are kept by lossless save [1] | P1 | lossless, render |
+| Saved to `.vox` MATL | [S1 0.98, S2] | done [3]: edits change only that slot's MATL keys of its type; unknown keys and unedited slots keep their bytes; new scenes write MATL for non-diffuse slots | P1 | lossless, render |
 | Copy and paste materials | Ctrl+C/V [S1 0.99] | missing | P3 | - |
 
 ## Render
@@ -193,5 +193,5 @@ Design note: `.vox` animation is a list of `nSHP` models with `_f` frame indices
 ## Takeaways
 
 1. Lossless save [1] was the one blocking gap for anyone with existing files. It is done: saving an opened MagicaVoxel scene keeps its materials, layers, cameras and names.
-2. The palette [2] and the renderer [3] were the two loved features vxr lacked most visibly. Palette editing is done (picker, live recolour, swap and copy); multi-select, sorting and palette import/export remain. The live path-traced corner, the Render panel (sun, sky, exposure, depth of field, samples) and PNG export are in; materials are next.
+2. The palette [2] and the renderer [3] were the two loved features vxr lacked most visibly. Palette editing is done (picker, live recolour, swap and copy); multi-select, sorting and palette import/export remain. The live path-traced corner, the Render panel (sun, sky, exposure, depth of field, samples), PNG export and per-slot materials (diffuse, metal, glass, emissive, saved as MATL) are in; refraction, plastic and the newer blend and cloud types remain.
 3. Brushes [4] and selection [5] close the sculpting gap. After them, the world editor [8] matters most for MagicaVoxel scenes with many objects.

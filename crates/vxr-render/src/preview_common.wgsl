@@ -31,17 +31,20 @@ struct Dispatch {
 };
 
 // One record per preview pixel. Radiance is stored demodulated (divided by the albedo of the
-// primary hit) so a palette edit recolors the converged image at once.
+// primary hit) so a palette edit recolors the converged image at once; metal and glass hits
+// (SPEC_BIT) and depth of field are stored in colour.
 struct Pixel {
     sum: vec3<f32>,  // sum of demodulated radiance
     lum2: f32,       // sum of luminance squared (variance estimate)
     t: f32,          // pixel-centre primary hit distance, -1 = sky
-    info: u32,       // palette index | normal code << 8 | hit << 11
+    info: u32,       // palette index | normal code << 8 | hit << 11 | metal or glass << 12
     n: f32,          // samples accumulated
     pad: f32,
 };
 
 const HIT_BIT: u32 = 2048u;
+// The primary hit is metal or glass: its samples are stored in colour, not demodulated.
+const SPEC_BIT: u32 = 4096u;
 
 fn camera_ray(px: vec2<f32>) -> vec3<f32> {
     let ndc = vec2<f32>(px.x * frame.size.z * 2.0 - 1.0, 1.0 - px.y * frame.size.w * 2.0);

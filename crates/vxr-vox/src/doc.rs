@@ -4,8 +4,9 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::build::{Builder, frame, world_blocks};
 use crate::bytes::Dict;
-use crate::chunk::{self, Ngrp, Nshp, Ntrn, Rgba, Size, Tdcz, Typed, Xyzi};
+use crate::chunk::{self, IdDict, Ngrp, Nshp, Ntrn, Rgba, Size, Tdcz, Typed, Xyzi};
 use crate::default_palette::DEFAULT_PALETTE;
+use crate::material::Material;
 use crate::raw::{Chunk, RawFile};
 use crate::scene::{Affine, IDENTITY_R, Instance, Node, Rule, Scene, mat_vec};
 use crate::{Error, Result};
@@ -127,6 +128,47 @@ impl Document {
             .map(|i| i + 1)
             .unwrap_or(self.raw.chunks.len());
         self.raw.chunks.insert(at, Chunk::new(chunk::RGBA, Rgba { colors, extra: vec![] }.encode()));
+        Ok(at)
+    }
+
+    /// The material of palette index `index` (1 to 255): its `MATL` dict, or the default.
+    pub fn material(&self, index: u8) -> Material {
+        self.raw
+            .chunks
+            .iter()
+            .filter(|c| c.is(chunk::MATL))
+            .filter_map(|c| IdDict::parse(chunk::MATL, &c.content).ok())
+            .find(|m| m.id == index as i32)
+            .map_or_else(Material::default, |m| Material::from_dict(&m.dict))
+    }
+
+    /// Set the material of palette index `index` (1 to 255). Touches only that index's
+    /// `MATL` chunk, and in it only the keys of the material's type; adds a chunk after the
+    /// last `MATL` (or the palette) if the file has none for it.
+    pub fn set_material(&mut self, index: u8, m: &Material) -> Result<usize> {
+        if index == 0 {
+            return Err(Error::new("palette index 0 is the empty voxel"));
+        }
+        for (i, c) in self.raw.chunks.iter_mut().enumerate() {
+            if !c.is(chunk::MATL) {
+                continue;
+            }
+            let mut d = IdDict::parse(chunk::MATL, &c.content)?;
+            if d.id != index as i32 {
+                continue;
+            }
+            m.apply_to(&mut d.dict);
+            c.content = d.encode();
+            return Ok(i);
+        }
+        let chunks = &self.raw.chunks;
+        let at = chunks
+            .iter()
+            .rposition(|c| c.is(chunk::MATL))
+            .or_else(|| chunks.iter().rposition(|c| c.is(chunk::RGBA) || c.is(chunk::IMAP)))
+            .map_or(chunks.len(), |i| i + 1);
+        let d = IdDict { id: index as i32, dict: m.to_dict(), extra: vec![] };
+        self.raw.chunks.insert(at, Chunk::new(chunk::MATL, d.encode()));
         Ok(at)
     }
 

@@ -14,3 +14,5 @@ pub mod tools;
 
 pub use brickmap::BrickMap;
 pub use scene::Scene;
+/// Palette slot materials, from the `.vox` codec.
+pub use vxr_vox::material;

@@ -244,6 +244,7 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
 
     palette(&mut s, dir)?;
     render(&mut s, dir)?;
+    materials(&mut s, dir)?;
 
     // Save, reopen and compare.
     let bytes = s.ed.scene.to_vox();
@@ -318,6 +319,81 @@ fn render(s: &mut Shot, dir: &Path) -> Result<(), String> {
     s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
     check(!s.ed.ui.show_render && !s.ed.ui.hits.contains_key("render"), "Cmd-K hides the render corner".into())?;
     s.ed.ui.show_render = true;
+    s.frames(2);
+    Ok(())
+}
+
+/// Materials through the colour editor's Material tab: Cmd-K opens it, the type buttons and
+/// sliders set the current slot's material as one undo step each, the render corner restarts
+/// and shows it, it saves to MATL chunks and reopens, and undo restores the file's materials.
+fn materials(s: &mut Shot, dir: &Path) -> Result<(), String> {
+    use vxr_core::material::Kind;
+    let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    let start = s.ed.scene.materials;
+    // The most used slot, so the change shows.
+    let slot = (1..=255u8).max_by_key(|&i| s.ed.scene.map.counts[i as usize]).unwrap_or(1);
+    s.ed.ui.slot = slot;
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("edit material".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    check(s.ed.ui.hits.contains_key("mt1"), "Cmd-K Edit material opens the Material tab".into())?;
+    let restarts = s.ed.preview.restarts;
+    s.ui_click("mt1")?;
+    let m = s.ed.scene.materials[slot as usize];
+    check(
+        m.kind == Kind::Metal && s.ed.preview.restarts > restarts && s.ed.ui.hits.contains_key("mat-rough"),
+        format!("Metal: slot {slot} is metal and the render corner restarted"),
+    )?;
+    let r = s.ed.ui.hits["mat-rough"];
+    s.ui_drag(r.center(), egui::pos2(r.left() - 20.0, r.center().y), egui::Modifiers::NONE);
+    let rough = s.ed.scene.materials[slot as usize].rough;
+    s.ed.undo();
+    let undone = s.ed.scene.materials[slot as usize];
+    s.ed.undo();
+    let diffuse = s.ed.scene.materials[slot as usize].kind;
+    s.ed.redo();
+    s.ed.redo();
+    check(
+        rough == 0.0
+            && undone == m
+            && diffuse == start[slot as usize].kind
+            && s.ed.scene.materials[slot as usize].rough == 0.0,
+        format!("roughness slider drag: {rough}, one undo step (back to {:.2}), the type one more", undone.rough),
+    )?;
+    // Glass and emissive on two other used slots.
+    let mut used: Vec<u8> = (1..=255u8).filter(|&i| i != slot && s.ed.scene.map.counts[i as usize] > 0).collect();
+    used.sort_by_key(|&i| std::cmp::Reverse(s.ed.scene.map.counts[i as usize]));
+    for (k, name, want) in [(0, "mt2", Kind::Glass), (1, "mt3", Kind::Emit)] {
+        let Some(&other) = used.get(k) else { break };
+        s.ed.ui.slot = other;
+        s.frames(1);
+        s.ui_click(name)?;
+        let got = s.ed.scene.materials[other as usize].kind;
+        check(got == want, format!("{}: slot {other} is {:?}", want.name(), got))?;
+    }
+    for _ in 0..90 {
+        s.frames(1);
+    }
+    s.save_png(&dir.join("app-2x-material.png"))?;
+    // Saved as MATL chunks, read back the same.
+    let bytes = s.ed.scene.to_vox();
+    let back = Scene::from_vox(&bytes)?;
+    let raw = vxr_vox::RawFile::parse(&bytes).map_err(|e| e.to_string())?;
+    let n = raw.chunks.iter().filter(|c| c.is(b"MATL")).count();
+    let changed = (1..256).filter(|&i| back.materials[i] != start[i]).count();
+    check(
+        back.materials == s.ed.scene.materials && changed >= 1,
+        format!("save and reopen: {changed} changed materials in {n} MATL chunks"),
+    )?;
+    while s.ed.scene.materials != start && s.ed.scene.history().can_undo() {
+        s.ed.undo();
+    }
+    s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+    check(
+        s.ed.scene.materials == start && s.ed.ui.color_edit.is_none(),
+        "undo restores every material; Escape closes the editor".into(),
+    )?;
+    s.ed.ui.slot = 1;
     s.frames(2);
     Ok(())
 }

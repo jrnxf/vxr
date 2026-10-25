@@ -3,6 +3,7 @@
 //! without waiting and encoded as PNG.
 
 use glam::Vec3;
+use vxr_core::material::Material;
 use vxr_render::gpu::Readback;
 use vxr_render::map::srgb_to_linear;
 use vxr_render::{EditBox, Gpu, GpuMap, Lighting, OrbitCamera, Preview};
@@ -95,6 +96,7 @@ impl Export {
         gpu: &Gpu,
         layout: &wgpu::BindGroupLayout,
         palette: &[[u8; 4]; 256],
+        materials: &[Material; 256],
         cam: OrbitCamera,
         settings: &RenderSettings,
     ) -> Result<Self, String> {
@@ -103,6 +105,7 @@ impl Export {
             return Err(format!("{w}×{h} is too large for this GPU"));
         }
         let mut preview = Preview::sized(&gpu.device, &gpu.queue, layout, palette, gpu.timestamps, (w, h));
+        preview.set_materials(&gpu.queue, materials);
         preview.lighting = settings.lighting(cam.distance);
         preview.max_spp = settings.samples();
         Ok(Self { preview, cam, readback: None })
@@ -124,6 +127,10 @@ impl Export {
 
     pub fn set_palette(&mut self, queue: &wgpu::Queue, palette: &[[u8; 4]; 256]) {
         self.preview.set_palette(queue, palette);
+    }
+
+    pub fn set_materials(&mut self, queue: &wgpu::Queue, materials: &[Material; 256]) {
+        self.preview.set_materials(queue, materials);
     }
 
     /// Encode this frame's slice of the export, unless it is done tracing.

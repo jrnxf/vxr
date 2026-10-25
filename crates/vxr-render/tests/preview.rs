@@ -305,3 +305,64 @@ fn an_export_sized_preview_matches_geometry() {
     let m = mismatch(&img, &cpu);
     assert!(m < 0.01, "{:.2}% of export pixels disagree with the CPU ray cast", m * 100.0);
 }
+
+/// Mean colour of the pixels the CPU ray cast says show slot `v`.
+fn mean_of(img: &[u8], cpu: &[u8], v: u8) -> [f64; 3] {
+    let px: Vec<&[u8; 4]> = img.as_chunks::<4>().0.iter().zip(cpu).filter(|(_, c)| **c == v).map(|(p, _)| p).collect();
+    assert!(!px.is_empty(), "slot {v} is not in view");
+    [0, 1, 2].map(|k| px.iter().map(|p| p[k] as f64).sum::<f64>() / px.len() as f64)
+}
+
+#[test]
+fn materials_emit_reflect_and_let_light_through() {
+    use vxr_core::material::{Kind, Material};
+    let Some(g) = gpu() else { return };
+    // The red steps, with a slab of slot 2 (pale blue) on top of part of them.
+    let mut scene = red_scene();
+    let mut cells = Vec::new();
+    for x in 10..30 {
+        for z in 10..30 {
+            cells.push(([x, 12, z], 2u8));
+            cells.push(([x, 13, z], 2u8));
+        }
+    }
+    scene.edit(cells);
+    scene.set_color(2, [150, 180, 255, 255]);
+    let mut rig = Rig::new(g, &scene);
+    let cpu = cpu_values(&scene.map, &rig.cam);
+    rig.frames(60, None);
+    let diffuse = (mean_of(&rig.image(), &cpu, 1), mean_of(&rig.image(), &cpu, 2));
+    assert!(diffuse.1[2] > diffuse.1[0], "the diffuse slab shows its own pale blue: {:?}", diffuse.1);
+
+    // Clear glass: the slab shows the red steps under it, and a recolour now restarts.
+    let mut mats = [Material::default(); 256];
+    mats[2] = Material { kind: Kind::Glass, rough: 0.0, ior: 1.3, trans: 1.0, ..Material::default() };
+    let restarts = rig.preview.restarts;
+    rig.preview.set_materials(&rig.g.queue, &mats);
+    rig.frames(60, None);
+    assert_eq!(rig.preview.restarts, restarts + 1, "a material change restarts");
+    let glass = mean_of(&rig.image(), &cpu, 2);
+    assert!(glass[0] > glass[2] * 1.3, "clear glass shows the red under it: {glass:?}");
+    let restarts = rig.preview.restarts;
+    rig.preview.set_palette(&rig.g.queue, &scene.palette);
+    rig.frames(1, None);
+    assert_eq!(rig.preview.restarts, restarts + 1, "with glass in the scene a recolour restarts");
+
+    // A mirror: slot 2 as smooth white metal reflects the blue sky, not its own colour.
+    scene.set_color(2, [255, 255, 255, 255]);
+    rig.preview.set_palette(&rig.g.queue, &scene.palette);
+    mats[2] = Material { kind: Kind::Metal, rough: 0.0, metal: 1.0, ..Material::default() };
+    rig.preview.set_materials(&rig.g.queue, &mats);
+    rig.frames(60, None);
+    let metal = mean_of(&rig.image(), &cpu, 2);
+    assert!(metal[2] > metal[0] * 1.1, "the mirror reflects the sky: {metal:?}");
+
+    // Emissive: slot 1 glows far brighter than when lit by the sun alone.
+    mats[2] = Material::default();
+    mats[1] = Material { kind: Kind::Emit, emit: 1.0, flux: 3.0, ..Material::default() };
+    rig.preview.set_materials(&rig.g.queue, &mats);
+    rig.frames(60, None);
+    let emit = mean_of(&rig.image(), &cpu, 1);
+    eprintln!("mean colours: diffuse {diffuse:?}, glass {glass:?}, metal {metal:?}, emissive {emit:?}");
+    assert!(emit[0] > diffuse.0[0] + 20.0, "emissive red is brighter: {emit:?} vs {:?}", diffuse.0);
+}

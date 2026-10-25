@@ -7,12 +7,18 @@
 //!   (read back a few frames later, never waited on) and the rows traced per frame follow the
 //!   measured cost per row. Without timestamps a conservative fixed cost per row is assumed.
 //! - Edits reset only the pixels whose primary or sun ray crosses the edited box; a camera move
-//!   restarts the whole image. Recolours need no reset (radiance is stored demodulated).
+//!   restarts the whole image. Recolours need no reset (radiance is stored demodulated),
+//!   unless a slot is metal or glass: those pixels are stored in colour, so they restart.
+//! - Materials per palette slot ([`Preview::set_materials`]): diffuse, metal (glossy, with a
+//!   sun highlight), glass (Fresnel reflection, or straight through with a tint: thin glass,
+//!   no bending) and emissive.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use glam::Vec3;
+
+use vxr_core::material::{Kind, Material};
 
 use crate::camera::OrbitCamera;
 use crate::map::{GpuMap, palette_linear};
@@ -215,6 +221,9 @@ pub struct Preview {
     frame_buf: wgpu::Buffer,
     disp_buf: wgpu::Buffer,
     pal_buf: wgpu::Buffer,
+    mat_buf: wgpu::Buffer,
+    /// Some slot is metal or glass, so recolours restart.
+    has_specular: bool,
     pub out_tex: wgpu::Texture,
     out_view: wgpu::TextureView,
     trace_group: wgpu::BindGroup,
@@ -245,6 +254,16 @@ pub struct Preview {
     pub restarts: u32,
     /// Rows traced in the last frame.
     pub last_rows: u32,
+}
+
+/// One slot's material as the trace shader reads it (`mats` in preview_trace.wgsl).
+fn material_params(m: &Material) -> [f32; 4] {
+    match m.kind {
+        Kind::Diffuse => [0.0; 4],
+        Kind::Metal => [1.0, m.rough, m.metal, 0.0],
+        Kind::Glass => [2.0, m.rough, m.ior, m.trans],
+        Kind::Emit => [3.0, 0.0, m.radiance(), 0.0],
+    }
 }
 
 fn entry(binding: u32, ty: wgpu::BindingType) -> wgpu::BindGroupLayoutEntry {
@@ -326,6 +345,7 @@ impl Preview {
         let fa = buf("preview filter a", n * 16, st);
         let fb = buf("preview filter b", n * 16, st);
         let pal_buf = buf("preview palette", 256 * 16, un);
+        let mat_buf = buf("preview materials", 256 * 16, un);
         let out_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("preview out"),
             size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
@@ -342,7 +362,12 @@ impl Preview {
 
         let trace_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("preview trace"),
-            entries: &[entry(0, uniform(false)), entry(1, uniform(true)), entry(2, storage(false))],
+            entries: &[
+                entry(0, uniform(false)),
+                entry(1, uniform(true)),
+                entry(2, storage(false)),
+                entry(3, uniform(false)),
+            ],
         });
         let dn_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("preview denoise"),
@@ -369,6 +394,7 @@ impl Preview {
                 wgpu::BindGroupEntry { binding: 0, resource: frame_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: disp_binding.clone() },
                 wgpu::BindGroupEntry { binding: 2, resource: pixels.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: mat_buf.as_entire_binding() },
             ],
         });
         let dn = |src: &wgpu::Buffer, dst: &wgpu::Buffer| {
@@ -459,6 +485,8 @@ impl Preview {
             frame_buf,
             disp_buf,
             pal_buf,
+            mat_buf,
+            has_specular: false,
             out_tex,
             out_view,
             trace_group,
@@ -490,14 +518,23 @@ impl Preview {
             last_rows: 0,
         };
         queue.write_buffer(&me.pal_buf, 0, bytemuck::cast_slice(&palette_linear(palette)));
+        queue.write_buffer(&me.mat_buf, 0, &[0u8; 256 * 16]);
         me
     }
 
+    /// Set the material of every palette slot (index 0 is unused). Restarts sampling.
+    pub fn set_materials(&mut self, queue: &wgpu::Queue, materials: &[Material; 256]) {
+        let params: Vec<[f32; 4]> = materials.iter().map(material_params).collect();
+        queue.write_buffer(&self.mat_buf, 0, bytemuck::cast_slice(&params));
+        self.has_specular = materials[1..].iter().any(|m| matches!(m.kind, Kind::Metal | Kind::Glass));
+        self.force_restart = true;
+    }
+
     /// Recolor: rewrite the preview's palette copy (the map's palette is written separately).
-    /// Instant, except with depth of field, which restarts.
+    /// Instant, except with depth of field or a metal or glass slot, which restart.
     pub fn set_palette(&mut self, queue: &wgpu::Queue, palette: &[[u8; 4]; 256]) {
         queue.write_buffer(&self.pal_buf, 0, bytemuck::cast_slice(&palette_linear(palette)));
-        if self.lighting.dof() {
+        if self.lighting.dof() || self.has_specular {
             self.force_restart = true;
         }
     }

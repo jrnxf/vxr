@@ -1,6 +1,8 @@
 //! Undo and redo. Each step is one user action (a click, a drag, a recolour) stored as
 //! the cells it changed with their old and new values, so undo is exact and cheap.
 
+use vxr_vox::Material;
+
 /// One voxel that an edit changed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Change {
@@ -17,18 +19,27 @@ pub struct ColorChange {
     pub new: [u8; 4],
 }
 
-/// One undo step: the voxels and palette slots a single action changed. A recolour has
-/// only colours, a swap of two slots has both (the colours and the voxels remapped to keep
-/// their look).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// One palette slot whose material an edit changed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MaterialChange {
+    pub index: u8,
+    pub old: Material,
+    pub new: Material,
+}
+
+/// One undo step: the voxels, palette colours and materials a single action changed. A
+/// recolour has only colours, a swap of two slots has all three (the colours and materials
+/// swapped, and the voxels remapped to keep their look).
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Step {
     pub voxels: Vec<Change>,
     pub colors: Vec<ColorChange>,
+    pub materials: Vec<MaterialChange>,
 }
 
 impl Step {
     pub fn is_empty(&self) -> bool {
-        self.voxels.is_empty() && self.colors.is_empty()
+        self.voxels.is_empty() && self.colors.is_empty() && self.materials.is_empty()
     }
 }
 

@@ -4,6 +4,7 @@
 
 use glam::Vec3;
 use vxr_core::Scene;
+use vxr_core::material::Material;
 use vxr_core::tools::{Brush, Gesture, Press, Target, plane_cell};
 use vxr_render::{EditBox, Gpu, GpuMap, OrbitCamera, Preview, Renderer, brickmap_layout, gpu::now_ms};
 
@@ -57,6 +58,8 @@ pub struct Editor {
     /// Space held: left-drag orbits.
     pub space: bool,
     palette: [[u8; 4]; 256],
+    /// The materials the GPU has, to notice changes.
+    materials: [Material; 256],
     frames: Vec<f64>,
     /// Where the scene was opened from or last saved to.
     pub path: Option<std::path::PathBuf>,
@@ -84,12 +87,13 @@ impl Editor {
         let map = GpuMap::new(&gpu.device, &gpu.queue, &layout, &scene.map, &scene.palette)?;
         let (width, height) = (size.0.max(1), size.1.max(1));
         let renderer = Renderer::new(&gpu.device, &layout, format, width, height, false);
-        let preview = Preview::new(&gpu.device, &gpu.queue, &layout, &scene.palette, gpu.timestamps);
+        let mut preview = Preview::new(&gpu.device, &gpu.queue, &layout, &scene.palette, gpu.timestamps);
+        preview.set_materials(&gpu.queue, &scene.materials);
         let egui = egui_wgpu::Renderer::new(&gpu.device, format, egui_wgpu::RendererOptions::default());
         let ctx = egui::Context::default();
         crate::ui::install(&ctx, fonts);
         let ui = Hybrid::new(scene.palette, used(&scene), name);
-        let palette = scene.palette;
+        let (palette, materials) = (scene.palette, scene.materials);
         let mut e = Self {
             gpu,
             scene,
@@ -112,6 +116,7 @@ impl Editor {
             cursor: None,
             space: false,
             palette,
+            materials,
             frames: Vec::new(),
             path: None,
             export: None,
@@ -130,6 +135,8 @@ impl Editor {
         self.map = GpuMap::new(&self.gpu.device, &self.gpu.queue, &self.layout, &scene.map, &scene.palette)?;
         self.palette = scene.palette;
         self.preview.set_palette(&self.gpu.queue, &self.palette);
+        self.materials = scene.materials;
+        self.preview.set_materials(&self.gpu.queue, &self.materials);
         self.preview.restart();
         self.export = None;
         self.scene = scene;
@@ -311,6 +318,7 @@ impl Editor {
         self.frames.drain(..keep);
 
         self.ui.palette = self.scene.palette;
+        self.ui.materials = self.scene.materials;
         self.ui.used = used(&self.scene);
         self.ui.can_undo = self.scene.history().can_undo();
         self.ui.can_redo = self.scene.history().can_redo();
@@ -325,6 +333,7 @@ impl Editor {
                 Action::Redo => self.redo(),
                 Action::Frame => self.frame_scene(),
                 Action::Recolor { slot, rgba } => self.scene.put_color(slot, rgba),
+                Action::SetMaterial { slot, material } => self.scene.put_material(slot, material),
                 Action::CommitColor => {
                     self.scene.commit();
                 }
@@ -362,7 +371,14 @@ impl Editor {
 
     /// Start a PNG export of the corner's view with the Render panel's settings.
     pub fn start_export(&mut self) {
-        let r = Export::start(&self.gpu, &self.layout, &self.scene.palette, self.cam, &self.ui.render);
+        let r = Export::start(
+            &self.gpu,
+            &self.layout,
+            &self.scene.palette,
+            &self.scene.materials,
+            self.cam,
+            &self.ui.render,
+        );
         match r {
             Ok(x) => {
                 let (w, h) = x.size();
@@ -389,6 +405,13 @@ impl Editor {
             self.preview.set_palette(queue, &self.palette);
             if let Some(x) = &mut self.export {
                 x.set_palette(queue, &self.palette);
+            }
+        }
+        if self.scene.materials != self.materials {
+            self.materials = self.scene.materials;
+            self.preview.set_materials(queue, &self.materials);
+            if let Some(x) = &mut self.export {
+                x.set_materials(queue, &self.materials);
             }
         }
         let edit = self.scene.map.take_dirty_box().map(|(lo, hi)| EditBox::voxels(lo, hi));
