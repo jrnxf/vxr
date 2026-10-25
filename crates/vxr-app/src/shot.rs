@@ -18,6 +18,8 @@ const POINTS: (u32, u32) = (1280, 800);
 struct Shot {
     ed: Editor,
     target: wgpu::Texture,
+    /// egui time in seconds, so double clicks and drags see time move forward.
+    time: f64,
 }
 
 impl Shot {
@@ -36,7 +38,7 @@ impl Shot {
             view_formats: &[],
         });
         let ed = Editor::new(gpu, scene, name, FORMAT, (w, h), ppp, crate::native::fonts())?;
-        Ok(Self { ed, target })
+        Ok(Self { ed, target, time: 0.0 })
     }
 
     /// Draw `n` frames (egui needs a couple to lay out and upload fonts).
@@ -47,11 +49,12 @@ impl Shot {
     /// Draw `n` frames, the first with `events` as egui input.
     fn frames_with(&mut self, n: usize, mut events: Vec<egui::Event>) {
         let view = self.target.create_view(&Default::default());
-        for i in 0..n {
+        for _ in 0..n {
             let size = egui::vec2(self.ed.width as f32 / self.ed.ppp, self.ed.height as f32 / self.ed.ppp);
+            self.time += 1.0 / 60.0;
             let mut input = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
-                time: Some(i as f64 / 60.0),
+                time: Some(self.time),
                 events: std::mem::take(&mut events),
                 ..Default::default()
             };
@@ -99,6 +102,44 @@ impl Shot {
             self.ed.pointer_moved(Some([at[0] + d[0], at[1] + d[1]]));
         }
         self.ed.button(Button::Left, false, false);
+    }
+
+    /// The middle of a named part of the UI, in points (see `Hybrid::hits`).
+    fn at(&self, name: &str) -> Result<egui::Pos2, String> {
+        self.ed.ui.hits.get(name).map(|r| r.center()).ok_or_else(|| format!("{name} is not on screen"))
+    }
+
+    /// Press the left button at `from` (points), move to `to` in a few steps, release, with
+    /// `modifiers` held, all as egui input.
+    fn ui_drag(&mut self, from: egui::Pos2, to: egui::Pos2, modifiers: egui::Modifiers) {
+        let button =
+            |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers };
+        self.frames_with(1, vec![egui::Event::ModifiersChanged(modifiers), egui::Event::PointerMoved(from)]);
+        self.frames_with(1, vec![button(from, true)]);
+        if from != to {
+            for k in 1..=6 {
+                self.frames_with(1, vec![egui::Event::PointerMoved(from + (to - from) * k as f32 / 6.0)]);
+            }
+        }
+        self.frames_with(1, vec![button(to, false)]);
+        self.frames_with(2, vec![egui::Event::ModifiersChanged(egui::Modifiers::NONE)]);
+    }
+
+    fn ui_click(&mut self, name: &str) -> Result<(), String> {
+        let p = self.at(name)?;
+        self.ui_drag(p, p, egui::Modifiers::NONE);
+        Ok(())
+    }
+
+    /// Click a field, replace its text with `text` and press Enter.
+    fn type_into(&mut self, name: &str, text: &str) -> Result<(), String> {
+        self.ui_click(name)?;
+        let key =
+            |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+        self.frames_with(1, vec![key(egui::Key::A, egui::Modifiers::COMMAND)]);
+        self.frames_with(1, vec![egui::Event::Text(text.into())]);
+        self.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+        Ok(())
     }
 
     fn tool(&mut self, tool: Tool, shape: Shape) {
@@ -196,6 +237,8 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
     check(s.ed.ui.cmdk.is_none(), "Escape closes it".into())?;
 
+    palette(&mut s, dir)?;
+
     // Save, reopen and compare.
     let bytes = s.ed.scene.to_vox();
     let path = dir.join("edited.vox");
@@ -223,4 +266,102 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     s.ed.pointer_moved(Some(p));
     s.frames(12);
     s.save_png(&dir.join("app-2x-edited.png"))
+}
+
+/// The palette editor, through egui input on the drawn UI: live recolour, one undo step per
+/// edit, hex and RGB fields, swap and copy by button and by Cmd-drag, Escape.
+fn palette(s: &mut Shot, dir: &Path) -> Result<(), String> {
+    s.frames(2);
+    let counts = s.ed.scene.map.counts;
+    let used = (1..256).max_by_key(|&i| counts[i]).unwrap() as u8;
+    s.ed.ui.slot = used;
+    s.frames(2);
+    s.ui_click("edit-color")?;
+    check(s.ed.ui.color_edit.is_some(), format!("Edit opens the color editor on slot {used}"))?;
+    let before = s.ed.scene.palette[used as usize];
+    let voxels = s.voxels();
+
+    // Drag across the saturation/value square: the colour shows while dragging, one undo step.
+    let sv = s.ed.ui.hits["sv"];
+    let undo_before = s.ed.scene.history().can_undo();
+    s.ui_drag(sv.left_top() + egui::vec2(4.0, 4.0), sv.center() + egui::vec2(30.0, 10.0), egui::Modifiers::NONE);
+    let dragged = s.ed.scene.palette[used as usize];
+    check(
+        dragged != before && s.voxels() == voxels && s.ed.scene.map.counts == counts,
+        format!("dragging in the color square recolors slot {used} live: {before:?} -> {dragged:?}, no voxel changed"),
+    )?;
+    s.save_png(&dir.join("app-2x-palette.png"))?;
+    s.ed.undo();
+    check(
+        s.ed.scene.palette[used as usize] == before && s.ed.scene.history().can_undo() == undo_before,
+        "one undo returns the color from before the drag".into(),
+    )?;
+    s.ed.redo();
+    s.frames(2);
+
+    s.type_into("field-hex", "#ff8800")?;
+    let c = s.ed.scene.palette[used as usize];
+    check(c[..3] == [0xff, 0x88, 0x00], format!("hex field sets {c:?}"))?;
+    s.type_into("field-g", "200")?;
+    let c = s.ed.scene.palette[used as usize];
+    check(c[..3] == [0xff, 200, 0x00], format!("G field sets {c:?}"))?;
+    s.type_into("field-h", "240")?;
+    let c = s.ed.scene.palette[used as usize];
+    check(c[2] > c[0] && c[2] > c[1], format!("H field turns it blue: {c:?}"))?;
+    s.ed.undo();
+    check(s.ed.scene.palette[used as usize][..3] == [0xff, 200, 0x00], "each field edit is one undo step".into())?;
+
+    // Swap with an unused slot: the voxels move with the colour, so the scene looks the same.
+    let free = (1..=64u8).find(|&i| counts[i as usize] == 0).ok_or("no unused slot in the first 64")?;
+    let (cu, cf) = (s.ed.scene.palette[used as usize], s.ed.scene.palette[free as usize]);
+    s.ui_click("swap")?;
+    check(s.ed.ui.slot_op.is_some(), "Swap with… arms the next swatch click".into())?;
+    s.ui_click(&format!("sw{free}"))?;
+    let m = &s.ed.scene.map;
+    check(
+        s.ed.scene.palette[free as usize] == cu
+            && s.ed.scene.palette[used as usize] == cf
+            && m.counts[free as usize] == counts[used as usize]
+            && m.counts[used as usize] == 0
+            && s.ed.ui.slot == free,
+        format!("swap slots {used} and {free}: colors and {} voxels trade places", counts[used as usize]),
+    )?;
+    s.ed.undo();
+    check(
+        s.ed.scene.map.counts == counts && s.ed.scene.palette[used as usize] == cu,
+        "one undo reverts the swap".into(),
+    )?;
+
+    // Copy the colour to another slot.
+    s.ed.ui.slot = used;
+    s.frames(2);
+    s.ui_click("copy")?;
+    s.ui_click(&format!("sw{}", free + 1))?;
+    check(s.ed.scene.palette[free as usize + 1] == cu, format!("copy slot {used} to slot {}", free + 1))?;
+    s.ed.undo();
+
+    // Cmd-drag a swatch onto another swaps them, as Ctrl+drag does in MagicaVoxel.
+    s.ed.ui.slot = used;
+    s.frames(2);
+    let (a, b) = (s.at(&format!("sw{used}"))?, s.at(&format!("sw{free}"))?);
+    s.ui_drag(a, b, egui::Modifiers::COMMAND);
+    check(
+        s.ed.scene.map.counts[free as usize] == counts[used as usize] && s.ed.scene.palette[free as usize] == cu,
+        "Cmd-drag a swatch onto another swaps them".into(),
+    )?;
+    s.ed.undo();
+
+    let key = |key| egui::Event::Key {
+        key,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    };
+    s.frames_with(2, vec![key(egui::Key::Escape)]);
+    check(s.ed.ui.color_edit.is_none(), "Escape closes the color editor".into())?;
+    s.ed.undo();
+    s.ed.undo();
+    s.ed.undo();
+    check(s.ed.scene.palette[used as usize] == before, "undoing every palette edit restores the color".into())
 }

@@ -78,10 +78,10 @@ Feature names below follow the update log [S1] unless another source is given.
 
 | Feature | MagicaVoxel | vxr | Priority | Why |
 |---|---|---|---|---|
-| 256-slot palette, recolour by editing a slot | Core workflow [S1, S5] | partial (64 swatches shown, slot picked, hex shown; the Edit button does nothing yet) [2] | P1 | palette |
-| Colour picker: HSV, RGB, hex | [S1 0.99.4.2] | missing [2] | P1 | palette |
-| Swap colours | Ctrl+drag swaps; Alt+drag swapped without changing the model in 0.97.2 [S1 0.99.2, 0.97.2] | missing [2] | P1 | palette |
-| Duplicate (copy) a colour | Ctrl+Shift+drag [S1 0.99.2] | missing [2] | P1 | palette |
+| 256-slot palette, recolour by editing a slot | Core workflow [S1, S5] | done (all 255 slots in a scrolling grid; Edit recolours every voxel of the slot live, one undo step per edit) [2] | P1 | palette |
+| Colour picker: HSV, RGB, hex | [S1 0.99.4.2] | done (saturation/value square, hue bar, hex, RGB and HSV fields) [2] | P1 | palette |
+| Swap colours | Ctrl+drag swaps; Alt+drag swapped without changing the model in 0.97.2 [S1 0.99.2, 0.97.2] | done (Swap with… button, Cmd-K, or Cmd/Ctrl-drag; voxels move with the colour so the scene keeps its look) [2] | P1 | palette |
+| Duplicate (copy) a colour | Ctrl+Shift+drag [S1 0.99.2] | done (Copy to… button, Cmd-K, or Cmd/Ctrl+Shift-drag) [2] | P1 | palette |
 | Multi-select colours, group HSV/RGB edits | Drag selects; group edits since 0.99.7.1 [S1 0.99.5, 0.99.7.1] | missing | P2 | palette |
 | Copy and paste colours between palettes | [S1 0.99.7.1] | missing | P2 | palette |
 | Sort palette | `pal sort [+-hsvrgb]` [S1 0.99.2] | missing | P3 | palette |
@@ -193,5 +193,5 @@ Design note: `.vox` animation is a list of `nSHP` models with `_f` frame indices
 ## Takeaways
 
 1. Lossless save [1] was the one blocking gap for anyone with existing files. It is done: saving an opened MagicaVoxel scene keeps its materials, layers, cameras and names.
-2. The palette [2] and the renderer [3] are the two loved features vxr lacks most visibly.
+2. The palette [2] and the renderer [3] were the two loved features vxr lacked most visibly. Palette editing is done (picker, live recolour, swap and copy); multi-select, sorting and palette import/export remain. The renderer is next.
 3. Brushes [4] and selection [5] close the sculpting gap. After them, the world editor [8] matters most for MagicaVoxel scenes with many objects.

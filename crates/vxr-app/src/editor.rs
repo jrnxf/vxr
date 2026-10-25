@@ -204,6 +204,8 @@ impl Editor {
             return;
         }
         self.ui.coach = false;
+        // A colour edit still open (a field not yet applied) is its own undo step.
+        self.scene.commit();
         let Some(p) = self.pointer else { return };
         let (o, d) = self.ray(p);
         let Some(t) = self.scene.target(o, d) else { return };
@@ -275,6 +277,20 @@ impl Editor {
                 Action::Undo => self.undo(),
                 Action::Redo => self.redo(),
                 Action::Frame => self.frame_scene(),
+                Action::Recolor { slot, rgba } => self.scene.put_color(slot, rgba),
+                Action::CommitColor => {
+                    self.scene.commit();
+                }
+                Action::SwapColors(a, b) => {
+                    self.gesture = None;
+                    self.scene.swap_colors(a, b);
+                    self.ui.toast(&self.ctx, format!("Swapped slots {a} and {b}"));
+                }
+                Action::CopyColor { from, to } => {
+                    self.gesture = None;
+                    self.scene.copy_color(from, to);
+                    self.ui.toast(&self.ctx, format!("Copied slot {from} to slot {to}"));
+                }
                 other => host.push(other),
             }
         }

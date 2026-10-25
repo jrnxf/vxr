@@ -12,7 +12,7 @@ use vxr_vox::build::Builder;
 use vxr_vox::scene::Rule;
 
 use crate::brickmap::{B, BRICK_VOXELS, BrickMap, EMPTY, MASK_WORDS};
-use crate::history::{Change, History, Step};
+use crate::history::{Change, ColorChange, History, Step};
 
 /// Largest scene extent per axis, in voxels. The brick grid for 2048^3 is 64 MiB.
 pub const MAX_EXTENT: u32 = 2048;
@@ -35,11 +35,13 @@ pub struct Scene {
     stroke: Option<Stroke>,
 }
 
-/// The changes of the edit in progress: one entry per cell, first old value and last new value.
+/// The changes of the edit in progress: one entry per cell or palette slot, first old value
+/// and last new value.
 #[derive(Default)]
 struct Stroke {
     changes: Vec<Change>,
     index: HashMap<[i32; 3], usize>,
+    colors: Vec<ColorChange>,
 }
 
 pub fn vox_to_world(p: [i32; 3]) -> [i32; 3] {
@@ -205,14 +207,33 @@ impl Scene {
         true
     }
 
-    /// Close the open edit as one undo step. Cells that ended where they started are dropped.
-    /// Returns how many voxels changed.
+    /// Recolour one palette slot inside the open edit (opening one if needed), so a colour
+    /// dragged through many values becomes one undo step at [`Scene::commit`]. Every voxel
+    /// using the slot changes with it; nothing is remeshed.
+    pub fn put_color(&mut self, index: u8, rgba: [u8; 4]) {
+        let old = self.palette[index as usize];
+        if old == rgba {
+            return;
+        }
+        self.palette[index as usize] = rgba;
+        let s = self.stroke.get_or_insert_default();
+        match s.colors.iter_mut().find(|c| c.index == index) {
+            Some(c) => c.new = rgba,
+            None => s.colors.push(ColorChange { index, old, new: rgba }),
+        }
+    }
+
+    /// Close the open edit as one undo step. Cells and slots that ended where they started
+    /// are dropped. Returns how many voxels changed.
     pub fn commit(&mut self) -> usize {
         let Some(s) = self.stroke.take() else { return 0 };
-        let changes: Vec<Change> = s.changes.into_iter().filter(|c| c.old != c.new).collect();
-        let n = changes.len();
-        if n > 0 {
-            self.history.push(Step::Voxels(changes));
+        let step = Step {
+            voxels: s.changes.into_iter().filter(|c| c.old != c.new).collect(),
+            colors: s.colors.into_iter().filter(|c| c.old != c.new).collect(),
+        };
+        let n = step.voxels.len();
+        if !step.is_empty() {
+            self.history.push(step);
         }
         n
     }
@@ -220,11 +241,39 @@ impl Scene {
     /// Recolour one palette slot as an undoable step.
     pub fn set_color(&mut self, index: u8, rgba: [u8; 4]) {
         self.commit();
-        let old = self.palette[index as usize];
-        if old != rgba {
-            self.palette[index as usize] = rgba;
-            self.history.push(Step::Palette { index, old, new: rgba });
+        self.put_color(index, rgba);
+        self.commit();
+    }
+
+    /// Give slot `to` the colour of slot `from`, as one undo step (MagicaVoxel's
+    /// Ctrl+Shift+drag). Voxels using `to` take the colour.
+    pub fn copy_color(&mut self, from: u8, to: u8) {
+        self.set_color(to, self.palette[from as usize]);
+    }
+
+    /// Swap the colours of two slots and the voxels that use them, as one undo step, so the
+    /// scene looks the same and only the palette order changes (MagicaVoxel's Ctrl+drag).
+    /// Returns how many voxels were remapped.
+    pub fn swap_colors(&mut self, a: u8, b: u8) -> usize {
+        if a == b || a == 0 || b == 0 {
+            return 0;
         }
+        self.commit();
+        let (ca, cb) = (self.palette[a as usize], self.palette[b as usize]);
+        self.put_color(a, cb);
+        self.put_color(b, ca);
+        let mut cells = Vec::new();
+        if self.map.counts[a as usize] > 0 || self.map.counts[b as usize] > 0 {
+            self.for_each_voxel(|p, v| {
+                if v == a || v == b {
+                    cells.push((p, if v == a { b } else { a }));
+                }
+            });
+        }
+        for (p, v) in cells {
+            self.put(p, v);
+        }
+        self.commit()
     }
 
     pub fn undo(&mut self) -> bool {
@@ -246,18 +295,16 @@ impl Scene {
     }
 
     fn apply(&mut self, step: &Step, revert: bool) {
-        match step {
-            Step::Voxels(changes) => {
-                let mut set = |c: &Change| {
-                    self.map.set(c.pos[0], c.pos[1], c.pos[2], if revert { c.old } else { c.new });
-                };
-                if revert {
-                    changes.iter().rev().for_each(&mut set);
-                } else {
-                    changes.iter().for_each(&mut set);
-                }
-            }
-            Step::Palette { index, old, new } => self.palette[*index as usize] = if revert { *old } else { *new },
+        let mut set = |c: &Change| {
+            self.map.set(c.pos[0], c.pos[1], c.pos[2], if revert { c.old } else { c.new });
+        };
+        if revert {
+            step.voxels.iter().rev().for_each(&mut set);
+        } else {
+            step.voxels.iter().for_each(&mut set);
+        }
+        for c in &step.colors {
+            self.palette[c.index as usize] = if revert { c.old } else { c.new };
         }
     }
 }

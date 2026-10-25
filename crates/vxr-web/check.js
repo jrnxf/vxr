@@ -199,6 +199,67 @@ async () => {
   await key('Escape');
   await key('v');
 
+  // Palette editing, clicking the drawn UI where the editor says each part is.
+  const at = (name) => { const h = window.vxr.hit(name); return h.length ? h : null; };
+  const clickAt = async (name) => { const h = at(name); if (h) await click(h[0], h[1]); return !!h; };
+  const col = (slot) => Array.from(window.vxr.color(slot));
+  const typeInto = async (name, text) => {
+    await clickAt(name);
+    await key('a', cmd);
+    for (const ch of text) await key(ch);
+    await key('Enter');
+  };
+  let used = 1;
+  for (let i = 1; i < 256; i++) if (col(i)[4] > col(used)[4]) used = i;
+  while (st().slot > used) await key('[');
+  while (st().slot < used) await key(']');
+  await frames();
+  step('the Edit button opens the color editor', (await clickAt('edit-color')) && st().colorEdit, JSON.stringify(st()));
+  const c0 = col(used);
+  const sv = at('sv');
+  await drag(sv[0] - 80, sv[1] - 50, sv[0] + 30, sv[1] + 10);
+  let c1 = col(used);
+  step('dragging in the color square recolors every voxel of the slot', c1.slice(0, 3).join() !== c0.slice(0, 3).join() && c1[4] === c0[4] && st().voxels === s0.voxels, `${c0} -> ${c1}`);
+  await key('z', cmd);
+  step('one undo returns the color from before the drag', col(used).join() === c0.join(), `${col(used)}`);
+  await typeInto('field-hex', '#ff8800');
+  step('the hex field sets the color', col(used).slice(0, 3).join() === '255,136,0', `${col(used)}`);
+  await typeInto('field-b', '64');
+  step('the B field sets one channel', col(used).slice(0, 3).join() === '255,136,64', `${col(used)}`);
+  await key('z', cmd);
+  await key('z', cmd);
+  step('each field edit is one undo step', col(used).join() === c0.join(), `${col(used)}`);
+  let free = 1;
+  while (col(free)[4] > 0) free++;
+  const f0 = col(free);
+  await clickAt('swap');
+  step('Swap with… arms the next swatch click', st().slotOp.includes('Swap'), st().slotOp);
+  await clickAt(`sw${free}`);
+  step('swap trades the colors and moves the voxels', col(free).join() === c0.join() && col(used)[4] === 0 && col(used).slice(0, 3).join() === f0.slice(0, 3).join() && st().slot === free, `${col(free)} ${col(used)}`);
+  await key('z', cmd);
+  step('one undo reverts the swap', col(used).join() === c0.join());
+  while (st().slot > used) await key('[');
+  while (st().slot < used) await key(']');
+  await clickAt('copy');
+  await clickAt(`sw${free + 1}`);
+  step('copy gives another slot the color', col(free + 1).slice(0, 3).join() === c0.slice(0, 3).join(), `${col(free + 1)}`);
+  await key('z', cmd);
+  while (st().slot > used) await key('[');
+  while (st().slot < used) await key(']');
+  const [a1, b1] = [at(`sw${used}`), at(`sw${free}`)];
+  await drag(a1[0], a1[1], b1[0], b1[1], 0, { ctrlKey: true });
+  step('Ctrl-drag a swatch onto another swaps them', col(free).join() === c0.join(), `${col(free)}`);
+  await key('z', cmd);
+  await key('Escape');
+  step('Escape closes the color editor', !st().colorEdit);
+  await key('k', cmd);
+  for (const ch of 'edit color') await key(ch);
+  await key('Enter');
+  step('Cmd-K "Edit color" opens it', st().colorEdit);
+  await key('Escape');
+  step('undoing every palette edit gives back the file', same(bytes(), original));
+  await key('v');
+
   // Save (download) and Open (file input).
   const input = document.getElementById('file');
   let picked = 0;

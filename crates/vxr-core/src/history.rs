@@ -9,10 +9,27 @@ pub struct Change {
     pub new: u8,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Step {
-    Voxels(Vec<Change>),
-    Palette { index: u8, old: [u8; 4], new: [u8; 4] },
+/// One palette slot that an edit recoloured.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ColorChange {
+    pub index: u8,
+    pub old: [u8; 4],
+    pub new: [u8; 4],
+}
+
+/// One undo step: the voxels and palette slots a single action changed. A recolour has
+/// only colours, a swap of two slots has both (the colours and the voxels remapped to keep
+/// their look).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Step {
+    pub voxels: Vec<Change>,
+    pub colors: Vec<ColorChange>,
+}
+
+impl Step {
+    pub fn is_empty(&self) -> bool {
+        self.voxels.is_empty() && self.colors.is_empty()
+    }
 }
 
 #[derive(Clone, Debug, Default)]

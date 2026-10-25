@@ -6,7 +6,10 @@ use egui::{
     Align, Align2, Area, Color32, Context, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Id, Key,
     Modifiers, Order, Pos2, Rect, Sense, Shadow, Stroke, StrokeKind, Ui, pos2, vec2,
 };
+use std::collections::HashMap;
 use std::sync::Arc;
+
+use crate::color::{Hsv, hex, parse_hex};
 
 // :root custom properties.
 pub const PANEL: Color32 = Color32::from_rgba_unmultiplied_const(20, 23, 30, 199);
@@ -125,6 +128,8 @@ mod icon {
     pub const REDO: char = '\u{e2a0}';
     pub const SEARCH: char = '\u{e151}';
     pub const CHEVRON_DOWN: char = '\u{e06d}';
+    pub const ARROW_LEFT_RIGHT: char = '\u{e24a}';
+    pub const COPY: char = '\u{e09e}';
 }
 
 pub use vxr_core::tools::{Shape, Tool};
@@ -138,7 +143,40 @@ pub enum Action {
     Redo,
     Frame,
     Embed,
+    /// Show `rgba` in palette slot `slot` now, inside the open colour edit.
+    Recolor {
+        slot: u8,
+        rgba: [u8; 4],
+    },
+    /// Close the colour edit in progress as one undo step.
+    CommitColor,
+    /// Swap two slots, keeping the scene's look.
+    SwapColors(u8, u8),
+    /// Give slot `to` the colour of slot `from`.
+    CopyColor {
+        from: u8,
+        to: u8,
+    },
 }
+
+/// What the next swatch click does, armed from the colour editor or Cmd-K.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SlotOp {
+    Swap,
+    Copy,
+}
+
+/// The colour editor's state. It edits the current slot.
+pub struct ColorEdit {
+    /// Kept between frames so the hue survives greys and black.
+    hsv: Hsv,
+    /// Text of the hex, R, G, B, H, S and V fields.
+    fields: [String; 7],
+}
+
+const FIELDS: [&str; 7] = ["HEX", "R", "G", "B", "H", "S", "V"];
+/// Height of the swatch grid's scrolling view (#swatches max-height).
+const SWATCH_VIEW: f32 = 240.0;
 
 /// Readouts for the stats corner.
 #[derive(Clone, Debug, Default)]
@@ -167,6 +205,15 @@ pub struct Hybrid {
     pub cmdk_sel: usize,
     pub can_undo: bool,
     pub can_redo: bool,
+    pub color_edit: Option<ColorEdit>,
+    pub slot_op: Option<SlotOp>,
+    /// Where each clickable part of the UI was last drawn, in points, by name, for the
+    /// headless checks ("edit-color", "sv", "hue", "swap", "copy", "sw<slot>", ...).
+    pub hits: HashMap<String, Rect>,
+    /// Swatch being dragged with Cmd (swap) or Cmd+Shift (copy).
+    drag_from: Option<u8>,
+    /// The slot the swatch grid last scrolled to.
+    shown_slot: u8,
     shift: bool,
     alt: bool,
     actions: Vec<Action>,
@@ -194,6 +241,9 @@ const COMMANDS: &[Command] = &[
     Command { label: "Open .vox", keys: &["⌘", "O"], run: |h| h.actions.push(Action::Open) },
     Command { label: "Save .vox", keys: &["⌘", "S"], run: |h| h.actions.push(Action::Save) },
     Command { label: "Embed", keys: &[], run: |h| h.actions.push(Action::Embed) },
+    Command { label: "Edit color", keys: &[], run: |h| h.open_color_edit() },
+    Command { label: "Swap color with…", keys: &[], run: |h| h.slot_op = Some(SlotOp::Swap) },
+    Command { label: "Copy color to…", keys: &[], run: |h| h.slot_op = Some(SlotOp::Copy) },
 ];
 
 impl Hybrid {
@@ -211,6 +261,11 @@ impl Hybrid {
             cmdk_sel: 0,
             can_undo: false,
             can_redo: false,
+            color_edit: None,
+            slot_op: None,
+            hits: HashMap::new(),
+            drag_from: None,
+            shown_slot: 28,
             shift: false,
             alt: false,
             actions: Vec::new(),
@@ -239,6 +294,33 @@ impl Hybrid {
         }
     }
 
+    /// Open the colour editor on the current slot.
+    pub fn open_color_edit(&mut self) {
+        if self.color_edit.is_none() {
+            let c = self.palette[self.slot as usize];
+            self.color_edit = Some(ColorEdit { hsv: Hsv::from_rgb([c[0], c[1], c[2]]), fields: Default::default() });
+        }
+    }
+
+    /// Escape: cancel an armed swap or copy, else close the colour editor, else the coach card.
+    fn escape(&mut self) {
+        if self.slot_op.take().is_none() && self.color_edit.take().is_none() {
+            self.coach = false;
+        }
+    }
+
+    /// A swatch was clicked: pick it, or finish an armed swap or copy with it.
+    fn click_slot(&mut self, slot: u8) {
+        match self.slot_op.take() {
+            Some(SlotOp::Swap) if slot != self.slot => self.actions.push(Action::SwapColors(self.slot, slot)),
+            Some(SlotOp::Copy) if slot != self.slot => {
+                self.actions.push(Action::CopyColor { from: self.slot, to: slot })
+            }
+            _ => {}
+        }
+        self.slot = slot;
+    }
+
     fn color(&self, slot: u8) -> Color32 {
         let c = self.palette[slot as usize];
         Color32::from_rgb(c[0], c[1], c[2])
@@ -247,10 +329,12 @@ impl Hybrid {
     /// Draw the whole UI and return what the app should do.
     pub fn ui(&mut self, ctx: &Context, stats: &Stats) -> Vec<Action> {
         self.keys(ctx);
+        self.hits.clear();
         let screen = ctx.content_rect();
         self.top_bar(ctx, screen);
         self.rail(ctx);
         self.palette_panel(ctx, screen);
+        self.color_editor(ctx, screen);
         if self.coach {
             self.coach_card(ctx, screen);
         }
@@ -297,7 +381,7 @@ impl Hybrid {
                 (Key::B, |h| h.shape = Shape::Box),
                 (Key::F, |h| h.shape = Shape::Face),
                 (Key::M, |h| h.mirror = !h.mirror),
-                (Key::Escape, |h| h.coach = false),
+                (Key::Escape, |h| h.escape()),
                 // The coach card's "? for every key": the command list shows every key.
                 (Key::Questionmark, |h| {
                     h.cmdk = Some(String::new());
@@ -437,7 +521,7 @@ impl Hybrid {
         let used_count = self.used.iter().skip(1).filter(|u| **u).count();
         let rect = Rect::from_min_size(
             pos2(screen.right() - 12.0 - 232.0, 68.0),
-            vec2(232.0, 12.0 + 15.0 + 10.0 + 52.0 + 10.0 + 208.0 + 10.0 + 48.0 + 12.0),
+            vec2(232.0, 12.0 + 15.0 + 10.0 + 52.0 + 10.0 + SWATCH_VIEW + 10.0 + 48.0 + 12.0),
         );
         Self::panel(ctx, "palette", rect, Order::Middle, |ui, rect| {
             let inner = rect.shrink(12.0);
@@ -484,48 +568,33 @@ impl Hybrid {
                 vec2(eg.size().x + 18.0, 28.0),
             );
             let er = ui.interact(edit, Id::unique("edit-color"), Sense::click());
-            let (ec, eb) = if er.hovered() { (TEXT, Color32::from_white_alpha(64)) } else { (MUTED, LINE2) };
+            self.hits.insert("edit-color".into(), edit);
+            let open = self.color_edit.is_some();
+            let (ec, eb) = if er.hovered() || open { (TEXT, Color32::from_white_alpha(64)) } else { (MUTED, LINE2) };
+            if open {
+                p.rect_filled(edit, CornerRadius::same(7), HOVER);
+            }
             p.rect_stroke(edit, CornerRadius::same(7), Stroke::new(1.0, eb), StrokeKind::Inside);
             p.galley(edit.center() - eg.size() / 2.0, eg, ec);
-            // #swatches: 8 columns of 22 px with 4 px gaps, 2 px padding.
-            let grid = pos2(inner.left() + 2.0, cur.bottom() + 10.0 + 2.0);
-            for i in 0..64u8 {
-                let slot = i + 1;
-                let (col, row) = ((i % 8) as f32, (i / 8) as f32);
-                let r = Rect::from_min_size(grid + vec2(col * 26.0, row * 26.0), vec2(22.0, 22.0));
-                let resp = ui.interact(r, Id::unique(("sw", slot)), Sense::click());
-                let on = self.slot == slot;
-                let scale = if on {
-                    1.05
-                } else if resp.hovered() {
-                    1.12
+            if er.clicked() {
+                if open {
+                    self.color_edit = None;
                 } else {
-                    1.0
-                };
-                let r = Rect::from_center_size(r.center(), r.size() * scale);
-                if on {
-                    p.rect_filled(r.expand(3.5), CornerRadius::same(9), Color32::WHITE);
-                    p.rect_filled(r.expand(2.0), CornerRadius::same(7), PANEL_SOLID);
-                }
-                p.rect(
-                    r,
-                    CornerRadius::same(5),
-                    self.color(slot),
-                    Stroke::new(1.0, Color32::from_white_alpha(20)),
-                    StrokeKind::Inside,
-                );
-                if self.used[slot as usize] {
-                    // mix-blend-mode: difference against white at 75%.
-                    let bg = self.color(slot);
-                    let d = |v: u8| (v as f32 * 0.25 + (255.0 - v as f32) * 0.75) as u8;
-                    p.circle_filled(r.center(), 2.0, Color32::from_rgb(d(bg.r()), d(bg.g()), d(bg.b())));
-                }
-                if resp.clicked() {
-                    self.slot = slot;
+                    self.open_color_edit();
                 }
             }
+            // #swatches: 8 columns of 22 px with 4 px gaps, 2 px padding, all 255 slots in a
+            // view that scrolls (the prototype's max-height: 240px).
+            let view = Rect::from_min_size(pos2(inner.left(), cur.bottom() + 10.0), vec2(inner.width(), SWATCH_VIEW));
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(view));
+            child.spacing_mut().scroll = egui::style::ScrollStyle::thin();
+            egui::ScrollArea::vertical()
+                .id_salt("swatches")
+                .max_height(SWATCH_VIEW)
+                .auto_shrink([false; 2])
+                .show(&mut child, |ui| self.swatches(ui, view.width()));
             // .note
-            let ny = grid.y + 8.0 * 26.0 - 4.0 + 2.0 + 10.0;
+            let ny = view.bottom() + 10.0;
             let mut job = LayoutJob::default();
             let fmt =
                 |color| TextFormat { font_id: inter(11.0), color, line_height: Some(15.95), ..Default::default() };
@@ -543,6 +612,273 @@ impl Hybrid {
             kbd_frames(&p, pos2(inner.left(), ny), &g, &['[', ']']);
             p.galley(pos2(inner.left(), ny), g, FAINT);
         });
+    }
+
+    // #swatches, inside the scroll view.
+    fn swatches(&mut self, ui: &mut Ui, width: f32) {
+        let (area, _) = ui.allocate_exact_size(vec2(width, 32.0 * 26.0), Sense::hover());
+        let grid = area.min + vec2(2.0, 2.0);
+        let p = ui.painter().clone();
+        let (pointer, released, cmd, shift) =
+            ui.input(|i| (i.pointer.latest_pos(), i.pointer.any_released(), i.modifiers.command, i.modifiers.shift));
+        let visible = ui.clip_rect();
+        let mut drop_on = None;
+        for i in 0..255u8 {
+            let slot = i + 1;
+            let (col, row) = ((i % 8) as f32, (i / 8) as f32);
+            let r = Rect::from_min_size(grid + vec2(col * 26.0, row * 26.0), vec2(22.0, 22.0));
+            let resp = ui.interact(r, Id::unique(("sw", slot)), Sense::click_and_drag());
+            if visible.contains_rect(r) {
+                self.hits.insert(format!("sw{slot}"), r);
+            }
+            let on = self.slot == slot;
+            if on && self.shown_slot != slot {
+                ui.scroll_to_rect(r.expand(4.0), None);
+                self.shown_slot = slot;
+            }
+            let scale = if on {
+                1.05
+            } else if resp.hovered() || (self.drag_from.is_some() && pointer.is_some_and(|q| r.contains(q))) {
+                1.12
+            } else {
+                1.0
+            };
+            let r = Rect::from_center_size(r.center(), r.size() * scale);
+            if on {
+                p.rect_filled(r.expand(3.5), CornerRadius::same(9), Color32::WHITE);
+                p.rect_filled(r.expand(2.0), CornerRadius::same(7), PANEL_SOLID);
+            }
+            p.rect(
+                r,
+                CornerRadius::same(5),
+                self.color(slot),
+                Stroke::new(1.0, Color32::from_white_alpha(20)),
+                StrokeKind::Inside,
+            );
+            if self.used[slot as usize] {
+                // mix-blend-mode: difference against white at 75%.
+                let bg = self.color(slot);
+                let d = |v: u8| (v as f32 * 0.25 + (255.0 - v as f32) * 0.75) as u8;
+                p.circle_filled(r.center(), 2.0, Color32::from_rgb(d(bg.r()), d(bg.g()), d(bg.b())));
+            }
+            if resp.drag_started() && cmd {
+                self.drag_from = Some(slot);
+            }
+            if pointer.is_some_and(|q| r.contains(q)) {
+                drop_on = Some(slot);
+            }
+            if resp.double_clicked() {
+                self.slot = slot;
+                self.open_color_edit();
+            } else if resp.clicked() {
+                self.click_slot(slot);
+            }
+        }
+        // MagicaVoxel's palette drags: Cmd (Ctrl) swaps, Cmd+Shift (Ctrl+Shift) copies.
+        if let Some(from) = self.drag_from {
+            if let Some(q) = pointer {
+                let ghost = Rect::from_center_size(q + vec2(10.0, 10.0), vec2(22.0, 22.0));
+                let lp = ui.ctx().layer_painter(egui::LayerId::new(Order::Tooltip, Id::unique("sw-drag")));
+                lp.rect(
+                    ghost,
+                    CornerRadius::same(5),
+                    self.color(from),
+                    Stroke::new(1.5, Color32::WHITE),
+                    StrokeKind::Outside,
+                );
+            }
+            if released {
+                self.drag_from = None;
+                if let Some(to) = drop_on.filter(|&t| t != from) {
+                    self.slot = from;
+                    self.slot_op = Some(if shift { SlotOp::Copy } else { SlotOp::Swap });
+                    self.click_slot(to);
+                }
+            }
+        }
+    }
+
+    // The colour editor: not in the mockups. A .panel beside #palette, built from its parts
+    // (.ph header, #current-style fields, #edit-color buttons, .note).
+    fn color_editor(&mut self, ctx: &Context, screen: Rect) {
+        let Some(mut ed) = self.color_edit.take() else { return };
+        let slot = self.slot;
+        let c = self.palette[slot as usize];
+        let rgb = [c[0], c[1], c[2]];
+        if ed.hsv.to_rgb() != rgb {
+            ed.hsv = Hsv::from_rgb(rgb);
+        }
+        let w = 232.0;
+        let inner_w = w - 24.0;
+        let mut job = LayoutJob::default();
+        let fmt = |color| TextFormat { font_id: inter(11.0), color, line_height: Some(15.95), ..Default::default() };
+        match self.slot_op {
+            Some(op) => {
+                let what = match op {
+                    SlotOp::Swap => format!("Click a slot to swap with slot {slot}. "),
+                    SlotOp::Copy => "Click a slot to give it this color. ".to_string(),
+                };
+                job.append(&what, 0.0, fmt(TEXT));
+                job.append("Esc cancels.", 0.0, fmt(MUTED));
+            }
+            None => job.append(
+                "Swap trades places with the next slot you click and keeps the scene's look. Copy gives that slot this color.",
+                0.0,
+                fmt(FAINT),
+            ),
+        }
+        job.wrap.max_width = inner_w;
+        let note = ctx.fonts_mut(|f| f.layout_job(job));
+        let sv_h = 136.0;
+        let h = 12.0
+            + 15.0
+            + 10.0
+            + sv_h
+            + 10.0
+            + 12.0
+            + 12.0
+            + 3.0 * 28.0
+            + 2.0 * 6.0
+            + 12.0
+            + 28.0
+            + 10.0
+            + note.size().y
+            + 12.0;
+        let rect = Rect::from_min_size(pos2(screen.right() - 12.0 - 232.0 - 8.0 - w, 68.0), vec2(w, h));
+        let (mut close, mut commit, mut live) = (false, false, false);
+        let mut op = None;
+        let mut hits = Vec::new();
+        let current = [
+            hex(rgb),
+            rgb[0].to_string(),
+            rgb[1].to_string(),
+            rgb[2].to_string(),
+            format!("{:.0}", ed.hsv.h),
+            format!("{:.0}", ed.hsv.s * 100.0),
+            format!("{:.0}", ed.hsv.v * 100.0),
+        ];
+        Self::panel(ctx, "color-edit", rect, Order::Middle, |ui, rect| {
+            let inner = rect.shrink(12.0);
+            let p = ui.painter().clone();
+            // .ph
+            let hy = inner.top() + 7.5;
+            let g = p.layout_job(spaced("EDIT COLOR", inter_semibold(11.0), MUTED, 0.88));
+            p.galley(pos2(inner.left(), hy - g.size().y / 2.0), g, MUTED);
+            let x = Rect::from_center_size(pos2(inner.right() - 6.0, hy), vec2(16.0, 22.0));
+            let xr = ui.interact(x, Id::unique("color-edit-x"), Sense::click());
+            hits.push(("color-edit-x", x));
+            p.text(x.center(), Align2::CENTER_CENTER, "×", inter(18.0), if xr.hovered() { TEXT } else { FAINT });
+            close |= xr.clicked();
+            p.text(pos2(x.left() - 6.0, hy), Align2::RIGHT_CENTER, format!("Slot {slot}"), mono(11.0), FAINT);
+            // Saturation (across) and value (down) at the current hue.
+            let sv = Rect::from_min_size(pos2(inner.left(), inner.top() + 25.0), vec2(inner.width(), sv_h));
+            let hue = ed.hsv.h;
+            gradient(&p, sv, 16, 8, |u, v| {
+                let c = Hsv { h: hue, s: u, v: 1.0 - v }.to_rgb();
+                Color32::from_rgb(c[0], c[1], c[2])
+            });
+            p.rect_stroke(sv, CornerRadius::ZERO, Stroke::new(1.0, LINE), StrokeKind::Inside);
+            let r = ui.interact(sv, Id::unique("sv"), Sense::click_and_drag());
+            hits.push(("sv", sv));
+            if r.is_pointer_button_down_on()
+                && let Some(q) = r.interact_pointer_pos()
+            {
+                ed.hsv.s = ((q.x - sv.left()) / sv.width()).clamp(0.0, 1.0);
+                ed.hsv.v = 1.0 - ((q.y - sv.top()) / sv.height()).clamp(0.0, 1.0);
+                live = true;
+            }
+            commit |= r.drag_stopped() || r.clicked();
+            handle(
+                &p,
+                pos2(sv.left() + ed.hsv.s * sv.width(), sv.top() + (1.0 - ed.hsv.v) * sv.height()),
+                ed.hsv.to_rgb(),
+            );
+            // Hue.
+            let hb = Rect::from_min_size(pos2(inner.left(), sv.bottom() + 10.0), vec2(inner.width(), 12.0));
+            gradient(&p, hb, 36, 1, |u, _| {
+                let c = Hsv { h: u * 360.0, s: 1.0, v: 1.0 }.to_rgb();
+                Color32::from_rgb(c[0], c[1], c[2])
+            });
+            p.rect_stroke(hb, CornerRadius::ZERO, Stroke::new(1.0, LINE), StrokeKind::Inside);
+            let r = ui.interact(hb.expand2(vec2(0.0, 4.0)), Id::unique("hue"), Sense::click_and_drag());
+            hits.push(("hue", hb));
+            if r.is_pointer_button_down_on()
+                && let Some(q) = r.interact_pointer_pos()
+            {
+                ed.hsv.h = ((q.x - hb.left()) / hb.width()).clamp(0.0, 1.0) * 360.0;
+                live = true;
+            }
+            commit |= r.drag_stopped() || r.clicked();
+            let hc = Hsv { h: ed.hsv.h, s: 1.0, v: 1.0 }.to_rgb();
+            handle(&p, pos2(hb.left() + ed.hsv.h / 360.0 * hb.width(), hb.center().y), hc);
+            // Fields: hex across, then R G B and H S V.
+            let mut y = hb.bottom() + 12.0;
+            let third = (inner.width() - 12.0) / 3.0;
+            let mut rects = vec![Rect::from_min_size(pos2(inner.left(), y), vec2(inner.width(), 28.0))];
+            for _ in 0..2 {
+                y += 28.0 + 6.0;
+                for k in 0..3 {
+                    rects
+                        .push(Rect::from_min_size(pos2(inner.left() + k as f32 * (third + 6.0), y), vec2(third, 28.0)));
+                }
+            }
+            for (i, fr) in rects.into_iter().enumerate() {
+                let id = Id::unique(("color-field", i));
+                if !ui.memory(|m| m.has_focus(id)) {
+                    ed.fields[i] = current[i].clone();
+                }
+                hits.push((["field-hex", "field-r", "field-g", "field-b", "field-h", "field-s", "field-v"][i], fr));
+                if field(ui, fr, FIELDS[i], id, &mut ed.fields[i]) && ed.fields[i] != current[i] {
+                    let t = ed.fields[i].trim().trim_end_matches('%').trim_end_matches('°');
+                    let num = t.parse::<f32>().ok();
+                    let mut c = rgb;
+                    let mut hsv = ed.hsv;
+                    let ok = match i {
+                        0 => parse_hex(t).map(|v| c = v).is_some(),
+                        1..=3 => num.map(|n| c[i - 1] = n.round().clamp(0.0, 255.0) as u8).is_some(),
+                        4 => num.map(|n| hsv.h = n.clamp(0.0, 360.0)).is_some(),
+                        _ => num.map(|n| *[&mut hsv.s, &mut hsv.v][i - 5] = (n / 100.0).clamp(0.0, 1.0)).is_some(),
+                    };
+                    if ok {
+                        ed.hsv = if i >= 4 { hsv } else { Hsv::from_rgb(c) };
+                        (live, commit) = (true, true);
+                    }
+                }
+            }
+            // Swap and copy.
+            let by = y + 28.0 + 12.0;
+            let half = (inner.width() - 6.0) / 2.0;
+            for (k, (o, glyph, label, name)) in [
+                (SlotOp::Swap, icon::ARROW_LEFT_RIGHT, "Swap with…", "swap"),
+                (SlotOp::Copy, icon::COPY, "Copy to…", "copy"),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let br = Rect::from_min_size(pos2(inner.left() + k as f32 * (half + 6.0), by), vec2(half, 28.0));
+                hits.push((name, br));
+                if small_button(ui, br, glyph, label, name, self.slot_op == Some(o)).clicked() {
+                    op = Some(if self.slot_op == Some(o) { None } else { Some(o) });
+                }
+            }
+            p.galley(pos2(inner.left(), by + 28.0 + 10.0), note, FAINT);
+        });
+        for (k, r) in hits {
+            self.hits.insert(k.into(), r);
+        }
+        if let Some(o) = op {
+            self.slot_op = o;
+        }
+        if live {
+            let c = ed.hsv.to_rgb();
+            self.actions.push(Action::Recolor { slot, rgba: [c[0], c[1], c[2], self.palette[slot as usize][3]] });
+        }
+        if commit {
+            self.actions.push(Action::CommitColor);
+        }
+        if !close {
+            self.color_edit = Some(ed);
+        }
     }
 
     // #welcome
@@ -689,7 +1025,29 @@ impl Hybrid {
     // #hint
     fn hint_bar(&self, ctx: &Context, screen: Rect) {
         let t = self.effective_tool();
-        let mut items: Vec<(&str, &str)> = match (t, self.shape) {
+        let armed;
+        let mut items: Vec<(&str, &str)> = match (self.slot_op, t, self.shape) {
+            (Some(op), _, _) => {
+                armed = match op {
+                    SlotOp::Swap => format!("a slot to swap with slot {}", self.slot),
+                    SlotOp::Copy => format!("a slot to copy slot {} to", self.slot),
+                };
+                vec![("Click", armed.as_str()), ("Esc", "cancel")]
+            }
+            (None, t, shape) => self.tool_hints(t, shape),
+        };
+        if self.slot_op.is_none() {
+            items.extend([("Shift", "erase"), ("Alt", "pick"), ("Right-drag", "orbit")]);
+            if t == Tool::Erase && self.shift {
+                let n = items.len();
+                items.remove(n - 3);
+            }
+        }
+        self.hint_panel(ctx, screen, &items);
+    }
+
+    fn tool_hints(&self, t: Tool, shape: Shape) -> Vec<(&'static str, &'static str)> {
+        match (t, shape) {
             (Tool::Add, Shape::Voxel) => vec![("Click", "add"), ("Drag", "draw on that plane")],
             (Tool::Add, Shape::Box) => vec![("Drag", "fill a rectangle")],
             (Tool::Add, Shape::Face) => vec![("Click", "extrude the whole face")],
@@ -700,12 +1058,10 @@ impl Hybrid {
             (Tool::Paint, Shape::Box) => vec![("Drag", "paint a rectangle")],
             (Tool::Paint, Shape::Face) => vec![("Click", "fill the connected face")],
             (Tool::Pick, _) => vec![("Click", "take that color")],
-        };
-        items.extend([("Shift", "erase"), ("Alt", "pick"), ("Right-drag", "orbit")]);
-        if t == Tool::Erase && self.shift {
-            let n = items.len();
-            items.remove(n - 3);
         }
+    }
+
+    fn hint_panel(&self, ctx: &Context, screen: Rect, items: &[(&str, &str)]) {
         let mut job = LayoutJob::default();
         for (i, (k, v)) in items.iter().enumerate() {
             let lead = if i == 0 { 0.0 } else { 14.0 };
@@ -1003,6 +1359,78 @@ fn group_thousands(n: u64) -> String {
         out.push(c);
     }
     out
+}
+
+/// A smooth gradient over `rect`: a grid of `cols` x `rows` quads coloured by `f(u, v)` at
+/// each corner, so the colours are exact at the grid points.
+fn gradient(p: &egui::Painter, rect: Rect, cols: usize, rows: usize, f: impl Fn(f32, f32) -> Color32) {
+    let mut m = egui::Mesh::default();
+    for j in 0..=rows {
+        for i in 0..=cols {
+            let (u, v) = (i as f32 / cols as f32, j as f32 / rows as f32);
+            m.colored_vertex(rect.lerp_inside(vec2(u, v)), f(u, v));
+        }
+    }
+    let row = (cols + 1) as u32;
+    for j in 0..rows as u32 {
+        for i in 0..cols as u32 {
+            let a = j * row + i;
+            m.add_triangle(a, a + 1, a + row);
+            m.add_triangle(a + 1, a + row + 1, a + row);
+        }
+    }
+    p.add(m);
+}
+
+/// A picker handle: the colour in a white ring with a soft dark edge.
+fn handle(p: &egui::Painter, at: Pos2, c: [u8; 3]) {
+    p.circle(at, 6.0, Color32::from_rgb(c[0], c[1], c[2]), Stroke::new(2.0, Color32::WHITE));
+    p.circle_stroke(at, 7.5, Stroke::new(1.0, Color32::from_black_alpha(100)));
+}
+
+/// A text field in the #current box style, with a faint mono label. Returns true when the
+/// field gives up focus (Enter, Tab or a click elsewhere), the moment to apply it.
+fn field(ui: &mut Ui, rect: Rect, label: &str, id: Id, text: &mut String) -> bool {
+    let focused = ui.memory(|m| m.has_focus(id));
+    let p = ui.painter().clone();
+    let border = if focused { Color32::from_rgba_unmultiplied(142, 162, 255, 140) } else { LINE };
+    p.rect(rect, CornerRadius::same(7), Color32::from_white_alpha(9), Stroke::new(1.0, border), StrokeKind::Inside);
+    let g = p.layout_no_wrap(label.into(), mono(10.0), FAINT);
+    let lw = g.size().x;
+    p.galley(pos2(rect.left() + 9.0, rect.center().y - g.size().y / 2.0), g, FAINT);
+    let tr = Rect::from_min_max(
+        pos2(rect.left() + 9.0 + lw + 7.0, rect.top() + 6.0),
+        pos2(rect.right() - 7.0, rect.bottom() - 6.0),
+    );
+    let edit = egui::TextEdit::singleline(text)
+        .id(id)
+        .font(mono(12.0))
+        .text_color(TEXT)
+        .frame(egui::Frame::NONE)
+        .margin(egui::Margin::ZERO)
+        .desired_width(tr.width());
+    ui.put(tr, edit).lost_focus()
+}
+
+// #edit-color, at a fixed size with an icon; `on` is the .tool.on look for an armed action.
+fn small_button(ui: &mut Ui, r: Rect, glyph: char, label: &str, id: &str, on: bool) -> egui::Response {
+    let resp = ui.interact(r, Id::unique(("sbtn", id)), Sense::click());
+    let p = ui.painter();
+    let (color, border) = if on {
+        p.rect_filled(r, CornerRadius::same(7), ACCENT_BG);
+        (ACCENT, Color32::from_rgba_unmultiplied(142, 162, 255, 89))
+    } else if resp.hovered() {
+        (TEXT, Color32::from_white_alpha(64))
+    } else {
+        (MUTED, LINE2)
+    };
+    p.rect_stroke(r, CornerRadius::same(7), Stroke::new(1.0, border), StrokeKind::Inside);
+    let g = p.layout_no_wrap(label.into(), inter(12.0), color);
+    let total = 14.0 + 6.0 + g.size().x;
+    let x = r.center().x - total / 2.0;
+    p.text(pos2(x + 7.0, r.center().y), Align2::CENTER_CENTER, glyph, icon_font(14.0), color);
+    p.galley(pos2(x + 20.0, r.center().y - g.size().y / 2.0), g, color);
+    resp
 }
 
 // #brand .logo: the 24-unit hexagonal cube from the prototype's SVG, scaled to `size`.

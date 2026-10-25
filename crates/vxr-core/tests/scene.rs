@@ -52,6 +52,73 @@ fn undo_of_overlapping_cells_in_one_step_restores_the_first_value() {
 }
 
 #[test]
+fn a_dragged_colour_is_one_undo_step() {
+    let mut s = Scene::new([8, 8, 8]);
+    s.edit([([0, 0, 0], 4)]);
+    let original = s.palette[4];
+    for g in 0..=255u8 {
+        s.put_color(4, [10, g, 30, 255]);
+    }
+    assert_eq!(s.palette[4], [10, 255, 30, 255], "the colour shows while it is dragged");
+    s.commit();
+    assert!(s.undo());
+    assert_eq!(s.palette[4], original, "one undo returns the colour from before the drag");
+    assert_eq!(s.map.get(0, 0, 0), 4, "the voxel edit before it is a separate step");
+    assert!(s.redo());
+    assert_eq!(s.palette[4], [10, 255, 30, 255]);
+
+    let five = s.palette[5];
+    s.put_color(5, [1, 1, 1, 255]);
+    s.put_color(5, five);
+    s.commit();
+    assert!(s.undo() && s.palette[4] == original, "a colour dragged back to where it started adds no step");
+}
+
+#[test]
+fn swapping_two_colours_keeps_the_look_and_undoes_in_one_step() {
+    let mut s = Scene::new([8, 8, 8]);
+    s.edit([([0, 0, 0], 3), ([1, 0, 0], 3), ([2, 0, 0], 7)]);
+    s.set_color(3, [200, 0, 0, 255]);
+    s.set_color(7, [0, 0, 200, 255]);
+    let look = |s: &Scene| -> BTreeMap<[i32; 3], [u8; 4]> {
+        let mut out = BTreeMap::new();
+        s.for_each_voxel(|p, c| {
+            out.insert(p, s.palette[c as usize]);
+        });
+        out
+    };
+    let before = (look(&s), s.palette, world_voxels(&s));
+    assert_eq!(s.swap_colors(3, 7), 3);
+    assert_eq!(look(&s), before.0, "every voxel shows the same colour");
+    assert_eq!((s.palette[3], s.palette[7]), ([0, 0, 200, 255], [200, 0, 0, 255]));
+    assert_eq!((s.map.get(0, 0, 0), s.map.get(2, 0, 0)), (7, 3));
+    assert_eq!((s.map.counts[3], s.map.counts[7]), (1, 2));
+    assert!(s.undo());
+    assert_eq!((s.palette, world_voxels(&s)), (before.1, before.2));
+    assert!(s.redo());
+    assert_eq!(look(&s), before.0);
+    assert_eq!(s.swap_colors(3, 3), 0);
+    assert_eq!(s.swap_colors(0, 3), 0, "slot 0 is empty and never swapped");
+
+    // Swapping with an unused slot moves the colour and its voxels there.
+    let n = s.swap_colors(7, 100);
+    assert_eq!((n, s.map.counts[7], s.map.counts[100]), (2, 0, 2));
+    assert_eq!(look(&s), before.0);
+}
+
+#[test]
+fn copying_a_colour_recolours_the_target_slot() {
+    let mut s = Scene::new([8, 8, 8]);
+    s.edit([([0, 0, 0], 3), ([1, 0, 0], 7)]);
+    let old = s.palette[7];
+    s.copy_color(3, 7);
+    assert_eq!(s.palette[7], s.palette[3]);
+    assert_eq!(s.map.get(1, 0, 0), 7, "voxels keep their slot");
+    assert!(s.undo());
+    assert_eq!(s.palette[7], old);
+}
+
+#[test]
 fn axes_follow_magicavoxel_z_up() {
     // One voxel at file (1, 2, 3) in a 4x4x4 model placed at the origin.
     let mut b = Builder::new(200);

@@ -252,12 +252,14 @@ impl App {
         let e = &self.editor;
         let (c, h) = (&e.cam, e.scene.history());
         format!(
-            r#"{{"voxels":{},"tool":"{:?}","shape":"{:?}","mirror":{},"slot":{},"undo":{},"redo":{},"cmdk":{},"coach":{},"name":{:?},"size":[{},{}],"ppp":{},"cam":[{},{},{},{},{},{}]}}"#,
+            r#"{{"voxels":{},"tool":"{:?}","shape":"{:?}","mirror":{},"slot":{},"colorEdit":{},"slotOp":"{:?}","undo":{},"redo":{},"cmdk":{},"coach":{},"name":{:?},"size":[{},{}],"ppp":{},"cam":[{},{},{},{},{},{}]}}"#,
             e.scene.map.voxels,
             e.ui.tool,
             e.ui.shape,
             e.ui.mirror,
             e.ui.slot,
+            e.ui.color_edit.is_some(),
+            e.ui.slot_op,
             h.can_undo(),
             h.can_redo(),
             e.ui.cmdk.is_some(),
@@ -273,6 +275,18 @@ impl App {
             c.pitch,
             c.distance,
         )
+    }
+
+    /// The RGBA colour of palette slot `slot` and how many voxels use it.
+    pub fn color(&self, slot: u8) -> Vec<u32> {
+        let c = self.editor.scene.palette[slot as usize];
+        vec![c[0] as u32, c[1] as u32, c[2] as u32, c[3] as u32, self.editor.scene.map.counts[slot as usize]]
+    }
+
+    /// The middle of a named part of the UI in CSS pixels (see `Hybrid::hits`), or an empty
+    /// array if it is not on screen. For the browser check.
+    pub fn hit(&self, name: &str) -> Vec<f32> {
+        self.editor.ui.hits.get(name).map(|r| vec![r.center().x, r.center().y]).unwrap_or_default()
     }
 
     /// Show a short message in the editor.
