@@ -35,7 +35,7 @@ Feature names below follow the update log [S1] unless another source is given.
 | Line brush (L) | Line, square and circle in one geometry mode since 0.99.6.2 [S1 0.99.6.2] | done (L: drag a line on the drag plane, shown live) | P1 | sculpt |
 | Center brush (C) | Square or circle from a center point, even diameters [S1 0.97, 0.97.1] | done (C: circle on the drag plane from its center, C again for a sphere; no square or even diameters) | P1 | sculpt |
 | Pattern brush (P) | Stamp a pattern made from a selection, rotate and offset it [S1 0.98.1] | missing | P2 | minutes |
-| Mirror X, Y, Z | Per-axis mirror on every brush [S1 0.97] | done (M toggles; X, Y, Z chips in the axis flyout; x and z planes at world 0, y at the middle of the model's height) | P1 | sculpt |
+| Mirror X, Y, Z | Per-axis mirror on every brush [S1 0.97] | done (M toggles; X, Y, Z chips in the axis flyout; planes in `docs/decisions.md`) | P1 | sculpt |
 | Axis lock | Brush option "axis" [S1 0.97, 0.99.5.1] | done (K cycles X, Y, Z, off: drags stay on the plane across that axis) | P1 | sculpt |
 | Diagonal symmetry | Command `dia [axis]` [S1 0.98.1] | missing | P3 | - |
 | Region options | Brushes act on selected or unselected voxels only [S1 0.98.1, 0.99.5.1] | missing (selection is in [5]; brushes ignore it so far) | P2 | sculpt |
