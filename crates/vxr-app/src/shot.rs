@@ -798,8 +798,21 @@ fn render_panel(s: &mut Shot, dir: &Path) -> Result<(), String> {
     s.frames_with(1, vec![egui::Event::Text("export png".into())]);
     s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
     let started = s.ed.export.is_some();
+    // An edit during the export reaches the corner once the export ends.
+    let restarts = s.ed.preview.restarts;
+    s.tool(Tool::Add, Shape::Voxel);
+    let mid = [s.ed.width as f32 / 2.0, s.ed.height as f32 / 2.0];
+    let p = s.top_face_pixel(mid)?;
+    s.stroke(p, &[]);
+    s.frames(1);
     s.ui_click("rs-export")?;
-    check(started && s.ed.export.is_none(), "Cmd-K Export PNG starts an export; the panel's button cancels it".into())?;
+    s.frames(1);
+    check(
+        started && s.ed.export.is_none() && s.ed.preview.restarts > restarts,
+        "Cmd-K Export PNG starts an export; the panel's button cancels it; an edit meanwhile restarts the corner"
+            .into(),
+    )?;
+    s.ed.undo();
     s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
     check(!s.ed.ui.render_panel, "Escape closes the Render panel".into())?;
     s.ed.ui.render = Default::default();

@@ -52,7 +52,7 @@ pub struct Editor {
     renderer: Renderer,
     /// The live path-traced preview in the corner.
     pub preview: Preview,
-    /// Whether the preview drew last frame (showing it again restarts it).
+    /// Whether the preview drew last frame and is up to date (showing it again restarts it).
     preview_shown: bool,
     /// When input last arrived (ms, `now_ms`).
     last_input: f64,
@@ -658,14 +658,17 @@ impl Editor {
             x.encode(queue, &mut enc, &self.map, edit);
         }
         // An export takes the corner's GPU time; the corner keeps its last image meanwhile.
-        if corner.is_some() && self.export.is_none() {
+        let paused = corner.is_some() && self.export.is_some();
+        if corner.is_some() && !paused {
             if !self.preview_shown {
                 self.preview.restart();
             }
             let idle = now_ms() - self.last_input > IDLE_MS;
             self.preview.encode(queue, &mut enc, &self.map, &self.cam, edit, idle);
         }
-        self.preview_shown = corner.is_some();
+        // This frame's edit went only to the export, so an edit while paused leaves the
+        // corner stale until it restarts.
+        self.preview_shown = corner.is_some() && !(paused && (edit.is_some() || !self.preview_shown));
         self.renderer.march(&mut enc, &self.map, None);
         if let Some(r) = corner {
             let px = [r.left() * ppp, r.top() * ppp, r.width() * ppp, r.height() * ppp];
