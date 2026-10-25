@@ -220,7 +220,7 @@ impl Document {
         }
         let want: BTreeMap<[i32; 3], u8> = world.iter().filter(|(_, c)| **c != 0).map(|(p, c)| (*p, *c)).collect();
         let mut kept = self.clone();
-        if kept.apply_changes(&changes).is_ok() && kept.scene()?.world_voxels(Rule::Compose) == want {
+        if kept.apply_changes(&changes).is_ok() && kept.scene().is_ok_and(|s| s.world_voxels(Rule::Compose) == want) {
             *self = kept;
             return Ok(WorldSave::Kept);
         }
