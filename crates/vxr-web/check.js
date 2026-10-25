@@ -294,6 +294,28 @@ async () => {
   step('0 snaps to isometric', st().view === 'Isometric' && st().ortho);
   await chip('view-persp');
   step('Persp: back to perspective', !st().ortho && st().view === null);
+  // Guides: grid, ground and bounds on by default; the flyout, G and Cmd-K toggle them.
+  step('the grid, ground and bounds show by default', st().guides.join() === 'true,true,true', JSON.stringify(st().guides));
+  const guideFlips = [];
+  for (const [n, i] of [['view-grid', 0], ['view-ground', 1], ['view-bounds', 2]]) {
+    await chip(n);
+    const off = !st().guides[i];
+    await chip(n);
+    guideFlips.push(off && st().guides[i]);
+  }
+  step("the flyout's Grid, Ground and Bounds buttons hide and show them", guideFlips.every(Boolean), guideFlips.join());
+  await key('g');
+  const gridOff = !st().guides[0];
+  await key('g');
+  step('G toggles the grid', gridOff && st().guides[0]);
+  await key('k', cmd);
+  for (const ch of 'show bounds') await key(ch);
+  await key('Enter');
+  const boundsOff = !st().guides[2];
+  await key('k', cmd);
+  for (const ch of 'show bounds') await key(ch);
+  await key('Enter');
+  step("Cmd-K 'Show bounds' hides and shows the bounds", boundsOff && st().guides[2]);
   await key('Escape');
   step('Escape closes the View flyout', !st().viewPanel);
   await key('.');

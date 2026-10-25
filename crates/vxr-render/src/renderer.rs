@@ -18,6 +18,26 @@ struct CameraUniform {
     sun: [f32; 4],
     cursor: [i32; 4],
     select: [u32; 4],
+    pix: [f32; 4],
+    bounds: [u32; 4],
+}
+
+/// What the editor view draws besides the voxels, in map coordinates. Off by default, so a
+/// bare render shows only the voxels and the background.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Guides {
+    /// The model bounds' size in voxels: the box from the map origin.
+    pub bounds: [u32; 3],
+    /// The map layer the ground sits on.
+    pub floor: i32,
+    /// A line on every voxel edge of the ground inside the bounds.
+    pub grid: bool,
+    /// The ground plane, its bounds footprint a shade lighter.
+    pub ground: bool,
+    /// The bounds box's twelve edges.
+    pub frame: bool,
+    /// Line width in pixels (the display's pixels per point).
+    pub line: f32,
 }
 
 pub struct Renderer {
@@ -31,6 +51,8 @@ pub struct Renderer {
     pub color: wgpu::Texture,
     pub depth: wgpu::Texture,
     pub info: wgpu::Texture,
+    /// Which bounds edges pass near each FRAME_TILE square of the view (see `frame_tiles`).
+    tiles: wgpu::Buffer,
     march: wgpu::ComputePipeline,
     blit: wgpu::RenderPipeline,
     blit_layout: wgpu::BindGroupLayout,
@@ -41,6 +63,7 @@ pub struct Renderer {
     sel_layout: wgpu::BindGroupLayout,
     sel_group: wgpu::BindGroup,
     sel_words: u32,
+    pub guides: Guides,
 }
 
 impl Renderer {
@@ -68,6 +91,16 @@ impl Renderer {
                 storage_tex(1, wgpu::TextureFormat::Rgba8Unorm),
                 storage_tex(2, wgpu::TextureFormat::R32Float),
                 storage_tex(3, wgpu::TextureFormat::R32Uint),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
         let cam = device.create_buffer(&wgpu::BufferDescriptor {
@@ -184,6 +217,7 @@ impl Renderer {
             color: t.color,
             depth: t.depth,
             info: t.info,
+            tiles: t.tiles,
             march,
             blit,
             blit_layout,
@@ -193,6 +227,7 @@ impl Renderer {
             sel_layout,
             sel_group,
             sel_words: 0,
+            guides: Guides::default(),
         }
     }
 
@@ -223,8 +258,8 @@ impl Renderer {
             height,
             self.gbuffer,
         );
-        (self.color, self.depth, self.info, self.out_group, self.blit_group) =
-            (t.color, t.depth, t.info, t.out_group, t.blit_group);
+        (self.color, self.depth, self.info, self.tiles, self.out_group, self.blit_group) =
+            (t.color, t.depth, t.info, t.tiles, t.out_group, t.blit_group);
         self.width = width;
         self.height = height;
     }
@@ -236,13 +271,31 @@ impl Renderer {
         let sun = glam::Vec3::new(0.45, 0.8, 0.35).normalize();
         // eye.w = 0: orthographic, rays start on the near plane (see `primary_ray`).
         let c = cursor.unwrap_or([0; 3]);
+        // World size of a pixel at ray distance t: constant in orthographic, growing with t in
+        // perspective.
+        let h = self.height as f32;
+        let pix = if cam.ortho { [2.0 * cam.half_height() / h, 0.0] } else { [0.0, 2.0 * (cam.fov_y * 0.5).tan() / h] };
+        let g = &self.guides;
+        let (w, h) = (self.width as f32, self.height as f32);
+        if g.frame {
+            let edges = bounds_edges(vp, g.bounds, w, h);
+            let reach = g.line.max(1.0) * 0.5 + 1.5;
+            queue.write_buffer(
+                &self.tiles,
+                0,
+                bytemuck::cast_slice(&frame_tiles(&edges, self.width, self.height, reach)),
+            );
+        }
+        let flags = g.grid as u32 | (g.ground as u32) << 1 | (g.frame as u32) << 2;
         let u = CameraUniform {
             inv_vp: vp.inverse().to_cols_array_2d(),
             eye: [eye.x, eye.y, eye.z, if cam.ortho { 0.0 } else { 1.0 }],
             size: [self.width as f32, self.height as f32, 1.0 / self.width as f32, 1.0 / self.height as f32],
             sun: [sun.x, sun.y, sun.z, 0.0],
             cursor: [c[0], c[1], c[2], cursor.is_some() as i32],
-            select: [self.sel_words, 0, 0, 0],
+            select: [self.sel_words, self.width.div_ceil(FRAME_TILE), 0, 0],
+            pix: [pix[0], pix[1], g.floor as f32, g.line.max(1.0)],
+            bounds: [g.bounds[0], g.bounds[1], g.bounds[2], flags],
         };
         queue.write_buffer(&self.cam, 0, bytemuck::bytes_of(&u));
     }
@@ -294,10 +347,89 @@ impl Renderer {
     }
 }
 
+/// Side of the square tiles the bounds edges are binned into, in pixels.
+const FRAME_TILE: u32 = 32;
+
+/// One bit per bounds edge for each FRAME_TILE square of a `width` x `height` view: set when
+/// the edge's segment comes within `reach` pixels of the tile, so a pixel tests only the
+/// edges that can cover it (usually none).
+fn frame_tiles(edges: &[[f32; 4]; 12], width: u32, height: u32, reach: f32) -> Vec<u32> {
+    let (tw, th) = (width.div_ceil(FRAME_TILE), height.div_ceil(FRAME_TILE));
+    let mut tiles = vec![0u32; (tw * th) as usize];
+    let t = FRAME_TILE as f32;
+    // Samples every half tile are within a quarter tile of every point of the segment.
+    let r = reach + t * 0.25;
+    let (w, h) = (width as f32, height as f32);
+    for (e, s) in edges.iter().enumerate() {
+        let (a, b) = (glam::Vec2::new(s[0], s[1]), glam::Vec2::new(s[2], s[3]));
+        // Clip to the view grown by `r` (Liang-Barsky), so far-off segments cost nothing.
+        let d = b - a;
+        let (mut t0, mut t1) = (0f32, 1f32);
+        for (p, q) in [(-d.x, a.x + r), (d.x, w + r - a.x), (-d.y, a.y + r), (d.y, h + r - a.y)] {
+            if p == 0.0 {
+                if q < 0.0 {
+                    t1 = -1.0;
+                }
+            } else if p < 0.0 {
+                t0 = t0.max(q / p);
+            } else {
+                t1 = t1.min(q / p);
+            }
+        }
+        if t0 > t1 {
+            continue;
+        }
+        let (a, b) = (a + d * t0, a + d * t1);
+        let steps = ((b - a).length() / (t * 0.5)).ceil().max(1.0) as u32;
+        for i in 0..=steps {
+            let p = a.lerp(b, i as f32 / steps as f32);
+            let x0 = ((p.x - r) / t).floor().max(0.0) as u32;
+            let y0 = ((p.y - r) / t).floor().max(0.0) as u32;
+            let x1 = (((p.x + r) / t).floor().max(0.0) as u32).min(tw - 1);
+            let y1 = (((p.y + r) / t).floor().max(0.0) as u32).min(th - 1);
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    tiles[(y * tw + x) as usize] |= 1 << e;
+                }
+            }
+        }
+    }
+    tiles
+}
+
+/// The bounds box's twelve edges in pixels, in the order `march.wgsl` numbers them: edge 3n + k
+/// runs along axis k, at the corner (n & 1, n >> 1) of the other two axes (k + 1, k + 2).
+/// Edges are clipped to the near plane; one wholly behind the eye lands far off screen.
+fn bounds_edges(vp: glam::Mat4, size: [u32; 3], w: f32, h: f32) -> [[f32; 4]; 12] {
+    const NEAR: f32 = 1e-3;
+    let s = glam::Vec3::new(size[0] as f32, size[1] as f32, size[2] as f32);
+    let screen = |c: glam::Vec4| [(c.x / c.w * 0.5 + 0.5) * w, (0.5 - c.y / c.w * 0.5) * h];
+    std::array::from_fn(|e| {
+        let (n, k) = (e / 3, e % 3);
+        let mut p0 = glam::Vec3::ZERO;
+        p0[(k + 1) % 3] = if n & 1 != 0 { s[(k + 1) % 3] } else { 0.0 };
+        p0[(k + 2) % 3] = if n & 2 != 0 { s[(k + 2) % 3] } else { 0.0 };
+        let mut p1 = p0;
+        p1[k] = s[k];
+        let (mut c0, mut c1) = (vp * p0.extend(1.0), vp * p1.extend(1.0));
+        if c0.w < NEAR && c1.w < NEAR {
+            return [-1e6; 4];
+        }
+        if c0.w < NEAR {
+            c0 = c0.lerp(c1, (NEAR - c0.w) / (c1.w - c0.w));
+        } else if c1.w < NEAR {
+            c1 = c1.lerp(c0, (NEAR - c1.w) / (c0.w - c1.w));
+        }
+        let (a, b) = (screen(c0), screen(c1));
+        [a[0], a[1], b[0], b[1]]
+    })
+}
+
 struct Targets {
     color: wgpu::Texture,
     depth: wgpu::Texture,
     info: wgpu::Texture,
+    tiles: wgpu::Buffer,
     out_group: wgpu::BindGroup,
     blit_group: wgpu::BindGroup,
 }
@@ -335,6 +467,12 @@ impl Targets {
         let info = tex("info", wgpu::TextureFormat::R32Uint, gw, gh);
         let v = |t: &wgpu::Texture| t.create_view(&Default::default());
         let (cv, dv, iv) = (v(&color), v(&depth), v(&info));
+        let tiles = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("frame tiles"),
+            size: (w.div_ceil(FRAME_TILE) * h.div_ceil(FRAME_TILE)) as u64 * 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let out_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("march out"),
             layout: out_layout,
@@ -343,6 +481,7 @@ impl Targets {
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&cv) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&dv) },
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&iv) },
+                wgpu::BindGroupEntry { binding: 4, resource: tiles.as_entire_binding() },
             ],
         });
         let blit_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -353,7 +492,7 @@ impl Targets {
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(sampler) },
             ],
         });
-        Self { color, depth, info, out_group, blit_group }
+        Self { color, depth, info, tiles, out_group, blit_group }
     }
 }
 

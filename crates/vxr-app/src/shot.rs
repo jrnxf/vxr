@@ -702,6 +702,54 @@ fn views(dir: &Path) -> Result<(), String> {
         s.ed.ui.view_panel && s.ed.ui.hits.contains_key("view-front"),
         "the view button opens the View flyout".into(),
     )?;
+    // Guides: on by default; the flyout's buttons, G and Cmd-K turn each off and on, and each
+    // changes the view.
+    check(s.ed.ui.grid && s.ed.ui.ground && s.ed.ui.frame, "the grid, ground and bounds show by default".into())?;
+    let view_px = |s: &mut Shot| {
+        s.frames(2);
+        pollster::block_on(read_texture(&s.ed.gpu.device, &s.ed.gpu.queue, &s.ed.renderer.color))
+    };
+    let changed =
+        |a: &[u8], b: &[u8]| a.as_chunks::<4>().0.iter().zip(b.as_chunks::<4>().0).filter(|(p, q)| p != q).count();
+    // The render corner off (it keeps sampling), and the pointer over the flyout, as during
+    // the clicks, so no voxel is highlighted.
+    let corner = std::mem::replace(&mut s.ed.ui.show_render, false);
+    let c = s.ed.ui.hits["view-close"].center() * s.ed.ppp;
+    s.ed.pointer_moved(Some([c.x, c.y]));
+    let all = view_px(&mut s);
+    for (hit, what) in [("view-bounds", "bounds frame"), ("view-grid", "grid"), ("view-ground", "ground")] {
+        s.ui_click(hit)?;
+        let off = view_px(&mut s);
+        let on = [s.ed.ui.grid, s.ed.ui.ground, s.ed.ui.frame];
+        s.ui_click(hit)?;
+        let back = view_px(&mut s);
+        let n = changed(&all, &off);
+        check(
+            on.iter().filter(|o| !**o).count() == 1 && n > 500 && back == all,
+            format!("the flyout's {what} button hides it ({n} pixels change) and shows it again"),
+        )?;
+    }
+    s.ed.ui.show_render = corner;
+    press(&mut s, egui::Key::G);
+    let g_off = !s.ed.ui.grid;
+    press(&mut s, egui::Key::G);
+    check(g_off && s.ed.ui.grid, "G toggles the grid".into())?;
+    for (q, flag) in [("show ground", 1), ("show bounds", 2), ("show grid", 0)] {
+        let get = |s: &Shot| [s.ed.ui.grid, s.ed.ui.ground, s.ed.ui.frame][flag];
+        let before = get(&s);
+        s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+        s.frames_with(1, vec![egui::Event::Text(q.into())]);
+        s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+        let after = get(&s);
+        s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+        s.frames_with(1, vec![egui::Event::Text(q.into())]);
+        s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+        check(before && !after && get(&s), format!("Cmd-K '{q}' hides it and shows it again"))?;
+    }
+    s.ui_click("view")?;
+    if !s.ed.ui.view_panel {
+        s.ui_click("view")?;
+    }
     s.ui_click("view-ortho")?;
     let (o0, d0) = s.ed.cam.ray(10.0, 10.0, 400.0, 300.0);
     let (o1, d1) = s.ed.cam.ray(390.0, 290.0, 400.0, 300.0);

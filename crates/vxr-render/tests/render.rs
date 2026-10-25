@@ -280,3 +280,60 @@ fn selection_tints_only_selected_voxels() {
     renderer.set_selection(&g.device, &g.queue, &[]);
     assert_eq!(draw(&renderer), plain, "an empty mask clears the highlight");
 }
+
+/// The guides: the ground lights the bounds footprint, the grid draws a line on each voxel
+/// edge of it, and the frame draws the bounds box's edges; with every guide off the view
+/// is the plain background.
+#[test]
+fn guides_draw_ground_grid_and_frame() {
+    let Some(g) = gpu() else { return };
+    let v = View::new(&g);
+    let mut renderer = v.renderer;
+    let s = Scene::new([32, 16, 32]);
+    let map = GpuMap::new(&g.device, &g.queue, &v.layout, &s.map, &s.palette).unwrap();
+    let draw = |r: &Renderer, cam: &OrbitCamera| {
+        r.set_camera(&g.queue, cam, None);
+        let mut enc = g.device.create_command_encoder(&Default::default());
+        r.march(&mut enc, &map, None);
+        g.queue.submit([enc.finish()]);
+        pollster::block_on(read_texture(&g.device, &g.queue, &r.color))
+    };
+    let at = |img: &[u8], cam: &OrbitCamera, p: [f32; 3]| {
+        let c = cam.view_proj(W as f32 / H as f32).project_point3(glam::Vec3::from(p));
+        let (x, y) = (((c.x * 0.5 + 0.5) * W as f32) as u32, ((0.5 - c.y * 0.5) * H as f32) as u32);
+        let i = ((y * W + x) * 4) as usize;
+        [img[i] as i32, img[i + 1] as i32, img[i + 2] as i32]
+    };
+    let cam = camera_for(&s.map);
+    let plain = draw(&renderer, &cam);
+    let guides = vxr_render::Guides { bounds: [32, 16, 32], floor: 0, line: 1.0, ..Default::default() };
+
+    // Ground: the footprint is lighter than the background there; the sky above is not.
+    renderer.guides = vxr_render::Guides { ground: true, ..guides };
+    let ground = draw(&renderer, &cam);
+    let (bg, lit) = (at(&plain, &cam, [16.0, 0.0, 16.0]), at(&ground, &cam, [16.0, 0.0, 16.0]));
+    assert!(lit.iter().zip(bg).all(|(l, b)| *l > b + 3), "the footprint {lit:?} is lighter than {bg:?}");
+    assert_eq!(&ground[..4], &plain[..4], "the top left corner stays background");
+
+    // Grid, from straight above in orthographic at 10 pixels per voxel: lines on the voxel
+    // edges, none in the middle of a cell.
+    let mut top = cam;
+    top.snap(vxr_render::View::Top);
+    top.ortho = true;
+    top.target = glam::Vec3::new(16.0, 0.0, 16.0);
+    top.distance = 5.0 / (top.fov_y * 0.5).tan();
+    renderer.guides = vxr_render::Guides { ground: true, grid: true, ..guides };
+    let grid = draw(&renderer, &top);
+    let (line, cell) = (at(&grid, &top, [16.02, 0.0, 16.5]), at(&grid, &top, [16.5, 0.0, 16.5]));
+    assert!(line[2] > cell[2] + 10, "a grid line {line:?} is brighter than the cell middle {cell:?}");
+
+    // Frame: an edge of the box shows in the accent blue; the middle of the view does not.
+    renderer.guides = vxr_render::Guides { frame: true, ..guides };
+    let frame = draw(&renderer, &cam);
+    let (on, off) = (at(&frame, &cam, [16.0, 16.0, 32.0]), at(&plain, &cam, [16.0, 16.0, 32.0]));
+    assert!(on[2] > off[2] + 30 && on[2] > on[0], "the top front edge {on:?} is drawn over {off:?}");
+    assert_eq!(at(&frame, &cam, [16.0, 8.0, 16.0]), at(&plain, &cam, [16.0, 8.0, 16.0]), "inside the box");
+
+    renderer.guides = vxr_render::Guides::default();
+    assert_eq!(draw(&renderer, &cam), plain, "with every guide off the view is the background");
+}

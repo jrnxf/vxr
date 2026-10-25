@@ -7,7 +7,7 @@ use vxr_core::Scene;
 use vxr_core::material::Material;
 use vxr_core::select::{Mode, MoveDrag, Transform};
 use vxr_core::tools::{Brush, Gesture, Press, Shape, Target, Tool, plane_cell};
-use vxr_render::{EditBox, Gpu, GpuMap, OrbitCamera, Preview, Renderer, brickmap_layout, gpu::now_ms};
+use vxr_render::{EditBox, Gpu, GpuMap, Guides, OrbitCamera, Preview, Renderer, brickmap_layout, gpu::now_ms};
 
 use crate::render::{EXPORT_SIZES, Export};
 use crate::ui::{Action, FontBytes, Hybrid, Stats};
@@ -49,7 +49,7 @@ pub struct Editor {
     pub scene: Scene,
     layout: wgpu::BindGroupLayout,
     map: GpuMap,
-    renderer: Renderer,
+    pub renderer: Renderer,
     /// The live path-traced preview in the corner.
     pub preview: Preview,
     /// Whether the preview drew last frame and is up to date (showing it again restarts it).
@@ -730,6 +730,14 @@ impl Editor {
         }
         let busy = self.gesture.is_some() || self.moving.is_some() || self.marquee.is_some();
         let tint = if busy { None } else { self.cursor.filter(|t| !t.ground).map(|t| t.voxel) };
+        self.renderer.guides = Guides {
+            bounds: self.scene.map.size_voxels(),
+            floor: self.scene.floor,
+            grid: self.ui.grid,
+            ground: self.ui.ground,
+            frame: self.ui.frame,
+            line: ppp,
+        };
         self.renderer.set_camera(queue, &self.cam, tint);
         let mut enc = dev.create_command_encoder(&Default::default());
         // The preview's passes go first so they can be timed on their own (see preview.rs).

@@ -126,8 +126,8 @@ Feature names below follow the update log [S1] unless another source is given.
 | Set rotation center on a voxel | X+click [S1 0.99.3] | missing | P2 | sculpt |
 | Perspective, orthographic, isometric | Camera modes [S1 0.97.1] | done [7] (View flyout, O, 0) | P1 | - |
 | View cube and axis snap views | 26 standard views, hotkey 5 for face views [S1 0.99] | partial [7] (six side views and isometric on 0 to 6 and the View flyout; no 26-view cube) | P2 | - |
-| Grid and ground | Frame grids with spacing, infinite ground [S1 0.98.1, 0.97.5] | missing [7] | P2 | minutes |
-| Bounding box display | Select on any of the six bounding box faces [S1 0.98.1] | missing [7] | P2 | - |
+| Grid and ground | Frame grids with spacing, infinite ground [S1 0.98.1, 0.97.5] | done [7] (a voxel grid on the ground inside the bounds and a ground that fades into the background; View flyout, G, Cmd-K; no grid spacing setting) | P2 | minutes |
+| Bounding box display | Select on any of the six bounding box faces [S1 0.98.1] | partial [7] (the bounds frame is drawn, faint where voxels hide it; View flyout, Cmd-K; no face selection on it) | P2 | - |
 | Save and load views | 7/8, F5/F7, camera slots [S1 0.99, 0.99.6.2] | missing (cameras kept by lossless save [1]) | P3 | - |
 | Camera control panel | FOV, position, pitch/yaw/roll [S1 0.99.6.2, 0.99.6.4] | missing | P3 | - |
 | Free (fly) camera | Pers/Free modes [S1 0.97.5, 0.99.6.4] | missing | P3 | - |

@@ -301,6 +301,10 @@ pub struct Hybrid {
     pub view: Option<View>,
     /// The View flyout beside the rail's view button is open.
     pub view_panel: bool,
+    /// Guides drawn in the view: the ground grid, the ground plane and the bounds frame.
+    pub grid: bool,
+    pub ground: bool,
+    pub frame: bool,
     /// Where each clickable part of the UI was last drawn, in points, by name, for the
     /// headless checks ("edit-color", "sv", "hue", "swap", "copy", "sw<slot>", ...).
     pub hits: HashMap<String, Rect>,
@@ -395,6 +399,9 @@ const COMMANDS: &[Command] = &[
     Command { label: "Right view", keys: &["4"], run: |h| h.actions.push(Action::Snap(View::Right)) },
     Command { label: "Top view", keys: &["5"], run: |h| h.actions.push(Action::Snap(View::Top)) },
     Command { label: "Bottom view", keys: &["6"], run: |h| h.actions.push(Action::Snap(View::Bottom)) },
+    Command { label: "Show grid", keys: &["G"], run: |h| h.grid = !h.grid },
+    Command { label: "Show ground", keys: &[], run: |h| h.ground = !h.ground },
+    Command { label: "Show bounds", keys: &[], run: |h| h.frame = !h.frame },
     Command { label: "Undo", keys: &["⌘", "Z"], run: |h| h.actions.push(Action::Undo) },
     Command { label: "Redo", keys: &["⌘", "⇧", "Z"], run: |h| h.actions.push(Action::Redo) },
     Command { label: "Open .vox", keys: &["⌘", "O"], run: |h| h.actions.push(Action::Open) },
@@ -439,6 +446,9 @@ impl Hybrid {
             ortho: false,
             view: None,
             view_panel: false,
+            grid: true,
+            ground: true,
+            frame: true,
             hits: HashMap::new(),
             axes_y: 0.0,
             view_y: 0.0,
@@ -705,6 +715,7 @@ impl Hybrid {
                 }),
                 (Key::Period, |h| h.actions.push(Action::Frame)),
                 (Key::O, |h| h.actions.push(Action::Ortho(!h.ortho))),
+                (Key::G, |h| h.grid = !h.grid),
                 (Key::Num0, |h| h.actions.push(Action::Snap(View::Iso))),
                 (Key::Num1, |h| h.actions.push(Action::Snap(View::Front))),
                 (Key::Num2, |h| h.actions.push(Action::Snap(View::Back))),
@@ -882,8 +893,9 @@ impl Hybrid {
             return;
         }
         // The button is the last in the rail, so the flyout grows up from its bottom edge.
-        let rect = Rect::from_min_size(pos2(12.0 + 52.0 + 8.0, self.view_y + 40.0 + 6.0 - 156.0), vec2(204.0, 156.0));
+        let rect = Rect::from_min_size(pos2(12.0 + 52.0 + 8.0, self.view_y + 40.0 + 6.0 - 210.0), vec2(204.0, 210.0));
         let (ortho, view) = (self.ortho, self.view);
+        let mut guides = [self.grid, self.ground, self.frame];
         let mut run = Vec::new();
         let mut hits = Vec::new();
         let mut close = false;
@@ -925,45 +937,34 @@ impl Hybrid {
                 Stroke::new(1.0, LINE),
             );
             let cw = (rect.width() - 24.0 - 8.0) / 3.0;
+            let cell = |k: usize, cy: f32| {
+                Rect::from_min_size(pos2(rect.left() + 12.0 + (k % 3) as f32 * (cw + 4.0), cy - 13.0), vec2(cw, 26.0))
+            };
             for (k, v) in View::ALL[..6].iter().copied().enumerate() {
-                let cy = hy + 78.0 + (k / 3) as f32 * 34.0;
-                let c = Rect::from_min_size(
-                    pos2(rect.left() + 12.0 + (k % 3) as f32 * (cw + 4.0), cy - 13.0),
-                    vec2(cw, 26.0),
-                );
+                let c = cell(k, hy + 78.0 + (k / 3) as f32 * 34.0);
                 let id = format!("view-{}", v.name().to_lowercase());
-                let resp = ui.interact(c, Id::unique(&id), Sense::click());
-                hits.push((id, c));
-                let (hover, on) = (resp.hovered(), view == Some(v));
-                let p = ui.painter();
-                let color = if on {
-                    p.rect(
-                        c,
-                        CornerRadius::same(7),
-                        ACCENT_BG,
-                        Stroke::new(1.0, Color32::from_rgba_unmultiplied(142, 162, 255, 89)),
-                        StrokeKind::Inside,
-                    );
-                    ACCENT
-                } else {
-                    let border = if hover { Color32::from_white_alpha(64) } else { LINE2 };
-                    p.rect_stroke(c, CornerRadius::same(7), Stroke::new(1.0, border), StrokeKind::Inside);
-                    if hover { TEXT } else { MUTED }
-                };
-                p.text(pos2(c.center().x - 3.0, c.center().y), Align2::CENTER_CENTER, v.name(), inter(11.0), color);
-                let kc = if on { ACCENT.gamma_multiply(0.8) } else { FAINT };
-                p.text(
-                    pos2(c.right() - 4.0, c.bottom() - 2.0),
-                    Align2::RIGHT_BOTTOM,
-                    (k + 1).to_string(),
-                    mono_medium(8.5),
-                    kc,
-                );
-                if resp.clicked() {
+                if view_chip(ui, c, &id, v.name(), &(k + 1).to_string(), view == Some(v)) {
                     run.push(Action::Snap(v));
                 }
+                hits.push((id, c));
+            }
+            ui.painter().line_segment(
+                [pos2(rect.left() + 10.0, hy + 142.5), pos2(rect.right() - 10.0, hy + 142.5)],
+                Stroke::new(1.0, LINE),
+            );
+            for (k, (id, label, key)) in
+                [("view-grid", "Grid", "G"), ("view-ground", "Ground", ""), ("view-bounds", "Bounds", "")]
+                    .into_iter()
+                    .enumerate()
+            {
+                let c = cell(k, hy + 166.0);
+                if view_chip(ui, c, id, label, key, guides[k]) {
+                    guides[k] = !guides[k];
+                }
+                hits.push((id.to_string(), c));
             }
         });
+        [self.grid, self.ground, self.frame] = guides;
         self.hits.extend(hits);
         self.actions.extend(run);
         if close {
@@ -2340,6 +2341,33 @@ fn rail_sep(ui: &Ui, rail: Rect, y: &mut f32) {
     let sy = *y - 2.0 + 5.0 + 0.5;
     ui.painter().line_segment([pos2(rail.left() + 10.0, sy), pos2(rail.right() - 10.0, sy)], Stroke::new(1.0, LINE));
     *y += 11.0 - 2.0 + 2.0;
+}
+
+// A text button of the View flyout with its key in the corner, accent when on. Returns
+// whether it was clicked.
+fn view_chip(ui: &mut Ui, c: Rect, id: &str, label: &str, key: &str, on: bool) -> bool {
+    let resp = ui.interact(c, Id::unique(id), Sense::click());
+    let hover = resp.hovered();
+    let p = ui.painter();
+    let color = if on {
+        p.rect(
+            c,
+            CornerRadius::same(7),
+            ACCENT_BG,
+            Stroke::new(1.0, Color32::from_rgba_unmultiplied(142, 162, 255, 89)),
+            StrokeKind::Inside,
+        );
+        ACCENT
+    } else {
+        let border = if hover { Color32::from_white_alpha(64) } else { LINE2 };
+        p.rect_stroke(c, CornerRadius::same(7), Stroke::new(1.0, border), StrokeKind::Inside);
+        if hover { TEXT } else { MUTED }
+    };
+    let shift = if key.is_empty() { 0.0 } else { 3.0 };
+    p.text(pos2(c.center().x - shift, c.center().y), Align2::CENTER_CENTER, label, inter(11.0), color);
+    let kc = if on { ACCENT.gamma_multiply(0.8) } else { FAINT };
+    p.text(pos2(c.right() - 4.0, c.bottom() - 2.0), Align2::RIGHT_BOTTOM, key, mono_medium(8.5), kc);
+    resp.clicked()
 }
 
 // .tool, .tool.on, .tool .k
