@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use vxr_core::World;
 use vxr_core::scene::vox_to_world;
-use vxr_vox::build::Builder;
+use vxr_vox::build::{Builder, SceneNode};
 use vxr_vox::scene::Rule;
 use vxr_vox::{Document, NodeKind, WorldSave, chunk};
 
@@ -172,6 +172,26 @@ fn a_file_without_a_scene_graph_is_rebuilt_when_objects_change() {
     let (_, back) = open(&doc.write());
     assert_eq!(back.objects().len(), 2);
     assert_eq!(back.world_voxels(false), want);
+}
+
+#[test]
+fn a_new_layer_goes_past_layers_objects_use_without_a_layr_chunk() {
+    let mut b = Builder::new(150);
+    let a = b.model([1, 1, 1], vec![[0, 0, 0, 1]]);
+    let c = b.model([1, 1, 1], vec![[0, 0, 0, 2]]);
+    b.root = vec![SceneNode::shape(a, None, [0, 0, 0]), SceneNode::shape(c, None, [4, 0, 0])];
+    let (mut doc, mut w) = open(&b.build().write());
+    assert!(w.tree.layers.is_empty());
+    assert!(w.objects().iter().all(|&i| w.tree.nodes[i].layer == 0));
+    let id = w.add_layer("props");
+    assert_eq!(id, 1);
+    assert_eq!(w.layers().iter().map(|l| l.id).collect::<Vec<_>>(), [0, 1]);
+    w.set_layer_hidden(id, true);
+    assert!(w.objects().iter().all(|&i| w.shown(i)), "hiding the new layer hides nothing");
+    w.save_into(&mut doc).unwrap();
+    let (_, back) = open(&doc.write());
+    assert_eq!(back.layers().iter().find(|l| l.id == id).unwrap().name.as_deref(), Some(&b"props"[..]));
+    assert!(back.objects().iter().all(|&i| back.shown(i)));
 }
 
 #[test]

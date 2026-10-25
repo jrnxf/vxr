@@ -360,7 +360,7 @@ impl World {
 
     /// Add a layer named `name`; returns its id.
     pub fn add_layer(&mut self, name: &str) -> i32 {
-        let id = self.tree.layers.iter().map(|l| l.id + 1).max().unwrap_or(0);
+        let id = self.layers().iter().map(|l| l.id + 1).max().unwrap_or(0);
         self.tree.layers.push(LayerInfo { id, name: Some(name.as_bytes().to_vec()), hidden: false });
         id
     }
