@@ -11,7 +11,7 @@ use vxr_vox::build::Builder;
 use vxr_vox::scene::Rule;
 use vxr_vox::{Document, Material};
 
-use crate::brickmap::{B, BRICK_VOXELS, BrickMap, EMPTY, MASK_WORDS};
+use crate::brickmap::BrickMap;
 use crate::history::{Bounds, BoundsChange, Change, ColorChange, History, MaterialChange, SelectionChange, Step};
 use crate::select::Clip;
 
@@ -194,29 +194,8 @@ impl Scene {
     }
 
     /// Every occupied map cell with its palette index, brick by brick.
-    pub fn for_each_voxel(&self, mut f: impl FnMut([i32; 3], u8)) {
-        let m = &self.map;
-        for bz in 0..m.dims[2] {
-            for by in 0..m.dims[1] {
-                for bx in 0..m.dims[0] {
-                    let b = m.grid[m.cell_index(bx, by, bz)];
-                    if b == EMPTY {
-                        continue;
-                    }
-                    let masks = &m.masks[b as usize * MASK_WORDS..(b as usize + 1) * MASK_WORDS];
-                    for (w, &bits) in masks.iter().enumerate() {
-                        let mut bits = bits;
-                        while bits != 0 {
-                            let li = w * 32 + bits.trailing_zeros() as usize;
-                            bits &= bits - 1;
-                            let (x, y, z) = (li as u32 & 7, (li as u32 >> 3) & 7, li as u32 >> 6);
-                            let p = [(bx * B + x) as i32, (by * B + y) as i32, (bz * B + z) as i32];
-                            f(p, m.pal[b as usize * BRICK_VOXELS + li]);
-                        }
-                    }
-                }
-            }
-        }
+    pub fn for_each_voxel(&self, f: impl FnMut([i32; 3], u8)) {
+        self.map.for_each(f);
     }
 
     /// Set map cells as one undoable step. Cells outside the map and cells that already

@@ -8,6 +8,8 @@
 //!   of the model bounds.
 //! - [`select`]: the selection (box and colour), and move, copy, paste, delete, fill,
 //!   rotate, flip and loop of the selection or the whole model.
+//! - [`world`]: several objects per scene (objects, groups, linked copies, layers), read
+//!   from and saved losslessly into `.vox`.
 //! - [`tools`]: the editing tools (add, erase, paint, pick with the voxel, box, face, line
 //!   and center brushes, mirror on three axes and axis lock), as presses, drags and releases.
 
@@ -17,8 +19,10 @@ pub mod model;
 pub mod scene;
 pub mod select;
 pub mod tools;
+pub mod world;
 
 pub use brickmap::BrickMap;
 pub use scene::Scene;
 /// Palette slot materials, from the `.vox` codec.
 pub use vxr_vox::material;
+pub use world::World;

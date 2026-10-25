@@ -80,6 +80,31 @@ impl BrickMap {
         self.size
     }
 
+    /// Every occupied cell with its palette index, brick by brick.
+    pub fn for_each(&self, mut f: impl FnMut([i32; 3], u8)) {
+        for bz in 0..self.dims[2] {
+            for by in 0..self.dims[1] {
+                for bx in 0..self.dims[0] {
+                    let b = self.grid[self.cell_index(bx, by, bz)];
+                    if b == EMPTY {
+                        continue;
+                    }
+                    let masks = &self.masks[b as usize * MASK_WORDS..(b as usize + 1) * MASK_WORDS];
+                    for (w, &bits) in masks.iter().enumerate() {
+                        let mut bits = bits;
+                        while bits != 0 {
+                            let li = w * 32 + bits.trailing_zeros() as usize;
+                            bits &= bits - 1;
+                            let (x, y, z) = (li as u32 & 7, (li as u32 >> 3) & 7, li as u32 >> 6);
+                            let p = [(bx * B + x) as i32, (by * B + y) as i32, (bz * B + z) as i32];
+                            f(p, self.pal[b as usize * BRICK_VOXELS + li]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Whether changes are being recorded for partial GPU uploads.
     pub fn tracking(&self) -> bool {
         self.track

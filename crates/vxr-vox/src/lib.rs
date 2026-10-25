@@ -6,6 +6,8 @@
 //!   the bytes it did not consume, so `encode(parse(c)) == c` for every chunk.
 //! - [`scene`]: the semantic view (models, palette, scene graph, world instances).
 //! - [`doc`]: a raw file plus edits that re-encode only the chunks they touch.
+//! - [`tree`]: the scene graph as an editable tree of objects and groups, with layers,
+//!   written back by [`Document::set_tree`] touching only the chunks whose meaning changed.
 //! - [`material`]: palette slot materials (`MATL`) as typed values.
 //! - [`build`]: writes new files from scratch (fixtures, property tests).
 //!
@@ -20,12 +22,14 @@ pub mod fixtures;
 pub mod material;
 pub mod raw;
 pub mod scene;
+pub mod tree;
 
 pub use bytes::Dict;
 pub use doc::{Document, WorldSave};
 pub use material::{Kind, Material};
 pub use raw::{Chunk, RawFile};
 pub use scene::{Affine, Instance, Scene};
+pub use tree::{Kind as NodeKind, LayerInfo, ModelEdits, Tree, TreeNode};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error {

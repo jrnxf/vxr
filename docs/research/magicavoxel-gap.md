@@ -136,7 +136,7 @@ Feature names below follow the update log [S1] unless another source is given.
 
 | Feature | MagicaVoxel | vxr | Priority | Why |
 |---|---|---|---|---|
-| Multiple objects per scene | Tab switches model and world editors [S1 0.99] | partial: every model of an opened file is flattened into one editable map; no objects [8] | P1 | lossless |
+| Multiple objects per scene | Tab switches model and world editors [S1 0.99] | partial: every model of an opened file is flattened into one editable map in the editor; the core world model (objects, groups, linked copies, layers, lossless save) is built and tested, not yet in the editor [8] | P1 | lossless |
 | Move, rotate, flip objects | Gizmo, explicit position, 90 degree rotate gizmo [S1 0.99, 0.99.7.0, 0.99.7.2] | missing [8] | P2 | - |
 | Groups | Enter and leave with Tab or double-click [S1 0.99, 0.99.5.1] | missing [8] | P2 | - |
 | References (instances) and duplicates | Shift+drag; Ref-R converts [S1 0.99, 0.99.5.1] | missing [8] | P2 | - |

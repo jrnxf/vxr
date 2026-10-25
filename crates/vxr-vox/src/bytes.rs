@@ -141,6 +141,11 @@ impl Dict {
         }
     }
 
+    /// Drop every pair with this key.
+    pub fn remove(&mut self, key: &str) {
+        self.0.retain(|(k, _)| k != key.as_bytes());
+    }
+
     pub fn with(mut self, key: &str, value: impl Into<Vec<u8>>) -> Self {
         self.set(key, value);
         self
