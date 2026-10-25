@@ -43,6 +43,7 @@ const CLICK_PX: f32 = 4.0;
 /// voxel. In world cells, since the world map moves under it as the object does.
 #[derive(Clone, Copy, Debug)]
 struct WorldDrag {
+    /// The node moved: the object pressed, or the picked group holding it.
     object: usize,
     axis: usize,
     start: [i32; 3],
@@ -368,10 +369,14 @@ impl Editor {
     }
 
     /// A press in world mode, with any tool: pick the object under it and start dragging it
-    /// on the plane of the face pressed, or pick nothing.
+    /// on the plane of the face pressed, or pick nothing. A press on an object of the picked
+    /// group keeps the group picked and drags the whole group.
     fn press_world(&mut self, t: Option<Target>) {
         let t = t.filter(|t| !t.ground);
-        let object = t.and_then(|t| self.scene.object_at(t.voxel));
+        let object = t.and_then(|t| self.scene.object_at(t.voxel)).map(|o| {
+            let group = self.scene.picked().filter(|&p| self.scene.world().unwrap().model_of(p).is_none());
+            group.filter(|&g| self.scene.world().unwrap().objects_under(g).contains(&o)).unwrap_or(o)
+        });
         self.scene.pick(object);
         if let (Some(t), Some(object)) = (t, object) {
             let axis = t.normal.iter().position(|&n| n != 0).unwrap_or(1);
@@ -413,7 +418,7 @@ impl Editor {
                 }
             }
             (Action::DeleteSelection, Some(i)) => {
-                let name = object_name(s.world().unwrap(), i);
+                let name = node_name(s.world().unwrap(), i);
                 if s.edit_world(|w| w.remove(i)) == Some(true) {
                     self.ui.toast(&self.ctx, format!("Deleted {name}"));
                 }
@@ -421,15 +426,38 @@ impl Editor {
             (Action::Duplicate { linked }, Some(i)) => match s.edit_world(|w| w.duplicate(i, linked)).flatten() {
                 Some(c) => {
                     s.pick(Some(c));
-                    let name = object_name(s.world().unwrap(), i);
+                    let name = node_name(s.world().unwrap(), i);
                     let what = if linked { "Linked copy of" } else { "Duplicated" };
                     self.ui.toast(&self.ctx, format!("{what} {name}"));
                 }
                 None => self.ui.toast(&self.ctx, "No room in the scene for that"),
             },
-            (Action::Duplicate { .. } | Action::Transform(Transform::Move(_)) | Action::DeleteSelection, None) => {
-                self.ui.toast(&self.ctx, "Click an object to pick it first")
+            (Action::Group, Some(i)) => {
+                if let Some(g) = s.edit_world(|w| w.group(&[i])).flatten() {
+                    s.pick(Some(g));
+                    let msg =
+                        format!("Grouped {} as {}", node_name(s.world().unwrap(), i), node_name(s.world().unwrap(), g));
+                    self.ui.toast(&self.ctx, msg);
+                }
             }
+            (Action::Ungroup, Some(g)) => {
+                let w = s.world().unwrap();
+                let (name, first) = (node_name(w, g), w.tree.children(g).first().copied());
+                if w.model_of(g).is_some() {
+                    self.ui.toast(&self.ctx, "Pick a group to ungroup it");
+                } else if s.edit_world(|w| w.ungroup(g)) == Some(true) {
+                    s.pick(first);
+                    self.ui.toast(&self.ctx, format!("Ungrouped {name}"));
+                }
+            }
+            (
+                Action::Duplicate { .. }
+                | Action::Transform(Transform::Move(_))
+                | Action::DeleteSelection
+                | Action::Group
+                | Action::Ungroup,
+                None,
+            ) => self.ui.toast(&self.ctx, "Click an object to pick it first"),
             _ => self.ui.toast(&self.ctx, "Tab into an object to edit its voxels"),
         }
     }
@@ -588,6 +616,7 @@ impl Editor {
                     self.ui.toast(&self.ctx, format!("Pasted {n} voxels"));
                 }
             }
+            Action::Group | Action::Ungroup => self.ui.toast(&self.ctx, "Tab to the world to group objects"),
             _ => {}
         }
     }
@@ -699,7 +728,7 @@ impl Editor {
         self.ui.has_clip = self.scene.clipboard.is_some();
         self.ui.bounds = self.scene.bounds().size;
         self.ui.world = self.scene.at() == At::World;
-        self.ui.picked = self.scene.picked().map(|i| object_name(self.scene.world().unwrap(), i));
+        self.ui.picked = self.scene.picked().map(|i| node_name(self.scene.world().unwrap(), i));
         self.ui.picked_node = self.scene.picked();
         self.ui.tree = tree_rows(&self.scene);
         self.ui.tree_on = match self.scene.at() {
@@ -752,7 +781,9 @@ impl Editor {
                 | Action::Copy
                 | Action::Cut
                 | Action::Paste
-                | Action::Duplicate { .. } => self.selection_action(a),
+                | Action::Duplicate { .. }
+                | Action::Group
+                | Action::Ungroup => self.selection_action(a),
                 Action::ToggleWorld => self.toggle_world(),
                 Action::PickNode(i) => self.pick_node(i),
                 Action::SetHidden(i, hidden) => self.set_hidden(i, hidden),
@@ -795,7 +826,9 @@ impl Editor {
             (_, None) => "A new scene is one model".to_string(),
             (At::World, Some(w)) => {
                 let objects = w.objects();
-                let i = s.picked().or(self.last_object.filter(|i| objects.contains(i))).or(objects.first().copied());
+                // A picked group edits its first object.
+                let picked = s.picked().and_then(|p| w.objects_under(p).first().copied());
+                let i = picked.or(self.last_object.filter(|i| objects.contains(i))).or(objects.first().copied());
                 match i {
                     Some(i) if s.edit_object(i) => format!("Editing {}", object_name(s.world().unwrap(), i)),
                     _ => "No object to edit".into(),

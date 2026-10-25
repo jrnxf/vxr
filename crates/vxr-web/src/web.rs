@@ -312,7 +312,7 @@ impl App {
             e.scene.world().map_or(1, |w| w.models.len()),
             e.scene
                 .picked()
-                .and_then(|i| e.scene.world().map(|w| vxr_app::editor::object_name(w, i)))
+                .and_then(|i| e.scene.world().map(|w| vxr_app::editor::node_name(w, i)))
                 .map_or("null".into(), |n| format!("{n:?}")),
             e.ui.tree
                 .iter()

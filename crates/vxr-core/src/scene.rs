@@ -270,16 +270,16 @@ impl Scene {
         self.history.push(Step { world: Some(Box::new(change)), at: At::World, ..Step::default() });
     }
 
-    /// The object picked in world mode, if it is still in the world.
+    /// The object or group picked in world mode, if it is still in the world.
     pub fn picked(&self) -> Option<usize> {
         self.picked
     }
 
-    /// Pick object `i` in world mode (None picks nothing): its voxels show selected. Not
-    /// an undo step. False outside world mode or if `i` is not an object.
+    /// Pick object or group `i` in world mode (None picks nothing): the voxels of every
+    /// object at or under it show selected. Not an undo step. False outside world mode or
+    /// if `i` is not a node under the root.
     pub fn pick(&mut self, i: Option<usize>) -> bool {
-        let ok =
-            self.at == At::World && i.is_none_or(|i| self.world.as_ref().is_some_and(|w| w.objects().contains(&i)));
+        let ok = self.at == At::World && i.is_none_or(|i| self.world.as_ref().is_some_and(|w| w.in_tree(i)));
         if ok {
             self.picked = i;
             self.show_picked();
@@ -296,13 +296,15 @@ impl Scene {
     fn show_picked(&mut self) {
         let mut cells = HashSet::new();
         if let (Some(i), Some(w)) = (self.picked, &self.world) {
-            if w.objects().contains(&i) {
-                w.for_each_object_voxel(i, |q, _| {
-                    let p = self.to_map(q);
-                    if self.map.get(p[0], p[1], p[2]) != 0 {
-                        cells.insert(p);
-                    }
-                });
+            if w.in_tree(i) {
+                for o in w.objects_under(i) {
+                    w.for_each_object_voxel(o, |q, _| {
+                        let p = self.to_map(q);
+                        if self.map.get(p[0], p[1], p[2]) != 0 {
+                            cells.insert(p);
+                        }
+                    });
+                }
             } else {
                 self.picked = None;
             }

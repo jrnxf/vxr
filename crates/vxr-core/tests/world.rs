@@ -436,3 +436,72 @@ fn every_shown_voxel_belongs_to_an_object() {
         assert_eq!(missing, 0, "{name}");
     }
 }
+
+#[test]
+fn groups_are_picked_moved_duplicated_grouped_and_ungrouped_in_world_mode() {
+    let bytes = fixture("22-world");
+    let mut s = vxr_core::Scene::from_vox(&bytes).unwrap();
+    let w = s.world().unwrap();
+    let (trees, slab) = (find(w, "trees"), find(w, "slab"));
+    let members = w.objects_under(trees);
+    assert!(members.len() >= 2, "the trees group holds several objects");
+    let count = |w: &World, nodes: &[usize]| {
+        let mut n = 0;
+        for &i in nodes {
+            if w.shown(i) {
+                w.for_each_object_voxel(i, |_, _| n += 1);
+            }
+        }
+        n
+    };
+    let group_voxels = count(w, &members);
+
+    // Picking a group shows every voxel under it selected.
+    assert!(s.pick(Some(trees)));
+    assert_eq!(s.selected_count(), group_voxels);
+
+    // Moving the group moves every object under it by the same offset, as one undo step.
+    let before: Vec<_> = members.iter().map(|&i| s.world().unwrap().placement(i).unwrap().0).collect();
+    s.edit_world(|w| w.move_by(trees, [2, 0, -1])).unwrap();
+    let w = s.world().unwrap();
+    for (&i, lo) in members.iter().zip(&before) {
+        assert_eq!(w.placement(i).unwrap().0, [lo[0] + 2, lo[1], lo[2] - 1]);
+    }
+    assert_eq!(s.picked(), Some(trees));
+    assert!(s.undo());
+    let w = s.world().unwrap();
+    assert!(members.iter().zip(&before).all(|(&i, lo)| w.placement(i).unwrap().0 == *lo));
+
+    // A duplicate of the group copies every object under it.
+    let objects = s.world().unwrap().objects().len();
+    let dup = s.edit_world(|w| w.duplicate(trees, true)).unwrap().unwrap();
+    assert_eq!(s.world().unwrap().objects().len(), objects + members.len());
+    assert!(s.pick(Some(dup)));
+    assert_eq!(s.selected_count(), group_voxels);
+    assert!(s.undo());
+    assert_eq!(s.picked(), None, "the undone copy drops the pick");
+
+    // Grouping an object wraps it in a new group in its place; ungrouping puts it back.
+    let world_before = s.world_voxels(false);
+    let order_before = s.world().unwrap().tree.order().len();
+    let g = s.edit_world(|w| w.group(&[slab])).unwrap().unwrap();
+    let w = s.world().unwrap();
+    assert_eq!(w.tree.children(g), &[slab]);
+    assert_eq!(w.tree.order().len(), order_before + 1);
+    assert_eq!(s.world_voxels(false), world_before, "grouping moves nothing");
+    assert!(s.pick(Some(g)));
+    assert!(s.edit_world(|w| w.ungroup(g)).unwrap());
+    assert_eq!(s.picked(), None, "the ungrouped group leaves the tree");
+    assert_eq!(s.world().unwrap().tree.order().len(), order_before);
+
+    // Ungrouping a moved group keeps its objects where they show, through save and reopen.
+    s.edit_world(|w| w.move_by(trees, [0, 3, 0])).unwrap();
+    let moved = s.world_voxels(false);
+    assert!(s.edit_world(|w| w.ungroup(trees)).unwrap());
+    assert_eq!(s.world_voxels(false), moved);
+    let again = vxr_core::Scene::from_vox(&s.to_vox()).unwrap();
+    assert_eq!(again.world_voxels(false), moved);
+
+    while s.undo() {}
+    assert!(s.to_vox() == bytes);
+}

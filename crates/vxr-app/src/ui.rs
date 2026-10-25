@@ -224,6 +224,10 @@ pub enum Action {
     SetHidden(usize, bool),
     /// Hide or show the picked object (H).
     ToggleHidden,
+    /// Put the picked object or group into a new group of its own (Cmd-G).
+    Group,
+    /// Move the picked group's children up into its parent (Cmd-Shift-G).
+    Ungroup,
     Copy,
     Cut,
     Paste,
@@ -455,6 +459,8 @@ const COMMANDS: &[Command] = &[
     Command { label: "Delete object", keys: &["⌫"], run: |h| h.actions.push(Action::DeleteSelection) },
     Command { label: "Hide or show object", keys: &["H"], run: |h| h.actions.push(Action::ToggleHidden) },
     Command { label: "Rename object", keys: &[], run: |h| h.start_rename(h.picked_node) },
+    Command { label: "Group object", keys: &["⌘", "G"], run: |h| h.actions.push(Action::Group) },
+    Command { label: "Ungroup", keys: &["⌘", "⇧", "G"], run: |h| h.actions.push(Action::Ungroup) },
     Command { label: "Frame scene", keys: &["."], run: |h| h.actions.push(Action::Frame) },
     Command { label: "View options", keys: &[], run: |h| h.view_panel = !h.view_panel },
     Command { label: "Perspective", keys: &["O"], run: |h| h.actions.push(Action::Ortho(false)) },
@@ -760,6 +766,12 @@ impl Hybrid {
             }
             if i.consume_key(Modifiers::COMMAND, Key::D) {
                 self.actions.push(Action::Duplicate { linked: false });
+            }
+            if i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::G) {
+                self.actions.push(Action::Ungroup);
+            }
+            if i.consume_key(Modifiers::COMMAND, Key::G) {
+                self.actions.push(Action::Group);
             }
             // Natively egui-winit turns Cmd-C, Cmd-X and Cmd-V into clipboard events (Paste
             // only when the system clipboard has text); the browser page sends the keys.
@@ -1130,7 +1142,7 @@ impl Hybrid {
                     run.push(Action::SetHidden(row.node, !row.hidden));
                 } else if resp.double_clicked() {
                     start_rename = Some(row.node);
-                } else if resp.clicked() && !row.group {
+                } else if resp.clicked() {
                     run.push(Action::PickNode(row.node));
                 }
             }

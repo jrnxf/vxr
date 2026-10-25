@@ -684,6 +684,59 @@ async () => {
     await key('x');
     await key('Escape');
     step('Escape cancels a rename', node('slab') === slab && st().picked === 'slab' && window.vxr.hit('tree-rename').length === 0);
+
+    // Groups: a group row picks the group, a drag on one of its objects and the arrows move
+    // it whole, Cmd-D copies it, Cmd-Shift-G ungroups, Cmd-G and Cmd-K 'Ungroup' wrap an
+    // object and take it out again, Tab edits the group's first object.
+    const trees = node('trees');
+    await pause();
+    await chip(`tree-${trees}`);
+    s = st();
+    step('a group row picks the group and selects its objects', s.picked === 'trees' && s.treeOn === trees && s.selected > 0, JSON.stringify(s));
+    let groupDrag = false;
+    for (const [dx, dy] of [[0, 0], [0, 30], [-40, 20], [40, 20], [0, 60], [-80, 40], [80, 40], [-40, -20], [40, -20]]) {
+      await pause();
+      await chip(`tree-${trees}`);
+      await drag(640 + dx, 400 + dy, 640 + dx + 90, 400 + dy + 10);
+      if (st().picked === 'trees' && !same(bytes(), worldFile)) { groupDrag = true; break; }
+      if (st().undo) await key('z', cmd);
+    }
+    step('a drag on an object of the picked group moves the group', groupDrag, JSON.stringify(st()));
+    await key('z', cmd);
+    step('the group drag is one undo step', same(bytes(), worldFile) && st().picked === 'trees');
+    await key('ArrowRight');
+    step('an arrow nudges the picked group', !same(bytes(), worldFile) && st().picked === 'trees');
+    await key('z', cmd);
+    await key('d', cmd);
+    s = st();
+    step('Cmd-D copies the group and its objects', s.objects === 9 && s.tree.length === 13, JSON.stringify(s));
+    await key('z', cmd);
+    await pause();
+    await chip(`tree-${trees}`);
+    await key('g', { metaKey: true, shiftKey: true });
+    s = st();
+    step('Cmd-Shift-G ungroups the picked group', s.tree.length === 7 && s.picked === 'tree a' && node('trees') === undefined, JSON.stringify(s));
+    await key('z', cmd);
+    step('ungrouping is one undo step', st().tree.length === 8 && same(bytes(), worldFile));
+    await pause();
+    await chip(`tree-${slab}`);
+    await key('g', cmd);
+    s = st();
+    const wrapped = s.tree.find((r) => r.node === slab);
+    step('Cmd-G puts the picked object into a new group', s.tree.length === 9 && s.picked === 'group 1' && wrapped && wrapped.depth === 1, JSON.stringify(s));
+    await key('k', cmd);
+    for (const ch of 'ungroup') await key(ch);
+    await key('Enter');
+    step("Cmd-K 'Ungroup' takes it out again", st().tree.length === 8 && st().picked === 'slab', JSON.stringify(st()));
+    for (let i = 0; i < 2; i++) await key('z', cmd);
+    step('every group edit undone gives back the file', same(bytes(), worldFile), JSON.stringify(st()));
+    await pause();
+    await chip(`tree-${trees}`);
+    await key('Tab');
+    step('Tab with a group picked edits its first object', st().mode === 'object' && st().treeOn === node('tree a'), JSON.stringify(st()));
+    await key('Tab');
+    await pause();
+    await chip(`tree-${slab}`);
     await key('Tab');
     const treeA = node('tree a');
     await chip(`tree-${treeA}`);

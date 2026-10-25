@@ -926,6 +926,10 @@ fn scene_tree(dir: &Path) -> Result<(), String> {
         "Cmd-K 'Rename object' opens the field, and Escape cancels it".into(),
     )?;
 
+    groups(&mut s, &bytes, dir)?;
+    s.frames(30);
+    s.ui_click(&format!("tree-{slab}"))?;
+
     // Model mode: the edited object's row is on, and a row click edits another object.
     s.frames_with(2, vec![key(egui::Key::Tab, egui::Modifiers::NONE)]);
     let editing = s.ed.scene.at() == At::Object(slab) && s.ed.ui.tree_on == Some(slab);
@@ -937,6 +941,151 @@ fn scene_tree(dir: &Path) -> Result<(), String> {
     )?;
     while s.ed.scene.undo() {}
     check(s.ed.scene.to_vox() == bytes, "every tree edit undone: byte-identical save".into())?;
+    Ok(())
+}
+
+/// Groups in world mode on 22-world: a group row picks the group, a drag on one of its
+/// objects and the arrows move the whole group, Cmd-D copies it, Cmd-Shift-G ungroups it,
+/// Cmd-G and Cmd-K "Ungroup" wrap an object in a group and take it out again, and Tab edits
+/// the group's first object. Leaves the world with every group edit undone.
+fn groups(s: &mut Shot, bytes: &[u8], dir: &Path) -> Result<(), String> {
+    use vxr_app::editor::node_name;
+    use vxr_core::history::At;
+    let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    let cmd = egui::Modifiers::COMMAND;
+    let node = |s: &Shot, name: &str| {
+        let w = s.ed.scene.world().unwrap();
+        (0..w.tree.nodes.len()).find(|&i| node_name(w, i) == name).ok_or(format!("no node {name}"))
+    };
+    let trees = node(s, "trees")?;
+    let members = s.ed.scene.world().unwrap().objects_under(trees);
+    let places = |s: &Shot| -> Vec<[i32; 3]> {
+        let w = s.ed.scene.world().unwrap();
+        members.iter().map(|&i| w.placement(i).map_or([0; 3], |p| p.0)).collect()
+    };
+    let shifted = |a: &[[i32; 3]], b: &[[i32; 3]]| -> Option<[i32; 3]> {
+        let d: [i32; 3] = std::array::from_fn(|k| b[0][k] - a[0][k]);
+        a.iter().zip(b).all(|(p, q)| (0..3).all(|k| q[k] - p[k] == d[k])).then_some(d)
+    };
+    let shown: usize = {
+        let w = s.ed.scene.world().unwrap();
+        let mut n = 0;
+        for &i in members.iter().filter(|&&i| w.shown(i)) {
+            w.for_each_object_voxel(i, |_, _| n += 1);
+        }
+        n
+    };
+
+    s.frames(30);
+    s.ui_click(&format!("tree-{trees}"))?;
+    s.frames(1);
+    check(
+        s.ed.scene.picked() == Some(trees)
+            && s.ed.ui.tree_on == Some(trees)
+            && s.ed.scene.selected_count() == shown
+            && members.len() == 3,
+        format!("a group row picks the group: its {} objects' {shown} voxels show selected", members.len()),
+    )?;
+    s.frames(2);
+    s.save_png(&dir.join("app-2x-group.png"))?;
+
+    // A drag on one of the group's objects moves the whole group, as one undo step.
+    let (w, h) = (s.ed.width as f32, s.ed.height as f32);
+    let mut at = None;
+    'find: for y in (0..40).map(|k| h * (0.15 + k as f32 * 0.0175)) {
+        for x in (0..60).map(|k| w * (0.2 + k as f32 * 0.01)) {
+            s.ed.pointer_moved(Some([x, y]));
+            let hit = s.ed.cursor().filter(|t| !t.ground && t.normal == [0, 1, 0]);
+            if hit.and_then(|t| s.ed.scene.object_at(t.voxel)).is_some_and(|o| members.contains(&o)) {
+                at = Some([x, y]);
+                break 'find;
+            }
+        }
+    }
+    let at = at.ok_or("no top face of the trees group in view")?;
+    let before = places(s);
+    s.stroke(at, &[[20.0, 0.0], [40.0, 4.0], [70.0, 10.0]]);
+    let after = places(s);
+    let d = shifted(&before, &after);
+    check(
+        s.ed.scene.picked() == Some(trees) && d.is_some_and(|d| d != [0; 3] && d[1] == 0),
+        format!("a drag on a tree of the picked group moves the whole group ({d:?})"),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
+    check(places(s) == before, "the group drag is one undo step".into())?;
+    s.frames_with(2, vec![key(egui::Key::ArrowRight, egui::Modifiers::NONE)]);
+    let d = shifted(&before, &places(s));
+    check(
+        d.is_some_and(|d| d.iter().map(|k| k.abs()).sum::<i32>() == 1 && d[1] == 0),
+        "an arrow nudges every object of the picked group one cell".into(),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
+
+    // Cmd-D copies the group with all its objects.
+    let objects = |s: &Shot| s.ed.scene.world().unwrap().objects().len();
+    let n0 = objects(s);
+    s.frames_with(2, vec![key(egui::Key::D, cmd)]);
+    let copy = s.ed.scene.picked().filter(|&c| c != trees);
+    let copied = copy.is_some_and(|c| s.ed.scene.world().unwrap().objects_under(c).len() == members.len());
+    check(copied && objects(s) == n0 + members.len(), "Cmd-D copies the picked group and every object in it".into())?;
+    s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
+
+    // Cmd-Shift-G ungroups: one row fewer, the objects stay where they show.
+    let world = s.ed.scene.world_voxels(false);
+    s.frames(30);
+    s.ui_click(&format!("tree-{trees}"))?;
+    let rows = s.ed.ui.tree.len();
+    s.frames_with(2, vec![key(egui::Key::G, cmd | egui::Modifiers::SHIFT)]);
+    check(
+        s.ed.ui.tree.len() == rows - 1
+            && !s.ed.ui.tree.iter().any(|r| r.node == trees)
+            && s.ed.scene.picked() == Some(members[0])
+            && s.ed.scene.world_voxels(false) == world,
+        "Cmd-Shift-G ungroups the picked group in place and picks its first object".into(),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
+    check(
+        s.ed.ui.tree.len() == rows && s.ed.ui.tree.iter().any(|r| r.node == trees && r.group),
+        "ungrouping is one undo step".into(),
+    )?;
+
+    // Cmd-G wraps the slab in a group of its own; Cmd-K "Ungroup" takes it out again.
+    let slab = node(s, "slab")?;
+    s.frames(30);
+    s.ui_click(&format!("tree-{slab}"))?;
+    s.frames_with(2, vec![key(egui::Key::G, cmd)]);
+    let g = s.ed.scene.picked().filter(|&g| g != slab);
+    let wrapped = g.is_some_and(|g| s.ed.scene.world().unwrap().tree.children(g) == [slab]);
+    let row = g.and_then(|g| s.ed.ui.tree.iter().find(|r| r.node == g).cloned());
+    let slab_row = s.ed.ui.tree.iter().find(|r| r.node == slab).cloned();
+    check(
+        wrapped
+            && s.ed.ui.tree.len() == rows + 1
+            && row.is_some_and(|r| r.group && r.depth == 0)
+            && slab_row.is_some_and(|r| r.depth == 1)
+            && s.ed.scene.world_voxels(false) == world,
+        "Cmd-G puts the picked object into a new group, in place, and picks the group".into(),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::K, cmd)]);
+    s.frames_with(1, vec![egui::Event::Text("ungroup".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    check(
+        s.ed.ui.tree.len() == rows && s.ed.scene.picked() == Some(slab),
+        "Cmd-K 'Ungroup' takes it out again".into(),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
+    s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
+
+    // Tab with a group picked edits the group's first object.
+    s.frames(30);
+    s.ui_click(&format!("tree-{trees}"))?;
+    s.frames_with(2, vec![key(egui::Key::Tab, egui::Modifiers::NONE)]);
+    let editing = s.ed.scene.at() == At::Object(members[0]);
+    s.frames_with(2, vec![key(egui::Key::Tab, egui::Modifiers::NONE)]);
+    check(
+        editing && s.ed.scene.at() == At::World && s.ed.scene.to_vox() == bytes,
+        "Tab with a group picked edits its first object; every group edit undone gives the file".into(),
+    )?;
     Ok(())
 }
 

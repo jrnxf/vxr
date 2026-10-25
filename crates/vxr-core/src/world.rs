@@ -82,6 +82,11 @@ impl World {
         self.tree.order().into_iter().filter(|&i| matches!(self.tree.nodes[i].kind, Kind::Object(_))).collect()
     }
 
+    /// Whether node `i` is in the tree under the root (an object or a group).
+    pub fn in_tree(&self, i: usize) -> bool {
+        i < self.tree.nodes.len() && self.tree.parents()[i].is_some()
+    }
+
     /// The model object `i` shows.
     pub fn model_of(&self, i: usize) -> Option<usize> {
         match self.tree.nodes[i].kind {
