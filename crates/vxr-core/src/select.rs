@@ -157,7 +157,7 @@ impl Scene {
     }
 
     /// The voxels a transform works on: the selection, or every voxel when nothing is selected.
-    fn subject(&self) -> (Vec<([i32; 3], u8)>, bool) {
+    pub(crate) fn subject(&self) -> (Vec<([i32; 3], u8)>, bool) {
         let mut out: Vec<_> = self.selection().map(|p| (p, self.map.get(p[0], p[1], p[2]))).collect();
         if !out.is_empty() {
             return (out, true);

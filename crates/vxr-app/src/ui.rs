@@ -193,6 +193,10 @@ pub enum Action {
     DeleteSelection,
     /// Paint the selection with the current colour.
     FillSelection,
+    /// Keep only the voxels seen from outside the selection, or the whole model.
+    Hollow,
+    /// Fill the space the selection, or the whole model, encloses with the current colour.
+    FillInterior,
     Copy,
     Cut,
     Paste,
@@ -320,6 +324,8 @@ const COMMANDS: &[Command] = &[
     Command { label: "Deselect", keys: &["Esc"], run: |h| h.actions.push(Action::Deselect) },
     Command { label: "Delete selection", keys: &["⌫"], run: |h| h.actions.push(Action::DeleteSelection) },
     Command { label: "Fill selection", keys: &[], run: |h| h.actions.push(Action::FillSelection) },
+    Command { label: "Hollow", keys: &[], run: |h| h.actions.push(Action::Hollow) },
+    Command { label: "Fill inside", keys: &[], run: |h| h.actions.push(Action::FillInterior) },
     Command { label: "Copy", keys: &["⌘", "C"], run: |h| h.actions.push(Action::Copy) },
     Command { label: "Cut", keys: &["⌘", "X"], run: |h| h.actions.push(Action::Cut) },
     Command { label: "Paste", keys: &["⌘", "V"], run: |h| h.actions.push(Action::Paste) },
@@ -862,13 +868,14 @@ impl Hybrid {
     }
 
     // The selection flyout beside the rail's select button, shown with the select tool or a
-    // selection: the count, ROTATE / FLIP / LOOP X Y Z (the whole model when nothing is
-    // selected) and fill, copy, cut, paste and delete. Built like the axis flyout.
+    // selection: the count, ROTATE / FLIP / LOOP X Y Z and hollow and fill inside (the
+    // whole model when nothing is selected), and fill, copy, cut, paste and delete. Built like the
+    // axis flyout.
     fn selection_panel(&mut self, ctx: &Context) {
         if self.tool != Tool::Select && self.selected == 0 {
             return;
         }
-        let rect = Rect::from_min_size(pos2(12.0 + 52.0 + 8.0, self.select_y - 6.0), vec2(162.0, 174.0));
+        let rect = Rect::from_min_size(pos2(12.0 + 52.0 + 8.0, self.select_y - 6.0), vec2(162.0, 208.0));
         let (selected, has_clip) = (self.selected, self.has_clip);
         let mut run = Vec::new();
         let mut hits = Vec::new();
@@ -934,7 +941,25 @@ impl Hybrid {
                     }
                 }
             }
-            let cy = hy + 30.0 + 3.0 * 34.0 + 4.0;
+            let cy = hy + 30.0 + 3.0 * 34.0;
+            for (k, (label, id, action)) in
+                [("Hollow", "hollow", Action::Hollow), ("Fill inside", "fill-in", Action::FillInterior)]
+                    .into_iter()
+                    .enumerate()
+            {
+                let c = Rect::from_min_size(pos2(rect.left() + 12.0 + k as f32 * 70.0, cy - 13.0), vec2(68.0, 26.0));
+                let resp = ui.interact(c, Id::unique(id), Sense::click());
+                hits.push((id.to_string(), c));
+                let hover = resp.hovered();
+                let p = ui.painter();
+                let border = if hover { Color32::from_white_alpha(64) } else { LINE2 };
+                p.rect_stroke(c, CornerRadius::same(7), Stroke::new(1.0, border), StrokeKind::Inside);
+                p.text(c.center(), Align2::CENTER_CENTER, label, inter(11.0), if hover { TEXT } else { MUTED });
+                if resp.clicked() {
+                    run.push(action);
+                }
+            }
+            let cy = hy + 30.0 + 4.0 * 34.0 + 4.0;
             ui.painter().line_segment(
                 [pos2(rect.left() + 10.0, cy - 20.5), pos2(rect.right() - 10.0, cy - 20.5)],
                 Stroke::new(1.0, LINE),

@@ -69,7 +69,7 @@ Feature names below follow the update log [S1] unless another source is given.
 | Model size up to 256^3 | Canvas size per object [S1 0.99.5] | done, and past it: one sparse map up to 2048 voxels per axis, split into 256^3 models on save | P1 | - |
 | Resize model bounds | Crop tool resizes the canvas live [S1 0.99.5.1] | missing [6] | P2 | - |
 | Crop to content and fit | Fit sizes several objects [S1 0.99.5.1] | missing [6] | P2 | - |
-| Hollow and fill | Edit tools (also in vengi [S4]) | missing [6] | P2 | sculpt |
+| Hollow and fill | Edit tools (also in vengi [S4]) | done [6] (selection flyout and Cmd-K: Hollow keeps the voxels seen from outside, Fill inside fills enclosed space; the selection or the whole model) | P2 | sculpt |
 | Boolean operations | Groups and objects [S1 0.99.6.2] | missing | P3 | - |
 | Statistics | `log`: model count, scene size, voxels per colour [S1 0.99.6.2] | partial (voxel count in the header; per-colour count kept in the brick map, not shown) | P3 | - |
 | Auto-save and crash recovery | Every 25 steps to `cache/`, recover from `backup.vox` [S1 0.99, FAQ] | missing | P2 | - |

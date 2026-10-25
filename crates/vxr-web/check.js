@@ -179,7 +179,7 @@ async () => {
   step('K again locks Y, Z, then off', st().lock === null);
 
   // Selection and transform: S, colour click, Escape, box select, a live move drag, the
-  // flyout, copy and paste, Backspace and Cmd-A, each edit undone again.
+  // flyout, copy and paste, Backspace and Cmd-A, hollow and fill inside, each edit undone again.
   await key('s');
   step('S picks the select tool and shows the selection flyout', st().tool === 'Select' && window.vxr.hit('rotate-y').length === 2, st().tool);
   await click(mx, my);
@@ -221,6 +221,16 @@ async () => {
   await key('a', cmd);
   step('Cmd-A selects every voxel', st().selected === st().voxels, `${st().selected}`);
   await key('Escape');
+  // Model tools on the whole island: hollow, fill inside, one undo step each.
+  const solid = st().voxels;
+  const hollowed = await chip('hollow') && st().voxels;
+  step('the flyout hollows the model', hollowed > 0 && hollowed < solid, `${solid} -> ${hollowed}`);
+  await chip('fill-in');
+  const refilled = st().voxels;
+  step('fill inside fills what the shell encloses', refilled >= solid, `${hollowed} -> ${refilled}`);
+  await key('z', cmd);
+  await key('z', cmd);
+  step('hollow and fill inside are one undo step each', same(bytes(), original), `${st().voxels}`);
   await key('a');
   step('undo after every tool returns to the island', same(bytes(), original));
 

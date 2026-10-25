@@ -423,6 +423,16 @@ impl Editor {
             Action::FillSelection => {
                 s.fill_selection(self.ui.slot);
             }
+            Action::Hollow => {
+                let n = s.hollow();
+                let msg = if n > 0 { format!("Hollowed: removed {n} voxels") } else { "Nothing to hollow".into() };
+                self.ui.toast(&self.ctx, msg);
+            }
+            Action::FillInterior => {
+                let n = s.fill_interior(self.ui.slot);
+                let msg = if n > 0 { format!("Filled {n} enclosed cells") } else { "No enclosed space to fill".into() };
+                self.ui.toast(&self.ctx, msg);
+            }
             Action::Copy | Action::Cut => {
                 let n = if a == Action::Copy { s.copy_selection() } else { s.cut_selection() };
                 if n > 0 {
@@ -565,6 +575,8 @@ impl Editor {
                 | Action::Deselect
                 | Action::DeleteSelection
                 | Action::FillSelection
+                | Action::Hollow
+                | Action::FillInterior
                 | Action::Copy
                 | Action::Cut
                 | Action::Paste => self.selection_action(a),

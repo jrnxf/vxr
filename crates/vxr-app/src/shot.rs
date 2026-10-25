@@ -250,6 +250,7 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     palette(&mut s, dir)?;
     brushes(dir)?;
     selection(dir)?;
+    model_tools()?;
     render(&mut s, dir)?;
     materials(&mut s, dir)?;
 
@@ -587,6 +588,46 @@ fn selection(dir: &Path) -> Result<(), String> {
     s.save_png(&dir.join("app-2x-select.png"))?;
     s.ed.button(Button::Left, false, false);
     s.hold(none);
+    Ok(())
+}
+
+/// Model tools on an empty scene with one 5^3 cube, so every count is exact: the selection
+/// flyout's hollow and fill (whole model), Cmd-K 'Fill inside', and one undo step each.
+fn model_tools() -> Result<(), String> {
+    let mut s = Shot::new(Scene::new(NEW_SIZE), "Untitled", 2.0)?;
+    s.ed.ui.coach = false;
+    let mut cells = Vec::new();
+    for (x, y, z) in (60..65).flat_map(|x| (0..5).flat_map(move |y| (60..65).map(move |z| (x, y, z)))) {
+        cells.push(([x, y, z], 12));
+    }
+    s.ed.scene.edit(cells);
+    s.ed.frame_scene();
+    s.frames(3);
+    let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    s.frames_with(2, vec![key(egui::Key::S, egui::Modifiers::NONE)]);
+    s.ui_click("hollow")?;
+    let hollowed = (s.voxels(), s.ed.scene.map.get(62, 2, 62));
+    check(hollowed == (98, 0), format!("flyout hollow: the 3^3 core goes ({hollowed:?})"))?;
+    s.frames_with(2, vec![key(egui::Key::Z, egui::Modifiers::COMMAND)]);
+    check(s.voxels() == 125, "hollow is one undo step".into())?;
+    s.ui_click("hollow")?;
+    s.ed.ui.slot = 7;
+    s.ui_click("fill-in")?;
+    check(
+        s.voxels() == 125 && s.ed.scene.map.counts[7] == 27,
+        format!("flyout fill: the enclosed core fills with the current colour ({})", s.ed.scene.map.counts[7]),
+    )?;
+    s.ed.undo();
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("fill inside".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    let filled = s.ed.scene.map.counts[7];
+    s.ed.undo();
+    s.ed.undo();
+    check(
+        filled == 27 && s.voxels() == 125 && s.ed.scene.map.counts[12] == 125,
+        "Cmd-K 'Fill inside'; undo back to the solid cube".into(),
+    )?;
     Ok(())
 }
 
