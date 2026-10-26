@@ -1,0 +1,21 @@
+[package]
+name = "vxr-ai-staged-ghost-spike"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Phase AI test 6: a 100k-cell staged change drawn as a ghost on the island (throwaway spike)"
+
+# Not a member of the root workspace: a spike builds on its own.
+[workspace]
+
+[dependencies]
+vxr-core = { path = "../../crates/vxr-core" }
+vxr-render = { path = "../../crates/vxr-render" }
+wgpu = "30.0.1"
+glam = { version = "0.34", features = ["bytemuck"] }
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "1"
+png = "0.18"
+
+[profile.release]
+debug = 0
