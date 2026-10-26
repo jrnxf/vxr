@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# Test 5: drive the spike's `vxr mcp` files mode from Claude Code, then check the files.
+#   spikes/ai-mcp-files/run <out-dir> [build|edit|reedit|shots]...   (default: all four)
+# Runs `claude -p` with the owner's own Claude Code login (no key involved), with only the
+# vxr MCP tools available. Everything it writes goes under <out-dir>, outside the repo.
+set -euo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
+repo="$(cd "$here/../.." && pwd)"
+out="${1:?usage: run <out-dir> [build|edit|reedit|shots]...}"
+shift
+steps=("$@")
+[[ ${#steps[@]} -gt 0 ]] || steps=(build edit reedit shots)
+mkdir -p "$out"
+out="$(cd "$out" && pwd)"
+bin="$here/target/release"
+"$here/../dev" cargo build --release --manifest-path "$here/Cargo.toml" >&2
+mkdir -p "$out/root" "$out/work"
+
+# One Claude Code run: <name> <prompt>. Writes <name>.jsonl (the stream), <name>.calls.jsonl
+# (the server's log of each tool call) and <name>.mcp.json.
+claude_run() {
+  local name="$1" prompt="$2"
+  rm -f "$out/$name.calls.jsonl"
+  cat >"$out/$name.mcp.json" <<EOF
+{"mcpServers": {"vxr": {"command": "$bin/vxr-mcp", "args": ["--root", "$out/root", "--log", "$out/$name.calls.jsonl"]}}}
+EOF
+  # No built-in tools, no user settings or hooks, only the vxr server; every vxr tool allowed.
+  (cd "$out/work" && claude -p "$prompt" \
+    --mcp-config "$out/$name.mcp.json" --strict-mcp-config \
+    --tools "" --allowedTools "mcp__vxr" \
+    --setting-sources project --no-session-persistence \
+    --output-format stream-json --verbose) >"$out/$name.jsonl"
+  python3 "$here/summary.py" "$out/$name.jsonl" "$out/$name.calls.jsonl" | tee "$out/$name.summary.txt"
+}
+
+for step in "${steps[@]}"; do
+  case "$step" in
+    build)
+      rm -f "$out/root/house.vox" "$out/root/house.vox.bak"
+      claude_run build "Use only the vxr MCP tools. Create a new file house.vox with a scene of 32 x 24 x 32 voxels and build a small cottage on a patch of grass: a grass base, wooden walls with a door opening and two windows, a pitched red roof, a chimney, glass in the windows (a glass material on the window colour), an emissive lamp beside the door, and a tree next to the house. Choose and set your own colours. Check your work with slice where it helps. Save the file, then call done with a one-line summary."
+      ;;
+    edit)
+      "$bin/fixture" "$out/world-orig.vox"
+      cp "$out/world-orig.vox" "$out/root/world.vox"
+      rm -f "$out/root/world.vox.bak"
+      claude_run edit "Use only the vxr MCP tools. Edit world.vox: (1) paint a 2 x 2 square of palette slot 2 (red) in the middle of the top of the object named slab; (2) the three trees are linked copies of one model: remove the single green voxel at the very top of that model; (3) make slot 8 (the slab's grey) a plastic material with roughness 0.4; (4) rename the layer trees to forest and show the layer secret; (5) put the object named gem on the layer ground, and unhide the object named lost gem; (6) move camera 0 out to a radius of 60. Change nothing else. Save the file, then call done with a one-line summary."
+      # Slab and tree models, slot 8, layers 1 and 2, the gem and lost gem nodes, camera 0.
+      "$bin/chunkdiff" "$out/world-orig.vox" "$out/root/world.vox" \
+        --expect 'XYZI #0' --expect 'XYZI #1' --expect 'MATL 8' --expect 'LAYR 1' --expect 'LAYR 2' \
+        --expect 'nTRN 14' --expect 'nTRN 16' --expect 'rCAM 0' | tee "$out/edit.chunks.txt" || true
+      ;;
+    reedit)
+      # A second session on the file the build wrote: vxr's own output, edited again.
+      cp "$out/root/house.vox" "$out/house-built.vox"
+      rm -f "$out/root/house.vox.bak"
+      claude_run reedit "Use only the vxr MCP tools. Open house.vox, make the roof dark blue (set its palette slot's colour) and make the lamp brighter (raise its material's emission and power). Change nothing else. Save the file, then call done with a one-line summary."
+      "$bin/chunkdiff" "$out/house-built.vox" "$out/root/house.vox" --expect 'RGBA' --expect 'MATL *' \
+        | tee "$out/reedit.chunks.txt" || true
+      ;;
+    shots)
+      # Open each result in the real editor, headless. Its first steps render the file at
+      # 1x and 2x and check that a save without edits is byte-identical.
+      for f in house-built house world; do
+        file="$out/root/$f.vox"
+        [[ $f == house-built ]] && file="$out/house-built.vox"
+        [[ -f $file ]] || continue
+        (cd "$repo" && ./dev cargo run --release -p vxr-app -- --shot "$out/shot-$f" "$file") \
+          >"$out/shot-$f.txt" 2>&1 || true
+        echo "== $f: $(grep -c '^ok' "$out/shot-$f.txt") ok, $(grep -c '^FAIL' "$out/shot-$f.txt") FAIL"
+        grep -E '^(opened|ok   save without edits|FAIL)' "$out/shot-$f.txt" | head -5
+      done
+      ;;
+    *) echo "unknown step $step" >&2; exit 2 ;;
+  esac
+done

@@ -1,6 +1,6 @@
 # spikes
 
-Throwaway Phase 2 risk tests (see `docs/plan.md` and `docs/research/recommendation.md`). Not the real build.
+Throwaway Phase 2 and Phase AI risk tests (see `docs/plan.md` and `docs/research/recommendation.md`). Not the real build.
 
 - `./dev <command>` runs a command in the Nix dev shell from `nix/flake.nix`: stable Rust with the `wasm32-unknown-unknown` target, `wasm-bindgen` 0.2.129, `wasm-opt`, `twiggy`, `brotli`. `./dev --fuzz <command>` uses nightly Rust with `cargo-fuzz`.
 - `./gpu-lock <command>` holds a lock while a timed GPU run happens, so benchmarks from different spikes never share the GPU.
