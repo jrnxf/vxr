@@ -106,7 +106,7 @@ The user's selection and the voxel under the pointer are the cheapest context of
 
 ### Keeping a change reviewable
 
-1. **Stage, do not apply.** The AI's calls run inside one open edit on the live scene. The editor draws it as a ghost: added voxels tinted, removed ones outlined, repainted ones with an accent edge (the selection highlight already does this kind of tint in the march shader). The render corner can show the after state.
+1. **Stage, do not apply.** The AI's calls run inside one open edit on the live scene. The editor draws it as a ghost: added voxels tinted, removed ones outlined, repainted ones with an accent edge (the selection highlight already does this kind of tint in the march shader). The render corner traces the same map, so it shows the after state except staged removals, which stay in the map until Apply (`spikes/ai-staged-ghost/RESULTS.md`).
 2. **Review card:** counts (`+1,248 added · 96 removed · 412 repainted · slot 3 changed`), the list of steps with checkboxes to drop one, Before/After, and a field to ask for changes, which continues the same staged edit.
 3. **Apply** commits it as one undo step named after the prompt ("AI: make the roof red"). **Discard** or Escape reverts it. **Stop** cancels the request mid-stream and keeps or drops what was staged, the user's choice.
 4. **Limits per request:** at most 40 tool calls and 200k changed cells by default; over 10k cells the card asks before staging more. Palette and material changes are always listed by slot.
