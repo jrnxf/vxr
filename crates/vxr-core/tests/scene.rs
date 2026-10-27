@@ -399,6 +399,23 @@ fn cameras_open_edit_undo_and_save_as_rcam() {
     assert_eq!(s.cameras.len(), 3);
     let old = s.cameras[2];
 
+    // An unchanged camera and a non-finite one push no undo step and write nothing.
+    let mut fresh = Scene::from_vox(&bytes).unwrap();
+    assert!(fresh.set_camera(old), "unchanged: found");
+    for bad in [
+        Camera { radius: f32::NAN, ..old },
+        Camera { fov: f32::INFINITY, ..old },
+        Camera { frustum: f32::NEG_INFINITY, ..old },
+        Camera { focus: [0.0, f32::NAN, 0.0], ..old },
+        Camera { angle: [0.0, 0.0, f32::INFINITY], ..old },
+    ] {
+        assert!(!fresh.set_camera(bad));
+        assert!(!fresh.put_camera(bad));
+    }
+    assert_eq!(fresh.cameras[2], old);
+    assert!(!fresh.undo(), "no undo step was pushed");
+    assert!(fresh.to_vox() == bytes, "nothing written");
+
     // A dragged value is one undo step.
     s.put_camera(Camera { radius: 20.0, ..old });
     s.put_camera(Camera { radius: 25.0, focus: [1.0, 2.0, 3.0], ..old });
@@ -437,7 +454,7 @@ fn cameras_open_edit_undo_and_save_as_rcam() {
 }
 
 #[test]
-fn files_without_cameras_save_without_cameras() {
+fn opened_files_keep_their_cameras_and_rcam_chunks_on_save() {
     for (name, bytes) in files() {
         let s = Scene::from_vox(&bytes).unwrap();
         let doc = vxr_vox::Document::read(&bytes).unwrap();
