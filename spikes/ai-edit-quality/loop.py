@@ -244,7 +244,7 @@ class Server:
         self.p.wait(timeout=60)
 
 
-def run(binary, model, scene, prompt, out, vision=True, shots=True):
+def run(binary, model, scene, prompt, out, vision=True, shots=True, pairs=False):
     """Run one request and write `<out>/run.json` (numbers, card) and `<out>/transcript.json`."""
     os.makedirs(out, exist_ok=True)
     srv = Server(binary, scene, vision)
@@ -298,10 +298,11 @@ def run(binary, model, scene, prompt, out, vision=True, shots=True):
         rec["error"] = str(e)[:800]
     rec["wall_s"] = time.monotonic() - t0
     rec["cost"] = cost(model, rec["usage"])
-    fin = srv.req({"cmd": "finish", "out": out, "shots": shots})
+    fin = srv.req({"cmd": "finish", "out": out, "shots": shots, "pairs": pairs})
     srv.close()
     rec["card"] = fin.get("card")
     rec["verify"] = fin.get("verify")
+    rec["pairs"] = fin.get("pairs")
     if fin.get("error"):
         rec["error"] = (rec["error"] or "") + f" finish: {fin['error']}"
     with open(os.path.join(out, "run.json"), "w") as f:

@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Phase AI tests 1, 2 and 4: spikes/ai-edit-quality/run <out-dir> [files|t1|t2|t4|judge|report]...
-# With no step named it runs them all. The model calls need ANTHROPIC_API_KEY and
+# Phase AI tests 1, 2 and 4: spikes/ai-edit-quality/run <out-dir> [files|t1|t2|t4|judge|report|r2|judge2]...
+# With no step named it runs round 1 (files to report); r2 and judge2 are test 1's round 2. The model calls need ANTHROPIC_API_KEY and
 # OPENAI_API_KEY in the environment (GEMINI_API_KEY for Gemini, with --models); nothing here
 # reads or writes a key. Everything it makes (runs, .vox files, pictures, the judging page)
 # goes under <out-dir>, none of it into git.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
-out="${1:?usage: run <out-dir> [files|t1|t2|t4|judge|report]...}"
+out="${1:?usage: run <out-dir> [files|t1|t2|t4|judge|report|r2|judge2]...}"
 shift
 steps=("$@")
 [[ ${#steps[@]} -eq 0 ]] && steps=(files t1 t2 t4 judge report)
@@ -35,6 +35,12 @@ for step in "${steps[@]}"; do
       ;;
     t2 | t4) py "$here/run.py" "$out" "$step" | tee -a "$out/$step.log" ;;
     judge) py "$here/judge.py" "$out/t1" "$out/before" "$out/judge" "$out/judge-key.json" ;;
+    r2)
+      # Round 2 of test 1: three tiers of scenes, before and after pictures, a $10 cap.
+      "$bin" scenes "$repo/prototype/demo/scene.vox" "$out/files"
+      py "$here/run.py" "$out" r2 --cap 9.5 | tee -a "$out/r2.log"
+      ;;
+    judge2) py "$here/judge2.py" "$out/r2" "$out/judge2" "$out/judge2-key.json" ;;
     report)
       py "$here/report.py" "$out" t1 >"$out/t1-report.md"
       py "$here/report.py" "$out" matrix >"$out/t1-matrix.md"

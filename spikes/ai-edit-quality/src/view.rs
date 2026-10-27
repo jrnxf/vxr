@@ -96,6 +96,32 @@ impl Viewer {
         );
         Ok((png, desc))
     }
+
+    /// A plain picture for judging: `scene` through `cam` at `dims`, with the ground and the
+    /// bounds frame but no labels.
+    pub fn picture(&mut self, scene: &Scene, cam: &OrbitCamera, dims: (u32, u32)) -> Result<Vec<u8>, String> {
+        let (dev, queue) = (&self.gpu.device, &self.gpu.queue);
+        let map = GpuMap::new(dev, queue, &self.layout, &scene.map, &scene.palette)?;
+        self.renderer.resize(dev, dims.0, dims.1);
+        self.renderer.guides = Guides {
+            bounds: scene.map.size_voxels(),
+            floor: scene.floor,
+            grid: true,
+            ground: true,
+            frame: true,
+            line: 1.0,
+        };
+        self.renderer.set_camera(queue, cam, None);
+        let mut enc = dev.create_command_encoder(&Default::default());
+        self.renderer.march(&mut enc, &map, None);
+        queue.submit([enc.finish()]);
+        let mut px = pollster::block_on(vxr_render::gpu::read_texture(dev, queue, &self.renderer.color));
+        for p in px.as_chunks_mut::<4>().0 {
+            p[3] = 255;
+        }
+        self.renderer.resize(dev, SIZE.0, SIZE.1);
+        encode_png(&px, dims.0, dims.1)
+    }
 }
 
 pub fn encode_png(rgba: &[u8], w: u32, h: u32) -> Result<Vec<u8>, String> {

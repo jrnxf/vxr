@@ -1,6 +1,9 @@
 """The fixed prompts of tests 1, 2 and 4.
 
-Test 1 and test 4 share the 20 edit prompts: 13 on the island, 7 on an empty scene. Test 2's
+Test 1 and test 4 share the 20 edit prompts: 13 on the island, 7 on an empty scene. Round 2
+of test 1 has 18 prompts in three tiers, 6 each, on scenes from `vxr-ops scenes`: simple (an
+empty scene, or a few shapes on a grass plate), medium (a farm) and large (the island with
+room above it), each tier a mix of building and editing, every change big enough to see. Test 2's
 10 placement prompts all ask for the same 2x2x2 magenta marker, so `score.py` can find it and
 check where it landed against the island's own voxels.
 """
@@ -41,4 +44,25 @@ PLACEMENTS = [
     ("p08-off-dock", f"{MARKER}, floating on the water just past the far end of the dock. Change nothing else."),
     ("p09-by-pine", f"{MARKER}, on the ground just to the right of the tallest pine tree. Change nothing else."),
     ("p10-sea-front", f"{MARKER}, floating on the open sea in front of the island, in line with the house. Change nothing else."),
+]
+
+ROUND2 = [
+    ("s1-cottage", "simple", "new", "Build a small cottage with a red roof, a door and two windows."),
+    ("s2-rocket", "simple", "new", "Build a rocket standing on a launch pad."),
+    ("s3-pumpkin", "simple", "new", "Build a big orange pumpkin with a green stem."),
+    ("s4-big-ball", "simple", "shapes", "Make the blue ball twice as big, still resting on the grass."),
+    ("s5-pole", "simple", "shapes", "Make the yellow pillar twice as tall and paint it in red and white stripes."),
+    ("s6-doghouse", "simple", "shapes", "Remove the red cube and build a small wooden doghouse in its place."),
+    ("m1-barn-colours", "medium", "farm", "Make the barn's walls white and its roof dark green."),
+    ("m2-windmill", "medium", "farm", "Build a tall windmill with four sails beside the barn."),
+    ("m3-no-pond", "medium", "farm", "Remove the pond and put grass where it was."),
+    ("m4-silo", "medium", "farm", "Add a round grain silo next to the barn, taller than the barn."),
+    ("m5-harvest", "medium", "farm", "Harvest the field: replace the wheat rows with bare brown soil."),
+    ("m6-coop", "medium", "farm", "Build a chicken coop with a fenced run on the empty grass in front of the barn."),
+    ("l1-winter", "large", "island-tall", "Make it winter: cover the grass and the tops of the trees in snow, and turn the shallow water to ice."),
+    ("l2-castle", "large", "island-tall", "Build a stone castle with four corner towers on the left (west) part of the island."),
+    ("l3-no-trees", "large", "island-tall", "Remove every tree from the island."),
+    ("l4-bridge", "large", "island-tall", "Build a long wooden bridge from the end of the dock out across the sea to the edge of the scene."),
+    ("l5-sea-level", "large", "island-tall", "Raise the sea level so the beaches are under water."),
+    ("l6-volcano", "large", "island-tall", "Build a big volcano with orange lava at its top in the sea behind the island."),
 ]

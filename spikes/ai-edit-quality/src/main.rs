@@ -11,9 +11,14 @@
 //! - `vxr-ops shoot <scene.vox | new> <prefix>`: the editor screenshots of a file.
 //! - `vxr-ops summary <scene.vox | new>`: the scene summary the model gets.
 //! - `vxr-ops reshoot <before.vox> <after.vox> <prefix>`: the screenshots of a saved result.
+//! - `vxr-ops pairs <before.vox | new> <result.vox> <dir>`: round 2's judging pictures of a
+//!   saved result (as `finish` makes them).
+//! - `vxr-ops scenes <island.vox> <dir>`: round 2's scenes: `shapes.vox` (a few shapes on a
+//!   grass plate), `farm.vox` and `island-tall.vox` (the island with room above it).
 //! - `vxr-ops dump <scene.vox>`: every voxel as `[x, y, z, slot]` in world cells (for `score.py`).
 
 mod ops;
+mod scenes;
 mod shots;
 mod view;
 
@@ -49,6 +54,23 @@ fn main() {
             let focus = ops::focus(&before.world_voxels(false), &before.palette, &after);
             shots::shoot(after, "result", Path::new(&args[3]), focus)
         })(),
+        Some("pairs") if args.len() == 4 => (|| {
+            let (before, _) = load(&args[1])?;
+            let bytes = std::fs::read(&args[2]).map_err(|e| format!("{}: {e}", args[2]))?;
+            let mut after = Scene::from_vox(&bytes)?;
+            if args[1] == "new" {
+                // A saved new scene reopens as several objects; rebuild it as the new scene it was.
+                let mut s = Scene::new(NEW_SIZE);
+                s.palette = after.palette;
+                let cells: Vec<_> = after.world_voxels(false).into_iter().map(|(p, v)| (s.to_map(p), v)).collect();
+                s.edit(cells);
+                after = s;
+            }
+            let tag = before_after(&before, &after, Path::new(&args[3]))?;
+            println!("{tag}");
+            Ok(())
+        })(),
+        Some("scenes") if args.len() == 3 => scenes::write(Path::new(&args[1]), Path::new(&args[2])),
         Some("dump") if args.len() == 2 => load(&args[1]).map(|(s, _)| {
             let cells: Vec<[i32; 4]> =
                 s.world_voxels(false).into_iter().map(|(p, v)| [p[0], p[1], p[2], v as i32]).collect();
@@ -99,7 +121,8 @@ fn serve(path: &str, vision: bool) -> Result<(), String> {
             }
             "finish" => {
                 let dir = Path::new(msg["out"].as_str().unwrap_or("."));
-                let r = finish(&mut o, bytes.as_deref(), dir, msg["shots"].as_bool().unwrap_or(true));
+                let pairs = msg["pairs"].as_bool().unwrap_or(false);
+                let r = finish(&mut o, bytes.as_deref(), dir, msg["shots"].as_bool().unwrap_or(true), pairs);
                 let _ = writeln!(out, "{}", r.unwrap_or_else(|e| json!({"error": e})));
                 let _ = out.flush();
                 return Ok(());
@@ -114,7 +137,7 @@ fn serve(path: &str, vision: bool) -> Result<(), String> {
 
 /// Save the result, check the review card against the file as saved, write the changed cells
 /// and the screenshots.
-fn finish(o: &mut ops::Ops, original: Option<&[u8]>, dir: &Path, shoot: bool) -> Result<Value, String> {
+fn finish(o: &mut ops::Ops, original: Option<&[u8]>, dir: &Path, shoot: bool, pairs: bool) -> Result<Value, String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let card = o.card();
     let saved = o.scene.to_vox();
@@ -159,6 +182,16 @@ fn finish(o: &mut ops::Ops, original: Option<&[u8]>, dir: &Path, shoot: bool) ->
         "file_palette_slots": palette, "card_matches_file": matches,
         "names_kept": names_kept, "notes_kept": notes_kept,
     });
+    let second = if pairs {
+        o.scene.deselect();
+        let before = match original {
+            Some(b) => Scene::from_vox(b)?,
+            None => Scene::new(NEW_SIZE),
+        };
+        Some(before_after(&before, &o.scene, dir)?)
+    } else {
+        None
+    };
     if shoot {
         let focus = o.focus();
         // A selection is not a change; its highlight would only clutter the judging shots.
@@ -166,7 +199,57 @@ fn finish(o: &mut ops::Ops, original: Option<&[u8]>, dir: &Path, shoot: bool) ->
         let scene = std::mem::replace(&mut o.scene, Scene::new([1, 1, 1]));
         shots::shoot(scene, "result", &dir.join("shot"), focus)?;
     }
-    Ok(json!({"card": card, "verify": verify}))
+    Ok(json!({"card": card, "verify": verify, "pairs": second}))
+}
+
+/// Round 2's judging pictures: the file as opened and the result through the same two
+/// cameras, without the editor's panels. `full` frames both scenes' voxels from the editor's
+/// default angle; the second frames the change (`close`) or, when the change has no small box
+/// (a build on an empty scene, a recolour across the scene), shows the full view from the
+/// opposite side (`side`). Returns which the second is.
+fn before_after(before: &Scene, after: &Scene, dir: &Path) -> Result<String, String> {
+    use glam::Vec3;
+    use vxr_render::OrbitCamera;
+    const DIMS: (u32, u32) = (1280, 800);
+    let aspect = DIMS.0 as f32 / DIMS.1 as f32;
+    let v = |a: [i32; 3]| Vec3::new(a[0] as f32, a[1] as f32, a[2] as f32);
+    // World boxes: [lo, hi + 1), from the voxels themselves.
+    let occupied =
+        |s: &Scene| vxr_core::select::bounds(s.world_voxels(false).into_keys()).map(|(lo, hi)| (v(lo), v(hi) + 1.0));
+    let (lo, hi) = match (occupied(before), occupied(after)) {
+        (Some(a), Some(b)) => (a.0.min(b.0), a.1.max(b.1)),
+        (Some(a), None) | (None, Some(a)) => a,
+        (None, None) => {
+            let b = after.bounds();
+            let lo = v(b.lo);
+            (lo, lo + Vec3::new(b.size[0] as f32, 1.0, b.size[2] as f32))
+        }
+    };
+    let full = OrbitCamera::framing_aspect(lo, hi, aspect);
+    let focus = ops::focus(&before.world_voxels(false), &before.palette, after);
+    let (second, tag) = match focus {
+        Some((a, b)) => {
+            let pad = ((0..3).map(|k| b[k] - a[k]).max().unwrap_or(0) as f32 * 0.25).clamp(4.0, 12.0);
+            (OrbitCamera::framing_aspect(v(a) - pad, v(b) + 1.0 + pad, aspect), "close")
+        }
+        None => {
+            let mut c = full;
+            c.yaw += std::f32::consts::PI;
+            (c, "side")
+        }
+    };
+    let mut viewer = view::Viewer::new()?;
+    for (name, scene) in [("before", before), ("after", after)] {
+        // The cameras are in world cells; each scene's map starts at its own origin.
+        let o = v(scene.to_world([0, 0, 0]));
+        for (kind, cam) in [("full", full), ("second", second)] {
+            let mut c = cam;
+            c.target -= o;
+            let png = viewer.picture(scene, &c, DIMS)?;
+            std::fs::write(dir.join(format!("{name}-{kind}.png")), png).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(tag.into())
 }
 
 /// Instructions planted in a file's names and notes (test 4). Each fits the 64 characters a
