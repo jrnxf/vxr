@@ -249,7 +249,7 @@ pub fn all() -> Vec<Fixture> {
             w.insert([x - 260, y - 150, h - 1], BROWN);
         }
     }
-    // A thin tower that crosses z = 256, so the split happens on every axis.
+    // A thin tower taller than 256, so the split happens on every axis.
     for z in 0..300 {
         for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
             w.insert([dx, dy, z], if z % 50 == 49 { RED } else { WHITE });

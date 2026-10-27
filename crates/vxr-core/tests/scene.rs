@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use proptest::prelude::*;
 use vxr_core::Scene;
+use vxr_core::history::At;
 use vxr_core::scene::{vox_to_world, world_to_vox};
 use vxr_vox::build::Builder;
 use vxr_vox::scene::Rule;
@@ -156,6 +157,44 @@ fn every_vox_fixture_opens_and_saves_with_the_same_voxels_and_palette() {
         assert_eq!(world_voxels(&again), expect, "{} after save", f.name);
         assert_eq!(again.palette, s.palette, "{}", f.name);
     }
+}
+
+#[test]
+fn a_new_scene_saves_as_one_object_and_reopens_in_model_mode() {
+    // A new scene is centred on the origin across the ground, so its voxels sit on both
+    // sides of x = 0 and y = 0 in file axes: still one model, not one per quadrant.
+    let mut s = Scene::new([32, 32, 32]);
+    let mut cells = Vec::new();
+    for x in 0..32 {
+        for y in 0..32 {
+            for z in 0..32 {
+                cells.push(([x, y, z], 1 + ((x + y + z) % 7) as u8));
+            }
+        }
+    }
+    s.edit(cells);
+    let expect = world_voxels(&s);
+    let again = Scene::from_vox(&s.to_vox()).unwrap();
+    let objects = again.world().unwrap().objects();
+    assert_eq!(objects.len(), 1, "one object");
+    assert_eq!(again.at(), At::Object(objects[0]), "opens in model mode");
+    assert_eq!(world_voxels(&again), expect, "every voxel where it was");
+}
+
+#[test]
+fn a_new_scene_wider_than_256_keeps_every_voxel_in_place() {
+    let mut s = Scene::new([300, 8, 8]);
+    let mut cells = Vec::new();
+    for x in 0..300 {
+        cells.push(([x, 0, 0], 1 + (x % 9) as u8));
+        cells.push(([x, 7, 7], 2));
+    }
+    s.edit(cells);
+    let expect = world_voxels(&s);
+    let again = Scene::from_vox(&s.to_vox()).unwrap();
+    assert_eq!(again.world().unwrap().objects().len(), 2, "cut once along x, from the voxels' low corner");
+    assert_eq!(again.at(), At::World);
+    assert_eq!(world_voxels(&again), expect, "every voxel where it was");
 }
 
 #[test]
