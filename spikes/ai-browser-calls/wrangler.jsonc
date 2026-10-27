@@ -1,0 +1,9 @@
+// The test page on a throwaway workers.dev origin: static assets only, with the CSP in www/_headers.
+// Never routed to vxr.jrnxf.co. Remove it after the test with `wrangler delete`.
+{
+  "name": "vxr-ai-browser-calls",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": true,
+  "preview_urls": false,
+  "assets": { "directory": "./www" }
+}

@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vxr AI browser calls</title>
+<link rel="stylesheet" href="style.css">
+<script type="module" src="app.js"></script>
+</head>
+<body>
+<main>
+  <h1>Direct browser calls</h1>
+  <p class="note">Phase AI risk test 3. One streamed tool call per provider, straight from this page, under a strict CSP. The key stays in this tab's memory and is cleared from the field when a run starts.</p>
+
+  <form id="run">
+    <label>Provider
+      <select id="provider">
+        <option value="anthropic">Anthropic</option>
+        <option value="openai">OpenAI (Chat Completions)</option>
+        <option value="openai-none">OpenAI (Chat Completions, reasoning off)</option>
+        <option value="openai-responses">OpenAI (Responses)</option>
+        <option value="gemini">Gemini (OpenAI endpoint)</option>
+        <option value="openrouter">OpenRouter (PKCE key)</option>
+        <option value="ollama">Ollama (local)</option>
+      </select>
+    </label>
+    <label>Model <input id="model" autocomplete="off" spellcheck="false"></label>
+    <label>Base URL <input id="base" autocomplete="off" spellcheck="false"></label>
+    <label>API key <input id="key" type="password" autocomplete="off" spellcheck="false" aria-label="API key"></label>
+    <div class="row">
+      <button id="go" type="submit">Run</button>
+      <button id="signin" type="button">Sign in with OpenRouter</button>
+      <button id="csp" type="button">CSP control</button>
+    </div>
+  </form>
+
+  <p id="status" role="status">idle</p>
+  <pre id="log"></pre>
+</main>
+</body>
+</html>
