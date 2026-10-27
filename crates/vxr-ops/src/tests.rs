@@ -465,6 +465,12 @@ fn parts_by_id_and_name() {
     );
     assert!(call(&mut o3, &mut s3, "select", json!({"parts": ["p2"]})).starts_with("3 voxels selected"));
     assert!(call(&mut o3, &mut s3, "erase", json!({"parts": ["p1", "red column"]})).starts_with("19 cells changed"));
+    // An empty part name is no part.
+    assert!(
+        call(&mut o3, &mut s3, "paint", json!({"slot": 6, "part": "", "parts": [" "], "from_slot": 10}))
+            .starts_with("0 cells changed")
+    );
+    assert!(call(&mut o3, &mut s3, "erase", json!({"part": "", "cells": [[9, 9, 9]]})).starts_with("0 cells changed"));
     let (_, m) = err(&mut o3, &mut s3, "erase", json!({"parts": ["p1", "p9"]}));
     assert!(m.contains("no part matches \"p9\""), "{m}");
     // Several matches ask for an id.

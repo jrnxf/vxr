@@ -731,14 +731,16 @@ impl Session {
         }
     }
 
-    /// The world cells still filled of `part` and `parts` together, or None when neither is given.
+    /// The world cells still filled of `part` and `parts` together, or None when neither is
+    /// given. An empty name counts as not given (models send `"part": ""` beside other arguments).
     fn parts_cells(&self, scene: &Scene, part: &Option<String>, parts: &[String]) -> Result<Option<Vec<Cell>>, Error> {
-        if part.is_none() && parts.is_empty() {
+        let keys: Vec<&String> = part.iter().chain(parts).filter(|k| !k.trim().is_empty()).collect();
+        if keys.is_empty() {
             return Ok(None);
         }
         let mut seen = HashSet::new();
         let mut cells = Vec::new();
-        for k in part.iter().chain(parts) {
+        for k in keys {
             let i = self.part(k)?;
             if seen.insert(i) {
                 cells.extend(self.part_cells(scene, i).into_iter().map(|p| scene.to_world(p)));
