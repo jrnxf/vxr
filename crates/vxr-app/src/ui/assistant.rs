@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use egui::{Galley, ScrollArea, UiBuilder};
-use vxr_ai::net::KeyPlace;
+use vxr_ai::net::{BROWSER_LIMIT, KeyPlace, browser_reachable};
 use vxr_ai::provider::{COMPATIBLE_MODELS, Kind, MODELS, OPENROUTER, Settings};
 
 use super::*;
@@ -271,6 +271,26 @@ impl Hybrid {
         }
         self.ai_out.push(AiAction::Send(text.to_string()));
         true
+    }
+
+    /// What the composer holds.
+    pub fn ai_draft(&self) -> &str {
+        &self.ai.draft
+    }
+
+    /// The editor did not start a request from the bar or the panel (its toast says why): the
+    /// words go back where they were typed, to send again.
+    pub fn ai_refused(&mut self, text: &str) {
+        let text = text.trim();
+        if let Some(bar) = &mut self.ask_bar
+            && bar.sent
+            && bar.text == text
+        {
+            bar.sent = false;
+            bar.focus = true;
+        } else if self.ai.draft.trim().is_empty() {
+            self.ai.draft = text.to_string();
+        }
     }
 
     // The docked panel.
@@ -817,6 +837,13 @@ impl Hybrid {
             focus |= resp.has_focus();
             hits.push(("ai-base".into(), r));
             ui.add_space(6.0);
+            if chat.settings.browser && !st.base.trim().is_empty() && !browser_reachable(&st.base) {
+                let g = wrap(ui, BROWSER_LIMIT, inter(11.5), MID, w, 4);
+                let (r, _) = ui.allocate_exact_size(vec2(w, g.size().y), Sense::hover());
+                ui.painter().galley(r.min, g, MID);
+                hits.push(("ai-base-limit".into(), r));
+                ui.add_space(6.0);
+            }
             let (r, _) = ui.allocate_exact_size(vec2(w, 32.0), Sense::hover());
             let resp2 = ai_field(ui, r, "MODEL", Id::unique("ai-model"), &mut st.model, false, COMPATIBLE_MODELS[0]);
             focus |= resp2.has_focus();

@@ -807,21 +807,25 @@ impl Editor {
 
     /// Send a request to the assistant: on the change under review if one is open (the
     /// card's "Ask for changes" continues it), else on a new one. Without a key the panel
-    /// opens on its key settings.
-    pub fn ask(&mut self, text: &str) {
+    /// opens on its key settings. Returns whether the request started; when it did not, a
+    /// toast says why.
+    pub fn ask(&mut self, text: &str) -> bool {
         let text = text.trim();
         if text.is_empty() {
-            return;
+            return false;
         }
         if self.assistant.running() {
-            return self.ui.toast(&self.ctx, "Wait for the answer, or stop it");
+            self.ui.toast(&self.ctx, "Wait for the answer, or stop it");
+            return false;
         }
         if !self.assistant.ready() {
             self.ui.open_ai_setup(None);
-            return self.ui.toast(&self.ctx, crate::assistant::NO_KEY);
+            self.ui.toast(&self.ctx, crate::assistant::NO_KEY);
+            return false;
         }
         if self.scene.at() == At::World {
-            return self.ui.toast(&self.ctx, "Open an object's model (Tab) to change it with AI");
+            self.ui.toast(&self.ctx, "Open an object's model (Tab) to change it with AI");
+            return false;
         }
         let opened = self.review.is_none();
         if opened {
@@ -836,14 +840,20 @@ impl Editor {
                 r.session.discard(&mut self.scene);
             }
             self.ui.toast(&self.ctx, e);
+            return false;
         }
+        true
     }
 
     /// What the panel and the prompt bar asked for.
     fn ai_action(&mut self, a: AiAction) {
         let now = now_ms() / 1000.0;
         match a {
-            AiAction::Send(text) => self.ask(&text),
+            AiAction::Send(text) => {
+                if !self.ask(&text) {
+                    self.ui.ai_refused(&text);
+                }
+            }
             AiAction::Stop => {
                 let staged = self.review.as_ref().is_some_and(|r| !review_empty(r, &self.scene));
                 if self.assistant.stop(now) {
@@ -1090,7 +1100,9 @@ impl Editor {
         actions.extend(std::iter::repeat_n(Action::ToggleWorld, tabs));
         if let Some(text) = self.ui.asked.take() {
             self.asks.push(text.clone());
-            self.ask(&text);
+            if !self.ask(&text) {
+                self.ui.review_ask_refused(&text);
+            }
         }
         for a in std::mem::take(&mut self.ui.ai_out) {
             self.ai_action(a);

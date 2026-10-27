@@ -2667,6 +2667,14 @@ impl Hybrid {
         self.review = Some(card);
     }
 
+    /// The editor did not start the card's "Ask for changes" (its toast says why): the words
+    /// go back into the field.
+    pub fn review_ask_refused(&mut self, text: &str) {
+        if self.review_ask.trim().is_empty() {
+            self.review_ask = text.trim().to_string();
+        }
+    }
+
     // The select tool's box while it is dragged: an accent outline over a faint accent fill.
     fn marquee(&self, ctx: &Context) {
         if let Some(r) = self.marquee {

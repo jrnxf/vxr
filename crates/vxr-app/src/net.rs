@@ -11,15 +11,18 @@ use std::time::Duration;
 use vxr_ai::net::{KeyPlace, Keys, Piece, Request, Stream, Transport};
 use vxr_ai::provider::Kind;
 
+#[derive(Default)]
 pub struct Net {
     /// Write each answer's raw stream into this folder (the live check records fixtures).
+    #[cfg(feature = "live")]
     pub record: Option<PathBuf>,
+    #[cfg(feature = "live")]
     sent: usize,
 }
 
 impl Net {
     pub fn new() -> Net {
-        Net { record: None, sent: 0 }
+        Net::default()
     }
 }
 
@@ -27,8 +30,13 @@ impl Transport for Net {
     fn send(&mut self, request: Request) -> Box<dyn Stream> {
         let (tx, rx) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
-        self.sent += 1;
-        let record = self.record.as_ref().map(|d| d.join(format!("{:02}.sse", self.sent)));
+        #[cfg(feature = "live")]
+        let record = {
+            self.sent += 1;
+            self.record.as_ref().map(|d| d.join(format!("{:02}.sse", self.sent)))
+        };
+        #[cfg(not(feature = "live"))]
+        let record: Option<PathBuf> = None;
         let flag = stop.clone();
         std::thread::spawn(move || fetch(request, tx, flag, record));
         Box::new(Thread { rx, stop })
@@ -39,6 +47,7 @@ fn fetch(request: Request, tx: mpsc::Sender<Piece>, stop: Arc<AtomicBool>, recor
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .timeout_connect(Some(Duration::from_secs(30)))
+        .timeout_per_read(Some(Duration::from_secs(vxr_ai::net::IDLE_SECS)))
         .build()
         .into();
     let mut req = agent.post(&request.url);

@@ -851,6 +851,10 @@ async () => {
     if (!ai().open) await key('j', cmd);
     step('the panel opens on its key settings while there is no key', ai().open && !!at('ai-key') && !!at('ai-pick-3'), JSON.stringify(ai()));
     await clickAt('ai-pick-3');
+    await paste('ai-base', 'http://192.168.1.20:11434/v1');
+    step('a host the browser cannot reach says so under the URL', !!at('ai-base-limit'));
+    await paste('ai-base', 'http://localhost:8080/v1');
+    step('a local server on any port needs no line', !at('ai-base-limit'));
     await paste('ai-base', `${location.origin}/__fake/v1`);
     await key('Enter');
     await paste('ai-model', 'stand-in');

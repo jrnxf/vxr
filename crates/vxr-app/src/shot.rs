@@ -267,6 +267,7 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     export(&mut s, dir)?;
     review(dir)?;
     assistant(dir)?;
+    ai_refused()?;
 
     // Save, reopen and compare.
     let bytes = s.ed.scene.to_vox();
@@ -3034,6 +3035,23 @@ fn assistant(dir: &Path) -> Result<(), String> {
         s.ed.assistant.settings.model == "claude-sonnet-5-5" && s.ed.ui.hits.contains_key("ai-key-remove"),
         "Sonnet uses the Anthropic key already kept".into(),
     )?;
+    // A compatible endpoint the browser cannot reach says so under its URL, in the browser only.
+    s.ui_click("ai-pick-3")?;
+    s.type_into("ai-base", "http://192.168.1.20:11434/v1")?;
+    s.frames(2);
+    check(!s.ed.ui.hits.contains_key("ai-base-limit"), "the desktop app reaches any compatible host".into())?;
+    s.ed.assistant.settings.browser = true;
+    s.ed.assistant.version += 1;
+    s.frames(2);
+    check(
+        s.ed.ui.hits.contains_key("ai-base-limit"),
+        "the browser cannot reach a host on the LAN: the line says so".into(),
+    )?;
+    s.type_into("ai-base", "http://localhost:8080/v1")?;
+    s.frames(2);
+    check(!s.ed.ui.hits.contains_key("ai-base-limit"), "a local server on any port needs no line".into())?;
+    s.ed.assistant.settings.browser = false;
+    s.ed.assistant.version += 1;
     s.ui_click("ai-pick-0")?;
     s.ui_click("ai-done")?;
     check(
@@ -3049,9 +3067,40 @@ fn assistant(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// A request the editor turns down (the world is not a model) keeps its words where they were
+/// typed: the bar stays open and unsent, the composer gets its draft back, and nothing is sent.
+fn ai_refused() -> Result<(), String> {
+    use vxr_core::history::At;
+    let mut s = Shot::new(Scene::from_vox(&house().to_vox())?, "house.vox", 1.0)?;
+    s.ed.ui.coach = false;
+    let fake = s.fake_assistant(0);
+    s.ed.assistant.set_key(vxr_ai::Kind::Anthropic, "sk-ant-test-not-a-real-key", false)?;
+    s.frames(2);
+    s.frames_with(2, vec![key_event(egui::Key::Tab, egui::Modifiers::NONE)]);
+    check(s.ed.scene.at() == At::World, "the house opens in the world after Tab".into())?;
+    s.ed.ui.open_ask_bar("open a door");
+    s.frames(2);
+    s.frames_with(2, vec![key_event(egui::Key::Enter, egui::Modifiers::NONE)]);
+    check(
+        fake.requests().is_empty() && s.ed.ui.ask_bar.as_ref().is_some_and(|b| b.text == "open a door" && !b.sent),
+        "a request turned down in the world leaves the bar open and unsent with its words".into(),
+    )?;
+    s.frames_with(2, vec![key_event(egui::Key::Escape, egui::Modifiers::NONE)]);
+    s.ed.ui.ai_open = true;
+    s.frames(2);
+    s.type_into("ai-draft", "open a door")?;
+    s.frames(2);
+    check(
+        fake.requests().is_empty() && s.ed.ui.ai_draft() == "open a door",
+        "a request turned down in the world goes back into the composer".into(),
+    )?;
+    Ok(())
+}
+
 /// The assistant against the real providers whose keys are in the environment: one request on
 /// the house through the panel, then "Ask for changes" on its card (the conversation replayed
 /// with the provider's thinking or reasoning), checked and applied. Keys stay in memory.
+#[cfg(feature = "live")]
 pub fn live(dir: &Path) -> Result<(), String> {
     use vxr_ai::Kind;
     use vxr_app::assistant::Progress;

@@ -81,6 +81,39 @@ pub trait Keys {
     }
 }
 
+/// Seconds a streamed answer may go without a byte before it counts as dropped.
+pub const IDLE_SECS: u64 = 60;
+
+/// The providers a web page may reach, by origin. The page's content security policy
+/// (`crates/vxr-web/www/_headers`) lists the same, and local servers on any port.
+pub const BROWSER_ORIGINS: [&str; 3] = ["https://api.anthropic.com", "https://api.openai.com", "https://openrouter.ai"];
+
+/// What a web page cannot reach, as the settings and errors say it.
+pub const BROWSER_LIMIT: &str = "Only Anthropic, OpenAI, OpenRouter and local servers (localhost or 127.0.0.1) work from the browser; the desktop app can reach other hosts";
+
+/// The origin of `url` (`scheme://host[:port]`), in lower case and without user info.
+pub fn origin(url: &str) -> String {
+    let (scheme, rest) = url.trim().split_once("://").unwrap_or(("", url));
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    let authority = authority.rsplit('@').next().unwrap_or(authority);
+    format!("{scheme}://{authority}").to_ascii_lowercase()
+}
+
+/// Whether a web page may reach `url`: one of [`BROWSER_ORIGINS`], or a local server over
+/// `http` on any port. The page's own origin is the host's to allow.
+pub fn browser_reachable(url: &str) -> bool {
+    let o = origin(url);
+    if BROWSER_ORIGINS.contains(&o.as_str()) {
+        return true;
+    }
+    let Some(authority) = o.strip_prefix("http://") else { return false };
+    let host = match authority.rsplit_once(':') {
+        Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) => h,
+        _ => authority,
+    };
+    host == "localhost" || host == "127.0.0.1"
+}
+
 /// Keys in memory only.
 #[derive(Default)]
 pub struct MemoryKeys {
@@ -138,6 +171,35 @@ pub fn scrub(text: &str, key: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_page_reaches_the_providers_and_local_servers_only() {
+        for url in [
+            "https://api.anthropic.com/v1/messages",
+            "https://api.openai.com/v1/responses",
+            "https://openrouter.ai/api/v1/chat/completions",
+            "http://localhost:11434/v1/chat/completions",
+            "http://127.0.0.1:1234/v1",
+            "http://127.0.0.1:8080/v1",
+            "HTTP://LocalHost:9000/v1",
+            "http://localhost/v1",
+        ] {
+            assert!(browser_reachable(url), "{url}");
+        }
+        for url in [
+            "http://192.168.1.20:11434/v1",
+            "https://localhost:11434/v1",
+            "http://api.openai.com/v1",
+            "https://api.openai.com:8443/v1",
+            "https://example.com/v1",
+            "http://localhost@example.com/v1",
+            "http://localhost.example.com/v1",
+            "openrouter.ai/api/v1",
+        ] {
+            assert!(!browser_reachable(url), "{url}");
+        }
+        assert_eq!(origin("http://user:pw@Example.com:81/v1?x#y"), "http://example.com:81");
+    }
 
     #[test]
     fn keys_never_show() {

@@ -10,7 +10,7 @@
 //! editor polls [`Assistant::tick`] once a frame.
 
 use vxr_ai::chat::{Item, Stop, ToolCall, ToolResult, Turn};
-use vxr_ai::net::{KeyPlace, Keys, MemoryKeys, Piece, Stream, Transport, scrub};
+use vxr_ai::net::{IDLE_SECS, KeyPlace, Keys, MemoryKeys, Piece, Stream, Transport, scrub};
 use vxr_ai::provider::{Kind, Settings, Usage, default_model};
 use vxr_ai::stream::{Decoder, Delta, error_text};
 use vxr_core::Scene;
@@ -76,17 +76,13 @@ enum Phase {
         decoder: Box<Decoder>,
         status: Option<u16>,
         body: Vec<u8>,
+        /// When the last piece arrived (seconds).
+        last: f64,
     },
     /// Sending again at `until` (seconds), after `why`.
-    Retry {
-        until: f64,
-    },
+    Retry { until: f64 },
     /// Calls waiting for the user to allow a bigger change, and the answers of the turn so far.
-    Held {
-        calls: Vec<ToolCall>,
-        results: Vec<ToolResult>,
-        done: bool,
-    },
+    Held { calls: Vec<ToolCall>, results: Vec<ToolResult>, done: bool },
 }
 
 struct Run {
@@ -297,8 +293,13 @@ impl Assistant {
         let model = self.settings.model.clone();
         let text = self.answer().map(|a| a.text.clone()).unwrap_or_default();
         if let Some(run) = &mut self.run {
-            run.phase =
-                Phase::Stream { stream, decoder: Box::new(Decoder::new(kind, &model)), status: None, body: Vec::new() };
+            run.phase = Phase::Stream {
+                stream,
+                decoder: Box::new(Decoder::new(kind, &model)),
+                status: None,
+                body: Vec::new(),
+                last: now,
+            };
             run.text_before = text;
         }
         self.working("Thinking");
@@ -325,18 +326,25 @@ impl Assistant {
     /// ended in this tick.
     pub fn tick(&mut self, review: Option<&mut Review>, scene: &mut Scene, now: f64) -> bool {
         let Some(run) = &mut self.run else { return false };
-        let (stream, decoder, status, body) = match &mut run.phase {
+        let (stream, decoder, status, body, last) = match &mut run.phase {
             Phase::Retry { until } if now >= *until => {
                 self.request(now);
                 return false;
             }
             Phase::Retry { .. } | Phase::Held { .. } => return false,
-            Phase::Stream { stream, decoder, status, body } => (stream, decoder, status, body),
+            Phase::Stream { stream, decoder, status, body, last } => (stream, decoder, status, body, last),
         };
         let mut deltas = Vec::new();
         // The stream's end: Ok, or the error and whether to send again.
         let mut end: Option<Result<(), (String, bool)>> = None;
-        for piece in stream.poll() {
+        let pieces = stream.poll();
+        if !pieces.is_empty() {
+            *last = now;
+        } else if now - *last >= IDLE_SECS as f64 {
+            stream.cancel();
+            end = Some(Err((format!("no answer for {IDLE_SECS} s"), true)));
+        }
+        for piece in pieces {
             match piece {
                 Piece::Status(s) => *status = Some(s),
                 Piece::Bytes(b) if status.is_some_and(|s| s < 300) => match decoder.push(&b) {
@@ -419,6 +427,11 @@ impl Assistant {
             run.retries += 1;
             let wait = 2f64.powi(run.retries as i32);
             run.phase = Phase::Retry { until: now + wait };
+            let before = run.text_before.clone();
+            if let Some(a) = self.answer() {
+                a.text = before;
+                a.thinking.clear();
+            }
             let short: String = e.chars().take(60).collect();
             self.working(&format!("Retrying in {wait:.0} s ({short})"));
             return;
@@ -647,6 +660,8 @@ pub mod fake {
         pub requests: Vec<Request>,
         /// Bytes per poll (0: everything at once).
         pub chunk: usize,
+        /// Requests still to answer with a 200 and then nothing, before the answers.
+        pub hangs: usize,
     }
 
     #[derive(Clone, Default)]
@@ -662,6 +677,10 @@ pub mod fake {
         pub fn fail(&self, status: u16, body: &str) {
             self.0.borrow_mut().answers.push_back((status, body.into()));
         }
+        /// Answer the next request with a 200 and then go quiet.
+        pub fn hang(&self) {
+            self.0.borrow_mut().hangs += 1;
+        }
         pub fn requests(&self) -> Vec<Request> {
             self.0.borrow().requests.clone()
         }
@@ -671,6 +690,10 @@ pub mod fake {
         fn send(&mut self, request: Request) -> Box<dyn Stream> {
             let mut s = self.0.borrow_mut();
             s.requests.push(request);
+            if s.hangs > 0 {
+                s.hangs -= 1;
+                return Box::new(Canned(VecDeque::from([Piece::Status(200)])));
+            }
             let (status, body) =
                 s.answers.pop_front().unwrap_or((500, r#"{"error":{"message":"no answer scripted"}}"#.into()));
             let n = if s.chunk == 0 { body.len().max(1) } else { s.chunk };
@@ -926,6 +949,58 @@ mod tests {
         let mut a = Assistant::new(Box::new(fake.clone()), Box::new(MemoryKeys::default()), false);
         assert_eq!(a.send("x", &mut r, &s, 0.0), Err(NO_KEY.into()));
         assert_eq!(fake.requests().len(), 1);
+    }
+
+    #[test]
+    fn a_retry_after_a_broken_stream_shows_only_the_new_answer() {
+        let (mut a, fake) = assistant(0);
+        let full = anthropic("Adding a tree.", &[]);
+        let cut = full.find("tree").unwrap();
+        let cut = full[..cut].rfind("\n\n").unwrap() + 2;
+        fake.answer(full[..cut].to_string());
+        fake.answer(anthropic("Adding a tree.", &[]));
+        let mut s = scene();
+        let mut r = Review::new(&s, "a tree");
+        a.send("a tree", &mut r, &s, 0.0).unwrap();
+        a.tick(Some(&mut r), &mut s, 0.1);
+        a.tick(Some(&mut r), &mut s, 0.2);
+        a.tick(Some(&mut r), &mut s, 0.3);
+        let Some(Entry::Answer(v)) = a.entries.last() else { panic!() };
+        assert!(matches!(&v.progress, Progress::Working(w) if w.starts_with("Retrying")), "{:?}", v.progress);
+        assert_eq!(v.text, "", "the broken attempt's text is dropped");
+        settle(&mut a, &mut r, &mut s, 50);
+        assert_eq!(fake.requests().len(), 2);
+        let Some(Entry::Answer(v)) = a.entries.last() else { panic!() };
+        assert_eq!((v.progress.clone(), v.text.as_str()), (Progress::Done, "Adding a tree."));
+    }
+
+    #[test]
+    fn a_quiet_stream_is_sent_again_after_the_idle_limit() {
+        let (mut a, fake) = assistant(0);
+        fake.hang();
+        fake.answer(anthropic("Here.", &[]));
+        let mut s = scene();
+        let mut r = Review::new(&s, "x");
+        a.send("x", &mut r, &s, 0.0).unwrap();
+        a.tick(Some(&mut r), &mut s, 1.0);
+        a.tick(Some(&mut r), &mut s, IDLE_SECS as f64 - 1.0);
+        let Some(Entry::Answer(v)) = a.entries.last() else { panic!() };
+        assert_eq!(v.progress, Progress::Working("Thinking".into()), "still waiting within the limit");
+        a.tick(Some(&mut r), &mut s, IDLE_SECS as f64 + 1.0);
+        let Some(Entry::Answer(v)) = a.entries.last() else { panic!() };
+        assert!(
+            matches!(&v.progress, Progress::Working(w) if w.starts_with("Retrying") && w.contains("no answer")),
+            "{:?}",
+            v.progress
+        );
+        let mut t = IDLE_SECS as f64 + 1.0;
+        while a.running() && t < 200.0 {
+            t += 1.0;
+            a.tick(Some(&mut r), &mut s, t);
+        }
+        assert_eq!(fake.requests().len(), 2);
+        let Some(Entry::Answer(v)) = a.entries.last() else { panic!() };
+        assert_eq!((v.progress.clone(), v.text.as_str()), (Progress::Done, "Here."));
     }
 
     #[test]

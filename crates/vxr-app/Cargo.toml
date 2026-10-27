@@ -9,6 +9,11 @@ publish.workspace = true
 name = "vxr"
 path = "src/main.rs"
 
+[features]
+# `vxr --live <dir>`: the assistant against the real providers, recording their streams
+# (`crates/vxr-ai/tests/fixtures/README.md`). Off in every shipped build.
+live = []
+
 [dependencies]
 vxr-core.workspace = true
 vxr-vox.workspace = true

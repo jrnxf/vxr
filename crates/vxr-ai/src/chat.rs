@@ -88,8 +88,7 @@ fn header(k: &str, v: &str) -> (String, String) {
 }
 
 /// Anthropic Messages: thinking adaptive with its summary shown, effort medium, the system
-/// prompt and history cached, tool inputs streamed as they are written, and the server's
-/// default fallback for a declined request.
+/// prompt and history cached, and tool inputs streamed as they are written.
 fn anthropic(settings: &Settings, key: Option<&str>, system: &str, tools: &[Tool], items: &[Item]) -> Request {
     let mut messages: Vec<Value> = Vec::new();
     let mut push = |role: &str, mut content: Vec<Value>| {
@@ -149,13 +148,8 @@ fn anthropic(settings: &Settings, key: Option<&str>, system: &str, tools: &[Tool
         "thinking": {"type": "adaptive", "display": "summarized"},
         "output_config": {"effort": "medium"},
         "cache_control": {"type": "ephemeral"},
-        "fallbacks": "default",
     });
-    let mut headers = vec![
-        header("content-type", "application/json"),
-        header("anthropic-version", "2023-06-01"),
-        header("anthropic-beta", "server-side-fallback-2026-07-01"),
-    ];
+    let mut headers = vec![header("content-type", "application/json"), header("anthropic-version", "2023-06-01")];
     if let Some(k) = key {
         headers.push(header("x-api-key", k));
     }
@@ -328,6 +322,8 @@ mod tests {
         assert_eq!(b["model"], "claude-opus-5-5");
         assert_eq!(b["output_config"]["effort"], "medium");
         assert_eq!(b["stream"], true);
+        assert!(b.get("fallbacks").is_none(), "the model picked answers, no other");
+        assert!(!r.headers.iter().any(|(k, _)| k == "anthropic-beta"));
         assert_eq!(b["system"][0]["cache_control"]["type"], "ephemeral");
         assert_eq!(b["tools"][0]["name"], "place");
         assert_eq!(b["tools"][0]["eager_input_streaming"], true);

@@ -8,28 +8,11 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 
 use js_sys::{Function, Reflect, Uint8Array};
-use vxr_ai::net::{KeyPlace, Keys, Piece, Request, Stream, Transport};
+use vxr_ai::net::{BROWSER_LIMIT, KeyPlace, Keys, Piece, Request, Stream, Transport, browser_reachable, origin};
 use vxr_ai::provider::Kind;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
-
-/// The hosts the page's content security policy lets it reach (`www/_headers`), besides its
-/// own origin.
-pub const HOSTS: [&str; 7] = [
-    "https://api.anthropic.com",
-    "https://api.openai.com",
-    "https://openrouter.ai",
-    "http://127.0.0.1:11434",
-    "http://localhost:11434",
-    "http://127.0.0.1:1234",
-    "http://localhost:1234",
-];
-
-fn origin(url: &str) -> String {
-    let (scheme, rest) = url.split_once("://").unwrap_or(("", url));
-    format!("{scheme}://{}", rest.split('/').next().unwrap_or(rest))
-}
 
 pub struct Fetch;
 
@@ -44,12 +27,10 @@ impl Transport for Fetch {
     fn send(&mut self, request: Request) -> Box<dyn Stream> {
         let shared = Rc::new(RefCell::new(Shared::default()));
         let o = origin(&request.url);
-        let own = web_sys::window().and_then(|w| w.location().origin().ok()).unwrap_or_default();
-        if o != own && !HOSTS.contains(&o.as_str()) {
+        let own = web_sys::window().and_then(|w| w.location().origin().ok()).map(|o| origin(&o)).unwrap_or_default();
+        if o != own && !browser_reachable(&request.url) {
             let host = o.split_once("://").map_or(o.as_str(), |(_, h)| h).to_string();
-            shared.borrow_mut().pieces.push_back(Piece::Blocked(format!(
-                "this page may reach only Anthropic, OpenAI, OpenRouter and local servers on ports 11434 (Ollama) and 1234 (LM Studio), not {host}; the desktop app can"
-            )));
+            shared.borrow_mut().pieces.push_back(Piece::Blocked(format!("{host} is out of reach. {BROWSER_LIMIT}")));
             return Box::new(FetchStream(shared));
         }
         let s = shared.clone();
