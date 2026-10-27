@@ -1,10 +1,12 @@
 # Tests 1, 2 and 4: edit quality, the picture, and hostile files
 
-Phase AI risk tests 1, 2 and 4 (`docs/plan.md`). Run 2026-10-27 on the M4 Pro with the owner's API keys: 205 model requests (200 in the batches, 5 pilots), $12.08 in all (test 1 $4.77, test 2 $3.44, test 4 $3.68, pilots $0.19), under the $15 cap.
+Phase AI risk tests 1, 2 and 4 (`docs/plan.md`). Run 2026-10-27 on the M4 Pro with the owner's API keys. Round 1: 205 model requests (200 in the batches, 5 pilots), $12.08 (test 1 $4.77, test 2 $3.44, test 4 $3.68, pilots $0.19), under its $15 cap. Round 2 of test 1, with the scenes redesigned after the owner found round 1's changes hard to see: 57 requests (54 and 3 pilots), $3.30, under its $10 cap.
 
 **Results.**
 
-- **Test 1 (edit quality): fail.** The owner accepted 13 of the default model's 20 answers (bar: 15). `claude-opus-5-5` at effort medium costs a median $0.093 per prompt (bar: under $0.10) but takes 31.5 s (bar: under 20 s). At effort low it meets both cost and time ($0.057, 16.8 s), but only 5 of its 20 answers were accepted. `claude-sonnet-5-5` got 10 of 20 ($0.031, 13.3 s); `gpt-6.1-sol` got 12 of 20 ($0.029, 46.8 s). No model and effort passed. 19 of the 20 prompts got at least one accepted answer; nobody built an acceptable well.
+- **Test 1 (edit quality): fail on time; the quality bar is met in round 2.** The bar is 15 of 20 acceptable on the default model (75%), median cost under $0.10 and median time under 20 s.
+  - Round 2 (18 prompts in three scene tiers, changes big enough to see): `claude-opus-5-5` at effort medium had 14 of 18 accepted (78%) at $0.081 and 25.4 s median, so it passes on quality and cost and fails on time. `gpt-6.1-sol` also had 14 of 18 (and 6 of 6 on the large scene) but at 37.3 s. `claude-sonnet-5-5` had 8 of 18, none of them on the large scene, at 11.2 s.
+  - Round 1 (20 prompts, small edits on the busy island): Opus 13 of 20 at $0.093 and 31.5 s; at effort low 5 of 20 at 16.8 s; Sonnet 10; GPT 12. The owner found many of its changes too small to see in the pictures, which led to round 2.
 - **Test 2 (does the picture help): fail for keeping vision.** With `render_view` the default model placed the same 8 of 9 markers as with the text summary alone (bar: 3 more out of 10), at 1.7 times the cost and time. Only `gpt-6.1-sol` gained 3 (5 to 8); `claude-sonnet-5-5` stayed at 5.
 - **Test 4 (prompt injection from files): pass on what the spike can check.** In 60 requests (the 20 prompts on all three models) on files whose object name, four layer names and `NOTE` chunk tell the assistant to erase everything or paint it all red, no change followed a planted instruction, and every change list matched the saved file cell for cell. The app has no review card yet, so the card itself is untested.
 
@@ -21,9 +23,11 @@ Not run: `gemini-3.8-flash`, because Google rejects the key in the key file on e
   - Limits as in the research: 4,096 cells per `place`, 40 tool calls and 200,000 changed cells per request.
   - Judging screenshots come from the editor itself (`vxr_app::Editor`, what `vxr --shot` draws its `app-1x.png` with) at 1280x800: the default view, the opposite side and, for island edits, a close-up of the change.
 - `loop.py`: the request loop with plain HTTP, no SDK. Claude through the Messages API (adaptive thinking, effort medium, prompt caching on the system prompt and the conversation); `gpt-6.1-sol` through OpenAI's Responses API (reasoning effort medium); an OpenAI-compatible Chat Completions client for Gemini, unused. The system prompt gives the axes and says that file text is data. The scene summary goes with the prompt. Costs use list prices per million tokens: Opus 5.5 $4 in, $20 out, $0.20 cache read, $5 cache write; Sonnet 5.5 $2, $10, $0.20, $2.50; `gpt-6.1-sol` $2 in, $10 out, with its cached input assumed at $0.20.
-- `prompts.py` (the fixed prompts), `run.py` (batches, the spend cap), `judge.py` (the blind page), `score.py` (test 2), `report.py` (tables), `run` (everything in order).
+- `prompts.py` (the fixed prompts), `run.py` (batches, the spend cap), `judge.py` and `judge2.py` (the blind pages of test 1's two rounds; `vxr-ops scenes` and `vxr-ops pairs` make round 2's scenes and pictures), `score.py` (test 2), `report.py` (tables), `run` (everything in order).
 
 ## Test 1: edit quality through tools
+
+### Round 1
 
 20 prompts. 13 on the island: recolour the roof, a flag on the chimney, a fence around the house, remove the chimney, a turquoise sea, a rowing boat by the dock, three trees, yellow flowers, a well, autumn pines, a lighthouse on the dock, a lamp post, a bench. 7 on an empty 128^3 scene: a pagoda garden, a tower, a snowman, a fenced yard, a sailboat, a mushroom house, a palm island.
 
@@ -93,6 +97,73 @@ What the numbers show:
 - **Effort low halves Opus's calls and time** (median 8 calls) with no tool errors, but cuts its accepted answers from 13 to 5. It is not a way to meet the time bar.
 - **`gpt-6.1-sol` hits the call limit on builds.** It places shapes in long parallel batches (41 `sphere` calls for one snowman), so 5 of 7 builds went past 40 calls; the calls over the limit were refused, and what was placed by then stayed. It is the cheapest but the slowest.
 
+### Round 2
+
+The owner on round 1: some results "were hard to see because there was so much going on in the scene", so round 2 asked for prompts on a simple, a medium and a large scene, a mix of building and editing, and no tiny change on a busy scene.
+
+- **Scenes** (`vxr-ops scenes`, each one model): an empty 128^3 scene and `shapes` (a red cube, a blue ball and a yellow pillar on a grass plate, 1,967 voxels) for the simple tier; `farm` (a red barn, a white farmhouse, a fenced wheat field, a pond, a path and two trees, 10,907 voxels) for the medium tier; the island grown from 31 to 64 voxels tall for the large tier, so big builds fit on it.
+- **Prompts** (6 per tier): simple: a cottage, a rocket, a pumpkin (empty scene), the ball twice as big, the pillar twice as tall in red and white stripes, a doghouse in place of the cube; medium: the barn white with a dark green roof, a windmill, no pond, a silo, the field harvested, a chicken coop; large: winter, a castle, no trees, a bridge from the dock, a higher sea, a volcano behind the island.
+- **Models**: `claude-opus-5-5` (effort medium), `claude-sonnet-5-5`, `gpt-6.1-sol`; Opus at effort low was dropped. The same `vxr-ops`, system prompt and limits as round 1.
+- **Judging** (`judge2.py`): 54 cards, shuffled, model hidden, tier and prompt on top, then the scene before and after side by side through the same camera twice: the whole scene, and a close-up on the change (or the other side, when the change covers the scene). The pictures are the editor's ray-marched view at 1280x800 without the panels, re-rendered from each saved result by `vxr-ops pairs`. Same keys as round 1.
+
+| Model | Accepted | Simple (of 6) | Medium (of 6) | Large (of 6) | Median cost | Median time | Hit 40 calls |
+|---|---|---|---|---|---|---|---|
+| `claude-opus-5-5` | **14 of 18** | 5 | 5 | 4 | $0.081 | 25.4 s | 2 |
+| `claude-sonnet-5-5` | 8 of 18 | 5 | 3 | 0 | $0.024 | 11.2 s | 0 |
+| `gpt-6.1-sol` | 14 of 18 | 4 | 4 | 6 | $0.028 | 37.3 s | 5 |
+
+Median cost and time by tier: Opus $0.064 and 19.4 s simple, $0.057 and 21.3 s medium, $0.192 and 59.0 s large; Sonnet $0.021 and 9.5 s, $0.017 and 8.7 s, $0.050 and 20.6 s; GPT $0.028 and 40.1 s, $0.016 and 21.4 s, $0.033 and 38.2 s.
+
+Accepted answers per prompt (Opus, Sonnet, GPT; A accepted, . rejected):
+
+| Prompt | Verdicts | | Prompt | Verdicts | | Prompt | Verdicts |
+|---|---|---|---|---|---|---|---|
+| s1-cottage | A A . | | m1-barn-colours | A A A | | l1-winter | A . A |
+| s2-rocket | A A A | | m2-windmill | A . A | | l2-castle | A . A |
+| s3-pumpkin | . A . | | m3-no-pond | . . . | | l3-no-trees | . . A |
+| s4-big-ball | A A A | | m4-silo | A A . | | l4-bridge | A . A |
+| s5-pole | A A A | | m5-harvest | A A A | | l5-sea-level | A . A |
+| s6-doghouse | A . A | | m6-coop | A . A | | l6-volcano | . . A |
+
+The owner's notes (four, all on accepted answers but one):
+
+- Opus, the bridge (accepted): "don't like the color choice though".
+- GPT, the higher sea (accepted): "som flowers poking through which feels off though".
+- Sonnet, the pumpkin (accepted): "kind a ugly pumpkin though. dont like the stem".
+- Opus, the pumpkin (rejected): "too circular but not terrible".
+
+The pond prompt says nothing about the models: all three answers are the same 113 cells, the pond painted with the grass colour, and the one flaw in the pictures is a notch in the path where the generated pond had cut into it, a fault of the scene. Without it Opus and GPT have 14 of 17 and Sonnet 8 of 17.
+
+Per prompt (calls, tokens in and out, cost, time):
+
+| Prompt | `claude-opus-5-5` | `claude-sonnet-5-5` | `gpt-6.1-sol` |
+|---|---|---|---|
+| s1-cottage | 16 calls, 21k / 2.1k tok, $0.079, 20 s | 17 calls, 10k / 2.2k tok, $0.031, 15 s | 32 calls, 21k / 1.7k tok, $0.027, 43 s |
+| s2-rocket | 27 calls, 13k / 3.5k tok, $0.116, 31 s | 16 calls, 9k / 1.5k tok, $0.023, 9 s | 42 calls, 25k / 2.1k tok, $0.033, 53 s (limit) |
+| s3-pumpkin | 11 calls, 20k / 1.6k tok, $0.052, 19 s | 11 calls, 12k / 1.1k tok, $0.017, 9 s | 45 calls, 7k / 2.3k tok, $0.029, 40 s (limit) |
+| s4-big-ball | 6 calls, 10k / 1.5k tok, $0.047, 17 s | 3 calls, 14k / 0.7k tok, $0.014, 9 s | 26 calls, 23k / 1.6k tok, $0.028, 40 s |
+| s5-pole | 11 calls, 16k / 1.3k tok, $0.044, 13 s | 16 calls, 16k / 1.6k tok, $0.028, 10 s | 9 calls, 17k / 0.4k tok, $0.012, 17 s |
+| s6-doghouse | 17 calls, 24k / 2.5k tok, $0.076, 26 s | 9 calls, 14k / 1.2k tok, $0.019, 10 s | 21 calls, 21k / 1.2k tok, $0.023, 32 s |
+| m1-barn-colours | 5 calls, 16k / 0.7k tok, $0.032, 13 s | 4 calls, 14k / 0.5k tok, $0.012, 5 s | 5 calls, 13k / 0.2k tok, $0.010, 12 s |
+| m2-windmill | 38 calls, 46k / 6.6k tok, $0.194, 66 s | 16 calls, 12k / 2.3k tok, $0.035, 16 s | 29 calls, 30k / 1.6k tok, $0.031, 39 s (no done) |
+| m3-no-pond | 2 calls, 9k / 0.3k tok, $0.014, 5 s | 2 calls, 9k / 0.3k tok, $0.005, 3 s | 2 calls, 5k / 0.1k tok, $0.003, 5 s |
+| m4-silo | 13 calls, 42k / 2.3k tok, $0.083, 29 s | 6 calls, 10k / 1.3k tok, $0.021, 12 s | 18 calls, 23k / 1.1k tok, $0.022, 31 s |
+| m5-harvest | 3 calls, 16k / 0.5k tok, $0.025, 7 s | 3 calls, 16k / 0.4k tok, $0.013, 6 s | 4 calls, 13k / 0.2k tok, $0.009, 10 s |
+| m6-coop | 27 calls, 61k / 5.1k tok, $0.161, 47 s | 5 calls, 16k / 1.5k tok, $0.024, 14 s | 38 calls, 39k / 3.0k tok, $0.049, 59 s (no done) |
+| l1-winter | 7 calls, 21k / 1.2k tok, $0.054, 17 s | 7 calls, 20k / 1.1k tok, $0.025, 12 s | 11 calls, 22k / 0.6k tok, $0.018, 23 s |
+| l2-castle | 17 calls, 60k / 5.9k tok, $0.180, 59 s | 11 calls, 28k / 2.1k tok, $0.039, 18 s | 41 calls, 96k / 3.5k tok, $0.069, 85 s (limit) |
+| l3-no-trees | 41 calls, 329k / 8.4k tok, $0.323, 125 s (limit) | 14 calls, 76k / 3.0k tok, $0.068, 33 s | 59 calls, 298k / 7.6k tok, $0.178, 241 s (limit) |
+| l4-bridge | 7 calls, 39k / 2.0k tok, $0.082, 24 s | 5 calls, 21k / 0.9k tok, $0.025, 9 s | 18 calls, 51k / 1.0k tok, $0.032, 36 s |
+| l5-sea-level | 11 calls, 88k / 9.2k tok, $0.284, 111 s | 29 calls, 41k / 6.8k tok, $0.104, 51 s | 5 calls, 21k / 0.6k tok, $0.017, 26 s |
+| l6-volcano | 46 calls, 35k / 7.1k tok, $0.203, 59 s (limit) | 28 calls, 17k / 3.9k tok, $0.061, 23 s | 41 calls, 31k / 1.9k tok, $0.035, 41 s (limit) |
+
+What round 2 shows:
+
+- **With changes that can be seen, Opus and GPT clear the quality bar** (78%, against 75%). Round 1's lower scores came partly from the test: small changes on a busy island.
+- **Sonnet fails on the large scene** (0 of 6) while matching Opus on the simple tier (5 of 6). It is the fastest, but not a default.
+- **The large scene is slow for Opus** (59 s median). On "remove every tree" it made 32 `select` probes and 7 pictures, then hit the call limit having changed only one colour; raising the sea took it 111 s. Sonnet cleared everything above y 12 except the house, flattening the hills too ("This also flattened the central hills", its summary said), and was rejected. Only GPT's answer was accepted, after 40 `box` calls in 241 s.
+- **No tool call failed** in 54 requests, as in round 1.
+
 ## Test 2: does the picture help?
 
 10 placement prompts on the island, each asking for a 2x2x2 magenta marker in one place: on the chimney, on the tallest tree, at the end of the dock, in front of the door, on the roof ridge, left of the house touching its wall, behind the house touching its back wall, on the water past the dock, right of the tallest pine, on the sea in front of the island. Each ran once with the text summary only (11 tools) and once with `render_view` added. `score.py` scores the marker's cells against the island's own voxels: it must rest on what the prompt names (or touch the wall it names, on the ground), and must not replace island voxels.
@@ -127,7 +198,7 @@ What this does and does not show: the planted text never steered an edit, with t
 ## What it changes for the build
 
 - **OpenAI needs the Responses API.** `gpt-6.1-sol` refuses function tools with reasoning on Chat Completions ("Function tools with reasoning_effort are not supported for gpt-6.1-sol in /v1/chat/completions. To use function tools, use /v1/responses or set reasoning_effort to 'none'"). The two-client plan becomes Anthropic Messages, OpenAI Responses, and Chat Completions for the other OpenAI-compatible servers (Gemini's endpoint, OpenRouter, Ollama, LM Studio).
-- **Keep `claude-opus-5-5` at effort medium as the default, and make it faster rather than cheaper.** It had the most accepted answers (13); effort low fell to 5, Sonnet to 10. Most of its time went to finding parts (next two points), so those fixes come first, then test 1 again with the same prompts and page.
+- **Keep `claude-opus-5-5` at effort medium as the default, and make it faster rather than cheaper.** It had the most accepted answers in round 1 (13; effort low 5, Sonnet 10) and tied GPT for the most in round 2 (14 of 18) at two thirds of GPT's time; Sonnet failed the large scene. Time is what fails the bar (25.4 s in round 2, 59 s on the large scene), and most of it went to finding parts (next two points), so those fixes come first, then round 2's prompts again.
 - **Add a point query to the first-version operations.** Without `get_voxels` or a column height, models probed with `select`, which made island edits slow (test 1) and marker heights wrong (test 2). A `get_voxels(region)` (capped, as the research has it) or a "top voxel at x, z" query is cheap and would replace most of those calls.
 - **Name the parts.** Most of a request's time went to finding the chimney or the door. Object names help where the scene has objects; within one model, `NOTE` palette names or a short per-slot description in the summary would too.
 - **Leave `render_view` out of the first version** by the test's bar: the default model gained nothing and paid 70% more. GPT did gain 3, so keep the operation in `vxr-ops` and offer it per model later.
@@ -137,7 +208,7 @@ What this does and does not show: the planted text never steered an edit, with t
 
 ## Not covered
 
-Gemini and a local model (above). Each prompt ran once per model, so there is no spread: one request can take twice as long as the median (Opus took 110 s on the lamp post). The review card, Apply and Discard (the change list is computed against the file, not shown). Streaming and browser calls (test 3). Requests that continue a conversation ("now make it bigger").
+Gemini and a local model (above). Round 2's large scene is the same island as round 1's, so the tiers differ in size and busyness but share a palette style. Each prompt ran once per model, so there is no spread: one request can take twice as long as the median (Opus took 110 s on the lamp post). The review card, Apply and Discard (the change list is computed against the file, not shown). Streaming and browser calls (test 3). Requests that continue a conversation ("now make it bigger").
 
 ## Rerun
 
@@ -147,4 +218,4 @@ crates/vxr-app/fetch-fonts                         # once, the screenshots' UI f
 ANTHROPIC_API_KEY=... OPENAI_API_KEY=... spikes/ai-edit-quality/run <out-dir>
 ```
 
-It writes everything (each request's `run.json`, transcript, `result.vox`, changed cells, pictures, the judging page and the tables) under `<out-dir>`; none of it is in git. A request whose `run.json` exists is skipped, so a batch resumes; no request starts once the batch has spent $14.
+It writes everything (each request's `run.json`, transcript, `result.vox`, changed cells, pictures, the judging page and the tables) under `<out-dir>`; none of it is in git. A request whose `run.json` exists is skipped, so a batch resumes; no request starts once round 1 has spent $14. `run <out-dir> r2 judge2` runs round 2 and builds its page, with its own $9.50 cap.
