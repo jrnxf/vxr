@@ -481,8 +481,12 @@ impl Scene {
 
     /// Change one saved camera inside the open edit (opening one if needed), so a value
     /// dragged through many steps becomes one undo step at [`Scene::commit`]. Returns false
-    /// if the scene has no camera `c.id`.
+    /// if the scene has no camera `c.id` or `c` holds a value that is not finite.
     pub fn put_camera(&mut self, c: Camera) -> bool {
+        let finite = [c.radius, c.frustum, c.fov].into_iter().chain(c.focus).chain(c.angle).all(f32::is_finite);
+        if !finite {
+            return false;
+        }
         let Some(k) = self.cameras.iter().position(|o| o.id == c.id) else { return false };
         let old = self.cameras[k];
         if old == c {
@@ -497,7 +501,7 @@ impl Scene {
         true
     }
 
-    /// Set one saved camera as an undoable step. Returns false if the scene has no camera `c.id`.
+    /// Set one saved camera as an undoable step. Returns false if the scene has no camera `c.id` or `c` is not finite.
     pub fn set_camera(&mut self, c: Camera) -> bool {
         self.commit();
         let found = self.put_camera(c);

@@ -8,7 +8,7 @@
 //! of one value leaves the other keys' text, and the keys vxr does not know, as they were.
 
 use crate::bytes::Dict;
-use crate::material::{fmt, num};
+use crate::material::num;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Mode {
@@ -56,7 +56,7 @@ pub struct Camera {
 impl Camera {
     /// A camera in slot `id` with the values a dict without keys reads as.
     pub fn new(id: i32) -> Camera {
-        Camera { id, mode: Mode::Pers, focus: [0.0; 3], angle: [0.0; 3], radius: 0.0, frustum: 0.4, fov: 45.0 }
+        Camera { id, mode: Mode::Pers, focus: [0.0; 3], angle: [0.0; 3], radius: 0.0, frustum: 0.414_214, fov: 45.0 }
     }
 
     /// Read an `rCAM` dict. Missing or malformed keys take the values of [`Camera::new`].
@@ -80,12 +80,11 @@ impl Camera {
         if old.mode != self.mode {
             d.set("_mode", self.mode.tag());
         }
-        let v3 = |v: [f32; 3]| v.map(fmt).join(" ");
-        if old.focus != self.focus {
-            d.set("_focus", v3(self.focus));
-        }
-        if old.angle != self.angle {
-            d.set("_angle", v3(self.angle));
+        for (key, was, now) in [("_focus", old.focus, self.focus), ("_angle", old.angle, self.angle)] {
+            if was != now {
+                let text = edit_vec3(d.get_str(key), was, now);
+                d.set(key, text);
+            }
         }
         for (key, was, now) in
             [("_radius", old.radius, self.radius), ("_frustum", old.frustum, self.frustum), ("_fov", old.fov, self.fov)]
@@ -107,6 +106,24 @@ impl Camera {
             .with("_frustum", fmt(self.frustum))
             .with("_fov", fmt(self.fov))
     }
+}
+
+/// A number with up to six decimals, as MagicaVoxel writes camera values, no trailing zeros.
+fn fmt(v: f32) -> String {
+    let s = format!("{v:.6}");
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    if s == "-0" { "0".into() } else { s.into() }
+}
+
+/// The text of a vector after an edit: a component that did not change keeps its original
+/// text, so `"0.123456 1.234567 -2.5"` with x edited keeps `1.234567` and `-2.5` as written.
+fn edit_vec3(text: Option<&str>, was: [f32; 3], now: [f32; 3]) -> String {
+    let parts: Vec<&str> = text.map(|t| t.split_whitespace().collect()).unwrap_or_default();
+    let keep = parts.len() == 3 && was.iter().zip(&parts).all(|(w, p)| p.parse::<f32>() == Ok(*w));
+    (0..3)
+        .map(|i| if keep && was[i] == now[i] { parts[i].to_string() } else { fmt(now[i]) })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Three numbers separated by spaces, as `_focus` and `_angle` hold them.
@@ -168,5 +185,17 @@ mod tests {
         assert_eq!(Camera::from_dict(2, &d), Camera { radius: 60.0, angle: [10.0, 45.0, 0.0], ..c });
         let full = Camera { mode: Mode::Iso, fov: 30.5, ..c };
         assert_eq!(Camera::from_dict(2, &full.to_dict()), full);
+    }
+
+    #[test]
+    fn edits_keep_untouched_text_and_six_decimals() {
+        let mut d = Dict::default().with("_focus", "0.123456 1.234567 -2.5").with("_frustum", "0.5");
+        let c = Camera::from_dict(0, &d);
+        Camera { focus: [5.0, c.focus[1], c.focus[2]], ..c }.apply_to(&mut d);
+        assert_eq!(d.get_str("_focus"), Some("5 1.234567 -2.5"));
+        Camera { frustum: 0.123_456, fov: 0.414_214, ..c }.apply_to(&mut d);
+        assert_eq!((d.get_str("_frustum"), d.get_str("_fov")), (Some("0.123456"), Some("0.414214")));
+        assert_eq!(Camera::new(0).frustum, 0.414_214);
+        assert_eq!(Camera::new(0).to_dict().get_str("_frustum"), Some("0.414214"));
     }
 }
