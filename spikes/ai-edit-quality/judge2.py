@@ -1,4 +1,4 @@
-"""Build round 2's blind judging page: judge2.py <r2-dir> <page-dir> <key.json>.
+"""Build round 2's (or 3's) blind judging page: judge2.py <r2-dir> <page-dir> <key.json> [round].
 
 Each result gets a random id. A card shows the tier and the prompt, then the scene before and
 after side by side through the same camera twice: the full view, and a close-up on the change
@@ -16,6 +16,7 @@ import sys
 import prompts
 
 r2, page, keyfile = sys.argv[1:4]
+ROUND = sys.argv[4] if len(sys.argv) > 4 else "2"
 os.makedirs(os.path.join(page, "img"), exist_ok=True)
 info = {pid: (tier, scene, text) for pid, tier, scene, text in prompts.ROUND2}
 SCENES = {"new": "an empty scene", "shapes": "a few shapes on a grass plate", "farm": "the farm", "island-tall": "the island"}
@@ -47,7 +48,7 @@ with open(keyfile, "w") as f:
 models = len({k["model"] for k in key.values()})
 page_html = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>vxr test 1 round 2</title>
+<title>vxr test 1 round __ROUND__</title>
 <style>
 :root { --bg: #f6f6f4; --fg: #1c1c1e; --muted: #6b6b70; --card: #ffffff; --line: #deded9; --ok: #1f7a3d; --no: #b3261e; --chip: #ececea; }
 @media (prefers-color-scheme: dark) { :root { --bg: #151517; --fg: #ececee; --muted: #9a9aa2; --card: #1f1f23; --line: #34343a; --ok: #5cc27c; --no: #ef6b61; --chip: #2c2c32; } }
@@ -81,7 +82,7 @@ figcaption { font-size: 13px; font-weight: 600; margin: 0 0 4px; }
 #zoom img { max-width: 98vw; max-height: 98vh; }
 textarea { width: 100%; height: 160px; font-family: ui-monospace, monospace; font-size: 12px; background: var(--card); color: var(--fg); border: 1px solid var(--line); border-radius: 8px; }
 </style></head><body>
-<header><h1>vxr test 1, round 2: blind judging</h1><span id="progress"></span><span class="keys">A accept · R reject · N note (Enter to finish) · J/K move</span><button id="next">Next unjudged</button><button id="export">Export verdicts</button></header>
+<header><h1>vxr test 1, round __ROUND__: blind judging</h1><span id="progress"></span><span class="keys">A accept · R reject · N note (Enter to finish) · J/K move</span><button id="next">Next unjudged</button><button id="export">Export verdicts</button></header>
 <main>
 <p class="intro"><strong>__COUNT__ cards: __PROMPTS__ prompts, each answered by __MODELS__ different models, shuffled.</strong> So every prompt shows up __MODELS__ times, and each card is one model's attempt; you just don't see which model. Judge each card on its own.</p>
 <p class="intro">The prompts come in three tiers: simple (an empty scene or a few shapes), medium (a farm) and large (the island). Each card shows the scene before and after, side by side through the same camera: first the whole scene, then a close-up on what changed (or the other side, when the change covers the whole scene). Accept a result if you would apply it as a reasonable answer to the prompt; reject it otherwise. A note is optional. Click a picture to see it full size. Verdicts are kept in this browser until you export them.</p>
@@ -91,7 +92,7 @@ textarea { width: 100%; height: 160px; font-family: ui-monospace, monospace; fon
 <div id="zoom"><img alt=""></div>
 <script>
 const CARDS = __DATA__;
-const KEY = "vxr-t1-round2-verdicts";
+const KEY = "vxr-t1-round__ROUND__-verdicts";
 let v = {};
 try { v = JSON.parse(localStorage.getItem(KEY) || "{}"); } catch (e) { v = {}; }
 const save = () => { try { localStorage.setItem(KEY, JSON.stringify(v)); } catch (e) {} render(); };
@@ -114,7 +115,7 @@ function render() {
   for (const i of document.querySelectorAll("input[data-note]")) if (document.activeElement !== i) i.value = (v[i.dataset.note] || {}).note || "";
   const n = CARDS.filter(c => (v[c.id] || {}).verdict).length;
   document.getElementById("progress").textContent = `${n} of ${CARDS.length} judged`;
-  document.getElementById("out").value = JSON.stringify({ test: "vxr-ai-test-1-round-2", verdicts: v }, null, 1);
+  document.getElementById("out").value = JSON.stringify({ test: "vxr-ai-test-1-round-__ROUND__", verdicts: v }, null, 1);
 }
 function nextUnjudged(from) {
   for (let k = 1; k <= CARDS.length; k++) { const i = (from + k) % CARDS.length; if (!(v[CARDS[i].id] || {}).verdict) return i; }
@@ -136,7 +137,7 @@ document.getElementById("next").onclick = () => { const i = CARDS.findIndex(c =>
 document.getElementById("export").onclick = () => {
   const a = document.createElement("a");
   a.href = URL.createObjectURL(new Blob([document.getElementById("out").value], { type: "application/json" }));
-  a.download = "verdicts-round2.json"; a.click();
+  a.download = "verdicts-round__ROUND__.json"; a.click();
 };
 document.addEventListener("keydown", e => {
   if (e.target.tagName === "INPUT") {
@@ -156,7 +157,7 @@ render();
 list.addEventListener("focusin", e => { const id = e.target.dataset && e.target.dataset.note; if (id) { const k = CARDS.findIndex(c => c.id === id); if (k >= 0 && k !== cur) { cur = k; document.querySelectorAll(".card").forEach((el, j) => el.classList.toggle("focus", j === cur)); } } });
 </script></body></html>
 """
-html = (page_html.replace("__DATA__", json.dumps(cards)).replace("__COUNT__", str(len(cards)))
+html = (page_html.replace("__ROUND__", ROUND).replace("__DATA__", json.dumps(cards)).replace("__COUNT__", str(len(cards)))
         .replace("__PROMPTS__", str(len({k["prompt"] for k in key.values()}))).replace("__MODELS__", str(models)))
 with open(os.path.join(page, "index.html"), "w") as f:
     f.write(html)

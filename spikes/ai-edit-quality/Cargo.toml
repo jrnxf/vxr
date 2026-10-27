@@ -3,7 +3,7 @@ name = "vxr-ai-edit-quality"
 version = "0.0.0"
 edition = "2024"
 publish = false
-description = "Phase AI spike (tests 1, 2 and 4): the 12 first-version vxr-ops behind a model loop"
+description = "Phase AI spike (tests 1, 2 and 4): the 12 first-version vxr-ops behind a model loop, and test 1 round 3 on the vxr-ops crate"
 
 # Its own workspace, apart from the root one.
 [workspace]
@@ -17,6 +17,7 @@ vxr-core = { path = "../../crates/vxr-core" }
 vxr-vox = { path = "../../crates/vxr-vox" }
 vxr-render = { path = "../../crates/vxr-render" }
 vxr-app = { path = "../../crates/vxr-app" }
+vxr-ops = { path = "../../crates/vxr-ops" }
 serde_json = "1"
 wgpu = "30.0.1"
 glam = { version = "0.34", features = ["bytemuck"] }
