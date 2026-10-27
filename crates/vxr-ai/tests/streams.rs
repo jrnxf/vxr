@@ -110,3 +110,40 @@ fn openrouter_chat_completions() {
     assert_eq!(b["messages"][2]["tool_calls"][0]["id"], "toolu_or");
     assert_eq!(b["messages"][3]["role"], "tool");
 }
+
+/// Answers recorded from the live check (2026-10-27): Opus's with a signed thinking block,
+/// `gpt-6.1-sol`'s with an encrypted reasoning item (only the request echoed in its
+/// `response.created` events is trimmed). Every call is one vxr-ops takes, and the next
+/// request sends the thinking and the reasoning back as they came.
+#[test]
+fn recorded_answers_decode_and_replay() {
+    let (t, deltas) = decode(Kind::Anthropic, &fixture("anthropic-recorded.sse"));
+    assert_eq!((t.model.as_str(), t.stop.clone()), ("claude-opus-5-5", Stop::Tools));
+    assert!(!t.thinking.is_empty() && deltas.iter().any(|d| matches!(d, Delta::Thinking(_))));
+    assert!(t.usage.output > 0 && t.usage.input + t.usage.cache_read + t.usage.cache_write > 0);
+    for c in &t.calls {
+        vxr_ops::Op::parse(&c.name, c.input.clone()).unwrap_or_else(|e| panic!("{}: {e}", c.name));
+    }
+    let b = next_request(Kind::Anthropic, &t);
+    let blocks = b["messages"][1]["content"].as_array().unwrap();
+    let thinking = blocks.iter().find(|b| b["type"] == "thinking").expect("a thinking block");
+    assert!(thinking["signature"].as_str().is_some_and(|s| s.len() > 20));
+    assert_eq!(blocks.len(), t.raw.as_array().unwrap().len());
+
+    let (t, _) = decode(Kind::OpenAi, &fixture("responses-recorded.sse"));
+    assert_eq!((t.model.as_str(), t.stop.clone()), ("gpt-6.1-sol", Stop::Tools));
+    assert!(!t.calls.is_empty() && t.calls.iter().all(|c| c.bad.is_none() && c.id.starts_with("call_")));
+    for c in &t.calls {
+        vxr_ops::Op::parse(&c.name, c.input.clone()).unwrap_or_else(|e| panic!("{}: {e}", c.name));
+    }
+    let b = next_request(Kind::OpenAi, &t);
+    let input = b["input"].as_array().unwrap();
+    let reasoning = input.iter().find(|i| i["type"] == "reasoning").expect("a reasoning item");
+    assert!(reasoning["encrypted_content"].as_str().is_some_and(|s| s.len() > 100) && reasoning["id"].is_string());
+    assert!(
+        input
+            .iter()
+            .filter(|i| i["type"] == "function_call")
+            .all(|i| i.get("id").is_none() && i["call_id"].is_string())
+    );
+}

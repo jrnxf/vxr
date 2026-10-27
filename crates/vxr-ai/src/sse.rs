@@ -13,6 +13,8 @@ pub struct Event {
 #[derive(Default)]
 pub struct Sse {
     buf: Vec<u8>,
+    /// How much of `buf` has been searched for a blank line already.
+    searched: usize,
 }
 
 impl Sse {
@@ -20,25 +22,29 @@ impl Sse {
     pub fn push(&mut self, bytes: &[u8]) -> Vec<Event> {
         self.buf.extend_from_slice(bytes);
         let mut out = Vec::new();
-        while let Some((end, skip)) = block_end(&self.buf) {
+        // A blank line may straddle the old end: search again from 3 bytes before it.
+        while let Some((end, skip)) = block_end(&self.buf, self.searched.saturating_sub(3)) {
             let block: Vec<u8> = self.buf.drain(..end + skip).take(end).collect();
+            self.searched = 0;
             if let Some(e) = parse(&block) {
                 out.push(e);
             }
         }
+        self.searched = self.buf.len();
         out
     }
 
     /// The stream ended: a last block without its blank line still counts.
     pub fn finish(&mut self) -> Option<Event> {
         let block = std::mem::take(&mut self.buf);
+        self.searched = 0;
         parse(&block)
     }
 }
 
-/// Where the first block ends, and how long the blank line after it is.
-fn block_end(b: &[u8]) -> Option<(usize, usize)> {
-    for i in 0..b.len() {
+/// Where the first block ends, searching from `from`, and how long the blank line after it is.
+fn block_end(b: &[u8], from: usize) -> Option<(usize, usize)> {
+    for i in from..b.len() {
         for sep in [&b"\r\n\r\n"[..], b"\n\n", b"\r\r"] {
             if b[i..].starts_with(sep) {
                 return Some((i, sep.len()));

@@ -3813,6 +3813,8 @@ version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
  "egui",
+ "js-sys",
+ "vxr-ai",
  "vxr-app",
  "vxr-core",
  "vxr-render",

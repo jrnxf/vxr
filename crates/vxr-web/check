@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Check the browser build end to end in headless Chrome (chrome-devtools-axi on the PATH):
-# serve crates/vxr-web/dist/ on 127.0.0.1, run check.js in the page (every tool, camera,
-# undo/redo, Cmd-K, Open, Save, resize), check the no-WebGPU message in a browser without
-# WebGPU, and write 1x and 2x screenshots into the git-ignored crates/vxr-web/shots/.
+# serve crates/vxr-web/dist/ on 127.0.0.1 with the deploy's headers (check-server.js, with a
+# stand-in model provider), run check.js in the page (every tool, camera, undo/redo, Cmd-K,
+# the assistant, Open, Save, resize), check that a key remembered in the browser comes back
+# in a new page, check the no-WebGPU message in a browser without WebGPU, and write 1x and 2x
+# screenshots into the git-ignored crates/vxr-web/shots/.
 # Prints ok or FAIL per step and exits 1 on any failure. Run crates/vxr-web/build first.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -21,20 +23,7 @@ cd "$root"
 fixtures="$(mktemp -d)"
 trap 'rm -rf "$fixtures"' EXIT
 ./dev cargo run -q --release -p vxr-vox --example fixture -- 22-world "$fixtures/22-world.vox"
-./dev node -e "
-const http = require('node:http'), fs = require('node:fs'), path = require('node:path');
-const types = { '.html': 'text/html', '.js': 'text/javascript', '.wasm': 'application/wasm' };
-http.createServer((req, res) => {
-  const u = decodeURIComponent(new URL(req.url, 'http://x').pathname);
-  const p = u.startsWith('/__fixtures/') ? path.join(process.argv[3], u.slice(12)) : path.join(process.argv[1], u);
-  const f = p.endsWith('/') ? p + 'index.html' : p;
-  fs.readFile(f, (err, data) => {
-    if (err) { res.writeHead(404); res.end(); return; }
-    res.writeHead(200, { 'content-type': types[path.extname(f)] || 'application/octet-stream' });
-    res.end(data);
-  });
-}).listen(+process.argv[2], '127.0.0.1');
-" "$dist" "$port" "$fixtures" &
+./dev node "$here/check-server.js" "$dist" "$port" "$fixtures" &
 server=$!
 gpu=vxr-check-$$
 nogpu=vxr-check-nogpu-$$
@@ -73,6 +62,15 @@ for _ in $(seq 600); do
 done
 [ -n "$results" ] || results="FAIL check.js did not finish in 10 minutes"
 axi screenshot "$shots/web-1x-checked.png" >/dev/null
+
+# A key check.js asked this browser to remember comes back, encrypted, in a new page.
+axi open "$url" >/dev/null
+back="$(axi eval "async () => { for (let i = 0; i < 300 && !window.vxr; i++) await new Promise(r => setTimeout(r, 50)); await new Promise(r => setTimeout(r, 500)); const a = JSON.parse(window.vxr.ai()); await window.vxrKeys.forget('compatible'); return JSON.stringify([a.hasKey[2], a.remembered[2], a.kind]) }" | unwrap)"
+if [[ "$back" == '[true,true,"compatible"]' ]]; then
+  results+=$'\nok a key remembered in this browser is back in a new page (and forgotten again)'
+else
+  results+=$'\nFAIL a key remembered in this browser is back in a new page: '"$back"
+fi
 
 export CHROME_DEVTOOLS_AXI_SESSION=$nogpu
 export CHROME_DEVTOOLS_AXI_CHROME_ARGS='--disable-gpu --disable-webgpu'

@@ -2445,7 +2445,21 @@ fn review(dir: &Path) -> Result<(), String> {
     s.ui_click("review-after")?;
     let back = differ(&view_pixels(&mut s), &ghost);
     check(s.voxels() == v0 + 22 && back == 0, format!("After: the change again ({back} pixels differ)"))?;
-    // Dropping the door step takes its 6 removals out, and back.
+    // Dropping the door step takes its 6 removals out, and back. The card stops above the
+    // render corner, so its step list scrolls to the door.
+    s.frames(2);
+    if !s.ed.ui.hits.contains_key("review-step-4") {
+        let over = s.at("review-step-0")?;
+        let wheel = egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -200.0),
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Unknown,
+            modifiers: egui::Modifiers::NONE,
+        };
+        s.frames_with(1, vec![egui::Event::PointerMoved(over)]);
+        s.frames_with(20, vec![wheel]);
+    }
     s.ui_click("review-step-4")?;
     let c = s.ed.ui.review.clone().ok_or("no card")?;
     check(c.counts == [22, 0, 392] && c.steps[4].dropped, format!("dropping the door step: {:?}", c.counts))?;
@@ -2454,6 +2468,8 @@ fn review(dir: &Path) -> Result<(), String> {
     // The ask field takes text; Escape in it leaves the field, not the review.
     s.type_into("review-ask", "make the flag blue")?;
     check(s.ed.asks == ["make the flag blue"], format!("ask for changes reaches the assistant hook: {:?}", s.ed.asks))?;
+    // The ask above opened the assistant panel (no key yet): the card moved left of it.
+    s.frames(4);
     s.ui_click("review-ask")?;
     s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
     check(s.ed.review.is_some(), "Escape in the ask field keeps the review".into())?;
@@ -3063,9 +3079,14 @@ pub fn live(dir: &Path) -> Result<(), String> {
         s.ed.ui.ai_open = true;
         s.frames(2);
         let mut cost = 0.0;
-        for (k, prompt) in
-            ["make the roof red", "add a small flag on a pole on top of the roof"].into_iter().enumerate()
-        {
+        // `VXR_LIVE_PROMPTS` ("first|then") swaps in other requests, such as harder ones that
+        // make the model reason.
+        let custom = std::env::var("VXR_LIVE_PROMPTS").ok();
+        let prompts: Vec<&str> = match &custom {
+            Some(p) => p.split('|').collect(),
+            None => vec!["make the roof red", "add a small flag on a pole on top of the roof"],
+        };
+        for (k, prompt) in prompts.into_iter().enumerate() {
             let before = s.ed.assistant.entries.len();
             if k == 0 {
                 s.type_into("ai-draft", prompt)?;
@@ -3086,15 +3107,16 @@ pub fn live(dir: &Path) -> Result<(), String> {
             check(
                 a.progress == Progress::Done
                     && s.ed.assistant.entries.len() == before + 2
-                    && card.as_ref().is_some_and(|c| c.counts.iter().sum::<usize>() > 0),
+                    && card.as_ref().is_some_and(|c| c.counts.iter().sum::<usize>() > 0 || !c.slots.is_empty()),
                 format!(
-                    "{} {}: \"{prompt}\" -> {:?}, {} calls ({}), card {:?}, ${:.3}, {:.1} s",
+                    "{} {}: \"{prompt}\" -> {:?}, {} calls ({}), card {:?} slots {:?}, ${:.3}, {:.1} s",
                     kind.name(),
                     a.model,
                     a.progress,
                     a.calls.len(),
                     a.calls.iter().map(|c| c.tool.as_str()).collect::<Vec<_>>().join(" "),
                     card.as_ref().map(|c| c.counts),
+                    card.as_ref().map(|c| c.slots.iter().map(|s| s.slot).collect::<Vec<_>>()),
                     a.cost.unwrap_or(0.0),
                     a.secs
                 ),
@@ -3104,7 +3126,7 @@ pub fn live(dir: &Path) -> Result<(), String> {
         s.save_png(&dir.join(format!("live-{}.png", kind.id())))?;
         s.frames_with(2, vec![key_event(egui::Key::Enter, egui::Modifiers::NONE)]);
         check(
-            s.ed.review.is_none() && s.ed.scene.history().undo_label() == Some("AI: make the roof red"),
+            s.ed.review.is_none() && s.ed.scene.history().undo_label().is_some_and(|l| l.starts_with("AI: ")),
             format!("{}: applied as one undo step; ${cost:.3} for both requests", kind.name()),
         )?;
     }

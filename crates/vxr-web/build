@@ -16,7 +16,7 @@ mkdir -p "$dist/pkg" "$dist/fonts"
 ./dev wasm-bindgen --target web --no-typescript --out-dir "$dist/pkg" target/wasm32-unknown-unknown/wasm/vxr_web.wasm
 ./dev wasm-opt -O3 --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext \
   --enable-mutable-globals --enable-reference-types -o "$dist/pkg/vxr_web_bg.wasm" "$dist/pkg/vxr_web_bg.wasm"
-cp "$here/www/index.html" "$here/www/_headers" "$dist/"
+cp "$here/www/index.html" "$here/www/app.js" "$here/www/style.css" "$here/www/_headers" "$dist/"
 cp "$fonts"/*.ttf "$fonts"/*.txt "$dist/fonts/"
 node --input-type=module -e "
 import fs from 'node:fs';

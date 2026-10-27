@@ -205,6 +205,21 @@ impl Assistant {
         Ok(())
     }
 
+    /// The host changed the keys itself (the browser restored a remembered one): read them
+    /// again, and let the model follow them.
+    pub fn keys_changed(&mut self) {
+        self.has = [None; 3];
+        if !self.ready() {
+            for kind in [Kind::Anthropic, Kind::OpenAi, Kind::Compatible] {
+                if self.has_key(kind) {
+                    self.settings = Settings::new(kind, self.settings.browser);
+                    break;
+                }
+            }
+        }
+        self.version += 1;
+    }
+
     pub fn remove_key(&mut self, kind: Kind) -> Result<(), String> {
         self.keys.remove(kind)?;
         self.has[kind.index()] = Some(false);

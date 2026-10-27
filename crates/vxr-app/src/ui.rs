@@ -2309,7 +2309,7 @@ impl Hybrid {
         }
         let counts_text = ctx.fonts_mut(|f| f.layout_job(job));
         let counts_h = counts_text.size().y + 13.0;
-        let rows = card.steps.len().min(REVIEW_ROWS);
+        let mut rows = card.steps.len().min(REVIEW_ROWS);
         let (row_h, slot_h) = (26.0, 24.0);
         let mut h = 12.0 + 15.0 + 10.0 + prompt.size().y;
         if let Some(g) = &summary {
@@ -2329,6 +2329,14 @@ impl Hybrid {
             h += 14.0 + 12.0 + 6.0 + rows as f32 * row_h;
         }
         h += 12.0 + 28.0 + 8.0 + 30.0 + 12.0 + 32.0 + 12.0;
+        // The card ends above the render corner where they share columns: fewer steps show
+        // (the list scrolls), down to two.
+        if let Some(c) = self.render_dock.filter(|c| !self.full_render && c.left() < x + w) {
+            while rows > 2 && 68.0 + h > c.top() - 8.0 {
+                rows -= 1;
+                h -= row_h;
+            }
+        }
         let rect = Rect::from_min_size(pos2(x, 68.0), vec2(w, h));
         let mut hits: Vec<(String, Rect)> = Vec::new();
         let mut actions = Vec::new();
