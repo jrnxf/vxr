@@ -7,7 +7,9 @@ never written anywhere.
 
 Each run starts `vxr-ops serve <scene>` (the 12 operations on a real vxr_core::Scene), sends
 the scene summary with the prompt, runs the model's tool calls until it stops or calls done,
-then asks the server for the review card and the screenshots.
+then asks the server for the review card and the screenshots. Round 3 starts `vxr-ops serve3`
+instead: the `vxr-ops` crate's tools, system prompt and limits (per turn and per request,
+counted by the server, which starts a turn on each model answer) and its staged change.
 """
 
 import base64
@@ -224,8 +226,8 @@ def cost(model, usage):
 
 
 class Server:
-    def __init__(self, binary, scene, vision):
-        args = [binary, "serve", scene] + ([] if vision else ["--no-vision"])
+    def __init__(self, binary, scene, vision, cmd="serve"):
+        args = [binary, cmd, scene] + ([] if vision or cmd != "serve" else ["--no-vision"])
         self.p = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
 
     def req(self, m):
@@ -244,12 +246,14 @@ class Server:
         self.p.wait(timeout=60)
 
 
-def run(binary, model, scene, prompt, out, vision=True, shots=True, pairs=False):
+def run(binary, model, scene, prompt, out, vision=True, shots=True, pairs=False, server="serve"):
     """Run one request and write `<out>/run.json` (numbers, card) and `<out>/transcript.json`."""
     os.makedirs(out, exist_ok=True)
-    srv = Server(binary, scene, vision)
+    crate = server == "serve3"
+    srv = Server(binary, scene, vision, server)
     tools = srv.req({"cmd": "tools"})["tools"]
-    c = client(model, tools, SYSTEM + (VISION if vision else ""))
+    system = srv.req({"cmd": "system"})["text"] if crate else SYSTEM + (VISION if vision else "")
+    c = client(model, tools, system)
     summary = srv.req({"cmd": "summary"})["text"]
     c.start(f"Scene summary:\n{summary}\n\nRequest: {prompt}")
     rec = {"model": model, "scene": os.path.basename(scene), "prompt": prompt, "vision": vision,
@@ -272,16 +276,22 @@ def run(binary, model, scene, prompt, out, vision=True, shots=True, pairs=False)
             transcript.append({"turn": rec["turns"], "text": text, "calls": [{"name": n, "args": a} for _, n, a in calls], "usage": usage, "stop": stop})
             if not calls:
                 break
+            if crate:
+                srv.req({"cmd": "turn"})
             results = []
             for cid, name, args in calls:
                 rec["calls"] += 1
                 rec["by_tool"][name] = rec["by_tool"].get(name, 0) + 1
-                if rec["calls"] > MAX_CALLS:
+                if not crate and rec["calls"] > MAX_CALLS:
                     results.append((cid, f"error: the limit of {MAX_CALLS} tool calls per request is reached; call nothing else.", None, False))
                     rec["limit"] = True
                     continue
                 r = srv.req({"cmd": "call", "tool": name, "args": args})
-                if not r["ok"]:
+                if crate and "tool calls for this request is reached" in r["text"]:
+                    rec["limit"] = True
+                elif crate and "calls in one turn" in r["text"]:
+                    rec["turn_limited"] = rec.get("turn_limited", 0) + 1
+                elif not r["ok"]:
                     rec["tool_errors"] += 1
                 if r.get("png"):
                     images += 1

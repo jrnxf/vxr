@@ -1,6 +1,8 @@
-"""Tables for RESULTS.md: report.py <out-dir> <t1|t4> [island-dump.json island-summary.json].
+"""Tables for RESULTS.md: report.py <out-dir> <t1|t4|r3> [island-dump.json island-summary.json].
 
 t1: per model, per prompt: tool calls, tool errors, tokens, cost, time, done; then medians.
+r3: test 1 round 3, per prompt and model: calls, tokens, cost, time; then medians per model
+and tier, and the calls by tool.
 t4: per run, whether a change followed an instruction planted in the file (most of the scene
 erased, or most of it turned red), the change size next to the same model's test 1 answer,
 whether the review card matched the saved file, and whether the answer mentioned the planted
@@ -113,5 +115,58 @@ def matrix():
         print(f"| {pid} | " + " | ".join(cells.get((pid, m), "-") for m in models) + " |")
 
 
+def r3():
+    base = os.path.join(out, "r3")
+    models = sorted(os.listdir(base))
+    tier = {p[0]: p[1] for p in prompts.ROUND2}
+    runs = {}
+    for m in models:
+        for pid, *_ in prompts.ROUND2:
+            p = os.path.join(base, m, pid, "run.json")
+            if os.path.exists(p):
+                runs[(m, pid)] = json.load(open(p))
+    print("Per prompt (calls, tokens in and out, cost, time):")
+    print()
+    print("| Prompt | " + " | ".join(f"`{m}`" for m in models) + " |")
+    print("|---|" + "---|" * len(models))
+    for pid, *_ in prompts.ROUND2:
+        cells = []
+        for m in models:
+            r = runs.get((m, pid))
+            if not r:
+                cells.append("not run")
+                continue
+            tin, tout = tokens(r)
+            flags = [f for f, on in (("limit", r["limit"]), ("no done", not r["done"]), ("error", r["error"])) if on]
+            cells.append(f"{r['calls']} calls, {tin / 1000:.0f}k / {tout / 1000:.1f}k tok, ${r['cost']:.3f}, {r['wall_s']:.0f} s"
+                         + (f" ({', '.join(flags)})" if flags else ""))
+        print(f"| {pid} | " + " | ".join(cells) + " |")
+    print()
+    print("| Model | Runs | Median cost | Median time | Median calls | Simple (cost, time) | Medium | Large | Total cost | Tool errors | Turn-limited calls |")
+    print("|---|---|---|---|---|---|---|---|---|---|---|")
+    for m in models:
+        rs = [r for (mm, _), r in runs.items() if mm == m]
+        if not rs:
+            continue
+        by = {}
+        for (mm, pid), r in runs.items():
+            if mm == m:
+                by.setdefault(tier[pid], []).append(r)
+        def med(xs):
+            return f"${statistics.median(r['cost'] for r in xs):.3f}, {statistics.median(r['wall_s'] for r in xs):.1f} s" if xs else "-"
+        print(f"| `{m}` | {len(rs)} | ${statistics.median(r['cost'] for r in rs):.3f} | {statistics.median(r['wall_s'] for r in rs):.1f} s | "
+              f"{statistics.median(r['calls'] for r in rs):g} | {med(by.get('simple', []))} | {med(by.get('medium', []))} | {med(by.get('large', []))} | "
+              f"${sum(r['cost'] for r in rs):.2f} | {sum(r['tool_errors'] for r in rs)} | {sum(r.get('turn_limited', 0) for r in rs)} |")
+    print()
+    print("Calls by tool:")
+    print()
+    tools = sorted({t for r in runs.values() for t in r["by_tool"]})
+    print("| Model | " + " | ".join(f"`{t}`" for t in tools) + " |")
+    print("|---|" + "---|" * len(tools))
+    for m in models:
+        rs = [r for (mm, _), r in runs.items() if mm == m]
+        print(f"| `{m}` | " + " | ".join(str(sum(r["by_tool"].get(t, 0) for r in rs)) for t in tools) + " |")
+
+
 if __name__ == "__main__":
-    {"t1": t1, "matrix": matrix}.get(test, lambda: t4(sys.argv[3], sys.argv[4]))()
+    {"t1": t1, "matrix": matrix, "r3": r3}.get(test, lambda: t4(sys.argv[3], sys.argv[4]))()

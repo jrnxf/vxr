@@ -1,6 +1,10 @@
 //! Phase AI spike, tests 1, 2 and 4: the 12 first-version `vxr-ops` operations behind a
 //! model loop (`loop.py`).
 //!
+//! - `vxr-ops serve3 <scene.vox | new>`: the same protocol on the `vxr-ops` crate (test 1
+//!   round 3): its tools, system prompt (`{"cmd": "system"}`), limits per turn
+//!   (`{"cmd": "turn"}` starts one) and staged change, applied at `finish`. A call over the
+//!   ask-first size is approved at once, as if the user said yes, and counted.
 //! - `vxr-ops serve <scene.vox | new> [--no-vision]`: one scene, driven over stdin and stdout
 //!   with one JSON object per line: `{"cmd": "tools"}`, `{"cmd": "summary"}`,
 //!   `{"cmd": "call", "tool": ..., "args": {...}}` (answers `{"ok", "text", "png"}` with the PNG
@@ -20,6 +24,7 @@
 mod ops;
 mod scenes;
 mod shots;
+mod staged;
 mod view;
 
 use std::collections::BTreeMap;
@@ -40,6 +45,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let r = match args.first().map(String::as_str) {
         Some("serve") if args.len() >= 2 => serve(&args[1], !args.iter().any(|a| a == "--no-vision")),
+        Some("serve3") if args.len() == 2 => serve3(&args[1]),
         Some("inject") if args.len() == 4 => inject(&args[1], &args[2], &args[3]),
         Some("shoot") if args.len() == 3 => load(&args[1]).and_then(|(s, _)| {
             let name = Path::new(&args[1]).file_stem().map_or("new".into(), |n| n.to_string_lossy().into_owned());
@@ -135,12 +141,62 @@ fn serve(path: &str, vision: bool) -> Result<(), String> {
     Ok(())
 }
 
+fn serve3(path: &str) -> Result<(), String> {
+    let (scene, bytes) = load(path)?;
+    let mut o = staged::Staged::new(scene, bytes.as_deref());
+    let stdin = std::io::stdin();
+    let mut out = std::io::stdout().lock();
+    for line in stdin.lock().lines() {
+        let Ok(line) = line else { break };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let msg: Value = serde_json::from_str(&line).map_err(|e| e.to_string())?;
+        let reply = match msg["cmd"].as_str().unwrap_or("") {
+            "tools" => json!({"tools": vxr_ops::tools()}),
+            "system" => json!({"text": vxr_ops::SYSTEM_PROMPT}),
+            "summary" => json!({"text": o.summary()}),
+            "turn" => {
+                o.turn();
+                json!({"ok": true})
+            }
+            "call" => {
+                let name = msg["tool"].as_str().unwrap_or("");
+                let args = if msg["args"].is_object() { msg["args"].clone() } else { json!({}) };
+                match o.call(name, args) {
+                    Ok(t) => json!({"ok": true, "text": t}),
+                    Err(e) => json!({"ok": false, "text": format!("error: {e}")}),
+                }
+            }
+            "finish" => {
+                let dir = Path::new(msg["out"].as_str().unwrap_or("."));
+                let pairs = msg["pairs"].as_bool().unwrap_or(false);
+                o.close();
+                let r = finish(&mut o, bytes.as_deref(), dir, msg["shots"].as_bool().unwrap_or(true), pairs);
+                let _ = writeln!(out, "{}", r.unwrap_or_else(|e| json!({"error": e})));
+                let _ = out.flush();
+                return Ok(());
+            }
+            c => json!({"error": format!("unknown cmd {c}")}),
+        };
+        let _ = writeln!(out, "{reply}");
+        let _ = out.flush();
+    }
+    Ok(())
+}
+
 /// Save the result, check the review card against the file as saved, write the changed cells
 /// and the screenshots.
-fn finish(o: &mut ops::Ops, original: Option<&[u8]>, dir: &Path, shoot: bool, pairs: bool) -> Result<Value, String> {
+fn finish(
+    o: &mut impl staged::Run,
+    original: Option<&[u8]>,
+    dir: &Path,
+    shoot: bool,
+    pairs: bool,
+) -> Result<Value, String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let card = o.card();
-    let saved = o.scene.to_vox();
+    let saved = o.scene().to_vox();
     std::fs::write(dir.join("result.vox"), &saved).map_err(|e| e.to_string())?;
     std::fs::write(dir.join("changes.json"), o.changes().to_string()).map_err(|e| e.to_string())?;
     // The check: read the saved file back on its own and compare it with the file as opened.
@@ -183,20 +239,20 @@ fn finish(o: &mut ops::Ops, original: Option<&[u8]>, dir: &Path, shoot: bool, pa
         "names_kept": names_kept, "notes_kept": notes_kept,
     });
     let second = if pairs {
-        o.scene.deselect();
+        o.scene().deselect();
         let before = match original {
             Some(b) => Scene::from_vox(b)?,
             None => Scene::new(NEW_SIZE),
         };
-        Some(before_after(&before, &o.scene, dir)?)
+        Some(before_after(&before, o.scene(), dir)?)
     } else {
         None
     };
     if shoot {
         let focus = o.focus();
         // A selection is not a change; its highlight would only clutter the judging shots.
-        o.scene.deselect();
-        let scene = std::mem::replace(&mut o.scene, Scene::new([1, 1, 1]));
+        o.scene().deselect();
+        let scene = std::mem::replace(o.scene(), Scene::new([1, 1, 1]));
         shots::shoot(scene, "result", &dir.join("shot"), focus)?;
     }
     Ok(json!({"card": card, "verify": verify, "pairs": second}))
