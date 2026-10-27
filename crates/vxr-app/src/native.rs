@@ -120,6 +120,7 @@ impl State {
     fn act(&mut self, a: Action) {
         let ctx = self.editor.ctx.clone();
         match a {
+            Action::New => self.window.set_title("Untitled - vxr"),
             Action::Open => {
                 let Some(path) = rfd::FileDialog::new().add_filter("MagicaVoxel", &["vox"]).pick_file() else { return };
                 match open(&path).and_then(|(scene, name)| self.editor.load(scene, &name).map(|_| name)) {
@@ -150,6 +151,7 @@ impl State {
                         self.window.set_title(&format!("{name} - vxr"));
                         self.editor.ui.toast(&ctx, format!("Saved {name}"));
                         self.editor.path = Some(path);
+                        self.editor.mark_saved();
                     }
                     Err(e) => self.editor.ui.toast(&ctx, format!("Could not save: {e}")),
                 }

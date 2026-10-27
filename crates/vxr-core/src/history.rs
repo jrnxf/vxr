@@ -137,14 +137,17 @@ impl Step {
 
 #[derive(Clone, Debug, Default)]
 pub struct History {
-    undo: Vec<Step>,
-    redo: Vec<Step>,
+    undo: Vec<(u64, Step)>,
+    redo: Vec<(u64, Step)>,
+    /// The id the last pushed step got.
+    last: u64,
 }
 
 impl History {
     /// Record a new step. Any redo steps are dropped, as in every editor.
     pub fn push(&mut self, step: Step) {
-        self.undo.push(step);
+        self.last += 1;
+        self.undo.push((self.last, step));
         self.redo.clear();
     }
 
@@ -152,14 +155,14 @@ impl History {
     pub fn undo(&mut self) -> Option<&Step> {
         let s = self.undo.pop()?;
         self.redo.push(s);
-        self.redo.last()
+        self.redo.last().map(|(_, s)| s)
     }
 
     /// The step to apply again, moved back onto the undo stack.
     pub fn redo(&mut self) -> Option<&Step> {
         let s = self.redo.pop()?;
         self.undo.push(s);
-        self.undo.last()
+        self.undo.last().map(|(_, s)| s)
     }
 
     pub fn can_undo(&self) -> bool {
@@ -170,9 +173,20 @@ impl History {
         !self.redo.is_empty()
     }
 
+    /// Where the history stands: the id of the last step applied, 0 before any. Two equal
+    /// positions mean the same edits are applied, so the scene is the same.
+    pub fn position(&self) -> u64 {
+        self.undo.last().map_or(0, |(id, _)| *id)
+    }
+
     /// Add `d` to every map cell in every step at `at`, after that map moved.
     pub fn translate(&mut self, at: At, d: [i32; 3]) {
-        self.undo.iter_mut().chain(self.redo.iter_mut()).filter(|s| s.at == at).for_each(|s| s.translate(d));
+        self.undo
+            .iter_mut()
+            .chain(self.redo.iter_mut())
+            .map(|(_, s)| s)
+            .filter(|s| s.at == at)
+            .for_each(|s| s.translate(d));
     }
 
     pub fn clear(&mut self) {

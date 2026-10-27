@@ -155,6 +155,7 @@ mod icon {
     pub const FOLDER: char = '\u{e0d7}';
     pub const LINK: char = '\u{e102}';
     pub const FILE_OUTPUT: char = '\u{e0c8}';
+    pub const FILE_PLUS: char = '\u{e0c9}';
     pub const MAXIMIZE_2: char = '\u{e113}';
     pub const MINIMIZE_2: char = '\u{e11b}';
 }
@@ -166,6 +167,8 @@ pub use vxr_render::View;
 /// What the UI asks the app to do this frame.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Action {
+    /// Start a blank scene (the UI has already asked about unsaved edits).
+    New,
     Open,
     Save,
     Undo,
@@ -371,6 +374,8 @@ pub struct Hybrid {
     pub cmdk: Option<String>,
     pub cmdk_sel: usize,
     pub can_undo: bool,
+    /// The scene differs from what was last opened or saved.
+    pub unsaved: bool,
     pub can_redo: bool,
     pub color_edit: Option<ColorEdit>,
     pub slot_op: Option<SlotOp>,
@@ -398,6 +403,8 @@ pub struct Hybrid {
     pub view_panel: bool,
     /// The Export menu under the top bar's Export button is open.
     pub export_menu: bool,
+    /// The New scene confirm is open: the scene has edits that starting a new one would drop.
+    pub confirm_new: bool,
     /// Left edge of the top bar's Export button, where the Export menu lines up.
     export_x: f32,
     /// Guides drawn in the view: the ground grid, the ground plane and the bounds frame.
@@ -560,6 +567,7 @@ const COMMANDS: &[Command] = &[
     Command { label: "Show bounds", keys: &[], run: |h| h.frame = !h.frame },
     Command { label: "Undo", keys: &["⌘", "Z"], run: |h| h.actions.push(Action::Undo) },
     Command { label: "Redo", keys: &["⌘", "⇧", "Z"], run: |h| h.actions.push(Action::Redo) },
+    Command { label: "New scene", keys: &["⌘", "N"], run: |h| h.request_new() },
     Command { label: "Open .vox", keys: &["⌘", "O"], run: |h| h.actions.push(Action::Open) },
     Command { label: "Save .vox", keys: &["⌘", "S"], run: |h| h.actions.push(Action::Save) },
     Command { label: "Embed", keys: &[], run: |h| h.actions.push(Action::Embed) },
@@ -602,6 +610,7 @@ impl Hybrid {
             cmdk: None,
             cmdk_sel: 0,
             can_undo: false,
+            unsaved: false,
             can_redo: false,
             color_edit: None,
             slot_op: None,
@@ -618,6 +627,7 @@ impl Hybrid {
             view: None,
             view_panel: false,
             export_menu: false,
+            confirm_new: false,
             export_x: 0.0,
             grid: true,
             ground: true,
@@ -808,6 +818,16 @@ impl Hybrid {
         }
     }
 
+    /// New scene: start it now, or ask first when the scene has unsaved edits to lose.
+    pub fn request_new(&mut self) {
+        self.cmdk = None;
+        if self.unsaved {
+            self.confirm_new = true;
+        } else {
+            self.actions.push(Action::New);
+        }
+    }
+
     fn escape(&mut self) {
         if self.slot_op.take().is_some() || self.color_edit.take().is_some() || self.bounds_panel.take().is_some() {
             return;
@@ -859,6 +879,7 @@ impl Hybrid {
         self.selection_panel(ctx);
         self.bounds_panel(ctx);
         self.view_panel(ctx);
+        self.new_confirm(ctx, screen);
         self.export_menu(ctx);
         self.marquee(ctx);
         self.palette_panel(ctx, screen);
@@ -889,6 +910,16 @@ impl Hybrid {
                 self.renaming = None;
                 return;
             }
+            // The New scene confirm takes every key: Enter starts the blank scene, Escape keeps this one.
+            if self.confirm_new {
+                if i.consume_key(Modifiers::NONE, Key::Escape) {
+                    self.confirm_new = false;
+                } else if i.consume_key(Modifiers::NONE, Key::Enter) {
+                    self.confirm_new = false;
+                    self.actions.push(Action::New);
+                }
+                return;
+            }
             if i.consume_key(Modifiers::COMMAND, Key::K) {
                 self.cmdk = if self.cmdk.is_some() { None } else { Some(String::new()) };
                 self.cmdk_sel = 0;
@@ -909,6 +940,9 @@ impl Hybrid {
             }
             if i.consume_key(Modifiers::COMMAND, Key::Z) {
                 self.actions.push(Action::Undo);
+            }
+            if i.consume_key(Modifiers::COMMAND, Key::N) {
+                self.request_new();
             }
             if i.consume_key(Modifiers::COMMAND, Key::O) {
                 self.actions.push(Action::Open);
@@ -1062,11 +1096,21 @@ impl Hybrid {
             x = sel.right() + 4.0 + 6.0;
             p.line_segment([pos2(x, cy - 10.0), pos2(x, cy + 10.0)], Stroke::new(1.0, LINE));
             x += 1.0 + 6.0 + 4.0;
-            if tbtn(ui, &mut x, cy, Some(icon::FOLDER_OPEN), "Open .vox", "open", true).clicked() {
+            let r = tbtn(ui, &mut x, cy, Some(icon::FILE_PLUS), "New", "new", true);
+            self.hits.insert("new".into(), r.rect);
+            if r.clicked() {
+                self.request_new();
+            }
+            x += 4.0;
+            let r = tbtn(ui, &mut x, cy, Some(icon::FOLDER_OPEN), "Open .vox", "open", true);
+            self.hits.insert("open".into(), r.rect);
+            if r.clicked() {
                 self.actions.push(Action::Open);
             }
             x += 4.0;
-            if tbtn(ui, &mut x, cy, Some(icon::DOWNLOAD), "Save .vox", "save", true).clicked() {
+            let r = tbtn(ui, &mut x, cy, Some(icon::DOWNLOAD), "Save .vox", "save", true);
+            self.hits.insert("save".into(), r.rect);
+            if r.clicked() {
                 self.actions.push(Action::Save);
             }
             x += 4.0;
@@ -1883,6 +1927,71 @@ impl Hybrid {
         self.region = region;
         if toggle_bounds {
             self.toggle_bounds_panel();
+        }
+    }
+
+    // The New scene confirm, centred over the view: the edits would be lost, so Cancel is the
+    // default look and Enter or the accent button starts the blank scene. A dim backdrop under
+    // it takes the pointer, so the bars, the palette and the view wait for an answer.
+    fn new_confirm(&mut self, ctx: &Context, screen: Rect) {
+        if !self.confirm_new {
+            return;
+        }
+        Area::new(Id::unique("new-backdrop"))
+            .fade_in(false)
+            .order(Order::Foreground)
+            .fixed_pos(screen.min)
+            .constrain(false)
+            .show(ctx, |ui| {
+                ui.painter().rect_filled(screen, CornerRadius::ZERO, Color32::from_black_alpha(64));
+                ui.allocate_rect(screen, Sense::click_and_drag());
+            });
+        let (w, h) = (320.0, 138.0);
+        let rect = Rect::from_center_size(screen.center(), vec2(w, h));
+        let mut hits = Vec::new();
+        let (mut cancel, mut discard) = (false, false);
+        Self::panel(ctx, "new-confirm", rect, Order::Foreground, |ui, rect| {
+            let title = ui.painter().layout_no_wrap("Start a new scene?".into(), inter_semibold(13.0), TEXT);
+            ui.painter().galley(pos2(rect.left() + 16.0, rect.top() + 16.0), title, TEXT);
+            let mut job = LayoutJob::default();
+            job.append(
+                "The edits to this scene are not saved and will be lost.",
+                0.0,
+                TextFormat { font_id: inter(12.0), color: MUTED, line_height: Some(17.0), ..Default::default() },
+            );
+            job.wrap.max_width = w - 32.0;
+            let note = ui.fonts_mut(|f| f.layout_job(job));
+            ui.painter().galley(pos2(rect.left() + 16.0, rect.top() + 40.0), note, MUTED);
+            let by = rect.bottom() - 16.0 - 32.0;
+            let ink = Color32::from_rgb(0x0d, 0x10, 0x20);
+            let label = ui.painter().layout_no_wrap("Start new".into(), inter_semibold(13.0), ink);
+            let dw = label.size().x + 28.0;
+            let d = Rect::from_min_size(pos2(rect.right() - 16.0 - dw, by), vec2(dw, 32.0));
+            let resp = ui.interact(d, Id::unique("new-discard"), Sense::click());
+            let fill = if resp.hovered() { Color32::from_rgb(0xa6, 0xb6, 0xff) } else { ACCENT };
+            ui.painter().rect_filled(d, CornerRadius::same(8), fill);
+            ui.painter().galley(pos2(d.left() + 14.0, d.center().y - label.size().y / 2.0), label, ink);
+            discard = resp.clicked();
+            hits.push(("new-discard".to_string(), d));
+            let cl = ui.painter().layout_no_wrap("Cancel".into(), inter(13.0), MUTED);
+            let cw = cl.size().x + 28.0;
+            let c = Rect::from_min_size(pos2(d.left() - 6.0 - cw, by), vec2(cw, 32.0));
+            let resp = ui.interact(c, Id::unique("new-cancel"), Sense::click());
+            let color = if resp.hovered() { TEXT } else { MUTED };
+            if resp.hovered() {
+                ui.painter().rect_filled(c, CornerRadius::same(8), HOVER);
+            }
+            ui.painter().galley(pos2(c.left() + 14.0, c.center().y - cl.size().y / 2.0), cl, color);
+            cancel = resp.clicked();
+            hits.push(("new-cancel".to_string(), c));
+        });
+        ctx.move_to_top(egui::LayerId::new(Order::Foreground, Id::unique("new-confirm")));
+        self.hits.extend(hits);
+        if discard {
+            self.confirm_new = false;
+            self.actions.push(Action::New);
+        } else if cancel {
+            self.confirm_new = false;
         }
     }
 

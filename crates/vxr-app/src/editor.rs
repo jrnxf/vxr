@@ -99,6 +99,8 @@ pub struct Editor {
     frames: Vec<f64>,
     /// Where the scene was opened from or last saved to.
     pub path: Option<std::path::PathBuf>,
+    /// The history position at the last open, new scene or save (see `History::position`).
+    saved_at: u64,
     /// A PNG render export in progress (the corner pauses meanwhile).
     pub export: Option<Export>,
     /// The last finished export's PNG and size, for the host to save or download.
@@ -164,6 +166,7 @@ impl Editor {
             materials,
             frames: Vec::new(),
             path: None,
+            saved_at: 0,
             export: None,
             exported: None,
             export_fits: [false; 4],
@@ -171,6 +174,7 @@ impl Editor {
             last_object: None,
         };
         e.shape = (e.scene.reshapes(), e.scene.origin);
+        e.mark_saved();
         e.export_fits = EXPORT_SIZES.map(|(w, h)| Preview::fits(&e.gpu.device, w, h));
         e.frame_scene();
         Ok(e)
@@ -197,8 +201,27 @@ impl Editor {
         self.world_drag = None;
         self.sel_shown = (u64::MAX, 0);
         self.cursor = None;
+        self.ui.confirm_new = false;
+        self.mark_saved();
         self.frame_scene();
         Ok(())
+    }
+
+    /// The scene is saved as it stands now: New asks again only after another edit or undo.
+    pub fn mark_saved(&mut self) {
+        self.saved_at = self.scene.history().position();
+    }
+
+    /// Start a blank scene exactly as launching with no file does: the default size, palette
+    /// and camera, no history, selection or path.
+    pub fn new_scene(&mut self) {
+        // Cannot fail for an empty map of the default size.
+        let _ = self.load(Scene::new(NEW_SIZE), "Untitled");
+        self.cam = OrbitCamera::framing(Vec3::ZERO, Vec3::ONE);
+        self.frame_scene();
+        self.path = None;
+        self.ui.bounds_panel = None;
+        self.ui.toast(&self.ctx, "New scene");
     }
 
     pub fn resize(&mut self, width: u32, height: u32, ppp: f32) {
@@ -763,6 +786,7 @@ impl Editor {
         self.ui.used = used(&self.scene);
         self.ui.can_undo = self.scene.history().can_undo();
         self.ui.can_redo = self.scene.history().can_redo();
+        self.ui.unsaved = self.scene.history().position() != self.saved_at;
         self.ui.selected = self.scene.selected_count();
         self.ui.has_clip = self.scene.clipboard.is_some();
         self.ui.bounds = self.scene.bounds().size;
@@ -794,6 +818,10 @@ impl Editor {
         }
         for a in actions {
             match a {
+                Action::New => {
+                    self.new_scene();
+                    host.push(Action::New);
+                }
                 Action::Undo => self.undo(),
                 Action::Redo => self.redo(),
                 Action::Frame => self.frame_scene(),
