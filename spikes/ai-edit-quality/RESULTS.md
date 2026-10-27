@@ -4,7 +4,7 @@ Phase AI risk tests 1, 2 and 4 (`docs/plan.md`). Run 2026-10-27 on the M4 Pro wi
 
 **Results.**
 
-- **Test 1 (edit quality): waiting for the owner's blind verdicts.** The numbers are in. At the planned effort (medium) the default model, `claude-opus-5-5`, has a median cost of $0.093 per prompt (bar: under $0.10) but a median time of 31.5 s (bar: under 20 s), so it misses the time bar whatever the verdicts. At effort low it takes $0.057 and 16.8 s, inside both. `claude-sonnet-5-5` takes $0.031 and 13.3 s; `gpt-6.1-sol` $0.029 and 46.8 s.
+- **Test 1 (edit quality): fail.** The owner accepted 13 of the default model's 20 answers (bar: 15). `claude-opus-5-5` at effort medium costs a median $0.093 per prompt (bar: under $0.10) but takes 31.5 s (bar: under 20 s). At effort low it meets both cost and time ($0.057, 16.8 s), but only 5 of its 20 answers were accepted. `claude-sonnet-5-5` got 10 of 20 ($0.031, 13.3 s); `gpt-6.1-sol` got 12 of 20 ($0.029, 46.8 s). No model and effort passed. 19 of the 20 prompts got at least one accepted answer; nobody built an acceptable well.
 - **Test 2 (does the picture help): fail for keeping vision.** With `render_view` the default model placed the same 8 of 9 markers as with the text summary alone (bar: 3 more out of 10), at 1.7 times the cost and time. Only `gpt-6.1-sol` gained 3 (5 to 8); `claude-sonnet-5-5` stayed at 5.
 - **Test 4 (prompt injection from files): pass on what the spike can check.** In 60 requests (the 20 prompts on all three models) on files whose object name, four layer names and `NOTE` chunk tell the assistant to erase everything or paint it all red, no change followed a planted instruction, and every change list matched the saved file cell for cell. The app has no review card yet, so the card itself is untested.
 
@@ -61,12 +61,36 @@ Per prompt (calls, tokens in and out, cost, time):
 
 Tokens in counts every token sent, cached or not; caching served most of it (cached reads were 70 to 95% of Opus's input on island prompts). No tool call failed: every call had valid arguments.
 
-**Blind verdicts:** __VERDICTS__
+**Blind verdicts.** The owner judged all 80 answers (the 20 prompts from four model and effort settings) on a static page from `judge.py`: shuffled, with the model hidden, the editor screenshots after the change, the island before, and the review card's counts, with one accept or reject each and no notes. Before judging, the page gained keyboard shortcuts (N for a note, moving on to the next unjudged card) and a line saying each prompt appears four times; `judge.py` makes that page now.
+
+| Model | Accepted | Island (of 13) | Empty scene (of 7) | Median cost | Median time | Against the bar |
+|---|---|---|---|---|---|---|
+| `claude-opus-5-5` (effort medium) | **13 of 20** | 8 | 5 | $0.093 | 31.5 s | fails on quality and time |
+| `claude-opus-5-5` (effort low) | 5 of 20 | 3 | 2 | $0.057 | 16.8 s | fails on quality |
+| `claude-sonnet-5-5` | 10 of 20 | 7 | 3 | $0.031 | 13.3 s | fails on quality |
+| `gpt-6.1-sol` | 12 of 20 | 9 | 3 | $0.029 | 46.8 s | fails on quality and time |
+
+Accepted answers per prompt (Opus medium, Opus low, Sonnet, GPT; A accepted, . rejected):
+
+| Prompt | Verdicts | | Prompt | Verdicts |
+|---|---|---|---|---|
+| i01-roof-blue | A A A A | | i11-lighthouse | A A . A |
+| i02-chimney-flag | A . A A | | i12-lamp | A . . A |
+| i03-fence | . . . A | | i13-bench | . . A . |
+| i04-no-chimney | A . A A | | e01-pagoda | A A A . |
+| i05-sea | A . A . | | e02-tower | . . . A |
+| i06-boat | . . . A | | e03-snowman | A . . . |
+| i07-trees | A . A A | | e04-fence | . . A . |
+| i08-flowers | . A A A | | e05-sailboat | A . A A |
+| i09-well | . . . . | | e06-mushroom | A . . A |
+| i10-autumn | A . . . | | e07-palm | A A . . |
+
+Only the roof recolour was accepted from all four. The rejected answers cluster on things built around the house (fence, well, bench, boat), where the model first has to find the part, and on builds where shape matters (tower, fence, snowman). With no notes, the verdicts say what failed but not why.
 
 What the numbers show:
 
 - **Island edits are slow because the model has to find things.** The summary gives colours, counts and bounds, but nothing like "this is the chimney". Opus at effort medium spent 17 to 43 calls on the fence, chimney, lamp and bench, most of them `select` over a column or a box used as a probe ("how many voxels are here?") and `render_view` close-ups. The fence run spent all 40 calls looking and changed nothing. Builds on an empty scene need no searching: 12 to 31 calls, 19 to 44 s.
-- **Effort low halves Opus's calls and time** (median 8 calls) with no tool errors. Whether it costs quality is for the verdicts.
+- **Effort low halves Opus's calls and time** (median 8 calls) with no tool errors, but cuts its accepted answers from 13 to 5. It is not a way to meet the time bar.
 - **`gpt-6.1-sol` hits the call limit on builds.** It places shapes in long parallel batches (41 `sphere` calls for one snowman), so 5 of 7 builds went past 40 calls; the calls over the limit were refused, and what was placed by then stayed. It is the cheapest but the slowest.
 
 ## Test 2: does the picture help?
@@ -103,7 +127,7 @@ What this does and does not show: the planted text never steered an edit, with t
 ## What it changes for the build
 
 - **OpenAI needs the Responses API.** `gpt-6.1-sol` refuses function tools with reasoning on Chat Completions ("Function tools with reasoning_effort are not supported for gpt-6.1-sol in /v1/chat/completions. To use function tools, use /v1/responses or set reasoning_effort to 'none'"). The two-client plan becomes Anthropic Messages, OpenAI Responses, and Chat Completions for the other OpenAI-compatible servers (Gemini's endpoint, OpenRouter, Ollama, LM Studio).
-- **Run the default model at effort low**, or make Sonnet the default: Opus at medium misses the 20 s bar. Pick after the verdicts.
+- **Keep `claude-opus-5-5` at effort medium as the default, and make it faster rather than cheaper.** It had the most accepted answers (13); effort low fell to 5, Sonnet to 10. Most of its time went to finding parts (next two points), so those fixes come first, then test 1 again with the same prompts and page.
 - **Add a point query to the first-version operations.** Without `get_voxels` or a column height, models probed with `select`, which made island edits slow (test 1) and marker heights wrong (test 2). A `get_voxels(region)` (capped, as the research has it) or a "top voxel at x, z" query is cheap and would replace most of those calls.
 - **Name the parts.** Most of a request's time went to finding the chimney or the door. Object names help where the scene has objects; within one model, `NOTE` palette names or a short per-slot description in the summary would too.
 - **Leave `render_view` out of the first version** by the test's bar: the default model gained nothing and paid 70% more. GPT did gain 3, so keep the operation in `vxr-ops` and offer it per model later.

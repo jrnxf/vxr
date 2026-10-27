@@ -77,10 +77,13 @@ details .shots img { opacity: .9; }
 .verdict input { flex: 1 1 240px; font: inherit; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); }
 #zoom { position: fixed; inset: 0; background: rgba(0,0,0,.85); display: none; align-items: center; justify-content: center; z-index: 5; cursor: zoom-out; }
 #zoom img { max-width: 96vw; max-height: 96vh; }
+.keys { color: var(--muted); font-size: 13px; }
+.verdict input:focus { outline: 2px solid #5b7cfa; }
 textarea { width: 100%; height: 160px; font-family: ui-monospace, monospace; font-size: 12px; background: var(--card); color: var(--fg); border: 1px solid var(--line); border-radius: 8px; }
 </style></head><body>
-<header><h1>vxr test 1: blind judging</h1><span id="progress"></span><button id="next">Next unjudged</button><button id="export">Export verdicts</button></header>
+<header><h1>vxr test 1: blind judging</h1><span id="progress"></span><span class="keys">A accept · R reject · N note (Enter to finish) · J/K move</span><button id="next">Next unjudged</button><button id="export">Export verdicts</button></header>
 <main>
+<p class="intro"><strong>__COUNT__ cards: __PROMPTS__ prompts, each answered by __MODELS__ different models, shuffled.</strong> So every prompt shows up __MODELS__ times, and each card is one model's attempt; you just don't see which model. Judge each card on its own.</p>
 <p class="intro">Each result is one model's answer to one prompt, in random order, with the model hidden. The pictures are the real editor after the change: the default view, the opposite side, and for island edits a close-up of where it changed. Accept a result if you would apply it as a reasonable answer to the prompt; reject it otherwise. A note is optional. Keys: A accept, R reject, J and K move between results. Verdicts are kept in this browser until you export them.</p>
 <div id="list"></div>
 <h2>Export</h2><p class="intro">Export downloads verdicts.json; the same text is below to copy.</p><textarea id="out" readonly></textarea>
@@ -110,6 +113,10 @@ function render() {
   document.getElementById("progress").textContent = `${n} of ${CARDS.length} judged`;
   document.getElementById("out").value = JSON.stringify({ test: "vxr-ai-test-1", verdicts: v }, null, 1);
 }
+function nextUnjudged(from) {
+  for (let k = 1; k <= CARDS.length; k++) { const i = (from + k) % CARDS.length; if (!(v[CARDS[i].id] || {}).verdict) return i; }
+  return Math.min(from + 1, CARDS.length - 1);
+}
 function focus(i) {
   cur = Math.max(0, Math.min(CARDS.length - 1, i));
   document.querySelectorAll(".card").forEach((e, k) => e.classList.toggle("focus", k === cur));
@@ -129,16 +136,26 @@ document.getElementById("export").onclick = () => {
   a.download = "verdicts.json"; a.click();
 };
 document.addEventListener("keydown", e => {
-  if (e.target.tagName === "INPUT") return;
+  if (e.target.tagName === "INPUT") {
+    if (e.key === "Enter" || e.key === "Escape") { e.preventDefault(); e.target.blur(); focus(cur); }
+    return;
+  }
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.key === "n") { e.preventDefault(); const i = document.querySelector(`input[data-note="${CARDS[cur].id}"]`); i.focus(); return; }
   const id = CARDS[cur].id;
-  if (e.key === "a" || e.key === "r") { v[id] = { ...(v[id] || {}), verdict: e.key === "a" ? "accept" : "reject" }; save(); focus(cur + 1); }
+  if (e.key === "a" || e.key === "r") { v[id] = { ...(v[id] || {}), verdict: e.key === "a" ? "accept" : "reject" }; save(); focus(nextUnjudged(cur)); }
   else if (e.key === "j") focus(cur + 1);
   else if (e.key === "k") focus(cur - 1);
   else if (e.key === "Escape") document.getElementById("zoom").style.display = "none";
 });
 render();
+{ const i = CARDS.findIndex(c => !(v[c.id] || {}).verdict); focus(i >= 0 ? i : 0); }
+list.addEventListener("focusin", e => { const id = e.target.dataset && e.target.dataset.note; if (id) { const k = CARDS.findIndex(c => c.id === id); if (k >= 0 && k !== cur) { cur = k; document.querySelectorAll(".card").forEach((el, j) => el.classList.toggle("focus", j === cur)); } } });
 </script></body></html>
 """
 with open(os.path.join(page, "index.html"), "w") as f:
-    f.write(page_html.replace("__DATA__", data))
+    models = len({k["model"] for k in key.values()})
+    prompts_n = len({k["prompt"] for k in key.values()})
+    f.write(page_html.replace("__DATA__", data).replace("__COUNT__", str(len(cards)))
+            .replace("__PROMPTS__", str(prompts_n)).replace("__MODELS__", str(models)))
 print(f"{len(cards)} results; page {os.path.join(page, 'index.html')}; key {keyfile}")
