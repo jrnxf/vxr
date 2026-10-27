@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::build::{Builder, frame, world_blocks};
 use crate::bytes::Dict;
+use crate::camera::Camera;
 use crate::chunk::{self, IdDict, Ngrp, Nshp, Ntrn, Rgba, Size, Tdcz, Typed, Xyzi};
 use crate::default_palette::DEFAULT_PALETTE;
 use crate::material::Material;
@@ -169,6 +170,60 @@ impl Document {
             .map_or(chunks.len(), |i| i + 1);
         let d = IdDict { id: index as i32, dict: m.to_dict(), extra: vec![] };
         self.raw.chunks.insert(at, Chunk::new(chunk::MATL, d.encode()));
+        Ok(at)
+    }
+
+    /// The saved cameras, in file order. A camera id that appears twice is read from its
+    /// first `rCAM`, as [`Document::camera`] and [`Document::set_camera`] see it.
+    pub fn cameras(&self) -> Vec<Camera> {
+        let mut out: Vec<Camera> = Vec::new();
+        for d in self.raw.chunks.iter().filter(|c| c.is(chunk::RCAM)) {
+            if let Ok(d) = IdDict::parse(chunk::RCAM, &d.content)
+                && !out.iter().any(|c| c.id == d.id)
+            {
+                out.push(Camera::from_dict(d.id, &d.dict));
+            }
+        }
+        out
+    }
+
+    /// The saved camera `id`, if the file has one.
+    pub fn camera(&self, id: i32) -> Option<Camera> {
+        self.raw
+            .chunks
+            .iter()
+            .filter(|c| c.is(chunk::RCAM))
+            .filter_map(|c| IdDict::parse(chunk::RCAM, &c.content).ok())
+            .find(|d| d.id == id)
+            .map(|d| Camera::from_dict(id, &d.dict))
+    }
+
+    /// Set saved camera `c.id`. Touches only that camera's `rCAM` chunk, and in it only the
+    /// keys whose value changed; adds a chunk after the last `rCAM` (or the render settings,
+    /// materials or palette) if the file has none for it.
+    pub fn set_camera(&mut self, c: &Camera) -> Result<usize> {
+        for (i, ch) in self.raw.chunks.iter_mut().enumerate() {
+            if !ch.is(chunk::RCAM) {
+                continue;
+            }
+            let mut d = IdDict::parse(chunk::RCAM, &ch.content)?;
+            if d.id != c.id {
+                continue;
+            }
+            c.apply_to(&mut d.dict);
+            ch.content = d.encode();
+            return Ok(i);
+        }
+        let chunks = &self.raw.chunks;
+        let at = chunks
+            .iter()
+            .rposition(|c| c.is(chunk::RCAM))
+            .or_else(|| {
+                chunks.iter().rposition(|c| [chunk::ROBJ, chunk::MATL, chunk::RGBA, chunk::IMAP].contains(&&c.id))
+            })
+            .map_or(chunks.len(), |i| i + 1);
+        let d = IdDict { id: c.id, dict: c.to_dict(), extra: vec![] };
+        self.raw.chunks.insert(at, Chunk::new(chunk::RCAM, d.encode()));
         Ok(at)
     }
 

@@ -1,7 +1,7 @@
 //! Undo and redo. Each step is one user action (a click, a drag, a recolour) stored as
 //! the cells it changed with their old and new values, so undo is exact and cheap.
 
-use vxr_vox::Material;
+use vxr_vox::{Camera, Material};
 
 /// One voxel that an edit changed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25,6 +25,13 @@ pub struct MaterialChange {
     pub index: u8,
     pub old: Material,
     pub new: Material,
+}
+
+/// One saved camera that an edit changed (the id is the same in both).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CameraChange {
+    pub old: Camera,
+    pub new: Camera,
 }
 
 /// The selection before and after a step that moved or changed it (map cells).
@@ -88,12 +95,13 @@ impl PartialEq for WorldChange {
 /// swapped, and the voxels remapped to keep their look). Steps that move a selection (move,
 /// rotate, paste, delete) also record it, so undo puts the selection back with the voxels.
 /// A resize or crop records the bounds, with the voxels it dropped. A world edit records
-/// the tree. `at` says which map the cells belong to; undo and redo go there first.
+/// the tree. A camera edit has only cameras. `at` says which map the cells belong to; undo and redo go there first.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Step {
     pub voxels: Vec<Change>,
     pub colors: Vec<ColorChange>,
     pub materials: Vec<MaterialChange>,
+    pub cameras: Vec<CameraChange>,
     pub selection: Option<Box<SelectionChange>>,
     pub bounds: Option<BoundsChange>,
     pub world: Option<Box<WorldChange>>,
@@ -105,6 +113,7 @@ impl Step {
         self.voxels.is_empty()
             && self.colors.is_empty()
             && self.materials.is_empty()
+            && self.cameras.is_empty()
             && self.selection.is_none()
             && self.bounds.is_none()
             && self.world.is_none()
