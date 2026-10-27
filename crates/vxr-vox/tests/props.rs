@@ -160,3 +160,28 @@ fn big_sparse_scene_over_256_on_every_axis() {
     assert!(scene.models.len() >= 4 * 3 * 3, "split into {} models", scene.models.len());
     assert_eq!(scene.world_voxels(Rule::Compose), voxels);
 }
+
+#[test]
+fn blocks_are_cut_from_the_voxels_low_corner() {
+    // Centred on the origin: one model, not one per side of each axis.
+    let cube = |lo: i32, n: i32| {
+        let mut v = BTreeMap::new();
+        for x in lo..lo + n {
+            for y in lo..lo + n {
+                for z in [lo, lo + n - 1] {
+                    v.insert([x, y, z], 1 + (x.rem_euclid(200)) as u8);
+                }
+            }
+        }
+        v
+    };
+    for (lo, n, models) in [(-16, 32, 1), (-128, 256, 1), (1000, 256, 1), (-128, 257, 8)] {
+        let voxels = cube(lo, n);
+        let mut b = Builder::new(200);
+        b.add_world(&voxels);
+        let bytes = b.build().write();
+        let scene = Document::read(&bytes).unwrap().scene().unwrap();
+        assert_eq!(scene.models.len(), models, "{n}^3 at {lo}");
+        assert_eq!(scene.world_voxels(Rule::Compose), voxels, "{n}^3 at {lo}");
+    }
+}

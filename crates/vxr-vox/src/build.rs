@@ -173,12 +173,20 @@ impl Builder {
 /// model voxel `v` back at its world cell.
 pub type Block = ([i32; 3], Vec<[u8; 4]>, [i32; 3]);
 
-/// World-space voxels split into models of at most 256^3.
+/// World-space voxels split into models of at most 256^3, on a 256 grid anchored at the
+/// voxels' low corner, so voxels that fit in 256^3 anywhere stay one model.
 pub fn world_blocks(voxels: &BTreeMap<[i32; 3], u8>) -> Vec<Block> {
+    let mut low = [i32::MAX; 3];
+    for (p, _) in voxels.iter().filter(|(_, c)| **c != 0) {
+        for k in 0..3 {
+            low[k] = low[k].min(p[k]);
+        }
+    }
     let mut blocks: BTreeMap<[i32; 3], Vec<([i32; 3], u8)>> = BTreeMap::new();
     for (p, &c) in voxels {
         if c != 0 {
-            blocks.entry(p.map(|x| x.div_euclid(256))).or_default().push((*p, c));
+            let cell = [0, 1, 2].map(|k| ((i64::from(p[k]) - i64::from(low[k])) / 256) as i32);
+            blocks.entry(cell).or_default().push((*p, c));
         }
     }
     let mut out = Vec::new();

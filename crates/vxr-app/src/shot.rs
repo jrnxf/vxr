@@ -259,6 +259,7 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     model_tools(dir)?;
     views(dir)?;
     world(dir)?;
+    new_scene_save(dir)?;
     scene_tree(dir)?;
     render(&mut s, dir)?;
     materials(&mut s, dir)?;
@@ -310,6 +311,45 @@ fn round_cells(r: i32, dims: usize) -> u64 {
         }
     }
     n
+}
+
+/// A new scene saved and reopened as Save and Open do it: a box across the origin stays
+/// one object, which opens in model mode with every voxel where it was.
+fn new_scene_save(dir: &Path) -> Result<(), String> {
+    use vxr_app::editor::tree_rows;
+    use vxr_core::history::At;
+    let mut s = Shot::new(Scene::new(NEW_SIZE), "Untitled", 2.0)?;
+    s.frames(3);
+    s.ed.ui.coach = false;
+    s.tool(Tool::Add, Shape::Box);
+    // A box on the ground from 10 cells before the world origin to 10 after it.
+    let o = s.ed.scene.to_map([0, 0, 0]).map(|c| c as f32);
+    let a = project(&s.ed, [o[0] - 9.5, 0.0, o[2] - 9.5]);
+    let b = project(&s.ed, [o[0] + 9.5, 0.0, o[2] + 9.5]);
+    s.stroke(a, &[[(b[0] - a[0]) / 2.0, (b[1] - a[1]) / 2.0], [b[0] - a[0], b[1] - a[1]]]);
+    s.ed.place_box();
+    let world = s.ed.scene.world_voxels(false);
+    let (mut lo, mut hi) = ([i32::MAX; 3], [i32::MIN; 3]);
+    for p in world.keys() {
+        for a in 0..3 {
+            (lo[a], hi[a]) = (lo[a].min(p[a]), hi[a].max(p[a]));
+        }
+    }
+    check(
+        lo[0] < 0 && hi[0] >= 0 && lo[2] < 0 && hi[2] >= 0,
+        format!("a box across the origin on a new scene: {} voxels, {lo:?} to {hi:?}", world.len()),
+    )?;
+    let path = dir.join("new.vox");
+    std::fs::write(&path, s.ed.scene.to_vox()).map_err(|e| e.to_string())?;
+    let (reopened, name) = crate::native::open(&path)?;
+    let objects = reopened.world().map_or(0, |w| w.objects().len());
+    let same = reopened.world_voxels(false) == world;
+    s.ed.load(reopened, &name)?;
+    s.frames(2);
+    check(
+        objects == 1 && matches!(s.ed.scene.at(), At::Object(_)) && same && tree_rows(&s.ed.scene).is_empty(),
+        format!("the saved new scene reopens in model mode, every voxel in place ({objects} object(s))"),
+    )
 }
 
 /// Line and center brushes, mirror on X, Y and Z and the axis lock, on an empty scene so
