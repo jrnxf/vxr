@@ -3286,6 +3286,7 @@ dependencies = [
  "rfd",
  "serde_json",
  "vxr-core",
+ "vxr-mcp",
  "vxr-ops",
  "vxr-render",
  "vxr-vox",
@@ -3298,6 +3299,16 @@ name = "vxr-core"
 version = "0.1.0"
 dependencies = [
  "proptest",
+ "vxr-vox",
+]
+
+[[package]]
+name = "vxr-mcp"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "vxr-core",
+ "vxr-ops",
  "vxr-vox",
 ]
 
