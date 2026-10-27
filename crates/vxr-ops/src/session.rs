@@ -150,7 +150,14 @@ pub struct Session {
     open: bool,
     replaying: bool,
     done: Option<String>,
+    /// While the scene shows the change's Before: each touched cell's value with the change,
+    /// and the palette with it.
+    before: Option<Before>,
 }
+
+/// What [`Session::show_before`] set aside: each touched cell's value with the change, and the
+/// palette with it.
+type Before = (Vec<(Cell, u8)>, [[u8; 4]; 256]);
 
 /// The `NOTE` chunk's names, cleaned, if the file has one.
 pub fn notes_of(bytes: &[u8]) -> Vec<String> {
@@ -192,6 +199,7 @@ impl Session {
             open: false,
             replaying: false,
             done: None,
+            before: None,
         }
     }
 
@@ -260,6 +268,7 @@ impl Session {
 
     /// Run one operation, without the call limits.
     pub fn run(&mut self, scene: &mut Scene, op: Op) -> Result<String, Error> {
+        self.show_before(scene, false);
         match op {
             Op::SceneSummary(_) => Ok(self.summary(scene)),
             Op::GetVoxels(a) => self.get_voxels(scene, &a),
@@ -432,6 +441,7 @@ impl Session {
     /// goes back to how it was and the steps still kept run again. Returns false for a step
     /// that changed nothing.
     pub fn set_dropped(&mut self, scene: &mut Scene, i: usize, dropped: bool) -> bool {
+        self.show_before(scene, false);
         let Some(s) = self.steps.get_mut(i).filter(|s| s.op.is_some()) else { return false };
         if s.dropped != dropped {
             s.dropped = dropped;
@@ -442,6 +452,9 @@ impl Session {
 
     /// Every staged cell (map cells) and how it shows, for the ghost overlay.
     pub fn ghost(&self, scene: &Scene) -> Vec<(Cell, Ghost)> {
+        if self.before.is_some() {
+            return Vec::new();
+        }
         let mut out: Vec<(Cell, Ghost)> = self
             .base
             .iter()
@@ -466,6 +479,9 @@ impl Session {
     /// The staged change in world cells, as the review card shows it.
     pub fn changes(&self, scene: &Scene) -> Changes {
         let mut c = Changes::default();
+        if self.before.is_some() {
+            return c;
+        }
         for (p, g) in self.ghost(scene) {
             let w = scene.to_world(p);
             let (b, v) = (self.base[&p], self.get(scene, p));
@@ -488,17 +504,61 @@ impl Session {
     /// Apply: erase the removed cells and close the edit as one undo step. Returns how many
     /// voxels changed.
     pub fn apply(self, scene: &mut Scene) -> usize {
+        self.apply_as(scene, None)
+    }
+
+    /// Apply as one undo step called `label` ("AI: make the roof red").
+    pub fn apply_named(self, scene: &mut Scene, label: &str) -> usize {
+        self.apply_as(scene, Some(label))
+    }
+
+    fn apply_as(mut self, scene: &mut Scene, label: Option<&str>) -> usize {
+        self.show_before(scene, false);
         if !self.open {
             return 0;
         }
         for &p in &self.removed {
             scene.put(p, 0);
         }
-        scene.commit()
+        match label {
+            Some(l) => scene.commit_named(l),
+            None => scene.commit(),
+        }
+    }
+
+    /// Show the scene as it was before the change (true) or with it again (false), for the
+    /// review card's Before and After. The map and palette are set directly, outside the open
+    /// edit, and put back before anything else runs: a call, a dropped step, Apply or Discard
+    /// first shows the change again. Before shows no ghost and no changes.
+    pub fn show_before(&mut self, scene: &mut Scene, on: bool) {
+        if on == self.before.is_some() {
+            return;
+        }
+        if on {
+            let mut after = Vec::with_capacity(self.base.len());
+            for (&p, &b) in &self.base {
+                after.push((p, scene.map.get(p[0], p[1], p[2])));
+                scene.map.set(p[0], p[1], p[2], b);
+            }
+            let palette = scene.palette;
+            scene.palette[1..].copy_from_slice(&self.palette_before[1..]);
+            self.before = Some((after, palette));
+        } else if let Some((after, palette)) = self.before.take() {
+            for (p, v) in after {
+                scene.map.set(p[0], p[1], p[2], v);
+            }
+            scene.palette = palette;
+        }
+    }
+
+    /// Whether the scene shows the change's Before ([`Session::show_before`]).
+    pub fn showing_before(&self) -> bool {
+        self.before.is_some()
     }
 
     /// Discard: put every cell and colour back and close the edit, leaving no undo step.
     pub fn discard(mut self, scene: &mut Scene) {
+        self.show_before(scene, false);
         self.revert(scene);
         if self.open {
             scene.commit();

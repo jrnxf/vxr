@@ -265,6 +265,7 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     render(&mut s, dir)?;
     materials(&mut s, dir)?;
     export(&mut s, dir)?;
+    review(dir)?;
 
     // Save, reopen and compare.
     let bytes = s.ed.scene.to_vox();
@@ -295,6 +296,7 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     s.save_png(&dir.join("app-2x-edited.png"))?;
     if let Some(p) = source {
         frame_times(p)?;
+        review_times(p)?;
     }
     Ok(())
 }
@@ -2336,6 +2338,263 @@ fn export(s: &mut Shot, dir: &Path) -> Result<(), String> {
     let filled = px.chunks(4).filter(|p| p[3] != 0).count();
     check(filled == shown.len(), format!("in world mode 22-world-slices.png holds its {filled} shown voxels"))?;
     Ok(())
+}
+
+/// A small stone house with a two-layer roof (slot 20) on hollow walls (slot 10), in the
+/// middle of a 32^3 model: world x and z from -16, y from 0.
+fn house() -> Scene {
+    let mut s = Scene::new([32, 32, 32]);
+    let mut cells = Vec::new();
+    for x in -6..=5 {
+        for z in -6..=5 {
+            for y in 0..=5 {
+                if x == -6 || x == 5 || z == -6 || z == 5 {
+                    cells.push(([x, y, z], 10u8));
+                }
+            }
+        }
+    }
+    for x in -7..=6 {
+        for z in -7..=6 {
+            cells.extend([([x, 6, z], 20u8), ([x, 7, z], 20u8)]);
+        }
+    }
+    let cells: Vec<_> = cells.into_iter().map(|(p, v)| (s.to_map(p), v)).collect();
+    s.edit(cells);
+    s
+}
+
+/// The house request: repaint the roof (392 cells) into slot 3 and make it red, add a flag on
+/// a pole (10 + 12 cells) and open a door (6 cells), then done.
+const HOUSE_SCRIPT: &str = r##"{"prompt": "make the roof red, add a flag and open a door", "calls": [
+    {"name": "paint", "input": {"slot": 3, "from_slot": 20}},
+    {"name": "palette_set", "input": {"slot": 3, "hex": "#D94A3A"}},
+    {"name": "line", "input": {"from": [8, 0, 8], "to": [8, 9, 8], "slot": 40, "name": "flag pole"}},
+    {"name": "box", "input": {"from": [9, 7, 8], "to": [12, 9, 8], "slot": 50, "name": "flag"}},
+    {"name": "box", "input": {"from": [-1, 0, 5], "to": [0, 2, 5], "mode": "erase"}},
+    {"name": "done", "input": {"summary": "Painted the roof red, added a flag on a pole and opened a door"}}
+]}"##;
+
+/// The review step of an AI change, driven by scripted tool calls through the same session,
+/// card and ghost the assistant will use: exact counts, the ghost in the view and its
+/// removals hidden from the render corner, Before and After, a dropped step, every other edit
+/// kept out, Discard (button and Escape) leaving no step, Apply (Enter) as one undo step named
+/// after the request, a change over 10,000 cells held until Allow or Stop, and the ask field.
+fn review(dir: &Path) -> Result<(), String> {
+    let mut s = Shot::new(house(), "house.vox", 2.0)?;
+    s.ed.ui.coach = false;
+    // Back off so the house, its flag and the card all show.
+    s.ed.cam.distance *= 1.9;
+    let h = s.ed.height as f32;
+    s.ed.cam.pan(-420.0, 0.0, h);
+    s.frames(2);
+    let (v0, counts0, palette0) = (s.voxels(), s.ed.scene.map.counts, s.ed.scene.palette);
+    let position = s.ed.scene.history().position();
+    let same = |s: &Shot| s.voxels() == v0 && s.ed.scene.map.counts == counts0 && s.ed.scene.palette == palette0;
+    let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    let plain = view_pixels(&mut s);
+    let answers = s.ed.stage_json(HOUSE_SCRIPT)?;
+    let ok = answers[0].iter().all(|a| matches!(a, vxr_app::review::Answer::Ok(_)));
+    check(ok && answers[0].len() == 6, format!("a scripted request stages its 6 calls: {answers:?}"))?;
+    s.frames(3);
+    let card = s.ed.ui.review.clone().ok_or("no review card")?;
+    check(
+        card.counts == [22, 6, 392] && card.slots.len() == 1 && card.slots[0].slot == 3,
+        format!(
+            "card counts: +{} added, {} removed, {} repainted, slots {:?}",
+            card.counts[0],
+            card.counts[1],
+            card.counts[2],
+            card.slots.iter().map(|c| c.slot).collect::<Vec<_>>()
+        ),
+    )?;
+    check(
+        card.steps.len() == 5 && card.summary.is_some() && s.ed.ui.hits.contains_key("review-apply"),
+        format!("card: {} steps, the model's summary, Apply on screen", card.steps.len()),
+    )?;
+    // Staged, not applied: removals stay in the map, the history has no new step.
+    check(
+        s.voxels() == v0 + 22 && s.ed.scene.history().position() == position,
+        format!("staged on the scene: {} voxels in the map (removals kept), no undo step", s.voxels()),
+    )?;
+    let ghost = view_pixels(&mut s);
+    let changed = differ(&ghost, &plain);
+    check(changed > 2000, format!("the ghost and the red roof change {changed} pixels of the view"))?;
+    s.frames(40);
+    s.save_png(&dir.join("app-2x-review.png"))?;
+    // Every other edit waits: a click in the view, Cmd-Z, Tab, Backspace, Cmd-S.
+    let p = s.top_face_pixel([s.ed.width as f32 / 2.0, s.ed.height as f32 / 2.0])?;
+    s.tool(Tool::Add, Shape::Voxel);
+    s.stroke(p, &[]);
+    s.frames_with(2, vec![key(egui::Key::Z, egui::Modifiers::COMMAND)]);
+    s.frames_with(2, vec![key(egui::Key::Tab, egui::Modifiers::NONE)]);
+    s.frames_with(2, vec![key(egui::Key::S, egui::Modifiers::COMMAND)]);
+    check(
+        s.ed.review.is_some() && s.voxels() == v0 + 22 && !s.host.contains(&Action::Save),
+        "a click, Cmd-Z, Tab and Cmd-S wait while the change is under review".into(),
+    )?;
+    // Before shows the scene as it was, with no ghost; After shows the change again.
+    s.ui_click("review-before")?;
+    s.frames(3);
+    check(same(&s) && s.ed.ui.review.as_ref().is_some_and(|c| c.before), "Before: the scene as it was".into())?;
+    let off = differ(&view_pixels(&mut s), &plain);
+    check(off == 0, format!("Before draws the view as the scene was: {off} pixels differ"))?;
+    s.frames(40);
+    s.save_png(&dir.join("app-2x-review-before.png"))?;
+    s.ui_click("review-after")?;
+    let back = differ(&view_pixels(&mut s), &ghost);
+    check(s.voxels() == v0 + 22 && back == 0, format!("After: the change again ({back} pixels differ)"))?;
+    // Dropping the door step takes its 6 removals out, and back.
+    s.ui_click("review-step-4")?;
+    let c = s.ed.ui.review.clone().ok_or("no card")?;
+    check(c.counts == [22, 0, 392] && c.steps[4].dropped, format!("dropping the door step: {:?}", c.counts))?;
+    s.ui_click("review-step-4")?;
+    check(s.ed.ui.review.as_ref().is_some_and(|c| c.counts == [22, 6, 392]), "keeping it again".into())?;
+    // The ask field takes text; Escape in it leaves the field, not the review.
+    s.type_into("review-ask", "make the flag blue")?;
+    check(s.ed.asks == ["make the flag blue"], format!("ask for changes reaches the assistant hook: {:?}", s.ed.asks))?;
+    s.ui_click("review-ask")?;
+    s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+    check(s.ed.review.is_some(), "Escape in the ask field keeps the review".into())?;
+    // Discard (the button) and Escape leave the scene as it was, with no undo step.
+    s.ui_click("review-discard")?;
+    check(
+        s.ed.review.is_none() && same(&s) && s.ed.scene.history().position() == position,
+        "Discard: the scene as it was, no undo step".into(),
+    )?;
+    s.ed.stage_json(HOUSE_SCRIPT)?;
+    s.frames(2);
+    s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+    check(s.ed.review.is_none() && same(&s) && s.ed.scene.history().position() == position, "Escape discards".into())?;
+    // Apply (Enter): one undo step named after the request.
+    s.ed.stage_json(HOUSE_SCRIPT)?;
+    s.frames(2);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    let label = s.ed.scene.history().undo_label().map(str::to_string);
+    check(
+        s.ed.review.is_none()
+            && s.voxels() == v0 + 22 - 6
+            && s.ed.scene.history().position() == position + 1
+            && label.as_deref() == Some("AI: make the roof red, add a flag and open a door"),
+        format!("Enter applies as one undo step: {label:?}"),
+    )?;
+    s.frames(2);
+    s.save_png(&dir.join("app-2x-review-applied.png"))?;
+    s.ed.undo();
+    check(same(&s), "undo puts the house back".into())?;
+    s.ed.redo();
+    check(s.voxels() == v0 + 16 && s.ed.scene.palette[3] == [0xD9, 0x4A, 0x3A, 255], "redo applies it again".into())?;
+    s.ed.undo();
+    // Over 10,000 cells the card asks before staging more: Stop keeps what is staged, Allow runs it.
+    let big = r#"{"prompt": "fill the sky", "calls": [
+        {"name": "place", "input": {"cells": [[-16, 31, -16]], "slot": 3}},
+        {"name": "box", "input": {"from": [-16, 10, -16], "to": [15, 30, 15], "slot": 60}},
+        {"name": "done", "input": {"summary": "a block of sky"}}]}"#;
+    s.ed.stage_json(big)?;
+    s.frames(3);
+    let held = s.ed.ui.review.as_ref().and_then(|c| c.held);
+    check(
+        held == Some((10_000, 200_000)) && s.ed.ui.hits.contains_key("review-allow"),
+        format!("a big change is held: {held:?}"),
+    )?;
+    s.frames(20);
+    s.save_png(&dir.join("app-2x-review-held.png"))?;
+    s.ui_click("review-stop")?;
+    let c = s.ed.ui.review.clone().ok_or("no card")?;
+    check(c.held.is_none() && c.counts == [1, 0, 0], format!("Stop keeps what is staged: {:?}", c.counts))?;
+    s.ui_click("review-discard")?;
+    s.ed.stage_json(big)?;
+    s.frames(2);
+    s.ui_click("review-allow")?;
+    let c = s.ed.ui.review.clone().ok_or("no card")?;
+    check(c.held.is_none() && c.counts[0] == 1 + 32 * 21 * 32, format!("Allow stages it: +{} added", c.counts[0]))?;
+    s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+    check(same(&s), "and Escape drops it all".into())?;
+    Ok(())
+}
+
+/// The voxel view alone (the march, under the UI), without the render corner or a cursor.
+fn view_pixels(s: &mut Shot) -> Vec<u8> {
+    let shown = s.ed.ui.show_render;
+    s.ed.ui.show_render = false;
+    s.ed.pointer_moved(None);
+    s.frames(2);
+    let px = pollster::block_on(read_texture(&s.ed.gpu.device, &s.ed.gpu.queue, &s.ed.renderer.color));
+    s.ed.ui.show_render = shown;
+    px
+}
+
+fn differ(a: &[u8], b: &[u8]) -> usize {
+    a.as_chunks::<4>().0.iter().zip(b.as_chunks::<4>().0).filter(|(x, y)| x != y).count()
+}
+
+/// A change of about 100,000 cells on the island at 3024x1964, as Phase AI test 6 measured
+/// it: the frame with its ghost against the frame without, and Apply and Discard each from
+/// the call until the next frame is drawn (the bar is 50 ms).
+fn review_times(scene: &Path) -> Result<(), String> {
+    let (sc, name) = crate::native::open(scene)?;
+    let mut s = Shot::sized(sc, &name, 2.0, (1512, 982))?;
+    s.ed.ui.coach = false;
+    s.ed.ui.show_render = false;
+    s.frames(4);
+    let script = r#"{"prompt": "change a lot", "calls": [
+        {"name": "box", "input": {"from": [20, 14, -64], "to": [63, 30, 63], "slot": 3}},
+        {"name": "box", "input": {"from": [-64, 6, -64], "to": [-24, 30, 63], "mode": "erase"}},
+        {"name": "box", "input": {"from": [-23, 0, -64], "to": [19, 30, 63], "slot": 12, "mode": "paint"}}]}"#;
+    let median = |mut t: Vec<f64>| {
+        t.sort_by(f64::total_cmp);
+        t[t.len() / 2]
+    };
+    let frame = |s: &mut Shot| {
+        let mut t = Vec::new();
+        for _ in 0..60 {
+            let t0 = std::time::Instant::now();
+            s.frames(1);
+            let _ = s.ed.gpu.device.poll(wgpu::PollType::wait_indefinitely());
+            t.push(t0.elapsed().as_secs_f64() * 1000.0);
+        }
+        median(t)
+    };
+    let stage = |s: &mut Shot| -> Result<[usize; 3], String> {
+        s.ed.stage_json(script)?;
+        if s.ed.review.as_ref().is_some_and(|r| !r.held.is_empty()) {
+            let r = s.ed.review.as_mut().unwrap();
+            r.allow(&mut s.ed.scene);
+        }
+        s.frames(2);
+        Ok(s.ed.ui.review.as_ref().map(|c| c.counts).unwrap_or_default())
+    };
+    let plain = frame(&mut s);
+    let counts = stage(&mut s)?;
+    let staged = frame(&mut s);
+    let (mut apply, mut discard) = (Vec::new(), Vec::new());
+    for _ in 0..5 {
+        let t0 = std::time::Instant::now();
+        s.ed.apply_review();
+        s.frames(1);
+        let _ = s.ed.gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        apply.push(t0.elapsed().as_secs_f64() * 1000.0);
+        s.ed.undo();
+        s.frames(1);
+        stage(&mut s)?;
+        let t0 = std::time::Instant::now();
+        s.ed.discard_review();
+        s.frames(1);
+        let _ = s.ed.gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        discard.push(t0.elapsed().as_secs_f64() * 1000.0);
+        stage(&mut s)?;
+    }
+    s.ed.discard_review();
+    let (apply, discard) = (median(apply), median(discard));
+    let total: usize = counts.iter().sum();
+    println!(
+        "info review on the island at 3024x1964 (median): a change of {total} cells (+{} added, {} removed, {} repainted), \
+         frame {plain:.2} ms without it, {staged:.2} ms staged with its ghost; Apply {apply:.1} ms, Discard {discard:.1} ms \
+         (each until the next frame is drawn)",
+        counts[0], counts[1], counts[2]
+    );
+    check(total > 80_000, format!("the timed change is big: {total} cells"))?;
+    check(apply < 50.0 && discard < 50.0, format!("Apply {apply:.1} ms and Discard {discard:.1} ms are under 50 ms"))
 }
 
 /// Frame time of the island at full Retina (3024x1964), without and with the render corner,

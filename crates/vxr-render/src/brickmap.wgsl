@@ -1,5 +1,7 @@
 // Brick map bindings and ray traversal, shared by the editor view (march.wgsl) and any
-// other pass that traces rays through the scene. Bind group 1.
+// other pass that traces rays through the scene. Bind group 1. The pass that includes it
+// defines `hidden(brick, local) -> bool`: cells in the map that its rays pass through (the
+// path-traced preview hides a staged change's removals; the editor view hides none).
 //
 // Layout: a dense grid of brick slots (EMPTY or a brick id), 16 mask words per brick
 // (512 bits, local index x | y << 3 | z << 6), and a coarse level of 64 bits per 4x4x4
@@ -110,7 +112,7 @@ fn march_brick(brick: u32, bc: vec3<i32>, ro: vec3<f32>, d: vec3<f32>, inv: vec3
     loop {
         *steps += 1u;
         let local = u32(v.x) | (u32(v.y) << 3u) | (u32(v.z) << 6u);
-        if (mask_bit(brick, local)) {
+        if (mask_bit(brick, local) && !hidden(brick, local)) {
             h.t = t;
             h.axis = ax;
             h.brick = brick;

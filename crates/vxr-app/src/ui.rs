@@ -158,6 +158,10 @@ mod icon {
     pub const FILE_PLUS: char = '\u{e0c9}';
     pub const MAXIMIZE_2: char = '\u{e113}';
     pub const MINIMIZE_2: char = '\u{e11b}';
+    pub const SPARKLES: char = '\u{e412}';
+    pub const CHECK: char = '\u{e06c}';
+    pub const TRIANGLE_ALERT: char = '\u{e193}';
+    pub const CORNER_DOWN_LEFT: char = '\u{e0a1}';
 }
 
 pub use vxr_core::select::{Region, Transform};
@@ -257,7 +261,62 @@ pub enum Action {
     PlaceBox,
     /// Drop the box whose height is being set (Escape).
     CancelBox,
+    /// Apply the AI change under review as one undo step (the card's Apply, Enter).
+    ApplyReview,
+    /// Drop the AI change under review (the card's Discard, Escape).
+    DiscardReview,
+    /// Drop a step of the change, or take it back (its checkbox).
+    DropStep(usize, bool),
+    /// Show the scene as it was before the change (true) or with it (false).
+    ReviewBefore(bool),
+    /// Let the change grow past 10,000 cells, and run the calls that were waiting.
+    AllowMore,
+    /// Drop the calls waiting to grow the change; what is staged stays.
+    StopHeld,
 }
+
+/// The review card of an AI change (set by the editor while one is under review).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ReviewCard {
+    /// The request, and the model's one-line summary once it called `done`.
+    pub prompt: String,
+    pub summary: Option<String>,
+    /// Cells added, removed and repainted.
+    pub counts: [usize; 3],
+    /// Palette slots whose colour or material the change sets.
+    pub slots: Vec<SlotChange>,
+    pub steps: Vec<StepRow>,
+    /// Calls wait for the user: the cells staged without asking, and the most allowed.
+    pub held: Option<(usize, usize)>,
+    /// The scene shows Before.
+    pub before: bool,
+}
+
+/// A palette slot the change sets: its colour before and after, and its material change.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SlotChange {
+    pub slot: u8,
+    pub old: [u8; 4],
+    pub new: [u8; 4],
+    pub material: Option<String>,
+}
+
+/// One step of the change on the card.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StepRow {
+    /// The step's place in the request (what `Action::DropStep` names).
+    pub index: usize,
+    pub tool: &'static str,
+    pub detail: String,
+    /// The call worked; failed calls are listed but change nothing.
+    pub ok: bool,
+    pub dropped: bool,
+    /// Its checkbox can drop it.
+    pub droppable: bool,
+}
+
+/// Steps the review card shows before its list scrolls.
+const REVIEW_ROWS: usize = 6;
 
 /// One row of the scene tree: an object or a group, in tree order (set by the editor).
 #[derive(Clone, Debug, PartialEq)]
@@ -457,6 +516,15 @@ pub struct Hybrid {
     /// Arrow keys pressed this frame with a selection, for the editor to move it.
     pub arrows: Vec<Key>,
     toast: Option<(String, f64)>,
+    /// The AI change under review, if any (set by the editor).
+    pub review: Option<ReviewCard>,
+    /// The review card's "Ask for changes" text, whether it had focus last frame, and the
+    /// first step shown when the list scrolls.
+    review_ask: String,
+    ask_focus: bool,
+    review_scroll: usize,
+    /// An "Ask for changes" the user sent, for the assistant to take.
+    pub asked: Option<String>,
 }
 
 struct Command {
@@ -659,6 +727,11 @@ impl Hybrid {
             actions: Vec::new(),
             arrows: Vec::new(),
             toast: None,
+            review: None,
+            review_ask: String::new(),
+            ask_focus: false,
+            review_scroll: 0,
+            asked: None,
         }
     }
 
@@ -842,6 +915,8 @@ impl Hybrid {
             self.render_panel = false;
         } else if self.full_render {
             self.full_render = false;
+        } else if self.review.is_some() {
+            self.actions.push(Action::DiscardReview);
         } else if self.selected > 0 {
             self.actions.push(Action::Deselect);
         } else {
@@ -884,6 +959,7 @@ impl Hybrid {
         self.marquee(ctx);
         self.palette_panel(ctx, screen);
         self.color_editor(ctx, screen);
+        self.review_card(ctx, screen);
         if self.coach {
             self.coach_card(ctx, screen);
         }
@@ -910,6 +986,12 @@ impl Hybrid {
                 self.renaming = None;
                 return;
             }
+            // The same for the review card's ask field: Escape leaves the field, it does not
+            // discard the change.
+            if self.ask_focus && i.consume_key(Modifiers::NONE, Key::Escape) {
+                self.ask_focus = false;
+                return;
+            }
             // The New scene confirm takes every key: Enter starts the blank scene, Escape keeps this one.
             if self.confirm_new {
                 if i.consume_key(Modifiers::NONE, Key::Escape) {
@@ -926,6 +1008,9 @@ impl Hybrid {
             }
             if self.cmdk.is_some() || typing {
                 return;
+            }
+            if self.review.is_some() && i.consume_key(Modifiers::NONE, Key::Enter) {
+                self.actions.push(Action::ApplyReview);
             }
             if self.lifting {
                 if i.consume_key(Modifiers::NONE, Key::Enter) {
@@ -2069,6 +2154,420 @@ impl Hybrid {
         }
     }
 
+    // The review card of an AI change: not in the mockups' Hybrid set (docs/research/ai.md,
+    // section 2, and its review mock). A .panel left of the palette: the request, what the
+    // change adds, removes and repaints, the palette slots it sets, the steps with a checkbox
+    // each, Before and After, a field to ask for changes, and Discard and Apply. Over 10,000
+    // cells it asks before staging more.
+    fn review_card(&mut self, ctx: &Context, screen: Rect) {
+        let Some(card) = self.review.take() else {
+            self.ask_focus = false;
+            self.review_ask.clear();
+            self.review_scroll = 0;
+            return;
+        };
+        let w = 304.0;
+        let inner_w = w - 24.0;
+        let x = (screen.right() - 12.0 - 232.0 - 8.0 - w).max(76.0);
+        let wrapped = |text: &str, font: FontId, color: Color32, rows: usize| {
+            let mut job = LayoutJob::single_section(
+                text.to_string(),
+                TextFormat { font_id: font, color, line_height: Some(17.0), ..Default::default() },
+            );
+            job.wrap = egui::text::TextWrapping {
+                max_width: inner_w,
+                max_rows: rows,
+                break_anywhere: false,
+                overflow_character: Some('…'),
+            };
+            ctx.fonts_mut(|f| f.layout_job(job))
+        };
+        let prompt = wrapped(&card.prompt, inter_semibold(13.0), TEXT, 3);
+        let summary = card.summary.as_deref().filter(|s| !s.is_empty()).map(|s| wrapped(s, inter(12.0), MUTED, 2));
+        let held_text = card.held.map(|(asked, most)| {
+            let mut job = LayoutJob::default();
+            job.append(
+                &format!(
+                    "The change would go past {} cells. Let it grow to {}?",
+                    group_thousands(asked as u64),
+                    group_thousands(most as u64)
+                ),
+                0.0,
+                TextFormat { font_id: inter(12.0), color: TEXT, line_height: Some(17.0), ..Default::default() },
+            );
+            job.wrap.max_width = inner_w - 20.0 - 20.0;
+            ctx.fonts_mut(|f| f.layout_job(job))
+        });
+        let [added, removed, repainted] = card.counts.map(|c| group_thousands(c as u64));
+        let mut parts: Vec<(String, Color32)> = Vec::new();
+        if card.counts[0] > 0 {
+            parts.push((format!("+{added} added"), OK));
+        }
+        if card.counts[1] > 0 {
+            parts.push((format!("{removed} removed"), DANGER));
+        }
+        if card.counts[2] > 0 {
+            parts.push((format!("{repainted} repainted"), ACCENT));
+        }
+        match card.slots.len() {
+            0 => {}
+            1 => parts.push((format!("slot {} changed", card.slots[0].slot), TEXT)),
+            k => parts.push((format!("{k} slots changed"), TEXT)),
+        }
+        if parts.is_empty() {
+            parts.push(("No changes yet".into(), MUTED));
+        }
+        // Lines break between the counts, never inside one, and no line starts or ends with
+        // a separator.
+        let fmt = |color| TextFormat { font_id: mono(11.5), color, line_height: Some(17.0), ..Default::default() };
+        let width = |t: &str| ctx.fonts_mut(|f| f.layout_no_wrap(t.into(), mono(11.5), TEXT)).size().x;
+        let (sep, max) = (width(" · "), inner_w - 20.0);
+        let mut job = LayoutJob::default();
+        let mut line = 0.0;
+        for (i, (t, c)) in parts.iter().enumerate() {
+            let w = width(t);
+            if i > 0 && line + sep + w > max {
+                job.append("\n", 0.0, fmt(FAINT));
+                line = 0.0;
+            } else if i > 0 {
+                job.append(" · ", 0.0, fmt(FAINT));
+                line += sep;
+            }
+            job.append(t, 0.0, fmt(*c));
+            line += w;
+        }
+        let counts_text = ctx.fonts_mut(|f| f.layout_job(job));
+        let counts_h = counts_text.size().y + 13.0;
+        let rows = card.steps.len().min(REVIEW_ROWS);
+        let (row_h, slot_h) = (26.0, 24.0);
+        let mut h = 12.0 + 15.0 + 10.0 + prompt.size().y;
+        if let Some(g) = &summary {
+            h += 4.0 + g.size().y;
+        }
+        h += 10.0 + counts_h;
+        if !card.slots.is_empty() {
+            h += 6.0 + card.slots.len() as f32 * slot_h;
+        }
+        if let Some(g) = &held_text {
+            h += 10.0 + 12.0 + g.size().y + 10.0 + 26.0 + 12.0;
+        }
+        if rows > 0 {
+            h += 14.0 + 12.0 + 6.0 + rows as f32 * row_h;
+        }
+        h += 12.0 + 28.0 + 8.0 + 30.0 + 12.0 + 32.0 + 12.0;
+        let rect = Rect::from_min_size(pos2(x, 68.0), vec2(w, h));
+        let mut hits: Vec<(String, Rect)> = Vec::new();
+        let mut actions = Vec::new();
+        let mut scroll = self.review_scroll.min(card.steps.len().saturating_sub(rows));
+        let mut wheel = 0.0;
+        let mut ask = std::mem::take(&mut self.review_ask);
+        let mut ask_focus = false;
+        let mut sent = None;
+        Self::panel(ctx, "review", rect, Order::Middle, |ui, rect| {
+            let inner = rect.shrink(12.0);
+            let p = ui.painter().clone();
+            // Header: AI CHANGE, and how many steps.
+            let hy = inner.top() + 7.5;
+            p.text(pos2(inner.left() + 6.0, hy), Align2::CENTER_CENTER, icon::SPARKLES, icon_font(13.0), ACCENT);
+            let g = p.layout_job(spaced("AI CHANGE", inter_semibold(11.0), MUTED, 0.88));
+            p.galley(pos2(inner.left() + 18.0, hy - g.size().y / 2.0), g, MUTED);
+            let n = card.steps.len();
+            let right = if card.before {
+                ("BEFORE".to_string(), MID)
+            } else {
+                (format!("{n} step{}", if n == 1 { "" } else { "s" }), FAINT)
+            };
+            p.text(pos2(inner.right(), hy), Align2::RIGHT_CENTER, right.0, mono(11.0), right.1);
+            let mut y = inner.top() + 15.0 + 10.0;
+            let ph = prompt.size().y;
+            p.galley(pos2(inner.left(), y), prompt, TEXT);
+            y += ph;
+            if let Some(g) = summary {
+                y += 4.0;
+                let gh = g.size().y;
+                p.galley(pos2(inner.left(), y), g, MUTED);
+                y += gh;
+            }
+            // The counts: +added · removed · repainted · slots changed.
+            y += 10.0;
+            let counts = Rect::from_min_size(pos2(inner.left(), y), vec2(inner_w, counts_h));
+            p.rect(
+                counts,
+                CornerRadius::same(8),
+                Color32::from_white_alpha(9),
+                Stroke::new(1.0, LINE),
+                StrokeKind::Inside,
+            );
+            let g = counts_text;
+            p.galley(pos2(counts.left() + 10.0, counts.center().y - g.size().y / 2.0), g, TEXT);
+            hits.push(("review-counts".into(), counts));
+            y += counts_h;
+            // Palette slots, by slot: old and new colour, the new hex, the material change.
+            if !card.slots.is_empty() {
+                y += 6.0;
+                for c in &card.slots {
+                    let r = Rect::from_min_size(pos2(inner.left(), y), vec2(inner_w, slot_h));
+                    let cy = r.center().y;
+                    p.text(
+                        pos2(r.left() + 2.0, cy),
+                        Align2::LEFT_CENTER,
+                        format!("SLOT {}", c.slot),
+                        mono(10.0),
+                        FAINT,
+                    );
+                    let sw = |at: f32, rgba: [u8; 4]| {
+                        let q = Rect::from_min_size(pos2(at, cy - 7.0), vec2(14.0, 14.0));
+                        p.rect(
+                            q,
+                            CornerRadius::same(4),
+                            Color32::from_rgb(rgba[0], rgba[1], rgba[2]),
+                            Stroke::new(1.0, LINE2),
+                            StrokeKind::Inside,
+                        );
+                    };
+                    let sx = r.left() + 62.0;
+                    sw(sx, c.old);
+                    p.text(pos2(sx + 23.0, cy), Align2::CENTER_CENTER, "→", inter(11.0), FAINT);
+                    sw(sx + 32.0, c.new);
+                    if c.old != c.new {
+                        let hex = format!("#{:02X}{:02X}{:02X}", c.new[0], c.new[1], c.new[2]);
+                        p.text(pos2(sx + 54.0, cy), Align2::LEFT_CENTER, hex, mono(11.0), TEXT);
+                    }
+                    if let Some(m) = &c.material {
+                        p.text(pos2(r.right(), cy), Align2::RIGHT_CENTER, m, inter(11.5), MUTED);
+                    }
+                    hits.push((format!("review-slot-{}", c.slot), r));
+                    y += slot_h;
+                }
+            }
+            // Over the cells allowed without asking: Stop or Allow.
+            if let Some(g) = held_text {
+                y += 10.0;
+                let gh = g.size().y;
+                let b = Rect::from_min_size(pos2(inner.left(), y), vec2(inner_w, 12.0 + gh + 10.0 + 26.0 + 12.0));
+                p.rect(
+                    b,
+                    CornerRadius::same(8),
+                    Color32::from_rgba_unmultiplied(255, 209, 102, 20),
+                    Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 209, 102, 90)),
+                    StrokeKind::Inside,
+                );
+                p.text(
+                    pos2(b.left() + 10.0 + 7.0, b.top() + 12.0 + 8.5),
+                    Align2::CENTER_CENTER,
+                    icon::TRIANGLE_ALERT,
+                    icon_font(13.0),
+                    MID,
+                );
+                p.galley(pos2(b.left() + 30.0, b.top() + 12.0), g, TEXT);
+                let by = b.top() + 12.0 + gh + 10.0;
+                let allow = Rect::from_min_size(pos2(b.right() - 10.0 - 72.0, by), vec2(72.0, 26.0));
+                let stop = allow.translate(vec2(-72.0 - 6.0, 0.0));
+                if small_button(ui, stop, icon::X, "Stop", "review-stop", false).clicked() {
+                    actions.push(Action::StopHeld);
+                }
+                if small_button(ui, allow, icon::CHECK, "Allow", "review-allow", true).clicked() {
+                    actions.push(Action::AllowMore);
+                }
+                hits.push(("review-stop".into(), stop));
+                hits.push(("review-allow".into(), allow));
+                y = b.bottom();
+            }
+            // The steps, each with a checkbox that drops it from the change.
+            if rows > 0 {
+                y += 14.0;
+                let g = p.layout_job(spaced("STEPS", inter(9.0), FAINT, 0.72));
+                p.galley(pos2(inner.left(), y + 6.0 - g.size().y / 2.0), g, FAINT);
+                let kept = card.steps.iter().filter(|s| s.ok && !s.dropped).count();
+                p.text(pos2(inner.right(), y + 6.0), Align2::RIGHT_CENTER, format!("{kept} kept"), mono(10.0), FAINT);
+                y += 12.0 + 6.0;
+                let body = Rect::from_min_size(pos2(inner.left() - 4.0, y), vec2(inner_w + 8.0, rows as f32 * row_h));
+                if card.steps.len() > rows && ui.rect_contains_pointer(body) {
+                    wheel = ui.input(|i| i.smooth_scroll_delta.y);
+                }
+                for (k, st) in card.steps.iter().enumerate().skip(scroll).take(rows) {
+                    let r = Rect::from_min_size(
+                        pos2(body.left(), body.top() + (k - scroll) as f32 * row_h),
+                        vec2(body.width(), row_h),
+                    );
+                    let id = format!("review-step-{k}");
+                    let resp =
+                        ui.interact(r, Id::unique(&id), if st.droppable { Sense::click() } else { Sense::hover() });
+                    hits.push((id, r));
+                    let p = ui.painter();
+                    if st.droppable && resp.hovered() {
+                        p.rect_filled(r, CornerRadius::same(7), HOVER);
+                    }
+                    let cb = Rect::from_center_size(pos2(r.left() + 4.0 + 7.0, r.center().y), vec2(14.0, 14.0));
+                    if !st.ok {
+                        p.text(cb.center(), Align2::CENTER_CENTER, icon::X, icon_font(12.0), DANGER);
+                    } else if st.dropped {
+                        p.rect_stroke(cb, CornerRadius::same(4), Stroke::new(1.0, LINE2), StrokeKind::Inside);
+                    } else {
+                        p.rect_filled(cb, CornerRadius::same(4), ACCENT);
+                        p.text(
+                            cb.center(),
+                            Align2::CENTER_CENTER,
+                            icon::CHECK,
+                            icon_font(11.0),
+                            Color32::from_rgb(0x0d, 0x10, 0x20),
+                        );
+                    }
+                    let kept = st.ok && !st.dropped;
+                    let tool_c = if kept { TEXT } else { FAINT };
+                    let tg = p.layout_no_wrap(st.tool.to_string(), mono(11.5), tool_c);
+                    let tw = tg.size().x;
+                    let tx = cb.right() + 9.0;
+                    p.galley(pos2(tx, r.center().y - tg.size().y / 2.0), tg, tool_c);
+                    let dx = tx + tw + 8.0;
+                    let detail_c = if !st.ok {
+                        DANGER.gamma_multiply(0.8)
+                    } else if kept {
+                        MUTED
+                    } else {
+                        FAINT
+                    };
+                    let mut job = LayoutJob::single_section(
+                        st.detail.clone(),
+                        TextFormat { font_id: inter(11.5), color: detail_c, ..Default::default() },
+                    );
+                    job.wrap = egui::text::TextWrapping {
+                        max_width: (r.right() - 6.0 - dx).max(1.0),
+                        max_rows: 1,
+                        break_anywhere: true,
+                        overflow_character: Some('…'),
+                    };
+                    let dg = p.layout_job(job);
+                    p.galley(pos2(dx, r.center().y - dg.size().y / 2.0), dg, detail_c);
+                    if st.dropped {
+                        let end = dx
+                            + p.layout_no_wrap(st.detail.clone(), inter(11.5), FAINT)
+                                .size()
+                                .x
+                                .min(r.right() - 6.0 - dx);
+                        p.line_segment([pos2(tx, r.center().y), pos2(end, r.center().y)], Stroke::new(1.0, FAINT));
+                    }
+                    if st.droppable && resp.clicked() {
+                        actions.push(Action::DropStep(st.index, !st.dropped));
+                    }
+                }
+                y += rows as f32 * row_h;
+            }
+            // Before and After.
+            y += 12.0;
+            let seg = Rect::from_min_size(pos2(inner.left(), y), vec2(inner_w, 28.0));
+            let mut seg_hits = Vec::new();
+            if let Some(k) = segmented(
+                ui,
+                seg,
+                &["review-before", "review-after"],
+                &["Before".to_string(), "After".to_string()],
+                if card.before { 0 } else { 1 },
+                &[true, true],
+                inter(12.0),
+                &mut seg_hits,
+            ) {
+                actions.push(Action::ReviewBefore(k == 0));
+            }
+            hits.extend(seg_hits.into_iter().map(|(n, r)| (n.to_string(), r)));
+            y += 28.0 + 8.0;
+            // Ask for changes: the assistant takes what is sent (`asked`).
+            let fr = Rect::from_min_size(pos2(inner.left(), y), vec2(inner_w, 30.0));
+            let id = Id::unique("review-ask");
+            let focused = ui.memory(|m| m.has_focus(id));
+            let border = if focused { Color32::from_rgba_unmultiplied(142, 162, 255, 140) } else { LINE };
+            p.rect(
+                fr,
+                CornerRadius::same(7),
+                Color32::from_white_alpha(9),
+                Stroke::new(1.0, border),
+                StrokeKind::Inside,
+            );
+            p.text(
+                pos2(fr.right() - 16.0, fr.center().y),
+                Align2::CENTER_CENTER,
+                icon::CORNER_DOWN_LEFT,
+                icon_font(13.0),
+                FAINT,
+            );
+            if ask.is_empty() && !focused {
+                p.text(
+                    pos2(fr.left() + 10.0, fr.center().y),
+                    Align2::LEFT_CENTER,
+                    "Ask for changes…",
+                    inter(12.0),
+                    FAINT,
+                );
+            }
+            let tr =
+                Rect::from_min_max(pos2(fr.left() + 10.0, fr.top() + 7.0), pos2(fr.right() - 30.0, fr.bottom() - 7.0));
+            let edit = egui::TextEdit::singleline(&mut ask)
+                .id(id)
+                .font(inter(12.0))
+                .text_color(TEXT)
+                .frame(egui::Frame::NONE)
+                .margin(egui::Margin::ZERO)
+                .desired_width(tr.width());
+            let resp = ui.put(tr, edit);
+            hits.push(("review-ask".into(), fr));
+            ask_focus = resp.has_focus();
+            if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) && !ask.trim().is_empty() {
+                sent = Some(std::mem::take(&mut ask).trim().to_string());
+            }
+            y += 30.0 + 12.0;
+            // Discard (Escape) and Apply (Enter).
+            let ink = Color32::from_rgb(0x0d, 0x10, 0x20);
+            let label = p.layout_no_wrap("Apply".into(), inter_semibold(13.0), ink);
+            let kw = ui.painter().layout_no_wrap("↵".into(), mono_medium(10.5), MUTED).size().x.max(8.0) + 10.0;
+            let aw = label.size().x + 28.0 + kw + 8.0;
+            let a = Rect::from_min_size(pos2(inner.right() - aw, y), vec2(aw, 32.0));
+            let resp = ui.interact(a, Id::unique("review-apply"), Sense::click());
+            let fill = if resp.hovered() { Color32::from_rgb(0xa6, 0xb6, 0xff) } else { ACCENT };
+            p.rect_filled(a, CornerRadius::same(8), fill);
+            p.galley(pos2(a.left() + 14.0, a.center().y - label.size().y / 2.0), label, ink);
+            let kr = Rect::from_min_size(pos2(a.right() - 14.0 - kw, a.center().y - 9.5), vec2(kw, 19.0));
+            p.rect_stroke(kr, CornerRadius::same(5), Stroke::new(1.0, ink.gamma_multiply(0.35)), StrokeKind::Inside);
+            p.text(kr.center(), Align2::CENTER_CENTER, "↵", mono_medium(10.5), ink);
+            if resp.clicked() {
+                actions.push(Action::ApplyReview);
+            }
+            hits.push(("review-apply".into(), a));
+            let dl = p.layout_no_wrap("Discard".into(), inter(13.0), MUTED);
+            let ew = p.layout_no_wrap("esc".into(), mono_medium(10.5), MUTED).size().x + 10.0;
+            let dw = dl.size().x + 28.0 + ew + 8.0;
+            let d = Rect::from_min_size(pos2(a.left() - 6.0 - dw, y), vec2(dw, 32.0));
+            let resp = ui.interact(d, Id::unique("review-discard"), Sense::click());
+            let color = if resp.hovered() { TEXT } else { MUTED };
+            p.rect_stroke(
+                d,
+                CornerRadius::same(8),
+                Stroke::new(1.0, if resp.hovered() { Color32::from_white_alpha(64) } else { LINE2 }),
+                StrokeKind::Inside,
+            );
+            p.galley(pos2(d.left() + 14.0, d.center().y - dl.size().y / 2.0), dl, color);
+            kbd(ui, pos2(d.right() - 14.0, d.center().y), "esc", true);
+            if resp.clicked() {
+                actions.push(Action::DiscardReview);
+            }
+            hits.push(("review-discard".into(), d));
+        });
+        if wheel != 0.0 {
+            let max = card.steps.len().saturating_sub(rows);
+            let step = (-wheel / row_h).round() as i64;
+            scroll = (scroll as i64 + step).clamp(0, max as i64) as usize;
+        }
+        self.review_scroll = scroll;
+        self.review_ask = ask;
+        self.ask_focus = ask_focus;
+        if sent.is_some() {
+            self.asked = sent;
+        }
+        self.hits.extend(hits);
+        self.hits.insert("review".into(), rect);
+        self.actions.extend(actions);
+        self.review = Some(card);
+    }
+
     // The select tool's box while it is dragged: an accent outline over a faint accent fill.
     fn marquee(&self, ctx: &Context) {
         if let Some(r) = self.marquee {
@@ -2989,6 +3488,10 @@ impl Hybrid {
                 };
                 vec![("Click", armed.as_str()), ("Esc", "cancel")]
             }
+            (None, _, _) if self.review.is_some() => {
+                let v = [("↵", "apply"), ("Esc", "discard"), ("Right-drag", "orbit"), ("Scroll", "zoom")];
+                return self.hint_panel(ctx, screen, &v);
+            }
             (None, _, _) if self.lifting => {
                 let v = [("Move", "set the height"), ("Click or ↵", "place"), ("Esc", "cancel")];
                 return self.hint_panel(ctx, screen, &v);
@@ -3109,7 +3612,10 @@ impl Hybrid {
         ctx.request_repaint_after(std::time::Duration::from_secs_f64(until - now));
         let g = ctx.fonts_mut(|f| f.layout_no_wrap(msg.clone(), inter(12.5), TEXT));
         let size = vec2(g.size().x + 28.0, g.size().y + 18.0);
-        let rect = Rect::from_min_size(pos2((screen.center().x - size.x / 2.0).round(), 68.0), size);
+        // Centred on the view, or on the part of it left of the review card when that shows.
+        let card = self.hits.get("review").filter(|_| self.review.is_some());
+        let cx = card.map_or(screen.center().x, |c| (76.0 + c.left()) / 2.0);
+        let rect = Rect::from_min_size(pos2((cx - size.x / 2.0).round(), 68.0), size);
         Self::panel(ctx, "toast", rect, Order::Foreground, |ui, rect| {
             ui.painter().galley(pos2(rect.left() + 14.0, rect.top() + 9.0), g, TEXT);
         });

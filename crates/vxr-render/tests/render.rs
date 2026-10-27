@@ -281,6 +281,62 @@ fn selection_tints_only_selected_voxels() {
     assert_eq!(draw(&renderer), plain, "an empty mask clears the highlight");
 }
 
+/// The staged-change ghost: added cells tinted green, removed ones red, repainted ones keep
+/// their colour inside the face with an accent edge, unmarked cells unchanged; an empty mask
+/// clears it.
+#[test]
+fn ghost_tints_staged_cells_by_kind() {
+    let Some(g) = gpu() else { return };
+    let v = View::new(&g);
+    let mut renderer = v.renderer;
+    // Four grey 4^3 blocks side by side: added, repainted, removed and untouched.
+    let mut s = Scene::new([40, 16, 32]);
+    let block =
+        |x0: i32| (x0..x0 + 4).flat_map(move |x| (0..4).flat_map(move |y| (12..16).map(move |z| ([x, y, z], 8u8))));
+    s.edit(block(4).chain(block(13)).chain(block(22)).chain(block(31)));
+    let kinds = [1u32, 2, 3];
+    let mask =
+        s.ghost_mask(kinds.iter().enumerate().flat_map(|(k, &kind)| block(4 + 9 * k as i32).map(move |c| (c.0, kind))));
+    let mut palette = [[128, 128, 128, 255]; 256];
+    palette[0] = [0; 4];
+    let map = GpuMap::new(&g.device, &g.queue, &v.layout, &s.map, &palette).unwrap();
+    let cam = camera_for(&s.map);
+    let draw = |r: &Renderer| {
+        r.set_camera(&g.queue, &cam, None);
+        let mut enc = g.device.create_command_encoder(&Default::default());
+        r.march(&mut enc, &map, None);
+        g.queue.submit([enc.finish()]);
+        pollster::block_on(read_texture(&g.device, &g.queue, &r.color))
+    };
+    let plain = draw(&renderer);
+    renderer.set_ghost(&g.device, &g.queue, &mask);
+    let lit = draw(&renderer);
+    let (mut seen, mut green, mut red, mut changed) = ([0usize; 4], [0usize; 4], [0usize; 4], [0usize; 4]);
+    for y in 0..H {
+        for x in 0..W {
+            let (o, d) = cam.ray(x as f32 + 0.5, y as f32 + 0.5, W as f32, H as f32);
+            let Some(h) = s.map.raycast(o.to_array(), d.to_array(), 1e6) else { continue };
+            let k = ((h.voxel[0] - 4) / 9) as usize;
+            let i = ((y * W + x) * 4) as usize;
+            let [r, gr, b] = [lit[i] as i32, lit[i + 1] as i32, lit[i + 2] as i32];
+            seen[k] += 1;
+            green[k] += usize::from(gr > r + 30 && gr > b);
+            red[k] += usize::from(r > gr + 30 && r > b + 30);
+            changed[k] += usize::from(plain[i..i + 3] != lit[i..i + 3]);
+        }
+    }
+    assert!(seen.iter().all(|&n| n > 50), "every block on screen: {seen:?}");
+    assert!(green[0] * 10 >= seen[0] * 9, "added cells are green: {green:?} of {seen:?}");
+    assert!(red[2] * 10 >= seen[2] * 9, "removed cells are red: {red:?} of {seen:?}");
+    assert!(
+        changed[1] * 10 >= seen[1] && changed[1] * 2 <= seen[1],
+        "repainted cells change only along their edges: {changed:?} of {seen:?}"
+    );
+    assert!(changed[3] * 100 <= seen[3], "the untouched block is unchanged: {changed:?} of {seen:?}");
+    renderer.set_ghost(&g.device, &g.queue, &[]);
+    assert_eq!(draw(&renderer), plain, "an empty mask clears the ghost");
+}
+
 /// The guides: the ground lights the bounds footprint, the grid draws a line on each voxel
 /// edge of it, and the frame draws the bounds box's edges; with every guide off the view
 /// is the plain background.

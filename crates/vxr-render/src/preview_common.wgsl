@@ -13,7 +13,8 @@ struct Frame {
     cap_hi: vec4<f32>,
     // x: 1 = restart (camera moved), 2 = edit this frame; y: history cap after an edit;
     // z: frame counter (random seed); w: 1 = denoise on, 2 = sky backdrop, 4 = depth of field
-    // (samples stored with their own hit's colour, not demodulated), 8 = physical sky
+    // (samples stored with their own hit's colour, not demodulated), 8 = physical sky,
+    // 16 = hide a staged change's removals (`hidden` in preview_trace.wgsl)
     flags: vec4<u32>,
     cam_r: vec4<f32>,    // camera right, w = lens radius (voxels, 0 = pinhole)
     cam_u: vec4<f32>,    // camera up, w = focus distance along the view direction
@@ -24,6 +25,7 @@ struct Frame {
 const SKY_BACKDROP: u32 = 2u;
 const DOF: u32 = 4u;
 const PHYSICAL_SKY: u32 = 8u;
+const HIDE: u32 = 16u;
 
 struct Dispatch {
     row0: u32,  // first row of this trace dispatch

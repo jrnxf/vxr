@@ -11,6 +11,7 @@ use vxr_core::tools::{Brush, Gesture, Press, Shape, Target, Tool, plane_cell};
 use vxr_render::{EditBox, Gpu, GpuMap, Guides, OrbitCamera, Preview, Renderer, brickmap_layout, gpu::now_ms};
 
 use crate::render::{EXPORT_SIZES, Export};
+use crate::review::{Answer, Review, Script};
 use crate::ui::{Action, FontBytes, Hybrid, LayerRow, Named, Stats, TreeRow};
 
 /// Input quiet for this long raises the preview's budget (spikes/preview/RESULTS.md).
@@ -111,7 +112,34 @@ pub struct Editor {
     shape: (u64, [i32; 3]),
     /// The object last edited, where Tab goes back to from world mode.
     last_object: Option<usize>,
+    /// The AI change under review: staged on the scene, drawn as a ghost, with its card.
+    /// While it is open nothing else edits the scene.
+    pub review: Option<Review>,
+    /// The review version and `map.fills` the ghost was built at, and the card's version.
+    ghost_shown: Option<(u64, u64)>,
+    card_shown: Option<u64>,
+    /// "Ask for changes" requests from the review card, for the assistant to take.
+    pub asks: Vec<String>,
 }
+
+/// What may run while an AI change is under review: the view, and the review itself.
+fn review_allows(a: &Action) -> bool {
+    matches!(
+        a,
+        Action::Frame
+            | Action::Snap(_)
+            | Action::Ortho(_)
+            | Action::CancelExport
+            | Action::ApplyReview
+            | Action::DiscardReview
+            | Action::DropStep(..)
+            | Action::ReviewBefore(_)
+            | Action::AllowMore
+            | Action::StopHeld
+    )
+}
+
+const REVIEW_FIRST: &str = "Apply or discard the AI change first";
 
 impl Editor {
     pub fn new(
@@ -172,6 +200,10 @@ impl Editor {
             export_fits: [false; 4],
             shape: (0, [0; 3]),
             last_object: None,
+            review: None,
+            ghost_shown: None,
+            card_shown: None,
+            asks: Vec::new(),
         };
         e.shape = (e.scene.reshapes(), e.scene.origin);
         e.mark_saved();
@@ -182,6 +214,8 @@ impl Editor {
 
     /// Replace the scene (after Open), reframing the camera.
     pub fn load(&mut self, scene: Scene, name: &str) -> Result<(), String> {
+        // A change under review belongs to the scene it was staged on.
+        self.review = None;
         let mut scene = scene;
         scene.map.track_dirty(true);
         self.map = GpuMap::new(&self.gpu.device, &self.gpu.queue, &self.layout, &scene.map, &scene.palette)?;
@@ -382,6 +416,9 @@ impl Editor {
         };
         if b != Button::Left || self.space {
             return;
+        }
+        if self.review.is_some() {
+            return self.ui.toast(&self.ctx, REVIEW_FIRST);
         }
         self.ui.coach = false;
         // A colour edit still open (a field not yet applied) is its own undo step.
@@ -694,17 +731,99 @@ impl Editor {
     }
 
     pub fn undo(&mut self) {
+        if self.review.is_some() {
+            return self.ui.toast(&self.ctx, REVIEW_FIRST);
+        }
         self.gesture = None;
         self.moving = None;
         self.world_drag = None;
-        self.scene.undo();
+        let label = self.scene.history().undo_label().map(str::to_string);
+        if self.scene.undo()
+            && let Some(l) = label
+        {
+            self.ui.toast(&self.ctx, format!("Undid {l}"));
+        }
     }
 
     pub fn redo(&mut self) {
+        if self.review.is_some() {
+            return self.ui.toast(&self.ctx, REVIEW_FIRST);
+        }
         self.gesture = None;
         self.moving = None;
         self.world_drag = None;
-        self.scene.redo();
+        let label = self.scene.history().redo_label().map(str::to_string);
+        if self.scene.redo()
+            && let Some(l) = label
+        {
+            self.ui.toast(&self.ctx, format!("Redid {l}"));
+        }
+    }
+
+    /// Run a request's tool calls through the review step, as the assistant will: the first
+    /// opens a review (an open review takes more calls, as "Ask for changes" will), each turn
+    /// is one model answer. Returns each call's answer, by turn.
+    pub fn stage(&mut self, script: Script) -> Vec<Vec<Answer>> {
+        if self.review.is_none() {
+            // Whatever the user had going ends here, as its own step.
+            self.place_box();
+            self.gesture = None;
+            self.moving = None;
+            self.marquee = None;
+            self.world_drag = None;
+            self.ui.color_edit = None;
+            self.ui.slot_op = None;
+            self.ui.bounds_panel = None;
+            self.ui.coach = false;
+            self.scene.commit();
+            self.review = Some(Review::new(&self.scene, &script.prompt));
+        }
+        let r = self.review.as_mut().unwrap();
+        let mut out = Vec::new();
+        for calls in script.turns {
+            out.push(r.turn(&mut self.scene, calls));
+        }
+        out
+    }
+
+    /// [`Editor::stage`] from a script's JSON (see [`Script`]).
+    pub fn stage_json(&mut self, json: &str) -> Result<Vec<Vec<Answer>>, String> {
+        Ok(self.stage(Script::parse(json)?))
+    }
+
+    /// Apply the change under review as one undo step named after the request.
+    pub fn apply_review(&mut self) {
+        let Some(r) = self.review.take() else { return };
+        let label = r.label();
+        let n = r.session.apply_named(&mut self.scene, &label);
+        let msg = if n > 0 || self.scene.history().undo_label() == Some(label.as_str()) {
+            format!("Applied {label}")
+        } else {
+            "Nothing to apply".to_string()
+        };
+        self.ui.toast(&self.ctx, msg);
+    }
+
+    /// Drop the change under review: the scene is as it was, with no undo step.
+    pub fn discard_review(&mut self) {
+        let Some(r) = self.review.take() else { return };
+        r.session.discard(&mut self.scene);
+        self.ui.toast(&self.ctx, "Discarded the AI change");
+    }
+
+    fn review_action(&mut self, a: Action) {
+        let Some(r) = &mut self.review else { return };
+        match a {
+            Action::ApplyReview => self.apply_review(),
+            Action::DiscardReview => self.discard_review(),
+            Action::DropStep(i, dropped) => r.set_dropped(&mut self.scene, i, dropped),
+            Action::ReviewBefore(on) => r.show_before(&mut self.scene, on),
+            Action::AllowMore => {
+                r.allow(&mut self.scene);
+            }
+            Action::StopHeld => r.stop(),
+            _ => {}
+        }
     }
 
     /// What a shape drag in progress spans, for the stats panel.
@@ -806,12 +925,37 @@ impl Editor {
             let (a, b) = (m.start, m.end);
             egui::Rect::from_two_pos(egui::pos2(a[0], a[1]), egui::pos2(b[0], b[1])) / self.ppp
         });
+        match &self.review {
+            Some(r) if self.card_shown != Some(r.version) => {
+                self.card_shown = Some(r.version);
+                self.ui.review = Some(r.card(&self.scene));
+            }
+            Some(_) => {}
+            None => {
+                self.card_shown = None;
+                self.ui.review = None;
+            }
+        }
         let stats = self.stats();
         let mut actions = Vec::new();
         let ui = &mut self.ui;
         let out = self.ctx.run_ui(input, |u| actions = ui.ui(u.ctx(), &stats));
         let mut host = Vec::new();
         actions.extend(std::iter::repeat_n(Action::ToggleWorld, tabs));
+        if let Some(text) = self.ui.asked.take() {
+            self.asks.push(text);
+        }
+        if self.review.is_some() {
+            // Nothing else edits the scene while a change is under review: the view still moves.
+            let n = actions.len();
+            actions.retain(review_allows);
+            let blocked = n > actions.len() || !self.ui.arrows.is_empty() || self.ui.renamed.is_some();
+            self.ui.arrows.clear();
+            self.ui.renamed = None;
+            if blocked {
+                self.ui.toast(&self.ctx, REVIEW_FIRST);
+            }
+        }
         // Any other command places a box whose height is being set first.
         if actions.iter().any(|a| *a != Action::CancelBox) {
             self.place_box();
@@ -876,6 +1020,12 @@ impl Editor {
                 Action::AddLayer => self.add_layer(),
                 Action::PlaceBox => self.place_box(),
                 Action::CancelBox => self.cancel_box(),
+                Action::ApplyReview
+                | Action::DiscardReview
+                | Action::DropStep(..)
+                | Action::ReviewBefore(_)
+                | Action::AllowMore
+                | Action::StopHeld => self.review_action(a),
                 Action::ExportPng => self.start_export(),
                 Action::CancelExport => {
                     self.export = None;
@@ -1120,6 +1270,9 @@ impl Editor {
         p.lighting = self.preview.lighting;
         p.max_spp = self.preview.max_spp;
         p.restarts = self.preview.restarts + 1;
+        if let Some(r) = &self.review {
+            p.set_hidden(dev, queue, &r.ghost_mask(&self.scene));
+        }
         self.preview = p;
         self.preview_shown = false;
     }
@@ -1161,6 +1314,15 @@ impl Editor {
         if sel.0 != self.sel_shown.0 || (sel != self.sel_shown && self.ui.selected > 0) {
             self.sel_shown = sel;
             self.renderer.set_selection(dev, queue, &self.scene.selection_mask());
+        }
+        // The ghost of a change under review follows brick slots too; the render corner hides
+        // its removals, which stay in the map until Apply.
+        let ghost = self.review.as_ref().map(|r| (r.version, self.scene.map.fills));
+        if ghost != self.ghost_shown {
+            self.ghost_shown = ghost;
+            let words = self.review.as_ref().map(|r| r.ghost_mask(&self.scene)).unwrap_or_default();
+            self.renderer.set_ghost(dev, queue, &words);
+            self.preview.set_hidden(dev, queue, &words);
         }
         let busy =
             self.gesture.is_some() || self.moving.is_some() || self.marquee.is_some() || self.world_drag.is_some();

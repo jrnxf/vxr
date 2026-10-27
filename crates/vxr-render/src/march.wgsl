@@ -7,7 +7,8 @@ struct Camera {
     size: vec4<f32>,      // width, height, 1/width, 1/height
     sun: vec4<f32>,       // xyz direction toward the sun
     cursor: vec4<i32>,    // voxel under the cursor (map coordinates); w = 1 to highlight it
-    select: vec4<u32>,    // x = words in `sel`, 0 when nothing is selected; y = frame tiles per row
+    select: vec4<u32>,    // x = words in `sel`, 0 when nothing is selected; y = frame tiles per row;
+                          // z = words in `ghost`, 0 when nothing is staged
     // Guides: world size of a pixel at ray distance t is pix.x + pix.y * t; pix.z = the ground
     // layer (map y); pix.w = guide line width in pixels.
     pix: vec4<f32>,
@@ -25,9 +26,31 @@ struct Camera {
 @group(0) @binding(4) var<storage, read> frame_tiles: array<u32>;
 // The selection: one bit per voxel in the masks' layout (16 words per brick slot).
 @group(2) @binding(0) var<storage, read> sel: array<u32>;
+// A staged change (an AI request under review): 2 bits per voxel, 32 words per brick slot.
+// 1 added, 2 repainted, 3 removed (still in the map until Apply, drawn as what goes).
+@group(2) @binding(1) var<storage, read> ghost: array<u32>;
 
 // Selection highlight, the UI's accent #8ea2ff in linear light.
 const SELECT_TINT: vec3<f32> = vec3<f32>(0.27, 0.36, 1.0);
+// Ghost tints, the UI's OK #6ee7a8 (added) and DANGER #ff6b7a (removed) in linear light;
+// repainted cells keep their new colour with an accent edge.
+const ADDED_TINT: vec3<f32> = vec3<f32>(0.155, 0.799, 0.392);
+const REMOVED_TINT: vec3<f32> = vec3<f32>(1.0, 0.147, 0.195);
+
+// The editor view draws every cell in the map, staged removals included.
+fn hidden(brick: u32, local: u32) -> bool {
+    return false;
+}
+
+fn ghost_kind(v: vec3<i32>) -> u32 {
+    if (cam.select.z == 0u) { return 0u; }
+    let brick = grid_at(v >> vec3<u32>(3u));
+    let l = vec3<u32>(v & vec3<i32>(7));
+    let local = l.x | (l.y << 3u) | (l.z << 6u);
+    let w = brick * 32u + (local >> 4u);
+    if (brick == 0xffffffffu || w >= cam.select.z) { return 0u; }
+    return (ghost[w] >> ((local & 15u) * 2u)) & 3u;
+}
 
 fn selected(v: vec3<i32>) -> bool {
     if (cam.select.x == 0u) { return false; }
@@ -171,6 +194,22 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let e = min(min(f, 1.0 - f) + abs(n), vec3<f32>(1.0));
             let edge = min(e.x, min(e.y, e.z)) < 0.07;
             col = mix(col, SELECT_TINT * (amb + 0.85 * diff + 0.2), select(0.45, 0.8, edge));
+        }
+        let kind = ghost_kind(voxel);
+        if (kind != 0u) {
+            // Every ghost cell gets an edge line so single cells read: added cells are tinted
+            // green, removed ones dimmed red, repainted ones keep their new colour.
+            let f = fract(hp);
+            let e = min(min(f, 1.0 - f) + abs(n), vec3<f32>(1.0));
+            let edge = min(e.x, min(e.y, e.z)) < 0.08;
+            let lit = amb + 0.85 * diff + 0.2;
+            if (kind == 1u) {
+                col = mix(col, ADDED_TINT * lit, select(0.5, 0.9, edge));
+            } else if (kind == 2u) {
+                col = select(col, SELECT_TINT * lit, edge);
+            } else {
+                col = select(mix(col * 0.35, REMOVED_TINT * 0.35, 0.5), REMOVED_TINT * lit, edge);
+            }
         }
         if (cam.cursor.w == 1 && all(voxel == cam.cursor.xyz)) {
             col = mix(col, vec3<f32>(1.0), 0.35);

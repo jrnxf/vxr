@@ -16,9 +16,18 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
-pub fn run(path: Option<PathBuf>) -> Result<(), String> {
+/// Open the window on `path` (or a new scene). `stage` is a review script (see
+/// [`vxr_app::review::Script`]) run as an AI request once the window is up.
+pub fn run(path: Option<PathBuf>, stage: Option<PathBuf>) -> Result<(), String> {
+    let stage = match stage {
+        Some(p) => {
+            let text = std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+            Some(vxr_app::review::Script::parse(&text).map_err(|e| format!("{}: {e}", p.display()))?)
+        }
+        None => None,
+    };
     let event_loop = EventLoop::new().map_err(|e| e.to_string())?;
-    let mut app = App { path, state: None, error: None };
+    let mut app = App { path, stage, state: None, error: None };
     event_loop.run_app(&mut app).map_err(|e| e.to_string())?;
     app.error.map_or(Ok(()), Err)
 }
@@ -42,6 +51,7 @@ pub fn fonts() -> Option<vxr_app::ui::FontBytes> {
 
 struct App {
     path: Option<PathBuf>,
+    stage: Option<vxr_app::review::Script>,
     state: Option<State>,
     error: Option<String>,
 }
@@ -89,7 +99,10 @@ impl App {
         surface.configure(&gpu.device, &config);
         let ppp = window.scale_factor() as f32;
         let max_tex = gpu.device.limits().max_texture_dimension_2d as usize;
-        let editor = Editor::new(gpu, scene, &name, format, (config.width, config.height), ppp, fonts())?;
+        let mut editor = Editor::new(gpu, scene, &name, format, (config.width, config.height), ppp, fonts())?;
+        if let Some(script) = self.stage.take() {
+            editor.stage(script);
+        }
         let egui =
             egui_winit::State::new(editor.ctx.clone(), egui::ViewportId::ROOT, &window, Some(ppp), None, Some(max_tex));
         Ok(State { window, surface, config, egui, editor })

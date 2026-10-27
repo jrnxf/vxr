@@ -239,7 +239,13 @@ pub struct Preview {
     has_specular: bool,
     pub out_tex: wgpu::Texture,
     out_view: wgpu::TextureView,
+    trace_layout: wgpu::BindGroupLayout,
+    pixels: wgpu::Buffer,
     trace_group: wgpu::BindGroup,
+    /// A staged change's ghost words, whose removed cells the trace passes through, and
+    /// whether any are set (see `set_hidden`).
+    ghost: wgpu::Buffer,
+    hide: bool,
     dn_ab: wgpu::BindGroup,
     dn_ba: wgpu::BindGroup,
     reset_pipe: wgpu::ComputePipeline,
@@ -299,6 +305,23 @@ fn storage(read_only: bool) -> wgpu::BindingType {
         has_dynamic_offset: false,
         min_binding_size: None,
     }
+}
+
+/// The trace pass's group: the frame, dispatch, pixels, materials and ghost buffers.
+fn trace_group(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, b: [&wgpu::Buffer; 5]) -> wgpu::BindGroup {
+    let disp =
+        wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: b[1], offset: 0, size: wgpu::BufferSize::new(16) });
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("preview trace"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: b[0].as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: disp },
+            wgpu::BindGroupEntry { binding: 2, resource: b[2].as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: b[3].as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 4, resource: b[4].as_entire_binding() },
+        ],
+    })
 }
 
 fn storage_tex() -> wgpu::BindingType {
@@ -382,6 +405,7 @@ impl Preview {
                 entry(1, uniform(true)),
                 entry(2, storage(false)),
                 entry(3, uniform(false)),
+                entry(4, storage(true)),
             ],
         });
         let dn_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -402,16 +426,8 @@ impl Preview {
             offset: 0,
             size: wgpu::BufferSize::new(16),
         });
-        let trace_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("preview trace"),
-            layout: &trace_layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: frame_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: disp_binding.clone() },
-                wgpu::BindGroupEntry { binding: 2, resource: pixels.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: mat_buf.as_entire_binding() },
-            ],
-        });
+        let ghost = buf("preview ghost", 16, st);
+        let trace_group = trace_group(device, &trace_layout, [&frame_buf, &disp_buf, &pixels, &mat_buf, &ghost]);
         let dn = |src: &wgpu::Buffer, dst: &wgpu::Buffer| {
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("preview denoise"),
@@ -504,7 +520,11 @@ impl Preview {
             has_specular: false,
             out_tex,
             out_view,
+            trace_layout,
+            pixels,
             trace_group,
+            ghost,
+            hide: false,
             dn_ab,
             dn_ba,
             reset_pipe,
@@ -552,6 +572,33 @@ impl Preview {
         if self.lighting.dof() || self.has_specular {
             self.force_restart = true;
         }
+    }
+
+    /// Pass through a staged change's removals, which stay in the map until Apply: `words` is
+    /// the editor view's ghost (`vxr_core::Scene::ghost_mask`), and its cells marked removed
+    /// are hidden. Empty hides nothing. Restarts sampling.
+    pub fn set_hidden(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, words: &[u32]) {
+        self.force_restart = true;
+        self.hide = !words.is_empty();
+        if words.is_empty() {
+            return;
+        }
+        // Sized exactly: the shader bounds its reads by the buffer's length.
+        let size = words.len() as u64 * 4;
+        if size != self.ghost.size() {
+            self.ghost = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("preview ghost"),
+                size,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.trace_group = trace_group(
+                device,
+                &self.trace_layout,
+                [&self.frame_buf, &self.disp_buf, &self.pixels, &self.mat_buf, &self.ghost],
+            );
+        }
+        queue.write_buffer(&self.ghost, 0, bytemuck::cast_slice(words));
     }
 
     /// Drop all accumulated samples on the next frame (a new scene).
@@ -627,7 +674,10 @@ impl Preview {
                 flags,
                 HIST_CAP,
                 self.frame_counter,
-                1 | (l.sky_backdrop as u32) << 1 | (l.dof() as u32) << 2 | (l.physical_sky as u32) << 3,
+                1 | (l.sky_backdrop as u32) << 1
+                    | (l.dof() as u32) << 2
+                    | (l.physical_sky as u32) << 3
+                    | (self.hide as u32) << 4,
             ],
             cam_r: [right.x, right.y, right.z, l.aperture.max(0.0)],
             cam_u: [up.x, up.y, up.z, focus],

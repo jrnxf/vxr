@@ -39,6 +39,11 @@ const SELECT_TINT: vec3<f32> = vec3<f32>(0.27, 0.36, 1.0);
 const ADDED_TINT: vec3<f32> = vec3<f32>(0.16, 0.77, 0.35);
 const REMOVED_TINT: vec3<f32> = vec3<f32>(1.0, 0.15, 0.15);
 
+// brickmap.wgsl asks each pass which map cells its rays pass through: none here.
+fn hidden(brick: u32, local: u32) -> bool {
+    return false;
+}
+
 fn ghost_kind(v: vec3<i32>) -> u32 {
     if (cam.select.z == 0u) { return 0u; }
     let brick = grid_at(v >> vec3<u32>(3u));

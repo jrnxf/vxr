@@ -7,12 +7,14 @@
 //! - [`files`]: OBJ export files, and a zip to download several files at once.
 //! - [`fonts`]: loading the UI fonts.
 //! - [`render`]: the Render panel's settings and the PNG render export.
+//! - [`review`]: the review step of an AI change, and scripts that drive it.
 
 pub mod color;
 pub mod editor;
 pub mod files;
 pub mod fonts;
 pub mod render;
+pub mod review;
 pub mod ui;
 
 pub use editor::Editor;
