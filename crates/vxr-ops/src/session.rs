@@ -267,12 +267,9 @@ impl Session {
                 self.edit(scene, a.cells, Mode::Add, slot, a.name.as_deref())
             }
             Op::Erase(a) => {
-                let cells = match (&a.part, a.cells.is_empty()) {
-                    (Some(_), false) => return Err(invalid("give cells or part, not both")),
-                    (Some(k), true) => {
-                        let i = self.part(k)?;
-                        self.part_cells(scene, i).into_iter().map(|p| scene.to_world(p)).collect()
-                    }
+                let cells = match (self.parts_cells(scene, &a.part, &a.parts)?, a.cells.is_empty()) {
+                    (Some(_), false) => return Err(invalid("give cells or parts, not both")),
+                    (Some(cells), true) => cells,
                     (None, _) => {
                         self.list_limit(a.cells.len())?;
                         a.cells
@@ -353,9 +350,8 @@ impl Session {
             }
             Op::Paint(a) => {
                 let slot = slot(a.slot)?;
-                let cells: Vec<Cell> = if let Some(k) = &a.part {
-                    let i = self.part(k)?;
-                    self.part_cells(scene, i).into_iter().map(|p| scene.to_world(p)).collect()
+                let cells: Vec<Cell> = if let Some(cells) = self.parts_cells(scene, &a.part, &a.parts)? {
+                    cells
                 } else if let Some(from) = a.from_slot {
                     let from = self::slot(from)?;
                     self.voxels_where(scene, |_, v| v == from)
@@ -365,7 +361,7 @@ impl Session {
                     let (lo, hi) = order(f, t);
                     self.voxels_where(scene, |q, _| inside(q, lo, hi))
                 } else {
-                    return Err(invalid("give part, from_slot, selection: true, or a box (from, to)"));
+                    return Err(invalid("give part or parts, from_slot, selection: true, or a box (from, to)"));
                 };
                 self.edit(scene, cells, Mode::Paint, slot, None)
             }
@@ -681,14 +677,13 @@ impl Session {
             } else if let Some(c) = a.color {
                 let c = slot(c)?;
                 self.voxels_where(scene, |_, v| v == c)
-            } else if let Some(k) = &a.part {
-                let i = self.part(k)?;
-                self.part_cells(scene, i).into_iter().map(|p| scene.to_world(p)).collect()
+            } else if let Some(cells) = self.parts_cells(scene, &a.part, &a.parts)? {
+                cells
             } else if let (Some(f), Some(t)) = (a.from, a.to) {
                 let (lo, hi) = order(f, t);
                 self.voxels_where(scene, |q, _| inside(q, lo, hi))
             } else {
-                return Err(invalid("give from and to, color, part, all or none"));
+                return Err(invalid("give from and to, color, part or parts, all or none"));
             };
             let cells = cells.into_iter().map(|w| scene.to_map(w));
             match a.mode {
@@ -734,6 +729,22 @@ impl Session {
                 )))
             }
         }
+    }
+
+    /// The world cells still filled of `part` and `parts` together, or None when neither is given.
+    fn parts_cells(&self, scene: &Scene, part: &Option<String>, parts: &[String]) -> Result<Option<Vec<Cell>>, Error> {
+        if part.is_none() && parts.is_empty() {
+            return Ok(None);
+        }
+        let mut seen = HashSet::new();
+        let mut cells = Vec::new();
+        for k in part.iter().chain(parts) {
+            let i = self.part(k)?;
+            if seen.insert(i) {
+                cells.extend(self.part_cells(scene, i).into_iter().map(|p| scene.to_world(p)));
+            }
+        }
+        Ok(Some(cells))
     }
 
     /// Part `i`'s cells that still hold a voxel (map cells).

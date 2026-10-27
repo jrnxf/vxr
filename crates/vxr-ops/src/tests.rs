@@ -456,6 +456,17 @@ fn parts_by_id_and_name() {
     assert_eq!(m, "no part matches \"boat\"; find_parts lists them");
     let (_, m) = err(&mut o, &mut s, "erase", json!({"part": "p1", "cells": [[0, 0, 0]]}));
     assert!(m.contains("not both"));
+    // Several parts in one call.
+    let mut s3 = small();
+    let mut o3 = Session::new(&s3, None);
+    assert!(
+        call(&mut o3, &mut s3, "paint", json!({"slot": 5, "part": "p1", "parts": ["p2", "p1"]}))
+            .starts_with("19 cells changed")
+    );
+    assert!(call(&mut o3, &mut s3, "select", json!({"parts": ["p2"]})).starts_with("3 voxels selected"));
+    assert!(call(&mut o3, &mut s3, "erase", json!({"parts": ["p1", "red column"]})).starts_with("19 cells changed"));
+    let (_, m) = err(&mut o3, &mut s3, "erase", json!({"parts": ["p1", "p9"]}));
+    assert!(m.contains("no part matches \"p9\""), "{m}");
     // Several matches ask for an id.
     let mut s2 = small();
     s2.edit([(s2.to_map([10, 0, 10]), 20)]);

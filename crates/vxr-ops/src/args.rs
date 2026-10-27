@@ -104,7 +104,7 @@ pub struct Place {
     pub name: Option<String>,
 }
 
-/// Clear listed cells (at most 4096), or every voxel of a part. For a region use box with mode erase.
+/// Clear listed cells (at most 4096), or every voxel of one or more parts. For a region use box with mode erase.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Erase {
@@ -113,6 +113,9 @@ pub struct Erase {
     pub cells: Vec<Cell>,
     /// A part id or name from the summary or find_parts.
     pub part: Option<String>,
+    /// Several part ids or names.
+    #[serde(default)]
+    pub parts: Vec<String>,
 }
 
 /// Fill the box between two corner cells (both included). hollow keeps only its outer shell.
@@ -172,7 +175,7 @@ pub struct Fill {
     pub slot: u8,
 }
 
-/// Recolour filled cells: those of a part, of slot from_slot, the selection, or those in a box (from, to). Empty cells stay empty.
+/// Recolour filled cells: those of one or more parts, of slot from_slot, the selection, or those in a box (from, to). Empty cells stay empty.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Paint {
@@ -181,6 +184,9 @@ pub struct Paint {
     pub slot: u8,
     /// A part id or name.
     pub part: Option<String>,
+    /// Several part ids or names.
+    #[serde(default)]
+    pub parts: Vec<String>,
     /// Recolour every voxel of this slot.
     #[schemars(range(min = 1, max = 255))]
     pub from_slot: Option<u8>,
@@ -191,7 +197,7 @@ pub struct Paint {
     pub to: Option<Cell>,
 }
 
-/// Select filled cells: in a box (from, to), of a palette slot (color), of a part, all, or none. The selection is the assistant's own; fill paints it.
+/// Select filled cells: in a box (from, to), of a palette slot (color), of one or more parts, all, or none. The selection is the assistant's own; fill paints it.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Select {
@@ -201,6 +207,9 @@ pub struct Select {
     pub color: Option<u8>,
     /// A part id or name.
     pub part: Option<String>,
+    /// Several part ids or names.
+    #[serde(default)]
+    pub parts: Vec<String>,
     #[serde(default)]
     pub all: bool,
     #[serde(default)]
