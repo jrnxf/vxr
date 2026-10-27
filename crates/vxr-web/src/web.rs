@@ -140,6 +140,14 @@ impl App {
         }
     }
 
+    /// A trackpad pinch: `delta` is the change in magnification (positive zooms in). Chrome
+    /// and Firefox send it as a wheel with Ctrl held, Safari as gesture events.
+    pub fn pinch(&mut self, delta: f32) {
+        if !self.editor.ctx.is_pointer_over_egui() {
+            self.editor.pinch(delta);
+        }
+    }
+
     /// A DOM key event (`KeyboardEvent.key`). Returns true when the page should call
     /// `preventDefault`: egui knows the key, or a text field has focus.
     pub fn key(&mut self, key: &str, pressed: bool, repeat: bool) -> bool {
@@ -303,7 +311,7 @@ impl App {
         let e = &self.editor;
         let (c, h) = (&e.cam, e.scene.history());
         format!(
-            r#"{{"voxels":{},"tool":"{:?}","shape":"{:?}","mirror":{},"mirrorAxes":[{},{},{}],"lock":{},"brushSize":{},"sizePanel":{},"lifting":{},"span":{},"selected":{},"region":"{:?}","hasClip":{},"bounds":[{},{},{}],"boundsPanel":{},"slot":{},"colorEdit":{},"slotOp":"{:?}","undo":{},"redo":{},"cmdk":{},"coach":{},"name":{:?},"size":[{},{}],"ppp":{},"cam":[{},{},{},{},{},{}],"ortho":{},"view":{},"viewPanel":{},"exportMenu":{},"confirmNew":{},"guides":[{},{},{}],"mode":"{}","objects":{},"models":{},"picked":{},"tree":[{}],"treeOn":{},"layers":[{}],"layerOn":{},"render":{{"shown":{},"spp":{},"rows":{},"restarts":{},"timestamps":{},"panel":{},"full":{},"size":[{},{}],"maxSpp":{},"exposure":{},"gamma":{},"vignette":{},"aperture":{},"sky":{},"physicalSky":{},"export":{}}},"review":{},"undoLabel":{},"asks":{:?}}}"#,
+            r#"{{"voxels":{},"tool":"{:?}","shape":"{:?}","mirror":{},"mirrorAxes":[{},{},{}],"lock":{},"brushSize":{},"sizePanel":{},"lifting":{},"span":{},"selected":{},"region":"{:?}","hasClip":{},"bounds":[{},{},{}],"boundsPanel":{},"slot":{},"colorEdit":{},"slotOp":"{:?}","undo":{},"redo":{},"cmdk":{},"coach":{},"name":{:?},"size":[{},{}],"ppp":{},"cam":[{},{},{},{},{},{}],"ortho":{},"inView":[{},{}],"cameraHints":{},"view":{},"viewPanel":{},"exportMenu":{},"confirmNew":{},"guides":[{},{},{}],"mode":"{}","objects":{},"models":{},"picked":{},"tree":[{}],"treeOn":{},"layers":[{}],"layerOn":{},"render":{{"shown":{},"spp":{},"rows":{},"restarts":{},"timestamps":{},"panel":{},"full":{},"size":[{},{}],"maxSpp":{},"exposure":{},"gamma":{},"vignette":{},"aperture":{},"sky":{},"physicalSky":{},"export":{}}},"review":{},"undoLabel":{},"asks":{:?}}}"#,
             e.scene.map.voxels,
             e.ui.tool,
             e.ui.shape,
@@ -341,6 +349,9 @@ impl App {
             c.pitch,
             c.distance,
             c.ortho,
+            e.scene_in_view().0,
+            e.scene_in_view().1,
+            e.ui.camera_hints,
             c.view().map_or("null".into(), |v| format!("\"{}\"", v.name())),
             e.ui.view_panel,
             e.ui.export_menu,

@@ -75,13 +75,24 @@ function wire() {
   canvas.addEventListener('wheel', (e) => {
     e.preventDefault();
     const k = e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? 400 : 1;
-    app.wheel(e.deltaX * k, e.deltaY * k);
+    // A trackpad pinch comes as a wheel with Ctrl held (Chrome, Firefox): zoom, not the page.
+    if (e.ctrlKey && !e.metaKey) app.pinch(Math.exp(-e.deltaY * k * 0.01) - 1);
+    else app.wheel(e.deltaX * k, e.deltaY * k);
   }, { passive: false });
+  // Safari sends a pinch as gesture events instead.
+  let pinchScale = 1;
+  canvas.addEventListener('gesturestart', (e) => { e.preventDefault(); pinchScale = 1; });
+  canvas.addEventListener('gesturechange', (e) => {
+    e.preventDefault();
+    app.pinch(e.scale / pinchScale - 1);
+    pinchScale = e.scale;
+  });
+  canvas.addEventListener('gestureend', (e) => e.preventDefault());
   const key = (e, down) => {
     if (composing || e.isComposing) return;
     mods(e);
     if (app.key(e.key, down, e.repeat)) e.preventDefault();
-    if ((e.metaKey || e.ctrlKey) && ['k', 'z', 'n', 'o', 's', 'd', 'g'].includes(e.key.toLowerCase())) e.preventDefault();
+    if ((e.metaKey || e.ctrlKey) && ['k', 'z', 'n', 'o', 's', 'd', 'g', '=', '+', '-'].includes(e.key.toLowerCase())) e.preventDefault();
   };
   addEventListener('keydown', (e) => key(e, true));
   addEventListener('keyup', (e) => key(e, false));
