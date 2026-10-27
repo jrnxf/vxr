@@ -151,8 +151,8 @@ impl Scene {
     /// the world is written into that file through [`World::save_into`], the palette and
     /// materials through [`Document::set_palette`] and [`Document::set_material`], and the
     /// cameras through [`Document::set_camera`], so every chunk they do not touch keeps its
-    /// bytes. A new scene is written as a fresh version
-    /// 200 file, split into models of at most 256^3.
+    /// bytes. A new scene is written as a fresh version 200 file, split into models of at
+    /// most 256^3.
     pub fn to_vox(&self) -> Vec<u8> {
         if let (Some(doc), Some(world)) = (&self.source, &self.world)
             && let Some(bytes) = self.save_into(doc.clone(), world.clone())

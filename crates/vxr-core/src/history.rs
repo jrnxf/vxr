@@ -95,7 +95,8 @@ impl PartialEq for WorldChange {
 /// swapped, and the voxels remapped to keep their look). Steps that move a selection (move,
 /// rotate, paste, delete) also record it, so undo puts the selection back with the voxels.
 /// A resize or crop records the bounds, with the voxels it dropped. A world edit records
-/// the tree. A camera edit has only cameras. `at` says which map the cells belong to; undo and redo go there first.
+/// the tree. A camera edit has only cameras. `at` says which map the cells belong to; undo
+/// and redo go there first.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Step {
     pub voxels: Vec<Change>,
