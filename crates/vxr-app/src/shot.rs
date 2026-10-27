@@ -353,9 +353,10 @@ fn new_scene_save(dir: &Path) -> Result<(), String> {
     )
 }
 
-/// New scene (Cmd-N, Cmd-K, the top bar's New): with no edits it starts a blank scene at
-/// once; after an edit it asks first, Cancel and Escape keep the scene, Start new and Enter
-/// replace it with what launching with no file gives, and a save of it is one model.
+/// New scene (Cmd-N, Cmd-K, the top bar's New): with nothing unsaved it starts a blank scene
+/// at once; after an edit (or an undo past a save) it asks first, the confirm takes the keys
+/// and the pointer, Cancel, Escape and an Open keep the scene, Start new and Enter replace it
+/// with what launching with no file gives, and a save of it is one model.
 fn new_scene_command(dir: &Path) -> Result<(), String> {
     use egui::{Event, Key, Modifiers};
     use vxr_core::history::At;
@@ -384,6 +385,15 @@ fn new_scene_command(dir: &Path) -> Result<(), String> {
         format!("New scene after an edit ({edited} voxel) asks first and keeps the scene"),
     )?;
     s.save_png(&dir.join("app-2x-new.png"))?;
+
+    // The pointer waits for an answer too: the top bar's Open and the view are behind it.
+    s.ui_click("open")?;
+    let view = egui::pos2(mid[0] / s.ed.ppp, mid[1] / s.ed.ppp + 120.0);
+    s.ui_drag(view, view + egui::vec2(40.0, 0.0), Modifiers::NONE);
+    check(
+        s.ed.ui.confirm_new && s.host.is_empty() && s.ed.ctx.is_pointer_over_egui(),
+        "the confirm takes the pointer (the top bar's Open and the view do nothing)".into(),
+    )?;
     s.ui_click("new-cancel")?;
     check(!s.ed.ui.confirm_new && s.voxels() == edited && s.host.is_empty(), "Cancel keeps the scene".into())?;
     s.frames_with(2, vec![key(Key::N, Modifiers::COMMAND)]);
@@ -424,6 +434,30 @@ fn new_scene_command(dir: &Path) -> Result<(), String> {
     s.stroke(mid, &[]);
     s.ui_click("new")?;
     check(s.ed.ui.confirm_new, "the top bar's New asks first".into())?;
+    s.ed.load(Scene::new(NEW_SIZE), "opened.vox")?;
+    s.frames(2);
+    check(!s.ed.ui.confirm_new && s.host.is_empty(), "Open behind the confirm closes it".into())?;
+
+    // Saved edits are not lost: New starts at once. An undo past the save is, so it asks.
+    let path = dir.join("before-new.vox");
+    s.stroke(mid, &[]);
+    std::fs::write(&path, s.ed.scene.to_vox()).map_err(|e| e.to_string())?;
+    s.ed.mark_saved();
+    s.frames_with(2, vec![key(Key::N, Modifiers::COMMAND)]);
+    check(
+        !s.ed.ui.confirm_new && s.host.contains(&Action::New) && s.voxels() == 0,
+        "New scene after an edit and a save starts at once".into(),
+    )?;
+    s.host.clear();
+    s.stroke(mid, &[]);
+    std::fs::write(&path, s.ed.scene.to_vox()).map_err(|e| e.to_string())?;
+    s.ed.mark_saved();
+    s.frames_with(2, vec![key(Key::Z, Modifiers::COMMAND)]);
+    s.frames_with(2, vec![key(Key::N, Modifiers::COMMAND)]);
+    check(
+        s.ed.ui.confirm_new && s.host.is_empty() && s.voxels() == 0,
+        "New scene after a save and an undo asks first".into(),
+    )?;
     s.ui_click("new-discard")?;
 
     // Save after New: one model.

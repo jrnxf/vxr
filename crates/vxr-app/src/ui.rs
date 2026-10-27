@@ -374,6 +374,8 @@ pub struct Hybrid {
     pub cmdk: Option<String>,
     pub cmdk_sel: usize,
     pub can_undo: bool,
+    /// The scene differs from what was last opened or saved.
+    pub unsaved: bool,
     pub can_redo: bool,
     pub color_edit: Option<ColorEdit>,
     pub slot_op: Option<SlotOp>,
@@ -608,6 +610,7 @@ impl Hybrid {
             cmdk: None,
             cmdk_sel: 0,
             can_undo: false,
+            unsaved: false,
             can_redo: false,
             color_edit: None,
             slot_op: None,
@@ -815,10 +818,10 @@ impl Hybrid {
         }
     }
 
-    /// New scene: start it now, or ask first when the scene has edits to lose.
+    /// New scene: start it now, or ask first when the scene has unsaved edits to lose.
     pub fn request_new(&mut self) {
         self.cmdk = None;
-        if self.can_undo {
+        if self.unsaved {
             self.confirm_new = true;
         } else {
             self.actions.push(Action::New);
@@ -1928,11 +1931,21 @@ impl Hybrid {
     }
 
     // The New scene confirm, centred over the view: the edits would be lost, so Cancel is the
-    // default look and Enter or the accent button starts the blank scene.
+    // default look and Enter or the accent button starts the blank scene. A dim backdrop under
+    // it takes the pointer, so the bars, the palette and the view wait for an answer.
     fn new_confirm(&mut self, ctx: &Context, screen: Rect) {
         if !self.confirm_new {
             return;
         }
+        Area::new(Id::unique("new-backdrop"))
+            .fade_in(false)
+            .order(Order::Foreground)
+            .fixed_pos(screen.min)
+            .constrain(false)
+            .show(ctx, |ui| {
+                ui.painter().rect_filled(screen, CornerRadius::ZERO, Color32::from_black_alpha(64));
+                ui.allocate_rect(screen, Sense::click_and_drag());
+            });
         let (w, h) = (320.0, 138.0);
         let rect = Rect::from_center_size(screen.center(), vec2(w, h));
         let mut hits = Vec::new();
@@ -1972,6 +1985,7 @@ impl Hybrid {
             cancel = resp.clicked();
             hits.push(("new-cancel".to_string(), c));
         });
+        ctx.move_to_top(egui::LayerId::new(Order::Foreground, Id::unique("new-confirm")));
         self.hits.extend(hits);
         if discard {
             self.confirm_new = false;

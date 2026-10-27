@@ -151,6 +151,7 @@ impl State {
                         self.window.set_title(&format!("{name} - vxr"));
                         self.editor.ui.toast(&ctx, format!("Saved {name}"));
                         self.editor.path = Some(path);
+                        self.editor.mark_saved();
                     }
                     Err(e) => self.editor.ui.toast(&ctx, format!("Could not save: {e}")),
                 }

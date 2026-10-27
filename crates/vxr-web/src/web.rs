@@ -241,8 +241,9 @@ impl App {
         }
     }
 
-    /// The scene as a `.vox` file, for the page to download.
+    /// The scene as a `.vox` file, for the page to download; New then has nothing to lose.
     pub fn save(&mut self) -> Vec<u8> {
+        self.editor.mark_saved();
         self.editor.scene.to_vox()
     }
 

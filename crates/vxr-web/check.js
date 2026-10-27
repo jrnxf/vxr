@@ -1042,8 +1042,12 @@ async () => {
   }
 
   // New scene: Cmd-N (a browser may keep it for itself, so Cmd-K and the top bar's New work
-  // too). Nothing to lose starts at once; an edit asks first, in the editor's own panel.
-  while (st().undo) await key('z', cmd);
+  // too). Nothing unsaved starts at once; an edit, or an undo past a save, asks first, in the
+  // editor's own panel, which takes the keys and the pointer until it is answered.
+  await click(mx, my);
+  bytes();
+  await key('n', cmd);
+  step('New scene after an edit and a save starts at once', !st().confirmNew && st().name === 'Untitled' && st().voxels === 0, JSON.stringify(st()));
   await key('n', cmd);
   s = st();
   step('New scene with nothing to lose starts at once', s.name === 'Untitled' && !s.confirmNew && s.voxels === 0 && !s.undo && s.bounds.join() === '128,128,128', JSON.stringify(s));
@@ -1051,6 +1055,15 @@ async () => {
   const newEdited = st().voxels;
   await key('n', cmd);
   step('New scene after an edit asks first and keeps the scene', newEdited > 0 && st().confirmNew && st().voxels === newEdited, `${newEdited}`);
+  const fileInput = document.getElementById('file');
+  let newPicked = 0;
+  const inputClick = fileInput.click;
+  fileInput.click = () => { newPicked++; };
+  await clickAt('open');
+  await click(mx + 240, my);
+  await drag(mx + 240, my, mx + 300, my, 2);
+  fileInput.click = inputClick;
+  step('the confirm takes the pointer: the Open button, a click and an orbit in the view do nothing', st().confirmNew && newPicked === 0 && st().voxels === newEdited && !camMoved(st(), s), `${newPicked}`);
   await clickAt('new-cancel');
   step('Cancel keeps the scene', !st().confirmNew && st().voxels === newEdited);
   await key('n', cmd);
@@ -1068,6 +1081,18 @@ async () => {
   step("Cmd-K 'New scene' asks first", st().confirmNew && !st().cmdk);
   await key('Enter');
   step('Enter starts the new scene', !st().confirmNew && st().voxels === 0);
+  await click(mx, my);
+  bytes();
+  await key('z', cmd);
+  await key('n', cmd);
+  step('New scene after a save and an undo asks first', st().confirmNew && st().voxels === 0);
+  await key('Enter');
+  await click(mx, my);
+  await key('n', cmd);
+  window.vxr.open(bytes(), 'opened.vox');
+  await frames(4);
+  step('Open behind the confirm closes it', !st().confirmNew && st().name === 'opened.vox');
+  await key('n', cmd);
   await click(mx, my);
   const afterNew = st().voxels;
   const newSaved = bytes();
