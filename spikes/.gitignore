@@ -8,3 +8,5 @@ fetched/
 vox/logs/
 vox/fixtures/*.vox
 vox/fixtures/magicavoxel/
+# Python bytecode from the spikes that drive models from Python.
+__pycache__/
