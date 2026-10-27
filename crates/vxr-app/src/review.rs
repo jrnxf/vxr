@@ -68,9 +68,9 @@ pub struct Review {
     pub session: Session,
     /// The request, as the user wrote it.
     pub prompt: String,
-    /// Calls not run yet because the change would grow past what the user allowed, the first
-    /// of them the one that asked.
-    pub held: Vec<Call>,
+    /// Turns not run yet because the change would grow past what the user allowed: the rest of
+    /// the turn that asked, its first call the one that asked, then every turn after it.
+    pub held: Vec<Vec<Call>>,
     /// The scene's materials when the request started (the card lists material changes by slot).
     materials: [Material; 256],
     /// The change as of its last edit, which Before keeps showing on the card.
@@ -99,8 +99,13 @@ impl Review {
         format!("AI: {short}{dots}")
     }
 
-    /// Run one model turn. Once a call is held, it and the rest wait for the user.
+    /// Run one model turn. Once a call is held, it and the rest wait for the user, and so do
+    /// later turns.
     pub fn turn(&mut self, scene: &mut Scene, calls: Vec<Call>) -> Vec<Answer> {
+        if !self.held.is_empty() {
+            self.held.push(calls);
+            return Vec::new();
+        }
         self.session.begin_turn();
         self.run(scene, calls)
     }
@@ -108,18 +113,17 @@ impl Review {
     fn run(&mut self, scene: &mut Scene, calls: Vec<Call>) -> Vec<Answer> {
         let mut out = Vec::new();
         let mut calls = calls.into_iter();
-        for c in calls.by_ref() {
+        while let Some(c) = calls.next() {
             match self.session.call(scene, &c.name, c.input.clone()) {
                 Ok(t) => out.push(Answer::Ok(t)),
                 Err(e) if e.kind == ErrorKind::NeedsApproval => {
                     out.push(Answer::Held);
-                    self.held.push(c);
+                    self.held.push(std::iter::once(c).chain(calls).collect());
                     break;
                 }
                 Err(e) => out.push(Answer::Err(e.message)),
             }
         }
-        self.held.extend(calls);
         self.changed(scene);
         out
     }
@@ -130,11 +134,16 @@ impl Review {
         self.version += 1;
     }
 
-    /// The user allowed a bigger change: stage up to the request's limit and run what was held.
+    /// The user allowed a bigger change: stage up to the request's limit and run what was held,
+    /// the rest of the turn that asked and then each later turn as its own turn.
     pub fn allow(&mut self, scene: &mut Scene) -> Vec<Answer> {
         self.session.approve_more();
-        let held = std::mem::take(&mut self.held);
-        self.run(scene, held)
+        let mut turns = std::mem::take(&mut self.held).into_iter();
+        let mut out = turns.next().map(|t| self.run(scene, t)).unwrap_or_default();
+        for t in turns {
+            out.extend(self.turn(scene, t));
+        }
+        out
     }
 
     /// The user stopped the held calls: they are dropped, what is staged stays.
@@ -269,7 +278,7 @@ mod tests {
         ];
         let answers = r.turn(&mut s, calls.clone());
         assert_eq!(answers, vec![Answer::Held]);
-        assert_eq!(r.held, calls);
+        assert_eq!(r.held, vec![calls]);
         assert_eq!(r.card(&s).held, Some((10_000, 200_000)));
         assert_eq!(r.session.staged(), 0);
         let answers = r.allow(&mut s);
@@ -288,6 +297,25 @@ mod tests {
         assert_eq!(r2.held.len(), 1);
         r2.stop();
         assert!(r2.held.is_empty());
+    }
+
+    #[test]
+    fn held_turns_run_as_their_own_turns_when_allowed() {
+        let mut s = scene();
+        let mut r = Review::new(&s, "a block and dots");
+        let dot = |x: i32| Call { name: "box".into(), input: json!({"from": [x, 20, 0], "to": [x, 20, 0], "slot": 5}) };
+        let mut first =
+            vec![Call { name: "box".into(), input: json!({"from": [-16, 1, -16], "to": [15, 10, 15], "slot": 3}) }];
+        first.extend((-16..-7).map(dot));
+        let second: Vec<Call> = (0..10).map(dot).collect();
+        assert_eq!(r.turn(&mut s, first), vec![Answer::Held]);
+        assert_eq!(r.turn(&mut s, second), vec![]);
+        assert_eq!(r.held.len(), 2);
+        let answers = r.allow(&mut s);
+        assert_eq!(answers.len(), 20);
+        assert!(answers.iter().all(|a| matches!(a, Answer::Ok(_))), "{answers:?}");
+        assert!(r.held.is_empty());
+        assert_eq!(r.card(&s).counts, [32 * 10 * 32 + 19, 0, 0]);
     }
 
     #[test]

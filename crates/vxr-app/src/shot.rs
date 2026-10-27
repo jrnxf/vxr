@@ -2340,8 +2340,6 @@ fn export(s: &mut Shot, dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Frame time of the island at full Retina (3024x1964), without and with the render corner,
-/// while editing (pointer moving every frame) and idle. Each frame waits for the GPU.
 /// A small stone house with a two-layer roof (slot 20) on hollow walls (slot 10), in the
 /// middle of a 32^3 model: world x and z from -16, y from 0.
 fn house() -> Scene {
@@ -2599,6 +2597,8 @@ fn review_times(scene: &Path) -> Result<(), String> {
     check(apply < 50.0 && discard < 50.0, format!("Apply {apply:.1} ms and Discard {discard:.1} ms are under 50 ms"))
 }
 
+/// Frame time of the island at full Retina (3024x1964), without and with the render corner,
+/// while editing (pointer moving every frame) and idle. Each frame waits for the GPU.
 fn frame_times(scene: &Path) -> Result<(), String> {
     let (sc, name) = crate::native::open(scene)?;
     let mut s = Shot::sized(sc, &name, 2.0, (1512, 982))?;

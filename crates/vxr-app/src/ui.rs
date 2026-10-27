@@ -2162,6 +2162,8 @@ impl Hybrid {
     fn review_card(&mut self, ctx: &Context, screen: Rect) {
         let Some(card) = self.review.take() else {
             self.ask_focus = false;
+            self.review_ask.clear();
+            self.review_scroll = 0;
             return;
         };
         let w = 304.0;

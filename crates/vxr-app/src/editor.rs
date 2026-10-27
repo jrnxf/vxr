@@ -781,12 +781,6 @@ impl Editor {
         let r = self.review.as_mut().unwrap();
         let mut out = Vec::new();
         for calls in script.turns {
-            if !r.held.is_empty() {
-                // Waiting for the user: the turn waits behind the held calls.
-                r.held.extend(calls);
-                out.push(Vec::new());
-                continue;
-            }
             out.push(r.turn(&mut self.scene, calls));
         }
         out
