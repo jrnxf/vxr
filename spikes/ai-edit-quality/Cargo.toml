@@ -1,0 +1,32 @@
+[package]
+name = "vxr-ai-edit-quality"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Phase AI spike (tests 1, 2 and 4): the 12 first-version vxr-ops behind a model loop"
+
+# Its own workspace, apart from the root one.
+[workspace]
+
+[[bin]]
+name = "vxr-ops"
+path = "src/main.rs"
+
+[dependencies]
+vxr-core = { path = "../../crates/vxr-core" }
+vxr-vox = { path = "../../crates/vxr-vox" }
+vxr-render = { path = "../../crates/vxr-render" }
+vxr-app = { path = "../../crates/vxr-app" }
+serde_json = "1"
+wgpu = "30.0.1"
+glam = { version = "0.34", features = ["bytemuck"] }
+egui = "0.37"
+pollster = "1"
+png = "0.18"
+base64 = "0.22"
+
+[profile.release]
+debug = 0
+
+[profile.dev]
+debug = 0

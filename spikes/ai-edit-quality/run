@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Phase AI tests 1, 2 and 4: spikes/ai-edit-quality/run <out-dir> [files|t1|t2|t4|judge|report|r2|judge2]...
+# With no step named it runs round 1 (files to report); r2 and judge2 are test 1's round 2.
+# The model calls need ANTHROPIC_API_KEY and OPENAI_API_KEY in the environment
+# (GEMINI_API_KEY for Gemini, with --models); nothing here reads or writes a key. Everything it makes (runs, .vox files, pictures, the judging page)
+# goes under <out-dir>, none of it into git.
+set -euo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
+repo="$(cd "$here/../.." && pwd)"
+out="${1:?usage: run <out-dir> [files|t1|t2|t4|judge|report|r2|judge2]...}"
+shift
+steps=("$@")
+[[ ${#steps[@]} -eq 0 ]] && steps=(files t1 t2 t4 judge report)
+mkdir -p "$out"
+out="$(cd "$out" && pwd)"
+bin="$here/target/release/vxr-ops"
+(cd "$repo" && ./dev cargo build --release --manifest-path spikes/ai-edit-quality/Cargo.toml)
+py() { python3 -E -s "$@"; }
+
+for step in "${steps[@]}"; do
+  case "$step" in
+    files)
+      # The island (node prototype/src/build.mjs makes it), the test 4 files with planted
+      # instructions, the island's voxels for scoring and its "before" screenshots.
+      mkdir -p "$out/files" "$out/before"
+      cp "$repo/prototype/demo/scene.vox" "$out/files/island.vox"
+      "$bin" inject "$out/files/island.vox" "$out/files/island-injected.vox" "$out/files/empty-injected.vox"
+      "$bin" dump "$out/files/island.vox" >"$out/island-dump.json"
+      "$bin" summary "$out/files/island.vox" >"$out/island-summary.json"
+      "$bin" shoot "$out/files/island.vox" "$out/before/island"
+      ;;
+    t1)
+      py "$here/run.py" "$out" t1 | tee -a "$out/t1.log"
+      py "$here/run.py" "$out" t1 --models claude-opus-5-5@low | tee -a "$out/t1.log"
+      ;;
+    t2 | t4) py "$here/run.py" "$out" "$step" | tee -a "$out/$step.log" ;;
+    judge) py "$here/judge.py" "$out/t1" "$out/before" "$out/judge" "$out/judge-key.json" ;;
+    r2)
+      # Round 2 of test 1: three tiers of scenes, before and after pictures, a $10 cap.
+      "$bin" scenes "$repo/prototype/demo/scene.vox" "$out/files"
+      py "$here/run.py" "$out" r2 --cap 9.5 | tee -a "$out/r2.log"
+      ;;
+    judge2) py "$here/judge2.py" "$out/r2" "$out/judge2" "$out/judge2-key.json" ;;
+    report)
+      py "$here/report.py" "$out" t1 >"$out/t1-report.md"
+      py "$here/report.py" "$out" matrix >"$out/t1-matrix.md"
+      py "$here/score.py" "$out/island-dump.json" "$out"/t2/*/*/* >"$out/t2-score.txt"
+      py "$here/report.py" "$out" t4 "$out/island-dump.json" "$out/island-summary.json" >"$out/t4-report.md"
+      tail -n 8 "$out/t2-score.txt"
+      tail -n 1 "$out/t4-report.md"
+      ;;
+    *) echo "unknown step $step" >&2; exit 2 ;;
+  esac
+done
