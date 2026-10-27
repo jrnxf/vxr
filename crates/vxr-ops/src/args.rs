@@ -12,6 +12,9 @@ use serde_json::Value;
 /// A world cell `[x, y, z]`.
 pub type Cell = [i32; 3];
 
+/// The largest coordinate a call may give, either way.
+pub const MAX_COORD: i64 = 1 << 24;
+
 /// add sets every cell to the slot, erase clears it, paint recolours only cells that hold a voxel.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
@@ -258,9 +261,10 @@ macro_rules! ops {
 
         impl Op {
             /// Parse a call by its tool name. Whole floats count as integers and a missing
-            /// input as `{}`, as models send them.
+            /// input as `{}`, as models send them. Numbers beyond [`MAX_COORD`] are refused.
             pub fn parse(name: &str, mut args: Value) -> Result<Op, String> {
                 integers(&mut args);
+                in_range(&args)?;
                 if args.is_null() {
                     args = Value::Object(Default::default());
                 }
@@ -320,6 +324,17 @@ fn integers(v: &mut Value) {
         Value::Array(a) => a.iter_mut().for_each(integers),
         Value::Object(o) => o.values_mut().for_each(integers),
         _ => {}
+    }
+}
+
+fn in_range(v: &Value) -> Result<(), String> {
+    match v {
+        Value::Number(n) if n.as_f64().is_some_and(|f| f.abs() > MAX_COORD as f64) => {
+            Err(format!("{n} is out of range: coordinates are within -{MAX_COORD}..{MAX_COORD}"))
+        }
+        Value::Array(a) => a.iter().try_for_each(in_range),
+        Value::Object(o) => o.values().try_for_each(in_range),
+        _ => Ok(()),
     }
 }
 

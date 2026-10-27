@@ -7,6 +7,7 @@ use vxr_vox::build::{Builder, SceneNode};
 use vxr_vox::chunk::{LAYR, Layr, NOTE, Note};
 use vxr_vox::raw::Chunk;
 
+use crate::args::{BoxShape, GetVoxels, Line, Mode};
 use crate::{ErrorKind, Ghost, Limits, MAX_NAME, Op, Session, tools};
 
 /// A new 32^3 scene: world x and z from -16 to 15, y from 0 to 31.
@@ -581,4 +582,50 @@ fn summary_shape() {
     assert_eq!(sum["height_map"]["rows"].as_array().unwrap().len(), 8);
     assert_eq!(&sum["height_map"]["rows"][4], "....3...");
     assert!(sum.get("file_content").is_none());
+}
+
+#[test]
+fn far_corners_are_refused() {
+    let mut s = empty();
+    let mut o = Session::new(&s, None);
+    let (lo, hi) = ([i32::MIN, i32::MIN, i32::MIN], [i32::MAX, i32::MAX, i32::MAX]);
+    let (k, m) = err(&mut o, &mut s, "box", json!({"from": [-2000000000, 0, 0], "to": [2000000000, 0, 0], "slot": 1}));
+    assert_eq!(k, ErrorKind::Invalid);
+    assert!(m.contains("out of range"), "{m}");
+    let (_, m) = err(&mut o, &mut s, "sphere", json!({"center": [i32::MAX, 0, 0], "radius": 2, "slot": 1}));
+    assert!(m.contains("out of range"), "{m}");
+    let (_, m) = err(&mut o, &mut s, "get_voxels", json!({"cells": [[0, i32::MIN, 0]]}));
+    assert!(m.contains("out of range"), "{m}");
+    // The limits hold for any corners, given straight to run.
+    let shape = BoxShape { from: lo, to: hi, slot: Some(1), mode: Mode::Add, hollow: false, name: None };
+    let m = o.run(&mut s, Op::Box(shape)).unwrap_err().message;
+    assert_eq!(m, format!("the box spans {} cells; at most 2000000", i64::MAX));
+    let line = Line { from: lo, to: hi, slot: Some(1), mode: Mode::Add, name: None };
+    assert!(o.run(&mut s, Op::Line(line)).unwrap_err().message.contains("over 4096"));
+    let read = GetVoxels { from: Some(lo), to: Some([i32::MAX, i32::MIN, i32::MIN]), ..GetVoxels::default() };
+    assert!(o.run(&mut s, Op::GetVoxels(read)).unwrap_err().message.contains("the box spans 4294967296 cells"));
+    assert_eq!(o.staged(), 0);
+}
+
+#[test]
+fn named_parts_keep_their_ids_across_replay() {
+    let mut s = small();
+    let mut o = Session::new(&s, None);
+    let r = call(&mut o, &mut s, "place", json!({"cells": [[3, 1, 3]], "slot": 7, "name": "flag"}));
+    assert!(r.ends_with("part p3 \"flag\""), "{r}");
+    let r = call(&mut o, &mut s, "place", json!({"cells": [[0, 1, 3]], "slot": 8, "name": "pole"}));
+    assert!(r.ends_with("part p4 \"pole\""), "{r}");
+    call(&mut o, &mut s, "paint", json!({"slot": 5, "part": "p4"}));
+    // Dropping the flag keeps the pole p4, so the paint still recolours the pole.
+    assert!(o.set_dropped(&mut s, 0, true));
+    assert_eq!((get(&mut o, &mut s, [3, 1, 3]), get(&mut o, &mut s, [0, 1, 3])), (0, 5));
+    let parts = json(&call(&mut o, &mut s, "find_parts", json!({"query": "pole"})));
+    assert!(parts["parts"][0].as_str().unwrap().starts_with("p4 \"pole\""), "{parts}");
+    assert!(err(&mut o, &mut s, "paint", json!({"slot": 6, "part": "p3"})).1.contains("no part matches \"p3\""));
+    // Taking it back gives the flag its id again; a new name never reuses one.
+    assert!(o.set_dropped(&mut s, 0, false));
+    assert_eq!((get(&mut o, &mut s, [3, 1, 3]), get(&mut o, &mut s, [0, 1, 3])), (7, 5));
+    let r = call(&mut o, &mut s, "place", json!({"cells": [[2, 1, 3]], "slot": 9, "name": "sail"}));
+    assert!(r.ends_with("part p5 \"sail\""), "{r}");
+    assert!(call(&mut o, &mut s, "paint", json!({"slot": 6, "part": "p3"})).starts_with("1 cells changed"));
 }

@@ -137,6 +137,9 @@ pub struct Session {
     pub(crate) parts: Vec<Part>,
     /// How many of `parts` were found in the scene; the rest the model named.
     detected: usize,
+    /// Every name an edit gave, in the order first given: name `i` is part `detected + i + 1`
+    /// however the steps replay.
+    names: Vec<String>,
     /// The file's `NOTE` palette row names, cleaned.
     pub(crate) notes: Vec<String>,
     steps: Vec<Step>,
@@ -179,6 +182,7 @@ impl Session {
             selection_before: selection.clone(),
             selection,
             detected: parts.len(),
+            names: Vec::new(),
             parts,
             notes: file.map(notes_of).unwrap_or_default(),
             steps: Vec::new(),
@@ -280,7 +284,7 @@ impl Session {
             Op::Box(a) => {
                 let slot = shape_slot(a.mode, a.slot)?;
                 let (lo, hi) = order(a.from, a.to);
-                let volume: i64 = (0..3).map(|k| (hi[k] - lo[k] + 1) as i64).product();
+                let volume = span(lo, hi);
                 if volume > self.limits.box_cells {
                     return Err(invalid(format!("the box spans {volume} cells; at most {}", self.limits.box_cells)));
                 }
@@ -311,7 +315,7 @@ impl Session {
                             return f;
                         }
                         std::array::from_fn(|k| {
-                            (f[k] as f64 + (t[k] - f[k]) as f64 * s as f64 / steps as f64).round() as i32
+                            (f[k] as f64 + (t[k] as f64 - f[k] as f64) * s as f64 / steps as f64).round() as i32
                         })
                     })
                     .collect();
@@ -649,7 +653,14 @@ impl Session {
                     self.parts[self.detected + k].id.clone()
                 }
                 None => {
-                    let part = parts::named(self.parts.len() + 1, &n, made);
+                    let i = match self.names.iter().position(|m| m.eq_ignore_ascii_case(&n)) {
+                        Some(i) => i,
+                        None => {
+                            self.names.push(n.clone());
+                            self.names.len() - 1
+                        }
+                    };
+                    let part = parts::named(self.detected + i + 1, &n, made);
                     let id = part.id.clone();
                     self.parts.push(part);
                     id
@@ -819,6 +830,11 @@ fn shape_slot(mode: Mode, s: Option<u8>) -> Result<u8, Error> {
 
 pub(crate) fn order(a: Cell, b: Cell) -> (Cell, Cell) {
     (std::array::from_fn(|k| a[k].min(b[k])), std::array::from_fn(|k| a[k].max(b[k])))
+}
+
+/// The cells in the box from `lo` to `hi`, saturating.
+pub(crate) fn span(lo: Cell, hi: Cell) -> i64 {
+    (0..3).fold(1i64, |n, k| n.saturating_mul(hi[k] as i64 - lo[k] as i64 + 1))
 }
 
 pub(crate) fn inside(p: Cell, lo: Cell, hi: Cell) -> bool {

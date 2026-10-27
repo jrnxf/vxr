@@ -10,7 +10,7 @@ use vxr_core::history::At;
 use vxr_vox::NodeKind;
 
 use crate::args::{Cell, GetVoxels, Slice};
-use crate::session::{Error, Session, invalid, order};
+use crate::session::{Error, Session, invalid, order, span};
 use crate::text::{clean, hex};
 
 /// Height map cell: this many voxels a side per character.
@@ -241,7 +241,7 @@ impl Session {
         match (a.from, a.to) {
             (Some(f), Some(t)) => {
                 let (lo, hi) = order(f, t);
-                let span: i64 = (0..3).map(|k| (hi[k] - lo[k] + 1) as i64).product();
+                let span = span(lo, hi);
                 if span > BOX_SPAN {
                     return Err(invalid(format!("the box spans {span} cells; at most {BOX_SPAN} (use slice)")));
                 }
