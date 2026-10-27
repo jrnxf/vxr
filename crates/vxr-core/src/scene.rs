@@ -13,11 +13,12 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use vxr_vox::build::Builder;
-use vxr_vox::{Document, Material};
+use vxr_vox::{Camera, Document, Material};
 
 use crate::brickmap::BrickMap;
 use crate::history::{
-    At, Bounds, BoundsChange, Change, ColorChange, History, MaterialChange, SelectionChange, Step, WorldChange,
+    At, Bounds, BoundsChange, CameraChange, Change, ColorChange, History, MaterialChange, SelectionChange, Step,
+    WorldChange,
 };
 use crate::select::Clip;
 use crate::world::World;
@@ -31,6 +32,8 @@ pub struct Scene {
     pub palette: [[u8; 4]; 256],
     /// Material by voxel index, from the file's `MATL` chunks. Index 0 is unused.
     pub materials: [Material; 256],
+    /// The saved cameras, from the file's `rCAM` chunks, in file order. A new scene has none.
+    pub cameras: Vec<Camera>,
     /// World cell of map cell (0, 0, 0).
     pub origin: [i32; 3],
     /// Map layer the ground plane sits on: clicks that miss every voxel land here. It is the
@@ -42,7 +45,7 @@ pub struct Scene {
     /// opened model's height, or of a new scene's map.
     pub pivot: [i32; 3],
     /// The file this scene was opened from. Saving applies the edits to it, so whatever
-    /// vxr does not edit (materials, layers, cameras, names, unknown chunks) is kept.
+    /// vxr does not edit (render settings, notes, unknown chunks) is kept.
     source: Option<Document>,
     history: History,
     stroke: Option<Stroke>,
@@ -78,6 +81,7 @@ struct Stroke {
     index: HashMap<[i32; 3], usize>,
     colors: Vec<ColorChange>,
     materials: Vec<MaterialChange>,
+    cameras: Vec<CameraChange>,
     /// The selection when the edit first changed it.
     selection: Option<Vec<[i32; 3]>>,
     bounds: Option<BoundsChange>,
@@ -102,6 +106,7 @@ impl Scene {
             map: BrickMap::new(size),
             palette,
             materials: [Material::default(); 256],
+            cameras: Vec::new(),
             origin: [-(size[0] as i32 / 2), 0, -(size[2] as i32 / 2)],
             floor: 0,
             pivot: [0, size[1] as i32, 0],
@@ -134,6 +139,7 @@ impl Scene {
         for i in 1..=255u8 {
             s.materials[i as usize] = doc.material(i);
         }
+        s.cameras = doc.cameras();
         s.source = Some(doc);
         s.world = Some(world);
         s.load(if objects.len() == 1 { At::Object(objects[0]) } else { At::World })?;
@@ -142,10 +148,11 @@ impl Scene {
     }
 
     /// Write the scene as a `.vox` file. A scene opened from a file is saved losslessly:
-    /// the world is written into that file through [`World::save_into`] and the palette and
-    /// materials through [`Document::set_palette`] and [`Document::set_material`], so every
-    /// chunk they do not touch keeps its bytes. A new scene is written as a fresh version
-    /// 200 file, split into models of at most 256^3.
+    /// the world is written into that file through [`World::save_into`], the palette and
+    /// materials through [`Document::set_palette`] and [`Document::set_material`], and the
+    /// cameras through [`Document::set_camera`], so every chunk they do not touch keeps its
+    /// bytes. A new scene is written as a fresh version 200 file, split into models of at
+    /// most 256^3.
     pub fn to_vox(&self) -> Vec<u8> {
         if let (Some(doc), Some(world)) = (&self.source, &self.world)
             && let Some(bytes) = self.save_into(doc.clone(), world.clone())
@@ -160,6 +167,7 @@ impl Scene {
             .filter(|&i| self.materials[i as usize] != Material::default())
             .map(|i| (i as i32, self.materials[i as usize].to_dict()))
             .collect();
+        b.cameras = self.cameras.iter().map(|c| (c.id, c.to_dict())).collect();
         b.add_world(&world);
         b.build().write()
     }
@@ -172,6 +180,11 @@ impl Scene {
             }
             if doc.material(i) != self.materials[i as usize] {
                 doc.set_material(i, &self.materials[i as usize]).ok()?;
+            }
+        }
+        for c in &self.cameras {
+            if doc.camera(c.id) != Some(*c) {
+                doc.set_camera(c).ok()?;
             }
         }
         if let At::Object(i) = self.at {
@@ -466,6 +479,32 @@ impl Scene {
         self.commit();
     }
 
+    /// Change one saved camera inside the open edit (opening one if needed), so a value
+    /// dragged through many steps becomes one undo step at [`Scene::commit`]. Returns false
+    /// if the scene has no camera `c.id`.
+    pub fn put_camera(&mut self, c: Camera) -> bool {
+        let Some(k) = self.cameras.iter().position(|o| o.id == c.id) else { return false };
+        let old = self.cameras[k];
+        if old == c {
+            return true;
+        }
+        self.cameras[k] = c;
+        let s = self.stroke.get_or_insert_default();
+        match s.cameras.iter_mut().find(|x| x.new.id == c.id) {
+            Some(x) => x.new = c,
+            None => s.cameras.push(CameraChange { old, new: c }),
+        }
+        true
+    }
+
+    /// Set one saved camera as an undoable step. Returns false if the scene has no camera `c.id`.
+    pub fn set_camera(&mut self, c: Camera) -> bool {
+        self.commit();
+        let found = self.put_camera(c);
+        self.commit();
+        found
+    }
+
     /// Replace the selection inside the open edit (opening one if needed), so undo restores it.
     pub(crate) fn put_selection(&mut self, cells: HashSet<[i32; 3]>) {
         let s = self.stroke.get_or_insert_default();
@@ -511,6 +550,7 @@ impl Scene {
             voxels: s.changes.into_iter().filter(|c| c.old != c.new).collect(),
             colors: s.colors.into_iter().filter(|c| c.old != c.new).collect(),
             materials: s.materials.into_iter().filter(|c| c.old != c.new).collect(),
+            cameras: s.cameras.into_iter().filter(|c| c.old != c.new).collect(),
             selection,
             bounds: s.bounds.filter(|b| b.old != b.new),
             world: None,
@@ -625,6 +665,11 @@ impl Scene {
         }
         for c in &step.materials {
             self.materials[c.index as usize] = if revert { c.old } else { c.new };
+        }
+        for c in &step.cameras {
+            if let Some(k) = self.cameras.iter_mut().find(|k| k.id == c.new.id) {
+                *k = if revert { c.old } else { c.new };
+            }
         }
         if let Some(c) = &step.selection {
             self.selection = (if revert { &c.old } else { &c.new }).iter().copied().collect();

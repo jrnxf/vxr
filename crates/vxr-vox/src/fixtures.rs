@@ -359,24 +359,28 @@ pub fn all() -> Vec<Fixture> {
     }
     add("14-materials", "Six cubes, left to right: grey diffuse, yellow metal, cyan glass, orange emissive, magenta blend, white cloud. Check each in the material panel and in the render tab.".into(), b);
 
-    // 15: a camera.
+    // 15: three saved cameras.
     let mut b = builder(200);
     let size = [3, 4, 5];
     let m = b.model(size, axes(size));
     b.root.push(SceneNode::shape(m, None, [0, 0, 0]));
-    b.cameras.push((
-        0,
+    let cam = |mode: &str, focus: &str, angle: &str, radius: &str| {
         Dict::default()
-            .with("_mode", "pers")
-            .with("_focus", "0 0 2")
-            .with("_angle", "30 45 0")
-            .with("_radius", "40")
+            .with("_mode", mode)
+            .with("_focus", focus)
+            .with("_angle", angle)
+            .with("_radius", radius)
             .with("_frustum", "0.4")
-            .with("_fov", "45"),
-    ));
+            .with("_fov", "45")
+    };
+    b.cameras = vec![
+        (0, cam("pers", "0 0 2", "30 45 0", "40")),
+        (1, cam("orth", "0 0 0", "90 0 0", "30")),
+        (2, cam("pers", "-3 3 1", "15 200 0", "12")),
+    ];
     add(
         "15-camera",
-        "Camera 1 is perspective, looking at (0, 0, 2) from 30 degrees up and 45 around, radius 40, field of view 45."
+        "Camera 1 is perspective, looking at (0, 0, 2) from 30 degrees up and 45 around, radius 40, field of view 45. Camera 2 is orthographic from straight above, radius 30. Camera 3 is perspective, looking at (-3, 3, 1) from 15 degrees up and 200 around, radius 12."
             .into(),
         b,
     );

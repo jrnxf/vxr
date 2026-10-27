@@ -82,12 +82,12 @@ impl Default for Material {
     }
 }
 
-fn num(d: &Dict, key: &str) -> Option<f32> {
+pub(crate) fn num(d: &Dict, key: &str) -> Option<f32> {
     d.get_str(key).and_then(|s| s.trim().parse::<f32>().ok()).filter(|v| v.is_finite())
 }
 
 /// A number as MagicaVoxel writes it: at most three decimals, no trailing zeros.
-fn fmt(v: f32) -> String {
+pub(crate) fn fmt(v: f32) -> String {
     let s = format!("{v:.3}");
     let s = s.trim_end_matches('0').trim_end_matches('.');
     if s == "-0" { "0".into() } else { s.into() }

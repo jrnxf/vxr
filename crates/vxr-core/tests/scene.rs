@@ -387,3 +387,63 @@ fn materials_open_and_save_as_matl() {
     let back = Scene::from_vox(&n.to_vox()).unwrap();
     assert_eq!(back.materials, n.materials);
 }
+
+#[test]
+fn cameras_open_edit_undo_and_save_as_rcam() {
+    use vxr_vox::Camera;
+    let mut b = vxr_vox::fixtures::all().into_iter().find(|f| f.name == "15-camera").unwrap().builder;
+    b.note = Some(vec![b"row 0".to_vec()]);
+    let bytes = b.build().write();
+    let mut s = Scene::from_vox(&bytes).unwrap();
+    assert_eq!(s.cameras, vxr_vox::Document::read(&bytes).unwrap().cameras());
+    assert_eq!(s.cameras.len(), 3);
+    let old = s.cameras[2];
+
+    // A dragged value is one undo step.
+    s.put_camera(Camera { radius: 20.0, ..old });
+    s.put_camera(Camera { radius: 25.0, focus: [1.0, 2.0, 3.0], ..old });
+    s.commit();
+    let new = Camera { radius: 25.0, focus: [1.0, 2.0, 3.0], ..old };
+    assert_eq!(s.cameras[2], new);
+    assert!(!s.set_camera(Camera::new(7)), "no such camera");
+    assert!(s.set_camera(new), "unchanged: no step");
+
+    // Saved: only camera 2's rCAM changes, chunk for chunk (the spike's chunkdiff).
+    let saved = s.to_vox();
+    let (a, b) = (vxr_vox::RawFile::parse(&bytes).unwrap(), vxr_vox::RawFile::parse(&saved).unwrap());
+    assert_eq!(a.chunks.len(), b.chunks.len());
+    let changed: Vec<usize> = (0..a.chunks.len()).filter(|&i| a.chunks[i] != b.chunks[i]).collect();
+    assert_eq!(changed.len(), 1);
+    let d = vxr_vox::chunk::IdDict::parse(vxr_vox::chunk::RCAM, &b.chunks[changed[0]].content).unwrap();
+    assert_eq!((d.id, d.dict.get_str("_radius"), d.dict.get_str("_focus")), (2, Some("25"), Some("1 2 3")));
+    assert_eq!(Scene::from_vox(&saved).unwrap().cameras[2], new);
+
+    // Undo gives the file's bytes, redo the edit again.
+    assert!(s.undo());
+    assert_eq!(s.cameras[2], old);
+    assert!(s.to_vox() == bytes, "undone: byte-identical again");
+    assert!(s.redo());
+    assert!(s.to_vox() == saved);
+
+    // A camera edit and a voxel edit undo in order.
+    s.edit([([0, 0, 0], 7)]);
+    assert!(s.undo() && s.undo());
+    assert!(s.to_vox() == bytes);
+
+    // A new scene has no cameras and writes none.
+    let n = Scene::new([4, 4, 4]);
+    assert!(n.cameras.is_empty());
+    assert!(vxr_vox::Document::read(&n.to_vox()).unwrap().cameras().is_empty());
+}
+
+#[test]
+fn files_without_cameras_save_without_cameras() {
+    for (name, bytes) in files() {
+        let s = Scene::from_vox(&bytes).unwrap();
+        let doc = vxr_vox::Document::read(&bytes).unwrap();
+        assert_eq!(s.cameras, doc.cameras(), "{name}");
+        let saved = vxr_vox::RawFile::parse(&s.to_vox()).unwrap();
+        let rcam = |c: &[vxr_vox::Chunk]| c.iter().filter(|c| c.is(vxr_vox::chunk::RCAM)).cloned().collect::<Vec<_>>();
+        assert_eq!(rcam(&saved.chunks), rcam(&doc.raw.chunks), "{name}");
+    }
+}

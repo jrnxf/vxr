@@ -9,12 +9,14 @@
 //! - [`tree`]: the scene graph as an editable tree of objects and groups, with layers,
 //!   written back by [`Document::set_tree`] touching only the chunks whose meaning changed.
 //! - [`material`]: palette slot materials (`MATL`) as typed values.
+//! - [`camera`]: saved cameras (`rCAM`) as typed values.
 //! - [`build`]: writes new files from scratch (fixtures, property tests).
 //!
 //! The reader is bounds checked everywhere and returns `Err` on malformed input.
 
 pub mod build;
 pub mod bytes;
+pub mod camera;
 pub mod chunk;
 pub mod default_palette;
 pub mod doc;
@@ -25,6 +27,7 @@ pub mod scene;
 pub mod tree;
 
 pub use bytes::Dict;
+pub use camera::{Camera, Mode as CameraMode};
 pub use doc::{Document, WorldSave};
 pub use material::{Kind, Material};
 pub use raw::{Chunk, RawFile};
