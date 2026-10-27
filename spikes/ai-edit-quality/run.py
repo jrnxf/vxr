@@ -9,7 +9,8 @@
 
 Results go to <out-dir>/<test>/.../<prompt-id>/ (run.json, transcript.json, result.vox,
 changes.json, views and shots). A run whose run.json exists is skipped, so a batch resumes.
-Spend is the sum of every run.json under <out-dir>; no run starts once it passes the cap.
+Spend is the sum of every run.json of the round (round 2 is <out-dir>/r2, round 1 the rest);
+no run starts once it passes the cap.
 """
 
 import argparse
@@ -30,9 +31,11 @@ DEFAULT = ["claude-opus-5-5", "claude-sonnet-5-5", "gpt-6.1-sol"]
 lock = threading.Lock()
 
 
-def spent(out):
+def spent(out, test=None):
     total = 0.0
     for p in glob.glob(os.path.join(out, "**", "run.json"), recursive=True):
+        if (test == "r2") != (os.sep + "r2" + os.sep in p[len(out):]):
+            continue
         with open(p) as f:
             total += json.load(f).get("cost", 0.0)
     return total
@@ -66,7 +69,7 @@ def one(job, out):
     if os.path.exists(os.path.join(path, "run.json")):
         return None
     with lock:
-        s = spent(out)
+        s = spent(out, path[len(out):].split(os.sep)[1])
         if s > CAP[0]:
             print(f"skip {path}: spend ${s:.2f} is over the ${CAP[0]} cap", flush=True)
             return None
@@ -98,7 +101,7 @@ def main():
                 f.result()
             except Exception as e:  # noqa: BLE001
                 print(f"run failed: {e}", file=sys.stderr, flush=True)
-    print(f"spend so far ${spent(args.out):.2f}")
+    print(f"spend so far ${spent(args.out, args.test):.2f}")
 
 
 if __name__ == "__main__":

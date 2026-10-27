@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Phase AI tests 1, 2 and 4: spikes/ai-edit-quality/run <out-dir> [files|t1|t2|t4|judge|report|r2|judge2]...
-# With no step named it runs round 1 (files to report); r2 and judge2 are test 1's round 2. The model calls need ANTHROPIC_API_KEY and
-# OPENAI_API_KEY in the environment (GEMINI_API_KEY for Gemini, with --models); nothing here
-# reads or writes a key. Everything it makes (runs, .vox files, pictures, the judging page)
+# With no step named it runs round 1 (files to report); r2 and judge2 are test 1's round 2.
+# The model calls need ANTHROPIC_API_KEY and OPENAI_API_KEY in the environment
+# (GEMINI_API_KEY for Gemini, with --models); nothing here reads or writes a key. Everything it makes (runs, .vox files, pictures, the judging page)
 # goes under <out-dir>, none of it into git.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
