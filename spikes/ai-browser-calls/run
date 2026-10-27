@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# Drive the test page in headless Chrome (chrome-devtools-axi): the CSP control, then each provider
+# (default: all of them; `provider=model` overrides the page's model) whose key is in the
+# environment, `runs` times each (default 3), and the local endpoint when something listens on
+# 127.0.0.1:11434. The key is typed into the page's password field and never printed; the page
+# clears the field when a run starts. Results go to <out-dir>/results.ndjson and a screenshot (the
+# field empty) to <out-dir>/page.png.
+#   env $(grep -E '^(ANTHROPIC|OPENAI|GEMINI)_API_KEY=' <key file> | xargs) spikes/ai-browser-calls/run <url> <out-dir> [runs [provider[=model]...]]
+set -euo pipefail
+url="$1"
+out="$2"
+runs="${3:-3}"
+shift $(( $# < 3 ? $# : 3 ))
+providers=("$@")
+[ ${#providers[@]} -gt 0 ] || providers=(anthropic openai openai-none openai-responses gemini ollama)
+mkdir -p "$out"
+command -v chrome-devtools-axi >/dev/null || { echo "chrome-devtools-axi is not on the PATH" >&2; exit 1; }
+export CHROME_DEVTOOLS_AXI_SESSION=vxr-ai-calls-$$
+trap 'chrome-devtools-axi stop >/dev/null 2>&1 || true' EXIT
+axi() { chrome-devtools-axi "$@"; }
+# eval prints the returned string JSON-quoted twice; unwrap it to plain text.
+unwrap() { sed -n 's/^result: //p' | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{let v=JSON.parse(s);while(typeof v==='string'&&v.startsWith('\"'))v=JSON.parse(v);console.log(v)})"; }
+
+# One run: fresh page, pick the provider, type the key, submit, wait for the result.
+one() {
+  local provider="$1" model="$2" key="$3"
+  axi open "$url" >/dev/null
+  axi eval "() => { const s = document.getElementById('provider'); s.value = '$provider'; vxrCalls.pick('$provider'); if ('$model') document.getElementById('model').value = '$model'; document.getElementById('key').focus(); return 'ready' }" >/dev/null
+  [ -n "$key" ] && axi type "$key" >/dev/null 2>&1
+  axi eval "async () => { const n = __results.length; document.getElementById('run').requestSubmit(); for (let i = 0; i < 1200 && __results.length === n; i++) await new Promise(r => setTimeout(r, 50)); return JSON.stringify({ ...__results.at(-1), keyFieldEmpty: document.getElementById('key').value === '' }) }" | unwrap
+}
+
+results="$out/results.ndjson"
+: > "$results"
+axi open "$url" >/dev/null
+axi eval "async () => JSON.stringify(await vxrCalls.cspControl())" | unwrap >> "$results"
+for spec in "${providers[@]}"; do
+  provider="${spec%%=*}"
+  model=""
+  [ "$spec" = "$provider" ] || model="${spec#*=}"
+  case "$provider" in
+    anthropic) key="${ANTHROPIC_API_KEY:-}" ;;
+    openai*) key="${OPENAI_API_KEY:-}" ;;
+    gemini) key="${GEMINI_API_KEY:-}" ;;
+    ollama) key=""; curl -s -o /dev/null -m 1 http://127.0.0.1:11434/ || { echo "ollama: nothing on 127.0.0.1:11434, skipped"; continue; } ;;
+  esac
+  [ "$provider" = ollama ] || [ -n "$key" ] || { echo "$provider: no key, skipped"; continue; }
+  for i in $(seq "$runs"); do
+    line="$(one "$provider" "$model" "$key")"
+    echo "$line" >> "$results"
+    echo "$line" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const r=JSON.parse(s);console.log(r.provider, r.ok?'ok':'FAIL', 'ttfb', r.ttfbMs, 'first delta', r.firstToolDeltaMs, 'total', r.totalMs, 'reads', r.reads, 'deltas', r.toolDeltas, JSON.stringify(r.args), r.stopReason, JSON.stringify(r.usage), r.error||'')})"
+  done
+done
+axi screenshot "$out/page.png" >/dev/null
+# No key may reach the results or the page.
+for k in "${ANTHROPIC_API_KEY:-}" "${OPENAI_API_KEY:-}" "${GEMINI_API_KEY:-}"; do
+  [ -z "$k" ] || ! grep -rqF -- "$k" "$out" || { echo "FAIL: a key reached $out" >&2; exit 1; }
+done
+grep -q '"ok":false' "$results" && { echo "FAIL: see $results"; exit 1; }
+echo "all ok"

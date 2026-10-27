@@ -30,7 +30,7 @@ Throwaway HTML mocks in the Hybrid look, in the git-ignored `.scratch/ai-mocks/`
 | OpenRouter | whatever the user picks; suggest the Anthropic default | any | the routed provider's price | OpenAI-compatible | [OAuth PKCE](https://openrouter.ai/docs/guides/overview/auth/oauth) |
 | Local: Ollama, LM Studio | the user's installed model, listed from the server | - | free; nothing leaves the machine | OpenAI-compatible (`/v1`) | [Ollama FAQ](https://docs.ollama.com/faq), [LM Studio `server start`](https://lmstudio.ai/docs/cli/server-start) |
 
-- **Two client implementations cover all five.** The Anthropic Messages API, plus one OpenAI-compatible Chat Completions client with a base URL (OpenAI, OpenRouter, Gemini's `/v1beta/openai/` endpoint, Ollama, LM Studio). A native Gemini client can come later if its OpenAI layer falls short on tool calls or images.
+- **Three client implementations cover all five.** The Anthropic Messages API, OpenAI's Responses API, and one OpenAI-compatible Chat Completions client with a base URL (OpenRouter, Gemini's `/v1beta/openai/` endpoint, Ollama, LM Studio). OpenAI's default `gpt-6.1-sol` refuses function tools on Chat Completions (risk test 3, `spikes/ai-browser-calls/RESULTS.md`), so OpenAI goes through Responses. A native Gemini client can come later if its OpenAI layer falls short on tool calls or images.
 - **Defaults follow the rule "latest, most capable"**: `claude-opus-5-5` is Anthropic's recommended start for most workloads. `claude-fable-5-1` ($10 / $50) is stronger for long reasoning but slower and 2.5x the price; voxel edits are short tool loops, so it is an option in the picker, not the default.
 - **Model IDs change every few months.** Do not hard-code a list. Ship the defaults above, and fill the picker from each provider's models endpoint (Anthropic's Models API reports capabilities per model, [docs](https://platform.claude.com/docs/en/models/overview#using-the-models-api)).
 - **Vision is needed** for the rendered view (section 2). All current Claude models take images ([Vision](https://platform.claude.com/docs/en/build-with-claude/vision)); the OpenAI and Gemini defaults above are multimodal. Local models often are not: the assistant must work without the picture.
@@ -190,12 +190,12 @@ What leaves the machine, only to the provider the user picked: the prompt, the s
 1. `vxr-ops`: the typed operation set with JSON Schemas, its limits, the scene summary, slices and `render_view`, with unit tests and a `--shot` section that drives a scripted tool-call sequence through the same staging and review path.
 2. The **review step** in the editor: staged edit, ghost overlay, review card, one undo step, Stop.
 3. **The assistant as both directions, sharing one conversation:** the docked chat panel (direction A, Cmd-J) is its home, with history and the tool calls; Cmd-K "Ask AI" (direction B) is the quick way in, and its result card can open in the panel. Small changes review in the card; bigger ones open the step list (`review.html`). The owner picked this on 2026-10-25.
-4. **Providers:** Anthropic Messages and one OpenAI-compatible client (OpenAI, Gemini's OpenAI endpoint, OpenRouter with PKCE, Ollama, LM Studio). Keys in the keychain natively and per tab in the browser.
+4. **Providers:** Anthropic Messages, OpenAI Responses and one OpenAI-compatible client (Gemini's OpenAI endpoint, OpenRouter with PKCE, Ollama, LM Studio). Keys in the keychain natively and per tab in the browser.
 5. `vxr mcp` **files mode**, then **live mode** over a local socket.
 
 ### Small enough to ship first
 
-Assistant in the docked panel and from Cmd-K, with review, Anthropic plus OpenAI-compatible, 12 operations (`scene_summary`, `render_view`, `place`, `erase`, `box`, `line`, `sphere`, `fill`, `paint`, `select`, `palette_set`, `done`), natively and in the browser. `vxr mcp` files mode with the same 12 plus `undo`, `open` and `save`. No scripts, no live mode.
+Assistant in the docked panel and from Cmd-K, with review, Anthropic, OpenAI and OpenAI-compatible, 12 operations (`scene_summary`, `render_view`, `place`, `erase`, `box`, `line`, `sphere`, `fill`, `paint`, `select`, `palette_set`, `done`), natively and in the browser. `vxr mcp` files mode with the same 12 plus `undo`, `open` and `save`. No scripts, no live mode.
 
 ### Risk tests first (like Phase 2)
 
