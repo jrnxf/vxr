@@ -4006,7 +4006,6 @@ fn tbtn_on(
     resp
 }
 
-/// kbd: 10.5 px mono, 1 px border with a 2 px bottom, right-aligned at `right_center`. Returns its width.
 /// A camera bar button: an icon, or a label, hovered like the top bar's buttons.
 fn nav_button(
     ui: &mut Ui,
@@ -4074,6 +4073,7 @@ fn tooltip(ctx: &Context, at: Rect, label: &str, keys: &[&str]) {
     );
 }
 
+/// kbd: 10.5 px mono, 1 px border with a 2 px bottom, right-aligned at `right_center`. Returns its width.
 fn kbd(ui: &Ui, right_center: Pos2, text: &str, _right: bool) -> f32 {
     let g = ui.painter().layout_no_wrap(text.into(), mono_medium(10.5), MUTED);
     let w = (g.size().x + 10.0).max(18.0);

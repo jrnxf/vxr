@@ -25,7 +25,7 @@ How MagicaVoxel 0.99.x moves the camera, from its own shortcut list and release 
 | Projection | Bottom bar: Perspective, Free, Orthogonal, Isometric [S2] | O toggles, Persp / Ortho / Iso in the View flyout and on the camera bar | No free (fly) camera yet |
 | Frame selection | Not found | Cmd-K "Frame selection" and the camera bar's button | Added: framing what you work on |
 | Save and load poses | 7 / 8, camera slots on the numpad [S1] | Not yet (cameras in files are kept and editable through the scene, not shown) | - |
-| Limits | None documented [S1, S2] | The pivot stays inside the scene's box and the zoom within 4 framings of it | The point of this change: see below |
+| Limits | None documented [S1, S2] | The pivot stays inside the model's bounds and the zoom within 4 framings of them | The point of this change: see below |
 
 ## Never losing the scene
 
@@ -33,8 +33,9 @@ MagicaVoxel documents no limit on pan or zoom; it relies on recenter (4). vxr us
 
 vxr now bounds the camera after every pan and zoom (`OrbitCamera::bound`):
 
-- **Pivot**: stays inside the scene's box (the voxels, or the floor of an empty scene), so the middle of the view always crosses the scene and an orbit cannot swing it away.
-- **Distance**: at most `MAX_ZOOM_OUT` (4) times the distance whose view holds the box's bounding sphere, so the scene never shrinks below about a fifth of the view's height.
+- **Pivot**: stays inside the model's bounds (the box the bounds frame draws, with any voxels outside it), so the middle of the view always crosses the space you build in and an orbit cannot swing it away. A small model in large bounds can still be panned and zoomed over the whole of them.
+- **Distance**: at most `MAX_ZOOM_OUT` (4) times the distance whose view holds the bounds' bounding sphere, so the bounds never shrink below about a fifth of the view's height.
+- **Framing** (`.`, Home, Frame selection) still fits the voxels (or the floor of an empty scene), not the bounds.
 - **No jumps**: a camera already outside (the scene shrank under it, after an erase or a crop) is only kept from going further, never snapped back.
 
 And every way back is on screen: the camera bar above the render corner has Frame scene, Frame selection and Reset camera, with zoom, the projection and the views, each with a tooltip naming its key, and Cmd-K lists every move. Holding Space shows the camera moves in the hint bar.

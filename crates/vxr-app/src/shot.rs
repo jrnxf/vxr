@@ -1818,9 +1818,11 @@ fn camera(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     let framed = s.ed.cam.distance;
     let (lo, hi) = s.ed.scene.map.occupied_bounds().ok_or("no voxels")?;
     let (lo, hi) = (glam::Vec3::from(lo.map(|v| v as f32)), glam::Vec3::from(hi.map(|v| v as f32)));
-    // The farthest the camera may be: MAX_ZOOM_OUT times the distance whose view holds the
-    // box's bounding sphere.
-    let far = (hi - lo).length() * 0.5 / (s.ed.cam.fov_y * 0.5).sin() * MAX_ZOOM_OUT;
+    // The camera stays inside the model's bounds (with any voxels outside them), at most
+    // MAX_ZOOM_OUT times the distance whose view holds their bounding sphere.
+    let size = glam::UVec3::from(s.ed.scene.map.size_voxels()).as_vec3();
+    let (blo, bhi) = (lo.min(glam::Vec3::ZERO), hi.max(size));
+    let far = (bhi - blo).length() * 0.5 / (s.ed.cam.fov_y * 0.5).sin() * MAX_ZOOM_OUT;
     let mid = [s.ed.width as f32 / 2.0, s.ed.height as f32 / 2.0];
     let drag = |s: &mut Shot, b: Button, d: [f32; 2], steps: usize| {
         s.ed.pointer_moved(Some(mid));
@@ -1843,16 +1845,16 @@ fn camera(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
         s.hold(egui::Modifiers::NONE);
     }
     s.frames(2);
-    let (shown, tall) = s.ed.scene_in_view();
+    let (shown, tall) = s.ed.box_in_view(blo, bhi);
     let t = s.ed.cam.target;
     check(
-        t.cmpge(lo).all() && t.cmple(hi).all() && s.voxels() == v0,
-        format!("pan and zoom keep the orbit point inside the scene's box ({t:.0})"),
+        t.cmpge(blo).all() && t.cmple(bhi).all() && s.voxels() == v0,
+        format!("pan and zoom keep the orbit point inside the model's bounds ({t:.0})"),
     )?;
     check(
         s.ed.cam.distance <= far * 1.001 && shown > 0.999 && tall > 0.15,
         format!(
-            "zooming out stops at {:.1}x the framing: the scene stays in view ({shown:.2} shown, {tall:.2} of the height)",
+            "zooming out stops at {:.1}x the framing: the bounds stay in view ({shown:.2} shown, {tall:.2} of the height)",
             s.ed.cam.distance / framed
         ),
     )?;
@@ -1873,7 +1875,7 @@ fn camera(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     drag(&mut s, Button::Middle, [80.0, 0.0], 10);
     s.ed.scroll(-10.0);
     check(
-        (s.ed.cam.target - t).length() <= (t - (lo + hi) * 0.5).length() && s.ed.cam.distance == d,
+        (s.ed.cam.target - t).length() <= (t - (blo + bhi) * 0.5).length() && s.ed.cam.distance == d,
         "from a lost camera pan and zoom do not go further out".into(),
     )?;
     let back = |s: &Shot, what: &str| {
@@ -2026,6 +2028,34 @@ fn camera(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     check(
         s.voxels() == v && c.x.abs() < 1e-3 && c.y.abs() < 1e-3 && moved > 4.0,
         format!("X-click orbits around the voxel clicked ({:.0}), no edit", s.ed.cam.target),
+    )?;
+
+    // One voxel in large bounds: framing fits the voxel, but zooming in toward it does not
+    // trap the camera there; zoom-out and pan still reach the whole bounds.
+    let mut one = Scene::new(NEW_SIZE);
+    let at = glam::Vec3::new(100.5, 0.5, 100.5);
+    one.edit(vec![([100, 0, 100], 12)]);
+    let mut s = Shot::new(one, "Untitled", 2.0)?;
+    s.ed.ui.coach = false;
+    s.frames(2);
+    let framed = s.ed.cam.distance;
+    s.ed.pointer_moved(Some(mid));
+    s.ed.scroll(3.0);
+    let near = s.ed.cam.distance;
+    for _ in 0..10 {
+        s.ed.scroll(-10.0);
+    }
+    let out = s.ed.cam.distance;
+    drag(&mut s, Button::Middle, [-40.0, -10.0], 30);
+    let t = s.ed.cam.target;
+    let size = glam::UVec3::from(NEW_SIZE).as_vec3();
+    check(
+        near < framed && out > 9.0 * 10.0,
+        format!("one voxel: framed at {framed:.0}, zoomed in to {near:.0}, out to {out:.0} voxels"),
+    )?;
+    check(
+        (t - at).length() > 20.0 && t.cmpge(glam::Vec3::ZERO).all() && t.cmple(size).all(),
+        format!("one voxel: a pan moves over the bounds, away from it ({t:.0})"),
     )?;
     Ok(())
 }

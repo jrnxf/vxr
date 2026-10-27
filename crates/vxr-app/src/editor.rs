@@ -267,7 +267,7 @@ impl Editor {
         (self.width, self.height, self.ppp) = (width, height, ppp);
     }
 
-    /// The box the camera frames and stays near: the voxels, or the floor of an empty scene.
+    /// The box the camera frames: the voxels, or the floor of an empty scene.
     fn scene_box(&self) -> (Vec3, Vec3) {
         let (lo, hi) = match self.scene.map.occupied_bounds() {
             Some(b) => b,
@@ -279,6 +279,16 @@ impl Editor {
         };
         let v = |a: [u32; 3]| Vec3::new(a[0] as f32, a[1] as f32, a[2] as f32);
         (v(lo), v(hi))
+    }
+
+    /// Keep the camera near the model after a pan or zoom from `from`: inside its bounds (the
+    /// box the bounds frame draws) and whatever `scene_box` frames, so a small model in large
+    /// bounds still leaves all of them to move over.
+    fn bound_camera(&mut self, from: &OrbitCamera) {
+        let (lo, hi) = self.scene_box();
+        let s = self.scene.map.size_voxels();
+        let size = Vec3::new(s[0] as f32, s[1] as f32, s[2] as f32);
+        self.cam.bound(lo.min(Vec3::ZERO), hi.max(size), from);
     }
 
     /// Frame a box from the current angle and projection.
@@ -360,12 +370,11 @@ impl Editor {
         self.zoom(if zoom_in { 2.0 } else { -2.0 }, None);
     }
 
-    /// Zoom by `notches` toward `toward`, kept near the scene.
+    /// Zoom by `notches` toward `toward`, kept near the model.
     fn zoom(&mut self, notches: f32, toward: Option<Vec3>) {
         let from = self.cam;
         self.cam.zoom(notches, toward);
-        let (lo, hi) = self.scene_box();
-        self.cam.bound(lo, hi, &from);
+        self.bound_camera(&from);
     }
 
     /// What the pointer is over, if anything.
@@ -405,8 +414,7 @@ impl Editor {
                 CamDrag::Pan => {
                     let from = self.cam;
                     self.cam.pan(dx, dy, self.height as f32);
-                    let (lo, hi) = self.scene_box();
-                    self.cam.bound(lo, hi, &from);
+                    self.bound_camera(&from);
                 }
             }
             return;
