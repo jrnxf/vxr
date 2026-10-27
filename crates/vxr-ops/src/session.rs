@@ -208,6 +208,13 @@ impl Session {
         self.turn_calls = 0;
     }
 
+    /// A new request on the same staged change (the review card's "Ask for changes"): the
+    /// per-request call count starts again; what is staged and the cell limits stay.
+    pub fn begin_request(&mut self) {
+        self.calls = 0;
+        self.turn_calls = 0;
+    }
+
     /// Run one tool call by name with its JSON input, counting it against the limits. Calls
     /// that can change something become steps.
     pub fn call(&mut self, scene: &mut Scene, tool: &str, args: Value) -> Result<String, Error> {

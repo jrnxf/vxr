@@ -100,6 +100,9 @@ impl App {
         let ppp = window.scale_factor() as f32;
         let max_tex = gpu.device.limits().max_texture_dimension_2d as usize;
         let mut editor = Editor::new(gpu, scene, &name, format, (config.width, config.height), ppp, fonts())?;
+        // The assistant reaches its provider from here, with keys from the OS keychain.
+        editor.assistant =
+            vxr_app::assistant::Assistant::new(Box::new(crate::net::Net::new()), Box::new(crate::net::Keychain), false);
         if let Some(script) = self.stage.take() {
             editor.stage(script);
         }

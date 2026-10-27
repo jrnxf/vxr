@@ -1,0 +1,10 @@
+[package]
+name = "vxr-ai"
+description = "vxr's AI assistant clients: Anthropic Messages, OpenAI Responses and OpenAI-compatible Chat Completions, streamed, with no I/O of their own"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+vxr-ops.workspace = true
+serde_json = "1"

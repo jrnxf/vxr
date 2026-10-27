@@ -12,6 +12,7 @@ vxr-vox = { path = "crates/vxr-vox" }
 vxr-core = { path = "crates/vxr-core" }
 vxr-render = { path = "crates/vxr-render" }
 vxr-ops = { path = "crates/vxr-ops" }
+vxr-ai = { path = "crates/vxr-ai" }
 glam = { version = "0.34", features = ["bytemuck"] }
 bytemuck = { version = "1", features = ["derive"] }
 

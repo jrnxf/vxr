@@ -14,6 +14,9 @@ use vxr_core::material::{Kind, Material};
 use crate::color::{Hsv, hex, parse_hex};
 use crate::render::{EXPORT_SIZES, RenderSettings, SPP_CHOICES};
 
+mod assistant;
+pub use assistant::{AiAction, AskBar, ChatView, PANEL_W};
+
 // :root custom properties.
 pub const PANEL: Color32 = Color32::from_rgba_unmultiplied_const(20, 23, 30, 199);
 pub const PANEL_SOLID: Color32 = Color32::from_rgb(0x16, 0x19, 0x20);
@@ -162,6 +165,13 @@ mod icon {
     pub const CHECK: char = '\u{e06c}';
     pub const TRIANGLE_ALERT: char = '\u{e193}';
     pub const CORNER_DOWN_LEFT: char = '\u{e0a1}';
+    pub const KEY_ROUND: char = '\u{e4a3}';
+    pub const SQUARE: char = '\u{e167}';
+    pub const ARROW_UP: char = '\u{e04a}';
+    pub const MESSAGE_SQUARE_PLUS: char = '\u{e40c}';
+    pub const PANEL_RIGHT: char = '\u{e431}';
+    pub const CHEVRON_RIGHT: char = '\u{e06f}';
+    pub const SHIELD_CHECK: char = '\u{e1ff}';
 }
 
 pub use vxr_core::select::{Region, Transform};
@@ -290,6 +300,8 @@ pub struct ReviewCard {
     pub held: Option<(usize, usize)>,
     /// The scene shows Before.
     pub before: bool,
+    /// The assistant is still working on it: what it is doing now.
+    pub working: Option<String>,
 }
 
 /// A palette slot the change sets: its colour before and after, and its material change.
@@ -525,6 +537,18 @@ pub struct Hybrid {
     review_scroll: usize,
     /// An "Ask for changes" the user sent, for the assistant to take.
     pub asked: Option<String>,
+    /// The assistant panel (Cmd-J) is open, and its key settings show in it.
+    pub ai_open: bool,
+    pub ai_setup: bool,
+    /// The assistant as the panel shows it (set by the editor when it changes).
+    pub chat: ChatView,
+    /// What the panel and the prompt bar asked the editor to do this frame.
+    pub ai_out: Vec<AiAction>,
+    /// Cmd-K "Ask AI"'s prompt bar.
+    pub ask_bar: Option<AskBar>,
+    ai: assistant::AiState,
+    /// Right edge of the stats corner, which the hint bar keeps clear of.
+    stats_right: f32,
 }
 
 struct Command {
@@ -656,6 +680,9 @@ const COMMANDS: &[Command] = &[
     Command { label: "Export PNG", keys: &[], run: |h| h.actions.push(Action::ExportPng) },
     Command { label: "Export OBJ", keys: &[], run: |h| h.actions.push(Action::ExportObj) },
     Command { label: "Export PNG slices", keys: &[], run: |h| h.actions.push(Action::ExportSlices) },
+    Command { label: "Ask AI…", keys: &["Tab"], run: |h| h.open_ask_bar("") },
+    Command { label: "Assistant panel", keys: &["⌘", "J"], run: |h| h.ai_open = !h.ai_open },
+    Command { label: "Assistant keys and model", keys: &[], run: |h| h.open_ai_setup(None) },
 ];
 
 impl Hybrid {
@@ -732,6 +759,13 @@ impl Hybrid {
             ask_focus: false,
             review_scroll: 0,
             asked: None,
+            ai_open: false,
+            ai_setup: false,
+            chat: ChatView::new(),
+            ai_out: Vec::new(),
+            ask_bar: None,
+            ai: Default::default(),
+            stats_right: 0.0,
         }
     }
 
@@ -902,6 +936,9 @@ impl Hybrid {
     }
 
     fn escape(&mut self) {
+        if self.ask_bar.take().is_some() || std::mem::take(&mut self.ai.menu) {
+            return;
+        }
         if self.slot_op.take().is_some() || self.color_edit.take().is_some() || self.bounds_panel.take().is_some() {
             return;
         }
@@ -947,6 +984,10 @@ impl Hybrid {
         self.hits.clear();
         let screen = ctx.content_rect();
         self.top_bar(ctx, screen);
+        // The docked assistant takes the right edge; the panels anchored there move left of it.
+        self.assistant_panel(ctx, screen);
+        let full = screen;
+        let screen = Rect::from_min_max(screen.min, pos2(screen.right() - self.ai_width(), screen.bottom()));
         self.rail(ctx);
         self.tree_panel(ctx);
         self.axes(ctx);
@@ -968,9 +1009,10 @@ impl Hybrid {
         self.render_panel(ctx, screen, stats);
         self.hint_bar(ctx, screen);
         self.history(ctx, screen);
+        self.ask_bar(ctx, screen);
         self.toast_panel(ctx, screen);
         if self.cmdk.is_some() {
-            self.cmdk(ctx, screen);
+            self.cmdk(ctx, full);
         }
         std::mem::take(&mut self.actions)
     }
@@ -992,6 +1034,10 @@ impl Hybrid {
                 self.ask_focus = false;
                 return;
             }
+            if self.ai.focus && i.consume_key(Modifiers::NONE, Key::Escape) {
+                self.ai.focus = false;
+                return;
+            }
             // The New scene confirm takes every key: Enter starts the blank scene, Escape keeps this one.
             if self.confirm_new {
                 if i.consume_key(Modifiers::NONE, Key::Escape) {
@@ -1001,6 +1047,9 @@ impl Hybrid {
                     self.actions.push(Action::New);
                 }
                 return;
+            }
+            if i.consume_key(Modifiers::COMMAND, Key::J) {
+                self.ai_open = !self.ai_open;
             }
             if i.consume_key(Modifiers::COMMAND, Key::K) {
                 self.cmdk = if self.cmdk.is_some() { None } else { Some(String::new()) };
@@ -1138,13 +1187,25 @@ impl Hybrid {
 
     // .panel
     fn panel(ctx: &Context, id: &str, rect: Rect, order: Order, contents: impl FnOnce(&mut Ui, Rect)) {
+        Self::panel_filled(ctx, id, rect, order, PANEL, contents)
+    }
+
+    /// A panel with its own fill: [`PANEL_SOLID`] for a menu over other panels.
+    fn panel_filled(
+        ctx: &Context,
+        id: &str,
+        rect: Rect,
+        order: Order,
+        fill: Color32,
+        contents: impl FnOnce(&mut Ui, Rect),
+    ) {
         Area::new(Id::unique(id)).fade_in(false).order(order).fixed_pos(rect.min).constrain(false).show(ctx, |ui| {
             let p = ui.painter();
             p.add(
                 Shadow { offset: [0, 10], blur: 30, spread: 0, color: Color32::from_black_alpha(89) }
                     .as_shape(rect, CornerRadius::same(R)),
             );
-            p.rect(rect, CornerRadius::same(R), PANEL, Stroke::new(1.0, LINE), StrokeKind::Inside);
+            p.rect(rect, CornerRadius::same(R), fill, Stroke::new(1.0, LINE), StrokeKind::Inside);
             ui.allocate_rect(rect, Sense::hover());
             contents(ui, rect);
         });
@@ -1223,6 +1284,16 @@ impl Hybrid {
             let mut kx = embed.left() - 4.0 - 36.0;
             if tbtn(ui, &mut kx, cy, Some(icon::KEYBOARD), "", "keys", true).clicked() {
                 self.cmdk = Some(String::new());
+            }
+            // The assistant panel (Cmd-J).
+            let mut ax = embed.left() - 4.0 - 36.0 - 4.0 - 36.0;
+            let r = tbtn_on(ui, &mut ax, cy, Some(icon::SPARKLES), "", "assistant", true, self.ai_open);
+            self.hits.insert("ai-toggle".into(), r.rect);
+            if self.ai_open {
+                ui.painter().text(r.rect.center(), Align2::CENTER_CENTER, icon::SPARKLES, icon_font(16.0), ACCENT);
+            }
+            if r.clicked() {
+                self.ai_open = !self.ai_open;
             }
         });
     }
@@ -2244,6 +2315,9 @@ impl Hybrid {
         if let Some(g) = &summary {
             h += 4.0 + g.size().y;
         }
+        if card.working.is_some() {
+            h += 6.0 + 17.0;
+        }
         h += 10.0 + counts_h;
         if !card.slots.is_empty() {
             h += 6.0 + card.slots.len() as f32 * slot_h;
@@ -2287,6 +2361,23 @@ impl Hybrid {
                 let gh = g.size().y;
                 p.galley(pos2(inner.left(), y), g, MUTED);
                 y += gh;
+            }
+            // The assistant is still at it: a pulsing dot and what it is doing.
+            if let Some(w) = &card.working {
+                y += 6.0;
+                let t = ui.input(|i| i.time);
+                let pulse = 0.55 + 0.45 * (t * 4.0).sin().abs() as f32;
+                p.circle_filled(pos2(inner.left() + 4.0, y + 8.5), 3.5, ACCENT.gamma_multiply(pulse));
+                let dots = ".".repeat(1 + (t * 3.0) as usize % 3);
+                p.text(
+                    pos2(inner.left() + 14.0, y + 8.5),
+                    Align2::LEFT_CENTER,
+                    format!("{w}{dots}"),
+                    inter(12.0),
+                    MUTED,
+                );
+                ui.ctx().request_repaint();
+                y += 17.0;
             }
             // The counts: +added · removed · repainted · slots changed.
             y += 10.0;
@@ -3160,7 +3251,7 @@ impl Hybrid {
     }
 
     // #stats
-    fn stats(&self, ctx: &Context, screen: Rect, s: &Stats) {
+    fn stats(&mut self, ctx: &Context, screen: Rect, s: &Stats) {
         let fps_color = if s.fps >= 55.0 {
             OK
         } else if s.fps >= 30.0 {
@@ -3195,6 +3286,7 @@ impl Hybrid {
             + 16.0 * (cols.len() - 1) as f32;
         let h = 16.0 + 13.3 + 18.2;
         let rect = Rect::from_min_size(pos2(12.0, screen.bottom() - 12.0 - h), vec2(w, h));
+        self.stats_right = rect.right();
         Self::panel(ctx, "stats", rect, Order::Middle, |ui, rect| {
             let p = ui.painter();
             let mut x = rect.left() + 12.0;
@@ -3575,10 +3667,10 @@ impl Hybrid {
         }
         let g = ctx.fonts_mut(|f| f.layout_job(job));
         let size = vec2(g.size().x + 28.0, 16.8 + 16.0);
-        let rect = Rect::from_min_size(
-            pos2((screen.center().x - size.x / 2.0).round(), screen.bottom() - 12.0 - size.y),
-            size,
-        );
+        // Centred on the view, kept clear of the stats corner and of #history.
+        let (lo, hi) = (self.stats_right + 8.0, screen.right() - 12.0 - 82.0 - 8.0);
+        let x = (screen.center().x - size.x / 2.0).min(hi - size.x).max(lo);
+        let rect = Rect::from_min_size(pos2(x.round(), screen.bottom() - 12.0 - size.y), size);
         Self::panel(ctx, "hint", rect, Order::Middle, |ui, rect| {
             ui.painter().galley(pos2(rect.left() + 14.0, rect.top() + 8.0), g, MUTED);
         });
@@ -3615,7 +3707,8 @@ impl Hybrid {
         // Centred on the view, or on the part of it left of the review card when that shows.
         let card = self.hits.get("review").filter(|_| self.review.is_some());
         let cx = card.map_or(screen.center().x, |c| (76.0 + c.left()) / 2.0);
-        let rect = Rect::from_min_size(pos2((cx - size.x / 2.0).round(), 68.0), size);
+        let top = self.ai.bar_bottom.map_or(68.0, |b| b + 8.0);
+        let rect = Rect::from_min_size(pos2((cx - size.x / 2.0).round(), top), size);
         Self::panel(ctx, "toast", rect, Order::Foreground, |ui, rect| {
             ui.painter().galley(pos2(rect.left() + 14.0, rect.top() + 9.0), g, TEXT);
         });
@@ -3627,10 +3720,13 @@ impl Hybrid {
         let hits: Vec<usize> =
             (0..COMMANDS.len()).filter(|&i| COMMANDS[i].label.to_lowercase().contains(&query)).collect();
         self.cmdk_sel = self.cmdk_sel.min(hits.len().saturating_sub(1));
-        let (mut run, mut close) = (None, false);
+        let (mut run, mut close, mut ask) = (None, false, false);
         ctx.input_mut(|i| {
             if i.consume_key(Modifiers::NONE, Key::Escape) {
                 close = true;
+            }
+            if i.consume_key(Modifiers::NONE, Key::Tab) {
+                ask = true;
             }
             if i.consume_key(Modifiers::NONE, Key::ArrowDown) {
                 self.cmdk_sel = (self.cmdk_sel + 1).min(hits.len().saturating_sub(1));
@@ -3640,6 +3736,7 @@ impl Hybrid {
             }
             if i.consume_key(Modifiers::NONE, Key::Enter) {
                 run = hits.get(self.cmdk_sel).copied();
+                ask |= hits.is_empty();
             }
         });
         let shown = hits.len().min(8);
@@ -3656,9 +3753,15 @@ impl Hybrid {
                 icon_font(16.0),
                 MUTED,
             );
+            // Tab asks AI, from any row.
+            let kx = field.right() - 10.0;
+            let ag = ui.painter().layout_no_wrap("Ask AI".into(), inter(12.0), FAINT);
+            let aw = ag.size().x;
+            ui.painter().galley(pos2(kx - aw, field.center().y - ag.size().y / 2.0), ag, FAINT);
+            let tw = kbd(ui, pos2(kx - aw - 6.0, field.center().y), "Tab", true);
             let text_rect = Rect::from_min_max(
                 pos2(field.left() + 36.0, field.top() + 10.0),
-                pos2(field.right() - 8.0, field.bottom() - 10.0),
+                pos2(kx - aw - 6.0 - tw - 10.0, field.bottom() - 10.0),
             );
             let q = self.cmdk.as_mut().unwrap();
             let edit = egui::TextEdit::singleline(q)
@@ -3676,13 +3779,38 @@ impl Hybrid {
             );
             let mut y = sep_y + 4.5;
             if hits.is_empty() {
-                ui.painter().text(
-                    pos2(rect.left() + 18.0, y + 17.0),
-                    Align2::LEFT_CENTER,
-                    "No command matches",
-                    inter(13.0),
-                    FAINT,
+                // No command matches: the one row asks AI with the query.
+                let row = Rect::from_min_size(pos2(rect.left() + 8.0, y), vec2(rect.width() - 16.0, 34.0));
+                let r = ui.interact(row, Id::unique("cmd-ask-ai"), Sense::click());
+                let p = ui.painter();
+                p.rect_filled(row, CornerRadius::same(7), HOVER);
+                p.text(
+                    pos2(row.left() + 18.0, row.center().y),
+                    Align2::CENTER_CENTER,
+                    icon::SPARKLES,
+                    icon_font(14.0),
+                    ACCENT,
                 );
+                let g = p.layout_no_wrap("Ask AI".into(), inter(13.0), TEXT);
+                let gw = g.size().x;
+                p.galley(pos2(row.left() + 32.0, row.center().y - g.size().y / 2.0), g, TEXT);
+                let mut job = LayoutJob::single_section(
+                    format!("“{}”", self.cmdk.as_deref().unwrap_or("").trim()),
+                    TextFormat { font_id: inter(13.0), color: MUTED, ..Default::default() },
+                );
+                job.wrap = egui::text::TextWrapping {
+                    max_width: (row.width() - 32.0 - gw - 8.0 - 70.0).max(1.0),
+                    max_rows: 1,
+                    break_anywhere: true,
+                    overflow_character: Some('…'),
+                };
+                let q = p.layout_job(job);
+                p.galley(pos2(row.left() + 32.0 + gw + 8.0, row.center().y - q.size().y / 2.0), q, MUTED);
+                kbd(ui, pos2(row.right() - 10.0, row.center().y), "↵", true);
+                self.hits.insert("cmd-ask-ai".into(), row);
+                if r.clicked() {
+                    ask = true;
+                }
             }
             for (n, &i) in hits.iter().take(shown).enumerate() {
                 let row = Rect::from_min_size(pos2(rect.left() + 8.0, y), vec2(rect.width() - 16.0, 34.0));
@@ -3711,6 +3839,12 @@ impl Hybrid {
                 y += 34.0;
             }
         });
+        if ask {
+            let q = self.cmdk.clone().unwrap_or_default();
+            ctx.memory_mut(|m| m.surrender_focus(Id::unique("cmdk-field")));
+            self.open_ask_bar(&q);
+            return;
+        }
         if let Some(i) = run {
             (COMMANDS[i].run)(self);
             close = true;
