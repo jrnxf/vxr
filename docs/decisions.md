@@ -5,7 +5,7 @@ What has been settled for vxr so far, and why. Newest context first within each 
 ## Identity
 
 - Name: **vxr**. Description everywhere: **fast voxel scenes** (short, terse, all lowercase).
-- Packages: crate `vxr` on crates.io; npm `@jrnxf/vxr` (scoped, so it cannot be squatted). Neither is published yet.
+- Packages: the desktop app is not published on crates.io for now. It ships as binaries through GitHub releases and the owner's Homebrew tap, the way Zed, Helix, WezTerm and Lapce do. Reason: crates.io would need every internal crate (`vxr-vox`, `vxr-core`, `vxr-render`, `vxr-ops`) published in lockstep, so the workspace stays `publish = false`. Publishing `vxr-vox` alone as a reusable format library stays open for later. npm `@jrnxf/vxr` (scoped, so it cannot be squatted) is unchanged. None of these is published yet.
 - Repo is private for now.
 
 ## Product
