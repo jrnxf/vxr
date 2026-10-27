@@ -8,6 +8,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde_json::{Value, json};
 use vxr_core::Scene;
+use vxr_core::select::Mode;
 use vxr_ops::{Limits, Session, clean, notes_of};
 
 /// Largest `.vox` file read, in bytes.
@@ -292,15 +293,12 @@ impl Files {
             None => None,
         };
         let o = self.open.as_mut().ok_or(NO_SCENE)?;
-        if let Some((rel, path)) = target {
-            o.rel = rel;
-            o.path = path;
-        }
+        let (rel, path) = target.unwrap_or_else(|| (o.rel.clone(), o.path.clone()));
         // Nothing may have turned into a symlink since the path was resolved.
-        if let Ok(m) = std::fs::symlink_metadata(&o.path)
+        if let Ok(m) = std::fs::symlink_metadata(&path)
             && !m.is_file()
         {
-            return Err(format!("{}: not a regular file", clean(o.rel.as_bytes())));
+            return Err(format!("{}: not a regular file", clean(rel.as_bytes())));
         }
         let bytes = o.scene.to_vox();
         // The file must read back as the same cells before it replaces anything.
@@ -308,7 +306,7 @@ impl Files {
         if again.world_voxels(false) != o.scene.world_voxels(false) {
             return Err("not saved: the result reads back with different cells".into());
         }
-        if let Some(dir) = o.path.parent() {
+        if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
             // The folder, made now, must still be inside the root.
             let dir = std::fs::canonicalize(dir).map_err(|e| e.to_string())?;
@@ -316,21 +314,26 @@ impl Files {
                 return Err("not saved: the folder is outside the root".into());
             }
         }
-        if o.path.exists() && self.backed_up.insert(o.path.clone()) {
-            let mut bak = o.path.clone().into_os_string();
-            bak.push(".bak");
-            std::fs::copy(&o.path, &bak).map_err(|e| format!("could not keep the .bak: {e}"))?;
+        let beside = |ext: &str| {
+            let mut p = path.clone().into_os_string();
+            p.push(ext);
+            PathBuf::from(p)
+        };
+        if path.exists() && !self.backed_up.contains(&path) {
+            let old = std::fs::read(&path).map_err(|e| format!("could not keep the .bak: {e}"))?;
+            write_new(&beside(".bak"), &old).map_err(|e| format!("could not keep the .bak: {e}"))?;
+            self.backed_up.insert(path.clone());
         }
-        let mut tmp = o.path.clone().into_os_string();
-        tmp.push(".tmp");
-        let tmp = PathBuf::from(tmp);
-        std::fs::write(&tmp, &bytes).map_err(|e| e.to_string())?;
-        if let Err(e) = std::fs::rename(&tmp, &o.path) {
+        let tmp = beside(".tmp");
+        write_new(&tmp, &bytes)?;
+        if let Err(e) = std::fs::rename(&tmp, &path) {
             let _ = std::fs::remove_file(&tmp);
             return Err(e.to_string());
         }
         let voxels = o.scene.world_voxels(false).len();
         let objects = again.world().map_or(1, |w| w.objects().len());
+        o.rel = rel;
+        o.path = path;
         o.bytes = bytes;
         o.unsaved = false;
         Ok(format!("saved {} ({} bytes, {voxels} voxels, {objects} objects)", clean(o.rel.as_bytes()), o.bytes.len()))
@@ -387,6 +390,22 @@ impl Files {
     }
 }
 
+/// Write `bytes` to a new file at `path`, replacing a regular file there but never
+/// following a symbolic link (or writing through anything else).
+fn write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    let name = path.file_name().map(|n| clean(n.as_encoded_bytes())).unwrap_or_default();
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.is_file() => std::fs::remove_file(path).map_err(|e| format!("{name}: {e}"))?,
+        Ok(_) => return Err(format!("{name}: not a regular file")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("{name}: {e}")),
+    }
+    let mut f =
+        std::fs::OpenOptions::new().write(true).create_new(true).open(path).map_err(|e| format!("{name}: {e}"))?;
+    f.write_all(bytes).map_err(|e| format!("{name}: {e}"))
+}
+
 impl Open {
     fn call(&mut self, name: &str, args: &Value) -> R {
         match name {
@@ -436,7 +455,9 @@ impl Open {
         let mut session = Session::with_limits(&self.scene, Some(&self.bytes), limits);
         match session.call(&mut self.scene, name, args.clone()) {
             Ok(text) => {
+                let selection: Vec<[i32; 3]> = session.selection().collect();
                 session.apply(&mut self.scene);
+                self.scene.select(selection, Mode::Replace);
                 Ok(text)
             }
             Err(e) => {

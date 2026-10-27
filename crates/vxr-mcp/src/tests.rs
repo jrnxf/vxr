@@ -394,3 +394,62 @@ fn files_new_scene_limits() {
     let r = files.call("box", &json!({"from": [-100000, 0, -100000], "to": [100000, 100, 100000], "slot": 1}));
     assert!(r.is_err(), "{r:?}");
 }
+
+#[test]
+fn the_selection_outlives_its_call() {
+    let dir = Dir::new("select");
+    let mut c = Client::new(&dir.0);
+    c.ok("new_scene", json!({"path": "sel.vox", "size": [8, 8, 8]}));
+    c.ok("box", json!({"from": [-2, 0, -2], "to": [1, 1, 1], "slot": 1}));
+    c.ok("select", json!({"from": [-2, 0, -2], "to": [1, 0, 1]}));
+    assert_eq!(summary(&mut c)["selection"]["count"], 16);
+    c.ok("select", json!({"from": [-2, 1, -2], "to": [-2, 1, -2], "mode": "add"}));
+    assert_eq!(summary(&mut c)["selection"]["count"], 17);
+    c.ok("fill", json!({"slot": 3}));
+    let slots = summary(&mut c)["slots_used"].clone();
+    let count = |s: u64| slots.as_array().unwrap().iter().find(|x| x["slot"] == s).map(|x| x["voxels"].clone());
+    assert_eq!(count(3), Some(json!(17)), "{slots}");
+    c.ok("select", json!({"none": true}));
+    assert!(c.err("fill", json!({"slot": 2})).contains("nothing is selected"));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_save_never_writes_through_a_planted_link() {
+    let dir = Dir::new("planted");
+    let outside = Dir::new("planted-outside");
+    let victim = outside.0.join("victim");
+    std::fs::write(&victim, b"keep me").unwrap();
+    let original = fixture();
+    for (name, beside) in [("a.vox", "a.vox.tmp"), ("b.vox", "b.vox.bak")] {
+        std::fs::write(dir.0.join(name), &original).unwrap();
+        std::os::unix::fs::symlink(&victim, dir.0.join(beside)).unwrap();
+        let mut c = Client::new(&dir.0);
+        c.ok("open", json!({"path": name}));
+        assert!(c.err("save", json!({})).contains("not a regular file"), "{name}");
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep me", "{name}");
+        assert_eq!(std::fs::read(dir.0.join(name)).unwrap(), original, "{name}");
+        assert!(std::fs::symlink_metadata(dir.0.join(beside)).unwrap().file_type().is_symlink());
+    }
+    // A stale regular .tmp left behind is replaced, not written through.
+    std::fs::write(dir.0.join("c.vox"), &original).unwrap();
+    std::fs::write(dir.0.join("c.vox.tmp"), b"stale").unwrap();
+    let mut c = Client::new(&dir.0);
+    c.ok("open", json!({"path": "c.vox"}));
+    c.ok("save", json!({}));
+    assert_eq!(std::fs::read(dir.0.join("c.vox")).unwrap(), original);
+    assert!(!dir.0.join("c.vox.tmp").exists());
+}
+
+#[test]
+fn a_failed_save_keeps_the_scene_s_file() {
+    let dir = Dir::new("failed-save");
+    std::fs::create_dir_all(dir.0.join("taken.vox")).unwrap();
+    let mut c = Client::new(&dir.0);
+    c.ok("new_scene", json!({"path": "mine.vox", "size": [4, 4, 4]}));
+    c.ok("place", json!({"cells": [[0, 0, 0]], "slot": 1}));
+    assert!(c.err("save", json!({"path": "taken.vox"})).contains("not a regular file"));
+    assert!(c.err("open", json!({"path": "mine.vox"})).contains("mine.vox has unsaved edits"));
+    assert!(c.ok("save", json!({})).contains("saved mine.vox"));
+    assert!(dir.0.join("mine.vox").is_file());
+}

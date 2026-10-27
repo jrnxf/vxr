@@ -203,6 +203,11 @@ impl Session {
         }
     }
 
+    /// The assistant's selection as the change has it (map cells).
+    pub fn selection(&self) -> impl Iterator<Item = Cell> + '_ {
+        self.selection.iter().copied()
+    }
+
     /// A new model turn: the per-turn call count starts again.
     pub fn begin_turn(&mut self) {
         self.turn_calls = 0;
