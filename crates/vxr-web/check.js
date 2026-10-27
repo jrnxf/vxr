@@ -799,11 +799,11 @@ async () => {
     const kept = others(file);
     step('the saved edit keeps every other chunk of the file', saved && kept.length > 0 && kept.join('|') === others(saved).join('|'), `${kept.length} chunks`);
     blob = null;
-    await click(354, 34);
+    await clickAt('save');
     step('the Save button downloads too', !!blob);
     await key('z', cmd);
     step('Cmd-O opens the file picker', (await key('o', cmd)) && picked === 1, `${picked}`);
-    await click(250, 34);
+    await clickAt('open');
     step('the Open button opens the file picker', picked === 2, `${picked}`);
     const dt = new DataTransfer();
     dt.items.add(new File([saved], 'saved.vox'));
@@ -1040,6 +1040,41 @@ async () => {
     URL.createObjectURL = realUrl;
     HTMLAnchorElement.prototype.click = realA;
   }
+
+  // New scene: Cmd-N (a browser may keep it for itself, so Cmd-K and the top bar's New work
+  // too). Nothing to lose starts at once; an edit asks first, in the editor's own panel.
+  while (st().undo) await key('z', cmd);
+  await key('n', cmd);
+  s = st();
+  step('New scene with nothing to lose starts at once', s.name === 'Untitled' && !s.confirmNew && s.voxels === 0 && !s.undo && s.bounds.join() === '128,128,128', JSON.stringify(s));
+  await click(mx, my);
+  const newEdited = st().voxels;
+  await key('n', cmd);
+  step('New scene after an edit asks first and keeps the scene', newEdited > 0 && st().confirmNew && st().voxels === newEdited, `${newEdited}`);
+  await clickAt('new-cancel');
+  step('Cancel keeps the scene', !st().confirmNew && st().voxels === newEdited);
+  await key('n', cmd);
+  await key('Escape');
+  step('Escape keeps the scene', !st().confirmNew && st().voxels === newEdited);
+  await clickAt('new');
+  step("the top bar's New asks first", st().confirmNew && !!at('new-discard'));
+  await clickAt('new-discard');
+  s = st();
+  step('Start new clears the scene, its history and its name', !s.confirmNew && s.voxels === 0 && !s.undo && s.name === 'Untitled' && s.bounds.join() === '128,128,128', JSON.stringify(s));
+  await click(mx, my);
+  await key('k', cmd);
+  for (const ch of 'new scene') await key(ch);
+  await key('Enter');
+  step("Cmd-K 'New scene' asks first", st().confirmNew && !st().cmdk);
+  await key('Enter');
+  step('Enter starts the new scene', !st().confirmNew && st().voxels === 0);
+  await click(mx, my);
+  const afterNew = st().voxels;
+  const newSaved = bytes();
+  window.vxr.open(newSaved, 'after-new.vox');
+  await frames(4);
+  s = st();
+  step('Save after New writes one model', afterNew > 0 && s.mode === 'object' && s.objects === 1 && s.voxels === afterNew, JSON.stringify([afterNew, s.mode, s.objects, s.voxels]));
 
   // Resize: the canvas follows its box at the device pixel ratio.
   c.style.width = '900px';

@@ -260,6 +260,7 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     views(dir)?;
     world(dir)?;
     new_scene_save(dir)?;
+    new_scene_command(dir)?;
     scene_tree(dir)?;
     render(&mut s, dir)?;
     materials(&mut s, dir)?;
@@ -349,6 +350,92 @@ fn new_scene_save(dir: &Path) -> Result<(), String> {
     check(
         objects == 1 && matches!(s.ed.scene.at(), At::Object(_)) && same && tree_rows(&s.ed.scene).is_empty(),
         format!("the saved new scene reopens in model mode, every voxel in place ({objects} object(s))"),
+    )
+}
+
+/// New scene (Cmd-N, Cmd-K, the top bar's New): with no edits it starts a blank scene at
+/// once; after an edit it asks first, Cancel and Escape keep the scene, Start new and Enter
+/// replace it with what launching with no file gives, and a save of it is one model.
+fn new_scene_command(dir: &Path) -> Result<(), String> {
+    use egui::{Event, Key, Modifiers};
+    use vxr_core::history::At;
+    let mut s = Shot::new(Scene::new(NEW_SIZE), "Untitled", 2.0)?;
+    s.frames(3);
+    s.ed.ui.coach = false;
+    s.tool(Tool::Add, Shape::Voxel);
+    let key = |key, modifiers| Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    let fresh = format!("{:?}", s.ed.cam);
+    let mid = [s.ed.width as f32 / 2.0, s.ed.height as f32 / 2.0];
+
+    s.frames_with(2, vec![key(Key::N, Modifiers::COMMAND)]);
+    check(
+        s.host.contains(&Action::New) && !s.ed.ui.confirm_new && s.ed.ui.scene_name == "Untitled",
+        "New scene with no edits starts at once, no confirm".into(),
+    )?;
+    s.host.clear();
+
+    // An edit, then New: the confirm shows and nothing is lost yet.
+    s.stroke(mid, &[]);
+    let edited = s.voxels();
+    s.ed.cam.orbit(0.4, 0.2);
+    s.frames_with(2, vec![key(Key::N, Modifiers::COMMAND)]);
+    check(
+        edited > 0 && s.ed.ui.confirm_new && s.host.is_empty() && s.voxels() == edited,
+        format!("New scene after an edit ({edited} voxel) asks first and keeps the scene"),
+    )?;
+    s.save_png(&dir.join("app-2x-new.png"))?;
+    s.ui_click("new-cancel")?;
+    check(!s.ed.ui.confirm_new && s.voxels() == edited && s.host.is_empty(), "Cancel keeps the scene".into())?;
+    s.frames_with(2, vec![key(Key::N, Modifiers::COMMAND)]);
+    s.frames_with(2, vec![key(Key::Escape, Modifiers::NONE)]);
+    check(!s.ed.ui.confirm_new && s.voxels() == edited && s.host.is_empty(), "Escape keeps the scene".into())?;
+
+    // Keys do nothing behind the confirm; Start new clears the scene.
+    s.frames_with(2, vec![key(Key::N, Modifiers::COMMAND)]);
+    s.frames_with(2, vec![key(Key::Z, Modifiers::COMMAND)]);
+    check(s.ed.ui.confirm_new && s.voxels() == edited, "the confirm takes the keys (Cmd-Z does nothing)".into())?;
+    s.ui_click("new-discard")?;
+    check(
+        !s.ed.ui.confirm_new
+            && s.voxels() == 0
+            && s.host.contains(&Action::New)
+            && !s.ed.scene.history().can_undo()
+            && s.ed.scene.selected_count() == 0
+            && s.ed.path.is_none()
+            && s.ed.ui.scene_name == "Untitled"
+            && s.ed.scene.bounds().size == NEW_SIZE
+            && format!("{:?}", s.ed.cam) == fresh,
+        "Start new gives a blank scene: default size and camera, no history, selection or path".into(),
+    )?;
+    s.host.clear();
+
+    // Cmd-K lists it, and Enter starts the confirm; so does the top bar's New.
+    s.stroke(mid, &[]);
+    s.frames_with(2, vec![key(Key::K, Modifiers::COMMAND)]);
+    s.frames_with(1, vec![Event::Text("new scene".into())]);
+    s.frames_with(2, vec![key(Key::Enter, Modifiers::NONE)]);
+    check(s.ed.ui.confirm_new && s.ed.ui.cmdk.is_none(), "Cmd-K New scene asks first".into())?;
+    s.frames_with(2, vec![key(Key::Enter, Modifiers::NONE)]);
+    check(
+        !s.ed.ui.confirm_new && s.voxels() == 0 && s.host.contains(&Action::New),
+        "Enter starts the new scene".into(),
+    )?;
+    s.host.clear();
+    s.stroke(mid, &[]);
+    s.ui_click("new")?;
+    check(s.ed.ui.confirm_new, "the top bar's New asks first".into())?;
+    s.ui_click("new-discard")?;
+
+    // Save after New: one model.
+    s.stroke(mid, &[]);
+    let voxels = s.voxels();
+    let path = dir.join("after-new.vox");
+    std::fs::write(&path, s.ed.scene.to_vox()).map_err(|e| e.to_string())?;
+    let (reopened, _) = crate::native::open(&path)?;
+    let objects = reopened.world().map_or(0, |w| w.objects().len());
+    check(
+        voxels > 0 && objects == 1 && matches!(reopened.at(), At::Object(_)) && reopened.map.voxels == voxels,
+        format!("Save after New writes one model ({objects} object, {voxels} voxel)"),
     )
 }
 

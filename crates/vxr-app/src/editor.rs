@@ -201,6 +201,19 @@ impl Editor {
         Ok(())
     }
 
+    /// Start a blank scene exactly as launching with no file does: the default size, palette
+    /// and camera, no history, selection or path.
+    pub fn new_scene(&mut self) {
+        // Cannot fail for an empty map of the default size.
+        let _ = self.load(Scene::new(NEW_SIZE), "Untitled");
+        self.cam = OrbitCamera::framing(Vec3::ZERO, Vec3::ONE);
+        self.frame_scene();
+        self.path = None;
+        self.ui.confirm_new = false;
+        self.ui.bounds_panel = None;
+        self.ui.toast(&self.ctx, "New scene");
+    }
+
     pub fn resize(&mut self, width: u32, height: u32, ppp: f32) {
         let (width, height) = (width.max(1), height.max(1));
         self.renderer.resize(&self.gpu.device, width, height);
@@ -794,6 +807,10 @@ impl Editor {
         }
         for a in actions {
             match a {
+                Action::New => {
+                    self.new_scene();
+                    host.push(Action::New);
+                }
                 Action::Undo => self.undo(),
                 Action::Redo => self.redo(),
                 Action::Frame => self.frame_scene(),
