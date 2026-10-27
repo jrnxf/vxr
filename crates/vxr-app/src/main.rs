@@ -1,6 +1,8 @@
 //! The vxr desktop editor.
 //!
 //! - `vxr [scene.vox]` opens a window, with the scene if one is given.
+//! - `vxr --stage <script.json> [scene.vox]` also runs a scripted AI request through the
+//!   review step (see `vxr_app::review::Script`), so the card and ghost can be tried by hand.
 //! - `vxr --shot <dir> [scene.vox]` runs headless: it drives the editor through every tool,
 //!   saves and reopens the result, and writes `app-1x.png` and `app-2x.png` into `<dir>`.
 
@@ -17,8 +19,12 @@ fn main() {
             Some(dir) => shot::run(dir.as_ref(), args.get(2).map(|s| s.as_ref())),
             None => Err("usage: vxr --shot <dir> [scene.vox]".into()),
         },
+        Some("--stage") => match args.get(1) {
+            Some(script) => native::run(args.get(2).map(Into::into), Some(script.into())),
+            None => Err("usage: vxr --stage <script.json> [scene.vox]".into()),
+        },
         Some(flag) if flag.starts_with('-') => Err(format!("unknown flag {flag}; usage: vxr [scene.vox]")),
-        path => native::run(path.map(Into::into)),
+        path => native::run(path.map(Into::into), None),
     };
     if let Err(e) = result {
         eprintln!("vxr: {e}");

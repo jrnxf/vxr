@@ -281,6 +281,59 @@ fn discard_leaves_nothing() {
 }
 
 #[test]
+fn before_shows_the_scene_as_it_was_and_apply_takes_the_name() {
+    let mut s = small();
+    let (before, palette) = (voxels(&s), s.palette);
+    let position = s.history().position();
+    let mut o = Session::new(&s, None);
+    call(&mut o, &mut s, "erase", json!({"cells": [[1, 3, 1]]}));
+    call(&mut o, &mut s, "box", json!({"from": [5, 0, 5], "to": [6, 1, 6], "slot": 4}));
+    call(&mut o, &mut s, "paint", json!({"slot": 4, "from_slot": 10}));
+    call(&mut o, &mut s, "palette_set", json!({"slot": 4, "hex": "#102030"}));
+    let (after, after_palette, changes) = (voxels(&s), s.palette, o.changes(&s));
+    o.show_before(&mut s, true);
+    assert!(o.showing_before());
+    assert_eq!(voxels(&s), before);
+    assert_eq!(s.palette, palette);
+    assert!(o.ghost(&s).is_empty());
+    o.show_before(&mut s, false);
+    assert_eq!(voxels(&s), after);
+    assert_eq!(s.palette, after_palette);
+    assert_eq!(o.changes(&s), changes);
+    // A call from Before runs on the change, not on the scene as it was.
+    o.show_before(&mut s, true);
+    call(&mut o, &mut s, "place", json!({"cells": [[9, 9, 9]], "slot": 4}));
+    assert!(!o.showing_before());
+    assert_eq!(o.changes(&s).added.len(), changes.added.len() + 1);
+    // Apply from Before applies the change, as one step with the request's name.
+    o.show_before(&mut s, true);
+    assert_eq!(o.apply_named(&mut s, "AI: make the roof red"), 8 + 1 + 1 + 16);
+    assert_eq!(s.history().position(), position + 1);
+    assert_eq!(s.history().undo_label(), Some("AI: make the roof red"));
+    assert_eq!(s.palette[4], [16, 32, 48, 255]);
+    assert!(s.undo());
+    assert_eq!(voxels(&s), before);
+    assert_eq!(s.palette, palette);
+    assert_eq!(s.history().redo_label(), Some("AI: make the roof red"));
+}
+
+#[test]
+fn discard_from_before_leaves_nothing() {
+    let mut s = small();
+    let (before, palette) = (voxels(&s), s.palette);
+    let position = s.history().position();
+    let mut o = Session::new(&s, None);
+    call(&mut o, &mut s, "erase", json!({"cells": [[1, 3, 1]]}));
+    call(&mut o, &mut s, "sphere", json!({"center": [8, 8, 8], "radius": 3, "slot": 4}));
+    call(&mut o, &mut s, "palette_set", json!({"slot": 10, "hex": "#ffffff"}));
+    o.show_before(&mut s, true);
+    o.discard(&mut s);
+    assert_eq!(voxels(&s), before);
+    assert_eq!(s.palette, palette);
+    assert_eq!(s.history().position(), position);
+}
+
+#[test]
 fn undo_and_dropped_steps_replay() {
     let mut s = empty();
     let mut o = Session::new(&s, None);

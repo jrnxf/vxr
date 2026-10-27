@@ -129,6 +129,41 @@ fn preview_matches_geometry_and_converges() {
     assert!(diff < 2.0, "mean change {diff:.2}/255 after 60 more frames: not converging");
 }
 
+/// A staged change's removals stay in the map until Apply: with them hidden, the preview
+/// sees the scene without them, as the CPU ray cast of the scene with them erased does.
+#[test]
+fn preview_passes_through_hidden_removals() {
+    let Some(g) = gpu() else { return };
+    // The top layers of the middle third are green (slot 9) and removed; the map keeps them.
+    let top = |p: [i32; 3]| (16..32).contains(&p[0]) && p[1] >= 3;
+    let mut removed = Vec::new();
+    let mut scene = red_scene();
+    scene.map.for_each(|p, _| {
+        if top(p) {
+            removed.push(p);
+        }
+    });
+    scene.edit(removed.iter().map(|&p| (p, 9)));
+    assert!(removed.len() > 500, "{} cells removed", removed.len());
+    let mut after = red_scene();
+    after.edit(removed.iter().map(|&p| (p, 0)));
+    let mut rig = Rig::new(g, &scene);
+    let mask = scene.ghost_mask(removed.iter().map(|&p| (p, 3)));
+    rig.preview.set_hidden(&rig.g.device, &rig.g.queue, &mask);
+    rig.frames(40, None);
+    let cpu_after = cpu_values(&after.map, &rig.cam);
+    let cpu_before = cpu_values(&scene.map, &rig.cam);
+    let differ = cpu_after.iter().zip(&cpu_before).filter(|(a, b)| a != b).count();
+    assert!(differ * 50 > cpu_after.len(), "the removal shows in the view: {differ} pixels");
+    let m = mismatch(&rig.image(), &cpu_after);
+    assert!(m < 0.01, "{:.2}% of pixels disagree with the scene without the removals", m * 100.0);
+    // Nothing hidden: the removals are back.
+    rig.preview.set_hidden(&rig.g.device, &rig.g.queue, &[]);
+    rig.frames(40, None);
+    let m = mismatch(&rig.image(), &cpu_before);
+    assert!(m < 0.01, "{:.2}% of pixels disagree with the scene as it is", m * 100.0);
+}
+
 #[test]
 fn orthographic_preview_matches_geometry() {
     let Some(g) = gpu() else { return };

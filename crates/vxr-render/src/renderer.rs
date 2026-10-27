@@ -63,6 +63,9 @@ pub struct Renderer {
     sel_layout: wgpu::BindGroupLayout,
     sel_group: wgpu::BindGroup,
     sel_words: u32,
+    /// The staged-change ghost (2 bits per voxel, 32 words per brick slot) and its words in use.
+    ghost: wgpu::Buffer,
+    ghost_words: u32,
     pub guides: Guides,
 }
 
@@ -110,19 +113,11 @@ impl Renderer {
             mapped_at_creation: false,
         });
         let sel_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("selection"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: true },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
+            label: Some("selection and ghost"),
+            entries: &[storage_buf(0), storage_buf(1)],
         });
-        let (sel, sel_group) = selection_buffer(device, &sel_layout, 16);
+        let (sel, ghost) = (mask_buffer(device, 16), mask_buffer(device, 16));
+        let sel_group = mask_group(device, &sel_layout, &sel, &ghost);
         let module = march_module(device, format!("{BRICKMAP_WGSL}\n{MARCH_WGSL}"));
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("march"),
@@ -227,6 +222,8 @@ impl Renderer {
             sel_layout,
             sel_group,
             sel_words: 0,
+            ghost,
+            ghost_words: 0,
             guides: Guides::default(),
         }
     }
@@ -235,13 +232,26 @@ impl Renderer {
     /// brick slot), as `vxr_core::Scene::selection_mask` builds it. Empty clears it.
     pub fn set_selection(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, words: &[u32]) {
         if words.len() as u64 * 4 > self.sel.size() {
-            let size = (words.len() as u64 * 4).next_power_of_two();
-            (self.sel, self.sel_group) = selection_buffer(device, &self.sel_layout, size);
+            self.sel = mask_buffer(device, (words.len() as u64 * 4).next_power_of_two());
+            self.sel_group = mask_group(device, &self.sel_layout, &self.sel, &self.ghost);
         }
         if !words.is_empty() {
             queue.write_buffer(&self.sel, 0, bytemuck::cast_slice(words));
         }
         self.sel_words = words.len() as u32;
+    }
+
+    /// Draw a staged change as a ghost: 2 bits per voxel in 32 words per brick slot, as
+    /// `vxr_core::Scene::ghost_mask` builds it (1 added, 2 repainted, 3 removed). Empty clears it.
+    pub fn set_ghost(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, words: &[u32]) {
+        if words.len() as u64 * 4 > self.ghost.size() {
+            self.ghost = mask_buffer(device, (words.len() as u64 * 4).next_power_of_two());
+            self.sel_group = mask_group(device, &self.sel_layout, &self.sel, &self.ghost);
+        }
+        if !words.is_empty() {
+            queue.write_buffer(&self.ghost, 0, bytemuck::cast_slice(words));
+        }
+        self.ghost_words = words.len() as u32;
     }
 
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
@@ -293,7 +303,7 @@ impl Renderer {
             size: [self.width as f32, self.height as f32, 1.0 / self.width as f32, 1.0 / self.height as f32],
             sun: [sun.x, sun.y, sun.z, 0.0],
             cursor: [c[0], c[1], c[2], cursor.is_some() as i32],
-            select: [self.sel_words, self.width.div_ceil(FRAME_TILE), 0, 0],
+            select: [self.sel_words, self.width.div_ceil(FRAME_TILE), self.ghost_words, 0],
             pix: [pix[0], pix[1], g.floor as f32, g.line.max(1.0)],
             bounds: [g.bounds[0], g.bounds[1], g.bounds[2], flags],
         };
@@ -496,23 +506,42 @@ impl Targets {
     }
 }
 
-fn selection_buffer(
-    device: &wgpu::Device,
-    layout: &wgpu::BindGroupLayout,
-    size: u64,
-) -> (wgpu::Buffer, wgpu::BindGroup) {
-    let buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("selection"),
+fn mask_buffer(device: &wgpu::Device, size: u64) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("mask"),
         size,
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
-    });
-    let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("selection"),
+    })
+}
+
+fn mask_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    sel: &wgpu::Buffer,
+    ghost: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("selection and ghost"),
         layout,
-        entries: &[wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() }],
-    });
-    (buf, group)
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: sel.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: ghost.as_entire_binding() },
+        ],
+    })
+}
+
+fn storage_buf(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only: true },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }
 }
 
 /// The march shader. Natively, wgpu's runtime checks (buffer bounds checks and the counter

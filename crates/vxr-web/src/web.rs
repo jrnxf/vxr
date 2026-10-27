@@ -303,7 +303,7 @@ impl App {
         let e = &self.editor;
         let (c, h) = (&e.cam, e.scene.history());
         format!(
-            r#"{{"voxels":{},"tool":"{:?}","shape":"{:?}","mirror":{},"mirrorAxes":[{},{},{}],"lock":{},"brushSize":{},"sizePanel":{},"lifting":{},"span":{},"selected":{},"region":"{:?}","hasClip":{},"bounds":[{},{},{}],"boundsPanel":{},"slot":{},"colorEdit":{},"slotOp":"{:?}","undo":{},"redo":{},"cmdk":{},"coach":{},"name":{:?},"size":[{},{}],"ppp":{},"cam":[{},{},{},{},{},{}],"ortho":{},"view":{},"viewPanel":{},"exportMenu":{},"confirmNew":{},"guides":[{},{},{}],"mode":"{}","objects":{},"models":{},"picked":{},"tree":[{}],"treeOn":{},"layers":[{}],"layerOn":{},"render":{{"shown":{},"spp":{},"rows":{},"restarts":{},"timestamps":{},"panel":{},"full":{},"size":[{},{}],"maxSpp":{},"exposure":{},"gamma":{},"vignette":{},"aperture":{},"sky":{},"physicalSky":{},"export":{}}}}}"#,
+            r#"{{"voxels":{},"tool":"{:?}","shape":"{:?}","mirror":{},"mirrorAxes":[{},{},{}],"lock":{},"brushSize":{},"sizePanel":{},"lifting":{},"span":{},"selected":{},"region":"{:?}","hasClip":{},"bounds":[{},{},{}],"boundsPanel":{},"slot":{},"colorEdit":{},"slotOp":"{:?}","undo":{},"redo":{},"cmdk":{},"coach":{},"name":{:?},"size":[{},{}],"ppp":{},"cam":[{},{},{},{},{},{}],"ortho":{},"view":{},"viewPanel":{},"exportMenu":{},"confirmNew":{},"guides":[{},{},{}],"mode":"{}","objects":{},"models":{},"picked":{},"tree":[{}],"treeOn":{},"layers":[{}],"layerOn":{},"render":{{"shown":{},"spp":{},"rows":{},"restarts":{},"timestamps":{},"panel":{},"full":{},"size":[{},{}],"maxSpp":{},"exposure":{},"gamma":{},"vignette":{},"aperture":{},"sky":{},"physicalSky":{},"export":{}}},"review":{},"undoLabel":{},"asks":{:?}}}"#,
             e.scene.map.voxels,
             e.ui.tool,
             e.ui.shape,
@@ -394,7 +394,41 @@ impl App {
             e.preview.lighting.sky_backdrop,
             e.preview.lighting.physical_sky,
             e.export.as_ref().map_or("null".into(), |x| format!("{:?}", x.progress().0)),
+            e.ui.review.as_ref().map_or("null".into(), |c| format!(
+                r#"{{"prompt":{:?},"summary":{},"counts":[{},{},{}],"slots":[{}],"steps":[{}],"held":{},"before":{}}}"#,
+                c.prompt,
+                c.summary.as_ref().map_or("null".into(), |s| format!("{s:?}")),
+                c.counts[0],
+                c.counts[1],
+                c.counts[2],
+                c.slots.iter().map(|s| s.slot.to_string()).collect::<Vec<_>>().join(","),
+                c.steps
+                    .iter()
+                    .map(|s| format!(r#"{{"tool":"{}","ok":{},"dropped":{}}}"#, s.tool, s.ok, s.dropped))
+                    .collect::<Vec<_>>()
+                    .join(","),
+                c.held.map_or("null".into(), |(a, m)| format!("[{a},{m}]")),
+                c.before,
+            )),
+            h.undo_label().map_or("null".into(), |l| format!("{l:?}")),
+            e.asks,
         )
+    }
+
+    /// Run a scripted AI request through the review step (see `vxr_app::review::Script`):
+    /// the card and the ghost show it until Apply or Discard. Returns each call's answer by
+    /// turn as JSON (`{"ok": text}`, `{"error": text}` or `"held"`), or the script's error.
+    pub fn stage(&mut self, script: &str) -> Result<String, JsValue> {
+        use vxr_app::review::Answer;
+        let turns = self.editor.stage_json(script).map_err(err)?;
+        let answer = |a: &Answer| match a {
+            Answer::Ok(t) => format!(r#"{{"ok":{t:?}}}"#),
+            Answer::Err(t) => format!(r#"{{"error":{t:?}}}"#),
+            Answer::Held => r#""held""#.into(),
+        };
+        let turns: Vec<String> =
+            turns.iter().map(|t| format!("[{}]", t.iter().map(answer).collect::<Vec<_>>().join(","))).collect();
+        Ok(format!("[{}]", turns.join(",")))
     }
 
     /// The RGBA colour of palette slot `slot` and how many voxels use it.

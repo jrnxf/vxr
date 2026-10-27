@@ -533,6 +533,16 @@ impl Scene {
     /// Close the open edit as one undo step. Cells and slots that ended where they started
     /// are dropped. Returns how many voxels changed.
     pub fn commit(&mut self) -> usize {
+        self.commit_as(None)
+    }
+
+    /// Close the open edit as one undo step called `label` (an AI change: "AI: make the roof
+    /// red"), as [`Scene::commit`] does.
+    pub fn commit_named(&mut self, label: &str) -> usize {
+        self.commit_as(Some(label.to_string()))
+    }
+
+    fn commit_as(&mut self, label: Option<String>) -> usize {
         self.commit_world();
         let Some(mut s) = self.stroke.take() else { return 0 };
         if !self.selection.is_empty() {
@@ -559,6 +569,7 @@ impl Scene {
             bounds: s.bounds.filter(|b| b.old != b.new),
             world: None,
             at: self.at,
+            label,
         };
         let n = step.voxels.len();
         if !step.is_empty() {

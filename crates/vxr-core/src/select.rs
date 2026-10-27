@@ -406,4 +406,29 @@ impl Scene {
         }
         words
     }
+
+    /// Cells as 2 bits each in [`GHOST_WORDS`] words per brick slot (bits `2 * (local_index
+    /// % 16)` of word `local_index / 16`), for the renderer's staged-change ghost: 1 added,
+    /// 2 repainted, 3 removed. Empty when no cell is in a brick. Like the selection mask it
+    /// follows brick slots, so build it again after cells fill or empty.
+    pub fn ghost_mask(&self, cells: impl IntoIterator<Item = ([i32; 3], u32)>) -> Vec<u32> {
+        use crate::brickmap::{B, EMPTY, local_index};
+        let mut words = Vec::new();
+        for (p, kind) in cells {
+            let [x, y, z] = p.map(|c| c as u32);
+            let b = self.map.grid[self.map.cell_index(x / B, y / B, z / B)];
+            if b == EMPTY {
+                continue;
+            }
+            if words.is_empty() {
+                words = vec![0u32; self.map.brick_slots() * GHOST_WORDS];
+            }
+            let li = local_index(x % B, y % B, z % B);
+            words[b as usize * GHOST_WORDS + li / 16] |= (kind & 3) << ((li % 16) * 2);
+        }
+        words
+    }
 }
+
+/// Words per brick slot in [`Scene::ghost_mask`]: 512 cells at 2 bits.
+pub const GHOST_WORDS: usize = 32;

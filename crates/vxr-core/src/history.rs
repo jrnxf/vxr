@@ -107,6 +107,8 @@ pub struct Step {
     pub bounds: Option<BoundsChange>,
     pub world: Option<Box<WorldChange>>,
     pub at: At,
+    /// What the step is called, when it is more than an edit by hand ("AI: make the roof red").
+    pub label: Option<String>,
 }
 
 impl Step {
@@ -171,6 +173,16 @@ impl History {
 
     pub fn can_redo(&self) -> bool {
         !self.redo.is_empty()
+    }
+
+    /// The name of the step undo would revert next, if it has one.
+    pub fn undo_label(&self) -> Option<&str> {
+        self.undo.last().and_then(|(_, s)| s.label.as_deref())
+    }
+
+    /// The name of the step redo would apply next, if it has one.
+    pub fn redo_label(&self) -> Option<&str> {
+        self.redo.last().and_then(|(_, s)| s.label.as_deref())
     }
 
     /// Where the history stands: the id of the last step applied, 0 before any. Two equal

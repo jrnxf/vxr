@@ -778,6 +778,58 @@ async () => {
     step('undoing the material edits gives back the file', same(bytes(), original) && !st().colorEdit);
   }
 
+  // The review step of an AI change, driven by a scripted request (window.vxr.stage): the
+  // card and ghost, Before and After, a dropped step, other edits kept out, Escape discards,
+  // Enter applies as one undo step named after the request, a change over 10,000 cells is
+  // held until Allow, and the ask field reaches the assistant hook.
+  {
+    const base = bytes();
+    const v0 = st().voxels;
+    const script = JSON.stringify({ prompt: 'put a red block on top', calls: [
+      { name: 'box', input: { from: [-2, 27, -2], to: [1, 29, 1], slot: 3 } },
+      { name: 'palette_set', input: { slot: 3, hex: '#ff0000' } },
+      { name: 'done', input: { summary: 'a red block' } },
+    ] });
+    const answers = JSON.parse(window.vxr.stage(script));
+    await frames(4);
+    let r = st().review;
+    step('a scripted request opens the review card', !!r && answers[0].length === 3 && answers[0].every((a) => a.ok) && !!at('review-apply'), JSON.stringify(answers));
+    step('the card counts the box and lists slot 3', r && r.counts[0] + r.counts[2] === 48 && r.counts[0] > 0 && r.slots.join() === '3' && r.steps.length === 2 && r.summary === 'a red block', JSON.stringify(r));
+    step('staged on the scene, no undo step yet', st().voxels === v0 + r.counts[0] && st().undoLabel === null, `${st().voxels}`);
+    await key('z', cmd);
+    await click(mx, my);
+    step('Cmd-Z and a click wait while the change is under review', !!st().review && st().voxels === v0 + r.counts[0]);
+    await clickAt('review-before');
+    step('Before shows the scene as it was', st().review.before && st().voxels === v0 && same(bytes(), base));
+    await clickAt('review-after');
+    step('After shows the change again', !st().review.before && st().voxels === v0 + r.counts[0]);
+    await clickAt('review-step-0');
+    step('dropping the box step takes it out', st().review.steps[0].dropped && st().review.counts.join() === '0,0,0', JSON.stringify(st().review));
+    await clickAt('review-step-0');
+    await clickAt('review-ask');
+    for (const ch of 'bigger') await key(ch);
+    await key('Enter');
+    step('ask for changes reaches the assistant hook', JSON.stringify(st().asks) === '["bigger"]' && !!st().review, JSON.stringify(st().asks));
+    await key('Escape');
+    step('Escape discards: the file as it was, no undo step', !st().review && same(bytes(), base) && st().undoLabel === null);
+    window.vxr.stage(script);
+    await frames(3);
+    await key('Enter');
+    s = st();
+    step('Enter applies as one undo step named after the request', !s.review && s.undoLabel === 'AI: put a red block on top' && s.voxels === v0 + r.counts[0], JSON.stringify(s.undoLabel));
+    await key('z', cmd);
+    step('undo puts the island back', same(bytes(), base));
+    window.vxr.stage(JSON.stringify({ prompt: 'paint everything', calls: [
+      { name: 'paint', input: { from: [-64, 0, -64], to: [63, 30, 63], slot: 5 } }] }));
+    await frames(3);
+    step('over 10,000 cells the card asks first', JSON.stringify(st().review.held) === '[10000,200000]' && !!at('review-allow'), JSON.stringify(st().review));
+    await clickAt('review-allow');
+    r = st().review;
+    step('Allow stages it', r.held === null && r.counts[2] > 10000, JSON.stringify(r.counts));
+    await clickAt('review-discard');
+    step('Discard leaves the file as it was', !st().review && same(bytes(), base));
+  }
+
   // Save (download) and Open (file input).
   const input = document.getElementById('file');
   let picked = 0;

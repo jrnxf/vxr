@@ -12,6 +12,17 @@
 // 3 emit, 4 plastic), y = roughness, z = metalness (metal), refractive index (glass), radiance
 // (emit) or specular (plastic), w = transparency (glass). mats[2v + 1]: x = attenuation (glass).
 @group(0) @binding(3) var<uniform> mats: array<vec4<f32>, 512>;
+// A staged change's ghost (2 bits per voxel, 32 words per brick slot, as the editor view's):
+// cells marked 3 are removed by the change but still in the map, and rays pass through them.
+// Read only with the HIDE flag.
+@group(0) @binding(4) var<storage, read> ghost: array<u32>;
+
+fn hidden(brick: u32, local: u32) -> bool {
+    if ((frame.flags.w & HIDE) == 0u) { return false; }
+    let w = brick * 32u + (local >> 4u);
+    if (w >= arrayLength(&ghost)) { return false; }
+    return ((ghost[w] >> ((local & 15u) * 2u)) & 3u) == 3u;
+}
 
 const M_METAL: u32 = 1u;
 const M_GLASS: u32 = 2u;
