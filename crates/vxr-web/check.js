@@ -851,6 +851,7 @@ async () => {
     if (!ai().open) await key('j', cmd);
     step('the panel opens on its key settings while there is no key', ai().open && !!at('ai-key') && !!at('ai-pick-3'), JSON.stringify(ai()));
     await clickAt('ai-pick-3');
+    step('picking the compatible endpoint keeps its settings open', ai().setup && !!at('ai-base') && !!at('ai-key'), JSON.stringify(ai()));
     await paste('ai-base', 'http://192.168.1.20:11434/v1');
     step('a host the browser cannot reach says so under the URL', !!at('ai-base-limit'));
     await paste('ai-base', 'http://localhost:8080/v1');

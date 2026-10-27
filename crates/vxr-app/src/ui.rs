@@ -681,7 +681,7 @@ const COMMANDS: &[Command] = &[
     Command { label: "Export OBJ", keys: &[], run: |h| h.actions.push(Action::ExportObj) },
     Command { label: "Export PNG slices", keys: &[], run: |h| h.actions.push(Action::ExportSlices) },
     Command { label: "Ask AI…", keys: &["Tab"], run: |h| h.open_ask_bar("") },
-    Command { label: "Assistant panel", keys: &["⌘", "J"], run: |h| h.ai_open = !h.ai_open },
+    Command { label: "Assistant panel", keys: &["⌘", "J"], run: |h| h.toggle_ai() },
     Command { label: "Assistant keys and model", keys: &[], run: |h| h.open_ai_setup(None) },
 ];
 
@@ -1049,7 +1049,7 @@ impl Hybrid {
                 return;
             }
             if i.consume_key(Modifiers::COMMAND, Key::J) {
-                self.ai_open = !self.ai_open;
+                self.toggle_ai();
             }
             if i.consume_key(Modifiers::COMMAND, Key::K) {
                 self.cmdk = if self.cmdk.is_some() { None } else { Some(String::new()) };
@@ -1293,7 +1293,7 @@ impl Hybrid {
                 ui.painter().text(r.rect.center(), Align2::CENTER_CENTER, icon::SPARKLES, icon_font(16.0), ACCENT);
             }
             if r.clicked() {
-                self.ai_open = !self.ai_open;
+                self.toggle_ai();
             }
         });
     }

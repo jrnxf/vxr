@@ -252,6 +252,18 @@ impl Hybrid {
         self.ai.key_kind = kind.or(Some(self.chat.settings.kind));
     }
 
+    /// Cmd-J and the top bar's button: close the panel, or open it, on its key settings
+    /// (kept until Done) while there is no key yet.
+    pub fn toggle_ai(&mut self) {
+        if self.ai_open {
+            self.ai_open = false;
+        } else if !self.chat.ready() {
+            self.open_ai_setup(None);
+        } else {
+            self.ai_open = true;
+        }
+    }
+
     /// Cmd-K "Ask AI": the prompt bar, starting from `text`.
     pub fn open_ask_bar(&mut self, text: &str) {
         self.cmdk = None;

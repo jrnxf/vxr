@@ -2829,6 +2829,15 @@ fn assistant(dir: &Path) -> Result<(), String> {
     )?;
     s.frames(2);
     s.save_png(&dir.join("app-2x-assistant-keys.png"))?;
+    // The compatible endpoint needs no key, but its URL, model and key stay to be filled.
+    s.ui_click("ai-pick-3")?;
+    s.frames(2);
+    check(
+        s.ed.ui.ai_setup && s.ed.ui.hits.contains_key("ai-base") && s.ed.ui.hits.contains_key("ai-key"),
+        "picking the compatible endpoint keeps its settings open".into(),
+    )?;
+    s.ui_click("ai-pick-0")?;
+    s.frames(2);
     s.type_into("ai-key", "sk-ant-test-not-a-real-key")?;
     s.frames(2);
     check(
