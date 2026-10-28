@@ -471,10 +471,14 @@ async () => {
   step('middle-drag pans', camMoved(a, s) && near(s.cam[3], a.cam[3]));
   a = s;
   c.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', bubbles: true }));
+  await frames();
+  const spaceHints = st().cameraHints;
   await drag(mx, my, mx - 70, my, 0);
   c.dispatchEvent(new KeyboardEvent('keyup', { key: ' ', bubbles: true }));
+  await frames();
   s = st();
-  step('Space+left-drag orbits without editing', !near(s.cam[3], a.cam[3]) && s.voxels === s0.voxels);
+  step('Space+left-drag pans without editing, as in MagicaVoxel', camMoved(a, s) && near(s.cam[3], a.cam[3]) && s.voxels === s0.voxels);
+  step('holding Space shows the camera moves in the hint bar', spaceHints && !s.cameraHints);
   a = s;
   ptr('pointermove', mx, my); await frames();
   const wheel = new WheelEvent('wheel', { clientX: mx, clientY: my, deltaY: -240, bubbles: true, cancelable: true });
@@ -495,9 +499,64 @@ async () => {
   ptr('pointermove', mx + 80, my + 40); await frames();
   s = st();
   step('a chorded click during orbit neither edits nor sticks', s.voxels === s0.voxels && !camMoved(afterChord, s), JSON.stringify(s));
+  // A trackpad pinch arrives as a wheel with Ctrl held: it zooms the view, not the page.
+  a = st();
+  const pinch = new WheelEvent('wheel', { clientX: mx, clientY: my, deltaY: -30, ctrlKey: true, bubbles: true, cancelable: true });
+  c.dispatchEvent(pinch);
+  await frames();
+  step('a trackpad pinch zooms in', st().cam[5] < a.cam[5] && pinch.defaultPrevented, `${a.cam[5]} -> ${st().cam[5]}`);
+  // Pan far and zoom far out, as lost the scene before: the scene stays in view.
+  for (let i = 0; i < 4; i++) {
+    await drag(mx, my, mx + 600, my + 300, 1);
+    ptr('pointermove', 100, 120); await frames();
+    for (let k = 0; k < 10; k++) c.dispatchEvent(new WheelEvent('wheel', { clientX: 100, clientY: 120, deltaY: 400, bubbles: true, cancelable: true }));
+    await frames();
+    await drag(mx, my, mx - 500, my + 400, 2, { shiftKey: true });
+  }
+  s = st();
+  step('panning and zooming far away keep the scene in view', s.inView[0] > 0.999 && s.inView[1] > 0.15 && s.voxels === s0.voxels, JSON.stringify(s.inView));
+  a = s;
   await key('.');
   s = st();
-  step('. frames the scene again', near(s.cam[5], s0.cam[5]) && near(s.cam[0], s0.cam[0]), `${s.cam} vs ${s0.cam}`);
+  step('. frames the scene, keeping the angle', s.inView[0] > 0.999 && s.inView[1] > 0.6 && near(s.cam[3], a.cam[3]), JSON.stringify([s.inView, s.cam]));
+  step('Home is kept from the browser', await key('Home'));
+  s = st();
+  step('Home resets the camera', s.cam.every((v, i) => near(v, s0.cam[i])) && !s.ortho, `${s.cam} vs ${s0.cam}`);
+
+  // The camera bar above the render corner.
+  a = st();
+  await chip('nav-zoom-in');
+  const zin = st().cam[5];
+  await chip('nav-zoom-out');
+  step('the camera bar zooms in and out', zin < a.cam[5] * 0.8 && Math.abs(st().cam[5] - a.cam[5]) < 1e-2, `${a.cam[5]} ${zin} ${st().cam[5]}`);
+  const plusKept = await key('=', cmd);
+  const zkey = st().cam[5];
+  await key('-', cmd);
+  step('Cmd-= and Cmd-- zoom, kept from the browser', plusKept && zkey < a.cam[5] * 0.8 && Math.abs(st().cam[5] - a.cam[5]) < 1e-2 && st().brushSize === a.brushSize);
+  await chip('nav-proj');
+  const barOrtho = st().ortho;
+  await chip('nav-proj');
+  step('the camera bar toggles orthographic', barOrtho && !st().ortho);
+  await chip('nav-views');
+  await chip('view-top');
+  step('the camera bar opens the views beside it', st().viewPanel && st().view === 'Top', JSON.stringify(st().view));
+  await key('Escape');
+  await drag(mx, my, mx + 900, my - 200, 1);
+  await chip('nav-frame');
+  s = st();
+  step('the camera bar frames the scene', s.inView[0] > 0.999 && s.inView[1] > 0.6 && s.view === 'Top', JSON.stringify(s.inView));
+  await chip('nav-reset');
+  step('the camera bar resets the camera', st().cam.every((v, i) => near(v, s0.cam[i])), `${st().cam}`);
+  // X-click: orbit around the voxel clicked, without an edit.
+  a = st();
+  c.dispatchEvent(new KeyboardEvent('keydown', { key: 'x', bubbles: true }));
+  await frames();
+  await click(mx + 120, my + 40);
+  c.dispatchEvent(new KeyboardEvent('keyup', { key: 'x', bubbles: true }));
+  await frames();
+  s = st();
+  step('X-click orbits around the voxel clicked, without editing', camMoved(a, s) && s.voxels === s0.voxels, JSON.stringify(s.cam));
+  await key('Home');
 
   // Cmd-K.
   step('Cmd-K is kept from the browser', await key('k', cmd));

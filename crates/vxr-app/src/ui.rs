@@ -158,6 +158,10 @@ mod icon {
     pub const FILE_PLUS: char = '\u{e0c9}';
     pub const MAXIMIZE_2: char = '\u{e113}';
     pub const MINIMIZE_2: char = '\u{e11b}';
+    pub const ZOOM_IN: char = '\u{e1b6}';
+    pub const ZOOM_OUT: char = '\u{e1b7}';
+    pub const SCAN_SEARCH: char = '\u{e537}';
+    pub const ROTATE_CCW: char = '\u{e148}';
     pub const SPARKLES: char = '\u{e412}';
     pub const CHECK: char = '\u{e06c}';
     pub const TRIANGLE_ALERT: char = '\u{e193}';
@@ -178,6 +182,12 @@ pub enum Action {
     Undo,
     Redo,
     Frame,
+    /// Frame the selected voxels, keeping the angle.
+    FrameSelection,
+    /// Back to the starting angle in perspective, framing the scene.
+    ResetCamera,
+    /// Zoom in (true) or out by a step, about the middle of the view.
+    Zoom(bool),
     /// Look from one side, or isometric (which turns orthographic on).
     Snap(View),
     /// Orthographic (true) or perspective projection.
@@ -384,6 +394,8 @@ pub struct ColorEdit {
 const FIELDS: [&str; 7] = ["HEX", "R", "G", "B", "H", "S", "V"];
 /// Height of the swatch grid's scrolling view (#swatches max-height).
 const SWATCH_VIEW: f32 = 240.0;
+/// The palette panel's height (it sits at y 68, under the top bar).
+const PALETTE_H: f32 = 12.0 + 15.0 + 10.0 + 52.0 + 10.0 + SWATCH_VIEW + 10.0 + 48.0 + 12.0;
 
 /// Readouts for the stats corner.
 #[derive(Clone, Debug, Default)]
@@ -460,6 +472,13 @@ pub struct Hybrid {
     pub view: Option<View>,
     /// The View flyout beside the rail's view button is open.
     pub view_panel: bool,
+    /// It was opened from the camera bar, so it shows beside that instead.
+    view_at_nav: bool,
+    /// Show the camera moves in the hint bar: Space is held or the camera is being dragged
+    /// (set by the editor).
+    pub camera_hints: bool,
+    /// A Cmd-K camera gesture was chosen: toast how the camera moves.
+    camera_tip: bool,
     /// The Export menu under the top bar's Export button is open.
     pub export_menu: bool,
     /// The New scene confirm is open: the scene has edits that starting a new one would drop.
@@ -620,6 +639,13 @@ const COMMANDS: &[Command] = &[
     Command { label: "Hide or show layer", keys: &[], run: |h| h.actions.push(Action::ToggleLayer) },
     Command { label: "Rename layer", keys: &[], run: |h| h.start_layer_rename(h.layer_on) },
     Command { label: "Frame scene", keys: &["."], run: |h| h.actions.push(Action::Frame) },
+    Command { label: "Frame selection", keys: &[], run: |h| h.actions.push(Action::FrameSelection) },
+    Command { label: "Reset camera", keys: &["Home"], run: |h| h.actions.push(Action::ResetCamera) },
+    Command { label: "Zoom in", keys: &["⌘", "="], run: |h| h.actions.push(Action::Zoom(true)) },
+    Command { label: "Zoom out", keys: &["⌘", "-"], run: |h| h.actions.push(Action::Zoom(false)) },
+    Command { label: "Orbit the camera", keys: &["Right-drag"], run: |h| h.camera_tip = true },
+    Command { label: "Pan the camera", keys: &["Space-drag"], run: |h| h.camera_tip = true },
+    Command { label: "Orbit around a point", keys: &["X", "Click"], run: |h| h.camera_tip = true },
     Command { label: "View options", keys: &[], run: |h| h.view_panel = !h.view_panel },
     Command { label: "Perspective", keys: &["O"], run: |h| h.actions.push(Action::Ortho(false)) },
     Command { label: "Orthographic", keys: &["O"], run: |h| h.actions.push(Action::Ortho(true)) },
@@ -694,6 +720,9 @@ impl Hybrid {
             ortho: false,
             view: None,
             view_panel: false,
+            view_at_nav: false,
+            camera_hints: false,
+            camera_tip: false,
             export_menu: false,
             confirm_new: false,
             export_x: 0.0,
@@ -953,7 +982,6 @@ impl Hybrid {
         self.size_flyout(ctx);
         self.selection_panel(ctx);
         self.bounds_panel(ctx);
-        self.view_panel(ctx);
         self.new_confirm(ctx, screen);
         self.export_menu(ctx);
         self.marquee(ctx);
@@ -966,11 +994,19 @@ impl Hybrid {
         self.stats(ctx, screen, stats);
         self.render_corner(ctx, screen, stats);
         self.render_panel(ctx, screen, stats);
+        self.nav_bar(ctx, screen);
+        self.view_panel(ctx);
         self.hint_bar(ctx, screen);
         self.history(ctx, screen);
         self.toast_panel(ctx, screen);
         if self.cmdk.is_some() {
             self.cmdk(ctx, screen);
+        }
+        if std::mem::take(&mut self.camera_tip) {
+            self.toast(
+                ctx,
+                "Right-drag orbits · Middle-drag or Space-drag pans · Scroll or pinch zooms · X-click orbits there",
+            );
         }
         std::mem::take(&mut self.actions)
     }
@@ -1025,6 +1061,12 @@ impl Hybrid {
             }
             if i.consume_key(Modifiers::COMMAND, Key::Z) {
                 self.actions.push(Action::Undo);
+            }
+            if i.consume_key(Modifiers::COMMAND, Key::Equals) || i.consume_key(Modifiers::COMMAND, Key::Plus) {
+                self.actions.push(Action::Zoom(true));
+            }
+            if i.consume_key(Modifiers::COMMAND, Key::Minus) {
+                self.actions.push(Action::Zoom(false));
             }
             if i.consume_key(Modifiers::COMMAND, Key::N) {
                 self.request_new();
@@ -1109,6 +1151,7 @@ impl Hybrid {
                     h.cmdk_sel = 0;
                 }),
                 (Key::Period, |h| h.actions.push(Action::Frame)),
+                (Key::Home, |h| h.actions.push(Action::ResetCamera)),
                 (Key::O, |h| h.actions.push(Action::Ortho(!h.ortho))),
                 (Key::G, |h| h.grid = !h.grid),
                 (Key::H, |h| {
@@ -1309,7 +1352,8 @@ impl Hybrid {
             let r = tool_button(ui, pos2(x, y), icon::AXIS_3D, "", self.view_panel);
             self.hits.insert("view".into(), r.rect);
             if r.clicked() {
-                self.view_panel = !self.view_panel;
+                self.view_panel = !self.view_panel || self.view_at_nav;
+                self.view_at_nav = false;
             }
         });
     }
@@ -1645,8 +1689,13 @@ impl Hybrid {
         if !self.view_panel {
             return;
         }
-        // The button is the last in the rail, so the flyout grows up from its bottom edge.
-        let rect = Rect::from_min_size(pos2(self.flyout_x(), self.view_y + 40.0 + 6.0 - 210.0), vec2(204.0, 210.0));
+        // The rail's button is the last in the rail, so the flyout grows up from its bottom
+        // edge; from the camera bar it sits left of the bar, bottom-aligned with it.
+        let size = vec2(204.0, 210.0);
+        let rect = match self.hits.get("nav").filter(|_| self.view_at_nav) {
+            Some(nav) => Rect::from_min_size(nav.max - size - vec2(nav.width() + 8.0, 0.0), size),
+            None => Rect::from_min_size(pos2(self.flyout_x(), self.view_y + 40.0 + 6.0 - size.y), size),
+        };
         let (ortho, view) = (self.ortho, self.view);
         let mut guides = [self.grid, self.ground, self.frame];
         let mut run = Vec::new();
@@ -2585,10 +2634,7 @@ impl Hybrid {
     // #palette
     fn palette_panel(&mut self, ctx: &Context, screen: Rect) {
         let used_count = self.used.iter().skip(1).filter(|u| **u).count();
-        let rect = Rect::from_min_size(
-            pos2(screen.right() - 12.0 - 232.0, 68.0),
-            vec2(232.0, 12.0 + 15.0 + 10.0 + 52.0 + 10.0 + SWATCH_VIEW + 10.0 + 48.0 + 12.0),
-        );
+        let rect = Rect::from_min_size(pos2(screen.right() - 12.0 - 232.0, 68.0), vec2(232.0, PALETTE_H));
         Self::panel(ctx, "palette", rect, Order::Middle, |ui, rect| {
             let inner = rect.shrink(12.0);
             let p = ui.painter().clone();
@@ -3492,6 +3538,18 @@ impl Hybrid {
                 let v = [("↵", "apply"), ("Esc", "discard"), ("Right-drag", "orbit"), ("Scroll", "zoom")];
                 return self.hint_panel(ctx, screen, &v);
             }
+            (None, _, _) if self.camera_hints => {
+                let v = [
+                    ("Right-drag", "orbit"),
+                    ("Space-drag", "pan"),
+                    ("Middle-drag", "pan"),
+                    ("Scroll", "zoom"),
+                    ("X-click", "orbit there"),
+                    ("Period", "frame"),
+                    ("Home", "reset"),
+                ];
+                return self.hint_panel(ctx, screen, &v);
+            }
             (None, _, _) if self.lifting => {
                 let v = [("Move", "set the height"), ("Click or ↵", "place"), ("Esc", "cancel")];
                 return self.hint_panel(ctx, screen, &v);
@@ -3584,6 +3642,99 @@ impl Hybrid {
         });
     }
 
+    // The camera bar: above the render corner (or the undo buttons when it is hidden), level
+    // with its right edge, so the camera's moves are always one click away. Projection, the
+    // View flyout, zoom, and the three ways back to the scene, each with a tooltip.
+    fn nav_bar(&mut self, ctx: &Context, screen: Rect) {
+        let proj = match (self.ortho, self.view) {
+            (_, Some(View::Iso)) => "Iso",
+            (true, _) => "Ortho",
+            (false, _) => "Persp",
+        };
+        let pg = ctx.fonts_mut(|f| f.layout_no_wrap(proj.into(), inter_medium(12.0), MUTED));
+        let pw = (pg.size().x + 20.0).max(52.0);
+        let w = 4.0 + pw + 2.0 + 32.0 + 9.0 + 2.0 * 32.0 + 2.0 + 9.0 + 3.0 * 32.0 + 2.0 * 2.0 + 4.0;
+        let size = vec2(w, 40.0);
+        let dock = self.render_dock.unwrap_or_else(|| {
+            Rect::from_min_max(pos2(screen.right() - 12.0 - 82.0, screen.bottom() - 52.0), screen.right_bottom())
+        });
+        let palette_bottom = 68.0 + PALETTE_H;
+        let mut rect = Rect::from_min_size(pos2(dock.right() - w, dock.top() - 8.0 - size.y), size);
+        if rect.top() < palette_bottom + 8.0 {
+            // A short window: beside the corner instead, level with its bottom.
+            rect = Rect::from_min_size(pos2(dock.left() - 8.0 - w, dock.bottom() - size.y), size);
+        }
+        self.hits.insert("nav".into(), rect);
+        let (sel, view_open) = (self.selected > 0, self.view_panel && self.view_at_nav);
+        let mut run = Vec::new();
+        let mut tip: Option<(Rect, &'static str, &'static [&'static str])> = None;
+        let mut hits = Vec::new();
+        let mut toggle_view = false;
+        Self::panel(ctx, "nav", rect, Order::Middle, |ui, rect| {
+            let cy = rect.center().y;
+            let mut x = rect.left() + 4.0;
+            let sep = |ui: &Ui, x: &mut f32| {
+                *x += 4.0;
+                ui.painter()
+                    .line_segment([pos2(*x + 0.5, cy - 10.0), pos2(*x + 0.5, cy + 10.0)], Stroke::new(1.0, LINE));
+                *x += 5.0;
+            };
+            let ortho = proj != "Persp";
+            let (proj_tip, proj_keys): (&'static str, &'static [&'static str]) =
+                if ortho { ("Perspective", &["O"]) } else { ("Orthographic", &["O"]) };
+            let b = Rect::from_min_size(pos2(x, cy - 16.0), vec2(pw, 32.0));
+            let r = nav_button(ui, b, None, Some(pg), "nav-proj", true, false);
+            if r.clicked() {
+                run.push(Action::Ortho(!ortho));
+            }
+            if r.hovered() {
+                tip = Some((b, proj_tip, proj_keys));
+            }
+            hits.push(("nav-proj", b));
+            x += pw + 2.0;
+            let buttons: [(&str, char, &str, &[&str], bool); 6] = [
+                ("nav-views", icon::AXIS_3D, "Views", &["0–6"], true),
+                ("nav-zoom-out", icon::ZOOM_OUT, "Zoom out", &["⌘", "-"], true),
+                ("nav-zoom-in", icon::ZOOM_IN, "Zoom in", &["⌘", "="], true),
+                ("nav-frame-sel", icon::SCAN_SEARCH, "Frame selection", &[], sel),
+                ("nav-frame", icon::SCAN, "Frame scene", &["."], true),
+                ("nav-reset", icon::ROTATE_CCW, "Reset camera", &["Home"], true),
+            ];
+            for (k, (id, glyph, label, keys, enabled)) in buttons.into_iter().enumerate() {
+                if k == 1 || k == 3 {
+                    sep(ui, &mut x);
+                }
+                let b = Rect::from_min_size(pos2(x, cy - 16.0), vec2(32.0, 32.0));
+                let on = id == "nav-views" && view_open;
+                let r = nav_button(ui, b, Some(glyph), None, id, enabled, on);
+                if r.hovered() {
+                    tip = Some((b, label, keys));
+                }
+                if r.clicked() {
+                    match id {
+                        "nav-views" => toggle_view = true,
+                        "nav-zoom-out" => run.push(Action::Zoom(false)),
+                        "nav-zoom-in" => run.push(Action::Zoom(true)),
+                        "nav-frame-sel" => run.push(Action::FrameSelection),
+                        "nav-frame" => run.push(Action::Frame),
+                        _ => run.push(Action::ResetCamera),
+                    }
+                }
+                hits.push((id, b));
+                x += 32.0 + 2.0;
+            }
+        });
+        if toggle_view {
+            self.view_panel = !self.view_panel || !self.view_at_nav;
+            self.view_at_nav = true;
+        }
+        self.hits.extend(hits.into_iter().map(|(n, r)| (n.to_string(), r)));
+        self.actions.extend(run);
+        if let Some((at, label, keys)) = tip {
+            tooltip(ctx, at, label, keys);
+        }
+    }
+
     // #history
     fn history(&mut self, ctx: &Context, screen: Rect) {
         let rect =
@@ -3669,6 +3820,10 @@ impl Hybrid {
                 .desired_width(text_rect.width());
             let resp = ui.put(text_rect, edit);
             resp.request_focus();
+            // Typing starts again from the best match, whatever row the pointer rests on.
+            if resp.changed() {
+                self.cmdk_sel = 0;
+            }
             let sep_y = field.bottom() + 4.5;
             ui.painter().line_segment(
                 [pos2(rect.left() + 1.0, sep_y), pos2(rect.right() - 1.0, sep_y)],
@@ -3687,7 +3842,9 @@ impl Hybrid {
             for (n, &i) in hits.iter().take(shown).enumerate() {
                 let row = Rect::from_min_size(pos2(rect.left() + 8.0, y), vec2(rect.width() - 16.0, 34.0));
                 let r = ui.interact(row, Id::unique(("cmd", i)), Sense::click());
-                if r.hovered() {
+                // Only a pointer that moves picks a row, so one resting over the list does not
+                // steal Enter from the typed match.
+                if r.hovered() && ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO) {
                     self.cmdk_sel = n;
                 }
                 let p = ui.painter();
@@ -3847,6 +4004,73 @@ fn tbtn_on(
         p.galley(pos2(cx, cy - g.size().y / 2.0), g, color);
     }
     resp
+}
+
+/// A camera bar button: an icon, or a label, hovered like the top bar's buttons.
+fn nav_button(
+    ui: &mut Ui,
+    r: Rect,
+    glyph: Option<char>,
+    label: Option<std::sync::Arc<egui::Galley>>,
+    id: &str,
+    enabled: bool,
+    on: bool,
+) -> egui::Response {
+    let sense = if enabled { Sense::click() } else { Sense::hover() };
+    let resp = ui.interact(r, Id::unique(("nav", id)), sense);
+    let p = ui.painter();
+    let mut color = MUTED;
+    if on {
+        p.rect_filled(r, CornerRadius::same(8), ACCENT_BG);
+        color = ACCENT;
+    } else if enabled && resp.hovered() {
+        p.rect_filled(r, CornerRadius::same(8), HOVER);
+        color = TEXT;
+    }
+    if !enabled {
+        color = color.gamma_multiply(0.35);
+    }
+    if let Some(g) = glyph {
+        p.text(r.center(), Align2::CENTER_CENTER, g, icon_font(16.0), color);
+    }
+    if let Some(g) = label {
+        p.galley(r.center() - g.size() / 2.0, g, color);
+    }
+    resp
+}
+
+/// A tooltip above `at`: what the control does and its keys, as kbd chips.
+fn tooltip(ctx: &Context, at: Rect, label: &str, keys: &[&str]) {
+    let g = ctx.fonts_mut(|f| f.layout_no_wrap(label.into(), inter(12.0), TEXT));
+    let kg: Vec<_> =
+        keys.iter().map(|k| ctx.fonts_mut(|f| f.layout_no_wrap((*k).into(), mono_medium(10.5), MUTED))).collect();
+    let kw: f32 = kg.iter().map(|k| (k.size().x + 10.0).max(18.0) + 3.0).sum();
+    let w = 10.0 + g.size().x + if kg.is_empty() { 0.0 } else { 8.0 + kw - 3.0 } + 10.0;
+    let size = vec2(w, 28.0);
+    let screen = ctx.content_rect();
+    let x = (at.center().x - w / 2.0).clamp(screen.left() + 12.0, screen.right() - 12.0 - w).round();
+    let rect = Rect::from_min_size(pos2(x, at.top() - 8.0 - 4.0 - size.y), size);
+    Area::new(Id::unique("tooltip")).fade_in(false).order(Order::Tooltip).fixed_pos(rect.min).constrain(false).show(
+        ctx,
+        |ui| {
+            let p = ui.painter();
+            p.add(
+                Shadow { offset: [0, 6], blur: 18, spread: 0, color: Color32::from_black_alpha(89) }
+                    .as_shape(rect, CornerRadius::same(8)),
+            );
+            p.rect(rect, CornerRadius::same(8), PANEL, Stroke::new(1.0, LINE2), StrokeKind::Inside);
+            let cy = rect.center().y;
+            p.galley(pos2(rect.left() + 10.0, cy - g.size().y / 2.0), g.clone(), TEXT);
+            let mut kx = rect.left() + 10.0 + g.size().x + 8.0;
+            for k in kg {
+                let kw = (k.size().x + 10.0).max(18.0);
+                let r = Rect::from_min_size(pos2(kx, cy - 9.5), vec2(kw, 19.0));
+                kbd_frame(p, r);
+                p.galley(pos2(r.center().x - k.size().x / 2.0, r.top() + 1.0 + (16.0 - k.size().y) / 2.0), k, MUTED);
+                kx += kw + 3.0;
+            }
+        },
+    );
 }
 
 /// kbd: 10.5 px mono, 1 px border with a 2 px bottom, right-aligned at `right_center`. Returns its width.

@@ -121,9 +121,9 @@ Feature names below follow the update log [S1] unless another source is given.
 
 | Feature | MagicaVoxel | vxr | Priority | Why |
 |---|---|---|---|---|
-| Orbit, pan, zoom | Right-drag, middle-drag or Space+drag, wheel or Z+drag [S1 0.99, FAQ] | done (right-drag orbit, Shift+right or middle pan, wheel zoom) | P1 | minutes |
-| Frame the model | Hotkey 4 recenters [S1 0.99] | done (`.`) | P1 | minutes |
-| Set rotation center on a voxel | X+click [S1 0.99.3] | missing | P2 | sculpt |
+| Orbit, pan, zoom | Right-drag, middle-drag or Space+drag, wheel or Z+drag [S1 0.99, FAQ] | done (right-drag orbit; middle, Space or Shift+right pan; wheel, trackpad pinch, Cmd-= and Cmd-- zoom; the pivot and zoom stay near the scene; see `camera-controls.md`) | P1 | minutes |
+| Frame the model | Hotkey 4 recenters [S1 0.99] | done (`.` keeps the angle, Home resets it, Frame selection; on the camera bar and in Cmd-K) | P1 | minutes |
+| Set rotation center on a voxel | X+click [S1 0.99.3] | done (X-click orbits around the voxel clicked) | P2 | minutes |
 | Perspective, orthographic, isometric | Camera modes [S1 0.97.1] | done [7] (View flyout, O, 0) | P1 | - |
 | View cube and axis snap views | 26 standard views, hotkey 5 for face views [S1 0.99] | partial [7] (six side views and isometric on 0 to 6 and the View flyout; no 26-view cube) | P2 | - |
 | Grid and ground | Frame grids with spacing, infinite ground [S1 0.98.1, 0.97.5] | done [7] (a voxel grid on the ground inside the bounds and a ground that fades into the background; View flyout, G, Cmd-K; no grid spacing setting) | P2 | minutes |
