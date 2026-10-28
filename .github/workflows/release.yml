@@ -244,14 +244,16 @@ jobs:
     timeout-minutes: 10
     steps:
       # Until vxr's first full release, brew installs the latest pre-release; after it, only full
-      # releases, so a pre-release never replaces a stable vxr.
+      # releases, so a pre-release never replaces a stable vxr. A full release is a v<x.y.z> tag:
+      # releases such as design-references hold files, not versions.
       - name: Check the formula follows this tag
         id: follow
         run: |
           case "$TAG" in
             *-*)
               full="$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-pre-releases --exclude-drafts \
-                --limit 1 --json tagName --jq '.[0].tagName // ""')"
+                --limit 100 --json tagName \
+                --jq '[.[].tagName | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))][0] // ""')"
               if [ -n "$full" ]; then
                 echo "$full is out, so the formula stays on full releases"
                 echo "bump=false" >> "$GITHUB_OUTPUT"
