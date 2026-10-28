@@ -331,6 +331,53 @@ fn stop_does_not_wait_for_an_agent_that_stopped_reading() {
 }
 
 #[test]
+fn stop_during_a_reply_the_agent_reads_still_says_stopped() {
+    let dir = Dir::new("midreply");
+    let host = Host::start(&dir.0).unwrap();
+    // A raw agent: the reply is still being written when Stop comes, and the reason follows it.
+    let (s, id) = paired(&dir, &host);
+    s.try_clone().unwrap().write_all(b"{\"id\": 1, \"read\": \"vxr://scene/summary\"}\n").unwrap();
+    wait_for(|| match host.poll().pop() {
+        Some(r) => {
+            r.answer(Ok("x".repeat(3 << 20)));
+            true
+        }
+        None => false,
+    });
+    std::thread::sleep(Duration::from_millis(200));
+    host.stop(id);
+    assert!(host.clients().is_empty());
+    let mut r = BufReader::new(s);
+    let mut line = String::new();
+    r.read_line(&mut line).unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&line).unwrap()["text"].as_str().unwrap().len(), 3 << 20);
+    line.clear();
+    r.read_line(&mut line).unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&line).unwrap(), json!({"closed": "stopped"}));
+
+    // `vxr mcp --live`: Stop as its big read is answered, and it stays stopped.
+    let mut a = Agent::new(&dir, "claude-code");
+    std::thread::scope(|sc| {
+        let h = sc.spawn(|| a.request("resources/read", json!({"uri": "vxr://scene/summary"})));
+        wait_for(|| match host.poll().pop() {
+            Some(r) => {
+                let conn = r.conn;
+                r.answer(Ok("x".repeat(3 << 20)));
+                host.stop(conn);
+                true
+            }
+            None => false,
+        });
+        let reply = h.join().unwrap();
+        let text = reply["result"]["contents"][0]["text"].as_str().unwrap();
+        assert!(text.len() == 3 << 20 || text == STOPPED, "the read gets its answer or the reason");
+    });
+    assert_eq!(tool(&host, &mut a, "erase", json!({})), (STOPPED.into(), true));
+    assert_eq!(tool(&host, &mut a, "erase", json!({})), (STOPPED.into(), true));
+    assert!(host.clients().is_empty(), "the stopped server does not connect again");
+}
+
+#[test]
 fn a_connection_id_is_never_given_out_again() {
     let dir = Dir::new("ids");
     let host = Host::start(&dir.0).unwrap();

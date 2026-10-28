@@ -302,16 +302,20 @@ mod unix {
     }
 
     impl Shared {
-        /// Tell a connection why it ends, and hang up. Never waits on the connection: when
-        /// its thread is in the middle of a reply (an agent not reading blocks it), the
-        /// connection is hung up without the reason, which ends that write at once.
+        /// Tell a connection why it ends, and hang up. Never waits on the connection: it is
+        /// gone from the list at once, and a thread of its own sends the reason after any
+        /// reply in flight (which times out after `WRITE_WAIT` if the agent is not reading)
+        /// and then hangs up.
         fn close(&self, id: u64, reason: &str) {
             let Some(c) = self.conns.lock().unwrap().remove(&id) else { return };
-            if let Ok(mut w) = c.writer.try_lock() {
-                let _ = w.set_write_timeout(Some(Duration::from_millis(200)));
-                let _ = write_line(&mut *w, &json!({"closed": reason}));
-            }
-            let _ = c.stream.shutdown(std::net::Shutdown::Both);
+            let reason = reason.to_string();
+            let _ = std::thread::Builder::new().name("vxr-live-close".into()).spawn(move || {
+                if let Ok(mut w) = c.writer.lock() {
+                    let _ = w.set_write_timeout(Some(Duration::from_millis(200)));
+                    let _ = write_line(&mut *w, &json!({"closed": reason}));
+                }
+                let _ = c.stream.shutdown(std::net::Shutdown::Both);
+            });
         }
 
         fn close_all(&self, reason: &str) {
@@ -484,8 +488,10 @@ mod unix {
                 break;
             }
         }
-        shared.conns.lock().unwrap().remove(&id);
-        let _ = stream.shutdown(std::net::Shutdown::Both);
+        // A connection closed by the app is hung up by `Shared::close`, after its reason.
+        if shared.conns.lock().unwrap().remove(&id).is_some() {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+        }
     }
 
     /// `vxr mcp --live`'s end: connects when the first request needs it, and again after
