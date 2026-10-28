@@ -16,7 +16,7 @@ use crate::render::{EXPORT_SIZES, RenderSettings, SPP_CHOICES};
 
 mod agents;
 mod assistant;
-pub use agents::{AgentsView, EditRow, FILES_SETUP, LIVE_SETUP};
+pub use agents::{AgentsView, EditRow, FILES_SETUP, LIVE_SETUP, SETUP};
 pub use assistant::{AiAction, AskBar, ChatView, PANEL_W};
 
 // :root custom properties.

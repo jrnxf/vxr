@@ -1,0 +1,300 @@
+name: Release
+
+# Pushing a tag v<version> builds the desktop app as vxr.app holding one universal binary (Apple
+# silicon and Intel), packed in vxr-<version>-universal-apple-darwin.tar.gz with its .sha256,
+# publishes the tag's GitHub release with both attached, then points the Homebrew formula at it, so
+# `brew install jrnxf/tap/vxr` installs vxr without compiling. The archive holds one directory of
+# the same name, with vxr.app (crates/vxr-app/bundle), README.md and THIRD_PARTY.md (the
+# notices for every Rust crate compiled in, from cargo-about and about.toml).
+#
+# Two kinds of tag:
+# - v0.1.0-pre.N, a development build: Cargo.toml says 0.1.0, and the build stamps the tag's
+#   0.1.0-pre.N into Cargo.toml and Cargo.lock, so each build needs no commit. Its release is a
+#   pre-release. Homebrew reads -pre.N from the archive's name and orders it before 0.1.0; it
+#   would read -dev.N as plain 0.1.0.
+# - v0.1.0, a full release: Cargo.toml must say 0.1.0.
+# The formula follows every full release, and pre-releases only until the first full one.
+#
+# Pull requests that touch the build, and a manual run, build and check the same archive, kept
+# as a workflow artifact only: they never make a release or a tag.
+#
+# Tap setup: jrnxf/homebrew-tap's docs/automatic-updates.md, which issues the TAP_DEPLOY_KEY
+# secret. Formula/vxr.rb must already exist in the tap and install vxr.app: the bump script
+# writes the formula's url and sha256, adding them to a HEAD-only formula, but it never adds a
+# formula or its install step.
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - about.hbs
+      - about.toml
+      - Cargo.lock
+      - Cargo.toml
+      - crates/vxr-app/bundle
+      - crates/vxr-app/examples/icon.rs
+      - crates/vxr-app/fetch-fonts
+      - crates/vxr-app/fonts.sha256
+  workflow_dispatch:
+
+# A newer push to a pull request replaces its run; a release always runs to the end.
+concurrency:
+  group: release-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  TARGET: universal-apple-darwin
+  # rust-overlay's stable in nix/flake.lock, as crates/vxr-web/cloudflare-build pins it.
+  RUST: 1.99.1
+  CARGO_ABOUT_VERSION: 0.9.2
+  CARGO_ABOUT_SHA256: ae72f0df0c399a1e96336f696fa55b1b28679fd725632eba8cf8e4568467cc3e
+
+jobs:
+  binary:
+    name: Build vxr.app
+    runs-on: macos-15
+    timeout-minutes: 60
+    outputs:
+      archive: ${{ steps.archive.outputs.archive }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Stamp a pre-release's version
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        run: |
+          base="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
+          version="${TAG#v}"
+          case "$version" in
+            "$base") exit 0 ;;
+            "$base"-pre.*) number="${version#"$base"-pre.}" ;;
+            *) number="" ;;
+          esac
+          case "$number" in
+            "" | *[!0-9]*)
+              echo "Cargo.toml says $base, so the tag must be v$base or v$base-pre.<number>" >&2
+              exit 1
+              ;;
+          esac
+          # perl, not sed: the first version line in Cargo.toml is the workspace's, and every vxr
+          # crate in Cargo.lock takes it, so --locked still builds.
+          perl -0pi -e "s/^version = \".*?\"/version = \"$version\"/m" Cargo.toml
+          perl -0pi -e "s/(\nname = \"vxr(?:-[a-z]+)?\"\nversion = )\".*?\"/\$1\"$version\"/g" Cargo.lock
+          git diff --stat
+        env:
+          TAG: ${{ github.ref_name }}
+
+      # Not the nix build: that binary links against /nix/store and runs only where the same
+      # store paths exist.
+      - name: Install the Rust toolchain
+        run: |
+          rustup toolchain install "$RUST" --profile minimal --target aarch64-apple-darwin,x86_64-apple-darwin
+          rustup default "$RUST"
+
+      - name: Build for arm64 and x86_64
+        run: crates/vxr-app/bundle out aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Check
+        run: |
+          app=out/vxr.app
+          bin=$app/Contents/MacOS/vxr
+          lipo -info "$bin"
+          lipo "$bin" -verify_arch arm64 x86_64
+          codesign --verify --strict --deep --all-architectures --verbose=2 "$app"
+          codesign --display --verbose=2 "$app" 2>&1 | tee signature.txt
+          grep -qx 'Signature=adhoc' signature.txt
+          plutil -p "$app/Contents/Info.plist"
+          ls "$app/Contents/Resources/fonts" "$app/Contents/Resources/vxr.icns"
+          # macOS 13 is the oldest the formula allows, for both slices.
+          for arch in arm64 x86_64; do
+            vtool -arch "$arch" -show-build "$bin" | tee build.txt
+            grep -Eq '^ +minos 13\.0$' build.txt
+          done
+          "$bin" --version
+          "$bin" mcp --help
+          # The Intel slice, under Rosetta, from a copy outside the bundle: macOS 26 tells the user
+          # that an app needing Rosetta will stop working, and a bare binary names no app.
+          cp "$bin" "$RUNNER_TEMP/vxr-x86_64"
+          arch -x86_64 "$RUNNER_TEMP/vxr-x86_64" --version
+          # The MCP server answers the handshake with its version.
+          mkdir scenes
+          printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"release","version":"0"}}}' \
+            | "$bin" mcp --root scenes | tee initialize.json
+          grep -q "\"version\":\"$("$bin" --version | sed 's/^vxr //')\"" initialize.json
+
+      - name: Check the version matches the tag
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        run: |
+          version="$(out/vxr.app/Contents/MacOS/vxr --version)"
+          if [ "$version" != "vxr ${TAG#v}" ]; then
+            echo "vxr --version prints $version, but the tag is $TAG" >&2
+            exit 1
+          fi
+        env:
+          TAG: ${{ github.ref_name }}
+
+      # about.toml lists the accepted licenses: a crate under any other fails here.
+      - name: Write the notices
+        run: |
+          name="cargo-about-$CARGO_ABOUT_VERSION-aarch64-apple-darwin"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$name.tar.gz" \
+            "https://github.com/EmbarkStudios/cargo-about/releases/download/$CARGO_ABOUT_VERSION/$name.tar.gz"
+          echo "$CARGO_ABOUT_SHA256  $RUNNER_TEMP/$name.tar.gz" | shasum -a 256 -c -
+          tar -xzf "$RUNNER_TEMP/$name.tar.gz" -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/$name/cargo-about" generate --locked --fail about.hbs -o THIRD_PARTY.md
+          grep -c '^### ' THIRD_PARTY.md
+
+      # Named for the version vxr prints, which the step above holds to the tag.
+      - name: Archive
+        id: archive
+        run: |
+          version="$(out/vxr.app/Contents/MacOS/vxr --version)"
+          dir="vxr-${version#vxr }-$TARGET"
+          mkdir "$dir"
+          cp -R out/vxr.app "$dir/"
+          install -m 0644 README.md THIRD_PARTY.md "$dir/"
+          # No AppleDouble files for extended attributes, and no runner account in the headers.
+          COPYFILE_DISABLE=1 tar -czf "$dir.tar.gz" --uid 0 --gid 0 --uname root --gname wheel "$dir"
+          echo "archive=$dir.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+
+      - name: Check the archive
+        run: |
+          tar -tvzf "$ARCHIVE"
+          printf '%s\n' "$DIR/" "$DIR/README.md" "$DIR/THIRD_PARTY.md" "$DIR/vxr.app/" > expected.txt
+          tar -tzf "$ARCHIVE" | grep -Ev '^[^/]+/vxr\.app/.' | LC_ALL=C sort | diff expected.txt -
+          mkdir unpacked
+          tar -xzf "$ARCHIVE" -C unpacked
+          app="unpacked/$DIR/vxr.app"
+          test "$(stat -f %Lp "$app/Contents/MacOS/vxr")" = 755
+          codesign --verify --strict --deep --all-architectures "$app"
+          diff -r out/vxr.app "$app"
+          "$app/Contents/MacOS/vxr" --version
+        env:
+          ARCHIVE: ${{ steps.archive.outputs.archive }}
+          DIR: ${{ steps.archive.outputs.dir }}
+
+      - run: shasum -a 256 "$ARCHIVE" | tee "$ARCHIVE.sha256"
+        env:
+          ARCHIVE: ${{ steps.archive.outputs.archive }}
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.archive.outputs.archive }}
+          path: |
+            ${{ steps.archive.outputs.archive }}
+            ${{ steps.archive.outputs.archive }}.sha256
+          if-no-files-found: error
+
+  release:
+    name: Publish the release with the archive
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: binary
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      # To make the release and attach files to it.
+      contents: write
+    steps:
+      # Pinned to a commit: this job holds a token that can change the release.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.binary.outputs.archive }}
+      - run: sha256sum --check "$ARCHIVE.sha256"
+        env:
+          ARCHIVE: ${{ needs.binary.outputs.archive }}
+      # A draft until the archive is on it, so a published release always has one. A release made
+      # by hand for the tag is kept, and gets the archive.
+      - name: Make the release
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "$TAG already has a release"
+            exit 0
+          fi
+          case "$TAG" in
+            *-*) kind=--prerelease ;;
+            *) kind=--latest ;;
+          esac
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft "$kind" \
+            --title "vxr ${TAG#v}" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+      - run: gh release upload "$TAG" "$ARCHIVE" "$ARCHIVE.sha256" --repo "$GITHUB_REPOSITORY" --clobber
+        env:
+          ARCHIVE: ${{ needs.binary.outputs.archive }}
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+      - run: gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+
+  tap:
+    name: Update the tap formula
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    # The formula points at the attached archive, so it must be there first.
+    needs: [binary, release]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      # Until vxr's first full release, brew installs the latest pre-release; after it, only full
+      # releases, so a pre-release never replaces a stable vxr.
+      - name: Check the formula follows this tag
+        id: follow
+        run: |
+          case "$TAG" in
+            *-*)
+              full="$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-pre-releases --exclude-drafts \
+                --limit 1 --json tagName --jq '.[0].tagName // ""')"
+              if [ -n "$full" ]; then
+                echo "$full is out, so the formula stays on full releases"
+                echo "bump=false" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              ;;
+          esac
+          echo "bump=true" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+      - name: Check for the tap's key
+        if: steps.follow.outputs.bump == 'true'
+        run: |
+          if [ "$KEY_SET" != true ]; then
+            echo "::error::TAP_DEPLOY_KEY is not set, so Formula/vxr.rb was not updated: see jrnxf/homebrew-tap docs/automatic-updates.md"
+            exit 1
+          fi
+        env:
+          KEY_SET: ${{ secrets.TAP_DEPLOY_KEY != '' }}
+      # Pinned to a commit: this job holds the key that can push to the tap brew installs from.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.follow.outputs.bump == 'true'
+        with:
+          repository: jrnxf/homebrew-tap
+          ssh-key: ${{ secrets.TAP_DEPLOY_KEY }}
+      # One asset for every Mac: the script writes a top-level url and sha256, and checks the
+      # asset against its .sha256.
+      - if: steps.follow.outputs.bump == 'true'
+        run: scripts/bump-formula.sh vxr "$TAG" "macos=$ARCHIVE"
+        env:
+          ARCHIVE: ${{ needs.binary.outputs.archive }}
+          TAG: ${{ github.ref_name }}
+      - if: steps.follow.outputs.bump == 'true'
+        run: |
+          # A tap PR that points the formula at this release by hand leaves nothing to commit.
+          if git diff --quiet; then
+            echo "Formula/vxr.rb already points at $TAG"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "vxr $TAG"
+          git push
+        env:
+          TAG: ${{ github.ref_name }}

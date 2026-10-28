@@ -5,12 +5,20 @@
 #[cfg(not(target_arch = "wasm32"))]
 use crate::ui::FontBytes;
 
-/// The fonts folder: `VXR_FONTS` if set, else `crates/vxr-app/fonts` in this checkout.
+/// The fonts folder: `VXR_FONTS` if set, else `Contents/Resources/fonts` when the binary runs
+/// from `vxr.app` (a release, `crates/vxr-app/bundle`; also through a symlink to it, such as
+/// Homebrew's `bin/vxr`), else `crates/vxr-app/fonts` in this checkout.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn dir() -> std::path::PathBuf {
-    std::env::var_os("VXR_FONTS")
-        .map(Into::into)
-        .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts"))
+    if let Some(dir) = std::env::var_os("VXR_FONTS") {
+        return dir.into();
+    }
+    let bundled = std::env::current_exe()
+        .and_then(std::fs::canonicalize)
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.parent()?.join("Resources/fonts")))
+        .filter(|dir| dir.is_dir());
+    bundled.unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts"))
 }
 
 /// Read the six font files from `dir`, or say which one is missing.

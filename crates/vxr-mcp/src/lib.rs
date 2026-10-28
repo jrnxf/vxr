@@ -26,6 +26,16 @@ use std::path::PathBuf;
 
 const USAGE: &str = "usage: vxr mcp --root <dir> | vxr mcp --live";
 
+const HELP: &str = r#"usage: vxr mcp --root <dir> | vxr mcp --live
+
+Serves MCP on stdin and stdout for a terminal agent such as Claude Code.
+
+  --root <dir>  open, edit and save the .vox files under <dir>
+  --live        edit the scene open in the vxr window, once its Terminal agents panel
+                (Cmd-K "Terminal agents (MCP)…") allows it
+
+`vxr setup claude` (or codex) registers both with the agent."#;
+
 /// `vxr mcp`'s arguments (after the subcommand): serve on stdin and stdout until it closes.
 pub fn run(args: &[String]) -> Result<(), String> {
     let mut root = None;
@@ -35,6 +45,10 @@ pub fn run(args: &[String]) -> Result<(), String> {
         match a.as_str() {
             "--root" => root = Some(it.next().ok_or(USAGE)?.clone()),
             "--live" => live = true,
+            "-h" | "--help" => {
+                println!("{HELP}");
+                return Ok(());
+            }
             other => return Err(format!("unknown argument {other}; {USAGE}")),
         }
     }

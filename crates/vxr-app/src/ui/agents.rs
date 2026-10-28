@@ -7,8 +7,11 @@
 
 use super::*;
 
-/// The setup lines the panel shows, for Claude Code.
-pub const LIVE_SETUP: &str = "claude mcp add vxr -- vxr mcp --live";
+/// The setup lines the panel shows, for Claude Code: `vxr setup claude` registers files mode as
+/// `vxr` and live mode as `vxr-live`, and the manual line adds only `vxr-live`, so neither
+/// replaces the files mode server.
+pub const SETUP: &str = "vxr setup claude";
+pub const LIVE_SETUP: &str = "claude mcp add vxr-live -- vxr mcp --live";
 pub const FILES_SETUP: &str = "claude mcp add vxr -- vxr mcp --root <folder>";
 
 /// Most Agent edits rows shown, newest first.
@@ -252,7 +255,7 @@ impl Hybrid {
             if let Some(g) = &error {
                 h += g.size().y + 10.0;
             }
-            h += 16.0 + 6.0 + 34.0 + 14.0;
+            h += 16.0 + 6.0 + 34.0 + 6.0 + 34.0 + 14.0;
             h += pairing.size().y.max(28.0) + 14.0;
             h += 16.0 + 6.0 + v.clients.len().max(1) as f32 * row_h + 4.0;
         } else {
@@ -334,7 +337,10 @@ impl Hybrid {
             label(ui, y, "ADD VXR TO CLAUDE CODE");
             y += 16.0 + 6.0;
             let line = Rect::from_min_size(pos2(inner.left(), y), vec2(inner_w, 34.0));
-            setup_line(ui, line, LIVE_SETUP, "agents-copy", &mut hits, &mut copied);
+            setup_line(ui, line, SETUP, "agents-copy", &mut hits, &mut copied);
+            y += 34.0 + 6.0;
+            let line = Rect::from_min_size(pos2(inner.left(), y), vec2(inner_w, 34.0));
+            setup_line(ui, line, LIVE_SETUP, "agents-copy-live", &mut hits, &mut copied);
             y += 34.0 + 14.0;
             // Pairing: the token file, and Regenerate.
             let ph = pairing.size().y.max(28.0);
