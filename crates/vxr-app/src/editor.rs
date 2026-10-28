@@ -963,19 +963,7 @@ impl Editor {
                     self.ui.ai_refused(&text);
                 }
             }
-            AiAction::Stop => {
-                let staged = self.review.as_ref().is_some_and(|r| !review_empty(r, &self.scene));
-                if self.assistant.stop(now) {
-                    if let Some(r) = &mut self.review {
-                        r.stop();
-                    }
-                    if staged {
-                        self.assistant.stop_ask = true;
-                    } else {
-                        self.close_empty_review();
-                    }
-                }
-            }
+            AiAction::Stop => self.stop_request(now),
             AiAction::Keep => self.assistant.stop_ask = false,
             AiAction::Drop => {
                 self.assistant.stop_ask = false;
@@ -991,12 +979,28 @@ impl Editor {
             },
             AiAction::Settings(s) => self.assistant.set_settings(s),
             AiAction::NewChat => {
-                self.assistant.stop(now);
                 self.assistant.stop_ask = false;
+                self.stop_request(now);
                 self.assistant.clear();
             }
         }
         self.assistant.version += 1;
+    }
+
+    /// Stop the request: held calls are dropped from the review, an empty review closes, and
+    /// a staged change asks Keep or Drop.
+    fn stop_request(&mut self, now: f64) {
+        let staged = self.review.as_ref().is_some_and(|r| !review_empty(r, &self.scene));
+        if self.assistant.stop(now) {
+            if let Some(r) = &mut self.review {
+                r.stop();
+            }
+            if staged {
+                self.assistant.stop_ask = true;
+            } else {
+                self.close_empty_review();
+            }
+        }
     }
 
     /// A review the assistant opened and left without a step or a change closes by itself.

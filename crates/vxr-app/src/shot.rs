@@ -269,6 +269,8 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     review(dir)?;
     assistant(dir)?;
     ai_refused()?;
+    ai_new_chat()?;
+    ai_bar_failed()?;
 
     // Save, reopen and compare.
     let bytes = s.ed.scene.to_vox();
@@ -3384,6 +3386,111 @@ fn ai_refused() -> Result<(), String> {
         fake.requests().is_empty() && s.ed.ui.ai_draft() == "open a door",
         "a request turned down in the world goes back into the composer".into(),
     )?;
+    Ok(())
+}
+
+/// New conversation ends a request the way Stop does: held calls leave the card, an empty
+/// review closes, and a staged change asks Keep or Drop; the next request then runs.
+fn ai_new_chat() -> Result<(), String> {
+    use serde_json::json;
+    use vxr_app::assistant::Progress;
+    use vxr_app::assistant::fake::anthropic;
+    let mut s = Shot::new(house(), "house.vox", 1.0)?;
+    s.ed.ui.coach = false;
+    let fake = s.fake_assistant(0);
+    s.ed.assistant.set_key(vxr_ai::Kind::Anthropic, "sk-ant-test-not-a-real-key", false)?;
+    s.ed.ui.ai_open = true;
+    s.frames(2);
+    let v0 = s.voxels();
+
+    // A small change staged, then a big one held: New conversation stops it.
+    fake.answer(anthropic("", &[("paint", json!({"slot": 5, "from_slot": 10}))]));
+    fake.answer(anthropic("", &[("box", json!({"from": [-16, 12, -16], "to": [15, 30, 15], "slot": 60}))]));
+    s.type_into("ai-draft", "make the walls green")?;
+    s.settle(600);
+    check(s.ed.assistant.held(), "a big change waits on the card".into())?;
+    s.ui_click("ai-new")?;
+    s.frames(2);
+    check(
+        !s.ed.assistant.running()
+            && s.ed.assistant.entries.is_empty()
+            && s.ed.review.as_ref().is_some_and(|r| r.held.is_empty())
+            && s.ed.ui.review.as_ref().is_some_and(|c| c.held.is_none())
+            && s.ed.ui.chat.stop_ask
+            && s.ed.ui.hits.contains_key("ai-keep"),
+        "New conversation drops the held calls and asks to keep or drop the staged change".into(),
+    )?;
+    s.ui_click("ai-keep")?;
+    // The kept change takes the next request, whose calls run.
+    fake.answer(anthropic(
+        "",
+        &[
+            ("line", json!({"from": [8, 0, 8], "to": [8, 9, 8], "slot": 40, "name": "flag pole"})),
+            ("done", json!({"summary": "Added a flag pole"})),
+        ],
+    ));
+    s.type_into("review-ask", "add a flag pole")?;
+    s.settle(600);
+    let a = s.last_answer().ok_or("no answer")?;
+    let card = s.ed.ui.review.clone().ok_or("no card")?;
+    check(
+        a.progress == Progress::Done && card.counts[0] == 10 && card.held.is_none(),
+        format!("the next request runs its calls: {:?}, card {:?}", a.progress, card.counts),
+    )?;
+    s.ui_click("review-discard")?;
+
+    // New conversation while a request runs on an empty review closes the review.
+    fake.hang();
+    s.type_into("ai-draft", "make the roof red")?;
+    s.frames(4);
+    check(s.ed.assistant.running() && s.ed.review.is_some(), "a request runs on a new review".into())?;
+    s.ui_click("ai-new")?;
+    s.frames(2);
+    check(
+        !s.ed.assistant.running() && s.ed.review.is_none() && !s.ed.ui.chat.stop_ask && s.voxels() == v0,
+        "New conversation closes the empty review".into(),
+    )?;
+    Ok(())
+}
+
+/// A request from the Cmd-K bar that fails while a review is open leaves the bar open on the
+/// failure, until Escape.
+fn ai_bar_failed() -> Result<(), String> {
+    use serde_json::json;
+    use vxr_app::assistant::Progress;
+    use vxr_app::assistant::fake::anthropic;
+    let mut s = Shot::new(house(), "house.vox", 1.0)?;
+    s.ed.ui.coach = false;
+    let fake = s.fake_assistant(0);
+    s.ed.assistant.set_key(vxr_ai::Kind::Anthropic, "sk-ant-test-not-a-real-key", false)?;
+    s.frames(2);
+    fake.answer(anthropic(
+        "",
+        &[("paint", json!({"slot": 5, "from_slot": 10})), ("done", json!({"summary": "Green walls"}))],
+    ));
+    s.ed.ui.open_ask_bar("make the walls green");
+    s.frames(2);
+    s.frames_with(2, vec![key_event(egui::Key::Enter, egui::Modifiers::NONE)]);
+    s.settle(600);
+    s.frames(3);
+    check(s.ed.review.is_some() && s.ed.ui.ask_bar.is_none(), "a change lands in the card and the bar closes".into())?;
+
+    fake.fail(400, r#"{"error":{"message":"bad request"}}"#);
+    s.ed.ui.open_ask_bar("add a flag pole");
+    s.frames(2);
+    s.frames_with(2, vec![key_event(egui::Key::Enter, egui::Modifiers::NONE)]);
+    s.settle(600);
+    s.frames(3);
+    let a = s.last_answer().ok_or("no answer")?;
+    check(
+        matches!(a.progress, Progress::Failed(_))
+            && s.ed.review.is_some()
+            && s.ed.ui.ask_bar.as_ref().is_some_and(|b| b.sent)
+            && s.ed.ui.hits.contains_key("ask-bar-close"),
+        format!("a failed request keeps the bar open on its failure: {:?}", a.progress),
+    )?;
+    s.frames_with(2, vec![key_event(egui::Key::Escape, egui::Modifiers::NONE)]);
+    check(s.ed.ui.ask_bar.is_none() && s.ed.review.is_some(), "Escape closes the bar, the card stays".into())?;
     Ok(())
 }
 

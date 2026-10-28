@@ -1087,13 +1087,15 @@ impl Hybrid {
 
     /// Cmd-K "Ask AI": a one-line prompt bar left of where the review card goes. Enter sends
     /// the request into the panel's conversation; the bar then follows it, and closes once its
-    /// change shows in the review card (an answer without a change stays until Escape).
+    /// change shows in the review card (an answer without a change, or a failed one, stays
+    /// until Escape).
     pub(super) fn ask_bar(&mut self, ctx: &Context, view: Rect) {
         self.ai.bar_bottom = None;
         let Some(mut bar) = self.ask_bar.take() else { return };
         let answer = self.chat.last_answer().cloned();
         let done = bar.sent && !self.chat.running;
-        if done && self.review.is_some() && !self.chat.stop_ask {
+        let failed = matches!(answer.as_ref().map(|a| &a.progress), Some(Progress::Failed(_)));
+        if done && self.review.is_some() && !self.chat.stop_ask && !failed {
             return;
         }
         let right = view.right() - 12.0 - 232.0 - 8.0 - 304.0 - 8.0;
