@@ -128,6 +128,11 @@ function wire() {
   const key = (e, down) => {
     if (composing || e.isComposing) return;
     mods(e);
+    // A browser fires copy and cut only with a selection, so the hidden field gets one.
+    if (down && (e.metaKey || e.ctrlKey) && ['c', 'x'].includes(e.key.toLowerCase()) && app.wants_keyboard()) {
+      ime.value = ' ';
+      ime.select();
+    }
     if (app.key(e.key, down, e.repeat)) e.preventDefault();
     if ((e.metaKey || e.ctrlKey) && ['k', 'j', 'z', 'n', 'o', 's', 'd', 'g', '=', '+', '-'].includes(e.key.toLowerCase())) e.preventDefault();
   };
@@ -145,6 +150,7 @@ function wire() {
   // egui takes the copy or cut in a frame drawn now.
   for (const type of ['copy', 'cut']) {
     addEventListener(type, (e) => {
+      ime.value = '';
       if (!app.wants_keyboard()) return;
       e.preventDefault();
       app.copy(type === 'cut');
