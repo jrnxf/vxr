@@ -1828,8 +1828,8 @@ impl Hybrid {
 
     // The View flyout of the camera bar: the projection (perspective, orthographic,
     // isometric) and the six side views with their number keys. It opens below the bar (over
-    // the render corner) if it ends above the undo/redo buttons, else above the bar if it
-    // clears the palette, else left of the bar, always on screen. The view the camera is at
+    // the render corner) if it fits on screen, else above the bar if it clears the palette,
+    // else left of the bar and the palette, always on screen. The view the camera is at
     // shows on.
     fn view_panel(&mut self, ctx: &Context, screen: Rect) {
         if !self.view_panel {
