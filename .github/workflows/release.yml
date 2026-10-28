@@ -117,8 +117,10 @@ jobs:
           done
           "$bin" --version
           "$bin" mcp --help
-          # The Intel slice, under Rosetta.
-          arch -x86_64 "$bin" --version
+          # The Intel slice, under Rosetta, from a copy outside the bundle: macOS 26 tells the user
+          # that an app needing Rosetta will stop working, and a bare binary names no app.
+          cp "$bin" "$RUNNER_TEMP/vxr-x86_64"
+          arch -x86_64 "$RUNNER_TEMP/vxr-x86_64" --version
           # The MCP server answers the handshake with its version.
           mkdir scenes
           printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"release","version":"0"}}}' \
