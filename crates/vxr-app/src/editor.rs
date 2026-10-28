@@ -93,7 +93,7 @@ pub struct Editor {
     /// Pointer position in pixels, if it is over the view.
     pointer: Option<[f32; 2]>,
     cursor: Option<Target>,
-    /// Space held: left-drag orbits.
+    /// Space held: a drag pans.
     pub space: bool,
     palette: [[u8; 4]; 256],
     /// The materials the GPU has, to notice changes.
@@ -138,6 +138,9 @@ fn review_allows(a: &Action) -> bool {
     matches!(
         a,
         Action::Frame
+            | Action::FrameSelection
+            | Action::ResetCamera
+            | Action::Zoom(_)
             | Action::Snap(_)
             | Action::Ortho(_)
             | Action::CancelExport
@@ -279,9 +282,8 @@ impl Editor {
         (self.width, self.height, self.ppp) = (width, height, ppp);
     }
 
-    /// Frame the model (or the floor of an empty scene), like MagicaVoxel's `.`. Keeps the
-    /// projection, and the angle when the camera is at a snap view.
-    pub fn frame_scene(&mut self) {
+    /// The box the camera frames: the voxels, or the floor of an empty scene.
+    fn scene_box(&self) -> (Vec3, Vec3) {
         let (lo, hi) = match self.scene.map.occupied_bounds() {
             Some(b) => b,
             None => {
@@ -291,14 +293,103 @@ impl Editor {
             }
         };
         let v = |a: [u32; 3]| Vec3::new(a[0] as f32, a[1] as f32, a[2] as f32);
+        (v(lo), v(hi))
+    }
+
+    /// Keep the camera near the model after a pan or zoom from `from`: inside its bounds (the
+    /// box the bounds frame draws) and whatever `scene_box` frames, so a small model in large
+    /// bounds still leaves all of them to move over.
+    fn bound_camera(&mut self, from: &OrbitCamera) {
+        let (lo, hi) = self.scene_box();
+        let s = self.scene.map.size_voxels();
+        let size = Vec3::new(s[0] as f32, s[1] as f32, s[2] as f32);
+        self.cam.bound(lo.min(Vec3::ZERO), hi.max(size), from);
+    }
+
+    /// Frame a box from the current angle and projection.
+    fn frame_box(&mut self, lo: Vec3, hi: Vec3) {
         let aspect = self.width as f32 / self.height as f32;
-        let (ortho, view) = (self.cam.ortho, self.cam.view());
-        self.cam = OrbitCamera::framing_aspect(v(lo), v(hi), aspect);
-        self.cam.ortho = ortho;
-        if let Some(view) = view {
-            self.cam.snap(view);
-            self.cam.fit(v(lo), v(hi), aspect, 0.9);
+        self.cam.target = (lo + hi) * 0.5;
+        self.cam.fit(lo, hi, aspect, 0.9);
+    }
+
+    /// Frame the model (or the floor of an empty scene), like MagicaVoxel's recenter. Keeps
+    /// the angle and the projection.
+    pub fn frame_scene(&mut self) {
+        let (lo, hi) = self.scene_box();
+        self.frame_box(lo, hi);
+    }
+
+    /// Frame the selected voxels, or the scene when nothing is selected.
+    pub fn frame_selection(&mut self) {
+        match self.scene.selection_bounds() {
+            Some((lo, hi)) => {
+                let v = |a: [i32; 3]| Vec3::new(a[0] as f32, a[1] as f32, a[2] as f32);
+                self.frame_box(v(lo), v(hi) + Vec3::ONE);
+            }
+            None => self.frame_scene(),
         }
+    }
+
+    /// Orbit around the voxel under `p` (pixels) from now on: the camera turns to look at it
+    /// from where it is, so the view centres on it. Nothing happens off the voxels.
+    pub fn orbit_around(&mut self, p: [f32; 2]) {
+        let (o, d) = self.ray(p);
+        let Some(h) = self.scene.map.raycast(o, d, 1e5) else { return };
+        let point = Vec3::from(o) + Vec3::from(d) * h.t;
+        let eye = self.cam.eye();
+        let back = eye - point;
+        self.cam.target = point;
+        self.cam.distance = back.length().max(1.0);
+        self.cam.yaw = back.x.atan2(back.z);
+        self.cam.pitch = (back.y / self.cam.distance).clamp(-1.0, 1.0).asin();
+    }
+
+    /// How much of the scene's box the view shows: the share of its projected rectangle on
+    /// screen, and its height as a share of the view's (for the checks).
+    pub fn scene_in_view(&self) -> (f32, f32) {
+        let (lo, hi) = self.scene_box();
+        self.box_in_view(lo, hi)
+    }
+
+    /// How much of the box `lo`..`hi` the view shows, as `scene_in_view`.
+    pub fn box_in_view(&self, lo: Vec3, hi: Vec3) -> (f32, f32) {
+        let vp = self.cam.view_proj(self.width as f32 / self.height as f32);
+        let (mut x0, mut x1, mut y0, mut y1) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
+        for i in 0..8 {
+            let c = Vec3::new(
+                if i & 1 == 0 { lo.x } else { hi.x },
+                if i & 2 == 0 { lo.y } else { hi.y },
+                if i & 4 == 0 { lo.z } else { hi.z },
+            );
+            let p = vp * c.extend(1.0);
+            if p.w <= 0.0 {
+                return (0.0, 0.0);
+            }
+            let (x, y) = (p.x / p.w, p.y / p.w);
+            (x0, x1, y0, y1) = (x0.min(x), x1.max(x), y0.min(y), y1.max(y));
+        }
+        let area = (x1 - x0) * (y1 - y0);
+        let shown = (x1.min(1.0) - x0.max(-1.0)).max(0.0) * (y1.min(1.0) - y0.max(-1.0)).max(0.0);
+        (if area > 0.0 { shown / area } else { 0.0 }, (y1.min(1.0) - y0.max(-1.0)).max(0.0) / 2.0)
+    }
+
+    /// Back to the starting view: the home angle in perspective, framing the scene.
+    pub fn reset_camera(&mut self) {
+        let (lo, hi) = self.scene_box();
+        self.cam = OrbitCamera::framing_aspect(lo, hi, self.width as f32 / self.height as f32);
+    }
+
+    /// Zoom a step about the middle of the view (the on-screen buttons, Cmd-= and Cmd--).
+    pub fn zoom_step(&mut self, zoom_in: bool) {
+        self.zoom(if zoom_in { 2.0 } else { -2.0 }, None);
+    }
+
+    /// Zoom by `notches` toward `toward`, kept near the model.
+    fn zoom(&mut self, notches: f32, toward: Option<Vec3>) {
+        let from = self.cam;
+        self.cam.zoom(notches, toward);
+        self.bound_camera(&from);
     }
 
     /// What the pointer is over, if anything.
@@ -335,7 +426,11 @@ impl Editor {
             let (dx, dy) = (p[0] - last[0], p[1] - last[1]);
             match drag {
                 CamDrag::Orbit => self.cam.orbit(dx, dy),
-                CamDrag::Pan => self.cam.pan(dx, dy, self.height as f32),
+                CamDrag::Pan => {
+                    let from = self.cam;
+                    self.cam.pan(dx, dy, self.height as f32);
+                    self.bound_camera(&from);
+                }
             }
             return;
         }
@@ -421,12 +516,20 @@ impl Editor {
         {
             return;
         }
+        // As MagicaVoxel: X-click orbits around the voxel clicked from then on.
+        if b == Button::Left && self.ctx.input(|i| i.key_down(egui::Key::X)) {
+            if let Some(p) = self.pointer {
+                self.orbit_around(p);
+            }
+            return;
+        }
         let (shift, _) = self.ui.modifiers();
         self.cam_drag = match b {
-            Button::Right if shift => Some(CamDrag::Pan),
+            // As MagicaVoxel: right-drag orbits, middle-drag and Space with either button pan.
+            Button::Right if shift || self.space => Some(CamDrag::Pan),
             Button::Right => Some(CamDrag::Orbit),
             Button::Middle => Some(CamDrag::Pan),
-            Button::Left if self.space => Some(CamDrag::Orbit),
+            Button::Left if self.space => Some(CamDrag::Pan),
             Button::Left => None,
         };
         if b != Button::Left || self.space {
@@ -742,7 +845,13 @@ impl Editor {
             let (o, d) = self.ray(p);
             self.scene.map.raycast(o, d, 1e5).map(|h| Vec3::from(o) + Vec3::from(d) * h.t)
         });
-        self.cam.zoom(notches, hit);
+        self.zoom(notches, hit);
+    }
+
+    /// A trackpad pinch: `delta` is the change in magnification (positive zooms in), toward
+    /// the point under the pointer as the wheel does.
+    pub fn pinch(&mut self, delta: f32) {
+        self.scroll((1.0 + delta).max(0.01).ln() / -0.88f32.ln());
     }
 
     pub fn undo(&mut self) {
@@ -1050,6 +1159,7 @@ impl Editor {
         self.ui.bounds = self.scene.bounds().size;
         self.ui.world = self.scene.at() == At::World;
         self.ui.lifting = self.lifting();
+        self.ui.camera_hints = self.space || self.cam_drag.is_some();
         self.ui.picked = self.scene.picked().map(|i| node_name(self.scene.world().unwrap(), i));
         self.ui.picked_node = self.scene.picked();
         self.ui.tree = tree_rows(&self.scene);
@@ -1131,6 +1241,9 @@ impl Editor {
                 Action::Undo => self.undo(),
                 Action::Redo => self.redo(),
                 Action::Frame => self.frame_scene(),
+                Action::FrameSelection => self.frame_selection(),
+                Action::ResetCamera => self.reset_camera(),
+                Action::Zoom(zoom_in) => self.zoom_step(zoom_in),
                 Action::Snap(v) => self.cam.snap(v),
                 Action::Ortho(on) => self.cam.ortho = on,
                 Action::Recolor { slot, rgba } => self.scene.put_color(slot, rgba),

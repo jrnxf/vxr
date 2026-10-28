@@ -8,6 +8,13 @@ use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI};
 /// up to 2048 a side, so the farthest corner is under 3548 from the centre) at any zoom.
 pub const ORTHO_BACK: f32 = 4096.0;
 
+/// How far the camera may zoom out: this many times the distance that frames the scene, so
+/// the scene never shrinks below about a fifth of the view.
+pub const MAX_ZOOM_OUT: f32 = 4.0;
+
+/// The angle the camera starts at and `reset` returns to: yaw and pitch, in radians.
+pub const HOME: (f32, f32) = (0.6, 0.6);
+
 /// Pitch of the isometric view: the cube diagonal points at the eye (atan of 1 / sqrt 2).
 pub const ISO_PITCH: f32 = 0.615_479_7;
 
@@ -82,7 +89,8 @@ impl OrbitCamera {
         let target = (lo + hi) * 0.5;
         let radius = (hi - lo).length() * 0.5;
         let fov_y = 45f32.to_radians();
-        let mut c = Self { target, yaw: 0.6, pitch: 0.6, distance: radius / (fov_y * 0.5).sin(), fov_y, ortho: false };
+        let mut c =
+            Self { target, yaw: HOME.0, pitch: HOME.1, distance: radius / (fov_y * 0.5).sin(), fov_y, ortho: false };
         c.fit(lo, hi, aspect, 0.9);
         c
     }
@@ -116,6 +124,19 @@ impl OrbitCamera {
             self.target += right * cx * half_h * aspect + up * cy * half_h;
             self.distance *= (ext / fill).clamp(0.5, 2.0);
         }
+    }
+
+    /// Keep the pivot inside the box `lo`..`hi` and the distance within `MAX_ZOOM_OUT` framings
+    /// of it, so panning and zooming cannot lose the scene. Called after a move from `from`: a
+    /// camera that was already outside (the scene shrank under it) is only kept from going
+    /// further, so the view never jumps.
+    pub fn bound(&mut self, lo: Vec3, hi: Vec3, from: &OrbitCamera) {
+        for a in 0..3 {
+            let (l, h) = (lo[a].min(from.target[a]), hi[a].max(from.target[a]));
+            self.target[a] = self.target[a].clamp(l, h);
+        }
+        let far = (hi - lo).length() * 0.5 / (self.fov_y * 0.5).sin() * MAX_ZOOM_OUT;
+        self.distance = self.distance.min(far.max(from.distance).max(1.0));
     }
 
     /// The orbit position, `distance` from the target. Perspective rays start here.
@@ -270,5 +291,47 @@ mod tests {
         c.snap(View::Top);
         c.orbit(0.0, 50.0);
         assert_eq!(c.pitch, FRAC_PI_2, "orbit stops at straight down");
+    }
+
+    #[test]
+    fn bound_keeps_the_pivot_in_the_box_and_the_zoom_near() {
+        let (lo, hi) = (Vec3::ZERO, Vec3::new(64.0, 16.0, 64.0));
+        let mut c = OrbitCamera::framing(lo, hi);
+        // Framing centres the box's projection, which can put the pivot just outside a flat
+        // box; it may stay there, but goes no further.
+        let (start, far) = (c.target, (hi - lo).length() * 0.5 / (c.fov_y * 0.5).sin() * MAX_ZOOM_OUT);
+        let (elo, ehi) = (lo.min(start), hi.max(start));
+        for _ in 0..200 {
+            let from = c;
+            c.pan(400.0, -300.0, 800.0);
+            c.zoom(-3.0, None);
+            c.orbit(37.0, 11.0);
+            c.bound(lo, hi, &from);
+        }
+        assert!(c.target.cmpge(elo).all() && c.target.cmple(ehi).all(), "pivot {:?} left the box", c.target);
+        assert!(c.distance <= far * 1.001, "{} zoomed out too far", c.distance);
+        // Zooming toward a point keeps the pivot between it and the old pivot, inside the box.
+        let from = c;
+        c.zoom(40.0, Some(hi));
+        c.bound(lo, hi, &from);
+        assert!(c.distance >= 1.0 && c.target.cmple(hi).all());
+    }
+
+    #[test]
+    fn bound_never_jumps_a_camera_already_outside() {
+        let (lo, hi) = (Vec3::ZERO, Vec3::splat(8.0));
+        let mut c = OrbitCamera::framing(Vec3::ZERO, Vec3::splat(512.0));
+        c.target = Vec3::new(300.0, 4.0, 4.0);
+        c.distance = 5000.0;
+        let from = c;
+        // Panning back toward the box is free; panning further out is stopped where it was.
+        c.target.x = 200.0;
+        c.bound(lo, hi, &from);
+        assert_eq!(c.target.x, 200.0);
+        let from = c;
+        c.target.x = 250.0;
+        c.distance = 6000.0;
+        c.bound(lo, hi, &from);
+        assert_eq!((c.target.x, c.distance), (200.0, 5000.0));
     }
 }

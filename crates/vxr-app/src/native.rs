@@ -286,6 +286,12 @@ impl ApplicationHandler for App {
                     });
                 }
             }
+            // A trackpad pinch (macOS) zooms like the wheel, toward the pointer.
+            WindowEvent::PinchGesture { delta, .. } => {
+                if !ed.ctx.is_pointer_over_egui() {
+                    ed.pinch(delta as f32);
+                }
+            }
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.physical_key == PhysicalKey::Code(KeyCode::Space) && !response.consumed {
                     ed.space = event.state == ElementState::Pressed;

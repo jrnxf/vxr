@@ -27,6 +27,7 @@ egui-wgpu = { version = "0.37", default-features = false }
 png = "0.18"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+vxr-mcp.workspace = true
 wgpu = "30.0.1"
 winit = "0.30"
 egui-winit = { version = "0.37", default-features = false, features = ["clipboard", "links", "wayland", "x11"] }
@@ -38,3 +39,6 @@ keyring = "4.2"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wgpu = { version = "30.0.1", default-features = false, features = ["webgpu", "wgsl", "std"] }
+
+[dev-dependencies]
+serde_json = "1"

@@ -258,6 +258,7 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     selection(dir)?;
     model_tools(dir)?;
     views(dir)?;
+    camera(dir, source)?;
     world(dir)?;
     new_scene_save(dir)?;
     new_scene_command(dir)?;
@@ -1778,6 +1779,286 @@ fn views(dir: &Path) -> Result<(), String> {
     check(s.ed.ui.view == Some(View::Front), "the flyout's Front button".into())?;
     press(&mut s, egui::Key::Escape);
     check(!s.ed.ui.view_panel, "Escape closes the View flyout".into())?;
+    Ok(())
+}
+
+/// The camera: pan and zoom cannot lose the scene, every way back (`.`, Home, the camera
+/// bar's buttons, Cmd-K) brings it into view from a lost camera, and the bar's zoom,
+/// projection and views, the trackpad pinch, Space-drag pan, X-click and the hint bar work.
+fn camera(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
+    use vxr_render::{
+        View,
+        camera::{HOME, MAX_ZOOM_OUT},
+    };
+    let (scene, name) = match scene {
+        Some(p) => crate::native::open(p)?,
+        None => {
+            let mut s = Scene::new(NEW_SIZE);
+            s.edit(
+                (40..88)
+                    .flat_map(|x| (0..6).flat_map(move |y| (40..88).map(move |z| ([x, y, z], 12))))
+                    .collect::<Vec<_>>(),
+            );
+            (s, "Untitled".into())
+        }
+    };
+    let mut s = Shot::new(scene, &name, 2.0)?;
+    s.ed.ui.coach = false;
+    s.frames(3);
+    let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    let press = |s: &mut Shot, k, m| s.frames_with(2, vec![key(k, m)]);
+    let cmdk = |s: &mut Shot, q: &str| {
+        s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+        s.frames_with(1, vec![egui::Event::Text(q.into())]);
+        s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    };
+    let (shown, tall) = s.ed.scene_in_view();
+    check(
+        shown > 0.999 && tall > 0.3,
+        format!("opened: the scene is in view ({shown:.2} shown, {tall:.2} of the height)"),
+    )?;
+    let framed = s.ed.cam.distance;
+    let (lo, hi) = s.ed.scene.map.occupied_bounds().ok_or("no voxels")?;
+    let (lo, hi) = (glam::Vec3::from(lo.map(|v| v as f32)), glam::Vec3::from(hi.map(|v| v as f32)));
+    // The camera stays inside the model's bounds (with any voxels outside them), at most
+    // MAX_ZOOM_OUT times the distance whose view holds their bounding sphere.
+    let size = glam::UVec3::from(s.ed.scene.map.size_voxels()).as_vec3();
+    let (blo, bhi) = (lo.min(glam::Vec3::ZERO), hi.max(size));
+    let far = (bhi - blo).length() * 0.5 / (s.ed.cam.fov_y * 0.5).sin() * MAX_ZOOM_OUT;
+    let mid = [s.ed.width as f32 / 2.0, s.ed.height as f32 / 2.0];
+    let drag = |s: &mut Shot, b: Button, d: [f32; 2], steps: usize| {
+        s.ed.pointer_moved(Some(mid));
+        s.ed.button(b, true, false);
+        for k in 1..=steps {
+            s.ed.pointer_moved(Some([mid[0] + d[0] * k as f32, mid[1] + d[1] * k as f32]));
+        }
+        s.ed.button(b, false, false);
+    };
+
+    // What used to lose the scene: pan far away, zoom far out, orbit, pan and zoom again.
+    let v0 = s.voxels();
+    for _ in 0..6 {
+        drag(&mut s, Button::Middle, [60.0, 25.0], 40);
+        s.ed.pointer_moved(Some([mid[0] * 0.2, mid[1] * 0.3]));
+        s.ed.scroll(-40.0);
+        drag(&mut s, Button::Right, [35.0, 6.0], 10);
+        s.hold(egui::Modifiers::SHIFT);
+        drag(&mut s, Button::Right, [-50.0, 40.0], 40);
+        s.hold(egui::Modifiers::NONE);
+    }
+    s.frames(2);
+    let (shown, tall) = s.ed.box_in_view(blo, bhi);
+    let t = s.ed.cam.target;
+    check(
+        t.cmpge(blo).all() && t.cmple(bhi).all() && s.voxels() == v0,
+        format!("pan and zoom keep the orbit point inside the model's bounds ({t:.0})"),
+    )?;
+    check(
+        s.ed.cam.distance <= far * 1.001 && shown > 0.999 && tall > 0.15,
+        format!(
+            "zooming out stops at {:.1}x the framing: the bounds stay in view ({shown:.2} shown, {tall:.2} of the height)",
+            s.ed.cam.distance / framed
+        ),
+    )?;
+
+    // A lost camera, as panning and zooming reached before the bounds: every way back works.
+    let lose = |s: &mut Shot| {
+        s.ed.cam.target += glam::Vec3::new(9000.0, 2500.0, -7000.0);
+        s.ed.cam.distance *= 60.0;
+        s.ed.cam.yaw += 2.0;
+        s.frames(1);
+    };
+    lose(&mut s);
+    let (shown, tall) = s.ed.scene_in_view();
+    check(shown < 0.01 || tall < 0.02, format!("a lost camera: {shown:.2} shown, {tall:.2} of the height"))?;
+    s.save_png(&dir.join("app-2x-camera-lost.png"))?;
+    // Panning and zooming further out from there is held, never jumps back.
+    let (t, d) = (s.ed.cam.target, s.ed.cam.distance);
+    drag(&mut s, Button::Middle, [80.0, 0.0], 10);
+    s.ed.scroll(-10.0);
+    check(
+        (s.ed.cam.target - t).length() <= (t - (blo + bhi) * 0.5).length() && s.ed.cam.distance == d,
+        "from a lost camera pan and zoom do not go further out".into(),
+    )?;
+    let back = |s: &Shot, what: &str| {
+        let (shown, tall) = s.ed.scene_in_view();
+        check(
+            shown > 0.999 && tall > 0.3,
+            format!("{what} brings the scene back ({shown:.2} shown, {tall:.2} of the height)"),
+        )
+    };
+    let yaw = s.ed.cam.yaw;
+    press(&mut s, egui::Key::Period, egui::Modifiers::NONE);
+    back(&s, ".")?;
+    check((s.ed.cam.yaw - yaw).abs() < 1e-6, "framing (.) keeps the angle".into())?;
+    lose(&mut s);
+    s.ui_click("nav-frame")?;
+    back(&s, "the camera bar's Frame scene")?;
+    lose(&mut s);
+    cmdk(&mut s, "frame scene");
+    back(&s, "Cmd-K 'Frame scene'")?;
+    lose(&mut s);
+    s.ed.cam.ortho = true;
+    press(&mut s, egui::Key::Home, egui::Modifiers::NONE);
+    back(&s, "Home (reset camera)")?;
+    check(
+        (s.ed.cam.yaw, s.ed.cam.pitch) == HOME && !s.ed.cam.ortho,
+        "Reset camera: the starting angle in perspective".into(),
+    )?;
+    lose(&mut s);
+    s.ui_click("nav-reset")?;
+    back(&s, "the camera bar's Reset camera")?;
+    lose(&mut s);
+    cmdk(&mut s, "reset camera");
+    back(&s, "Cmd-K 'Reset camera'")?;
+
+    // Frame selection: the bar's button is off until something is selected.
+    check(s.ed.ui.selected == 0, "nothing selected".into())?;
+    let c = ((lo + hi) * 0.5).as_ivec3();
+    let cells: Vec<[i32; 3]> = (-12..12)
+        .flat_map(|x| (-12..12).flat_map(move |y| (-12..12).map(move |z| [c.x + x, c.y + y, c.z + z])))
+        .collect();
+    s.ed.scene.select(cells, vxr_core::select::Mode::Replace);
+    s.frames(1);
+    let (slo, shi) = s.ed.scene.selection_bounds().ok_or("nothing selected")?;
+    lose(&mut s);
+    s.ui_click("nav-frame-sel")?;
+    let (slo, shi) = (glam::IVec3::from(slo).as_vec3(), glam::IVec3::from(shi).as_vec3() + 1.0);
+    let (shown, tall) = s.ed.box_in_view(slo, shi);
+    check(
+        shown > 0.999 && tall > 0.5,
+        format!("the camera bar's Frame selection fills the view with it ({shown:.2} shown, {tall:.2} of the height)"),
+    )?;
+    lose(&mut s);
+    cmdk(&mut s, "frame selection");
+    let (shown, tall) = s.ed.box_in_view(slo, shi);
+    check(shown > 0.999 && tall > 0.5, "Cmd-K 'Frame selection'".into())?;
+    s.ed.scene.select(Vec::new(), vxr_core::select::Mode::Replace);
+    press(&mut s, egui::Key::Home, egui::Modifiers::NONE);
+
+    // Zoom: the bar's buttons and Cmd-= / Cmd-- step about the middle; a pinch zooms too.
+    let d = s.ed.cam.distance;
+    s.ui_click("nav-zoom-in")?;
+    let d1 = s.ed.cam.distance;
+    s.ui_click("nav-zoom-out")?;
+    check(
+        d1 < d * 0.8 && (s.ed.cam.distance - d).abs() < d * 1e-3,
+        format!("the bar's zoom in and out: {d:.0} -> {d1:.0} -> {:.0}", s.ed.cam.distance),
+    )?;
+    press(&mut s, egui::Key::Equals, egui::Modifiers::COMMAND);
+    let d1 = s.ed.cam.distance;
+    press(&mut s, egui::Key::Minus, egui::Modifiers::COMMAND);
+    check(
+        d1 < d * 0.8 && (s.ed.cam.distance - d).abs() < d * 1e-3 && s.ed.ui.size == 1,
+        "Cmd-= and Cmd-- zoom (the brush size stays)".into(),
+    )?;
+    cmdk(&mut s, "zoom in");
+    check(s.ed.cam.distance < d * 0.8, "Cmd-K 'Zoom in'".into())?;
+    cmdk(&mut s, "zoom out");
+    s.ed.pointer_moved(Some(mid));
+    s.ed.pinch(0.5);
+    check(s.ed.cam.distance < d * 0.8, format!("a trackpad pinch zooms in ({:.0})", s.ed.cam.distance))?;
+    s.ed.pinch(-0.9);
+    check(s.ed.cam.distance <= far * 1.001, "a pinch out stops at the same limit".into())?;
+    press(&mut s, egui::Key::Home, egui::Modifiers::NONE);
+
+    // Projection and views from the bar.
+    s.ui_click("nav-proj")?;
+    check(s.ed.cam.ortho, "the bar's Persp button turns orthographic on".into())?;
+    s.ui_click("nav-proj")?;
+    check(!s.ed.cam.ortho, "and back to perspective".into())?;
+    s.ui_click("nav-views")?;
+    let nav = s.ed.ui.hits.get("nav").copied().ok_or("no camera bar")?;
+    let flyout = s.ed.ui.hits.get("view-front").copied().ok_or("no View flyout")?;
+    check(
+        s.ed.ui.view_panel && flyout.right() < nav.left(),
+        "the bar's Views button opens the View flyout beside the bar".into(),
+    )?;
+    s.ui_click("view-front")?;
+    check(s.ed.ui.view == Some(View::Front), "its Front button".into())?;
+    s.ui_click("view-iso")?;
+    // Hover: a tooltip with the shortcut (shown in the screenshot).
+    let at = s.at("nav-frame")?;
+    s.frames_with(3, vec![egui::Event::PointerMoved(at)]);
+    s.save_png(&dir.join("app-2x-camera.png"))?;
+    s.frames_with(1, vec![egui::Event::PointerGone]);
+    press(&mut s, egui::Key::Escape, egui::Modifiers::NONE);
+    check(!s.ed.ui.view_panel, "Escape closes it".into())?;
+    press(&mut s, egui::Key::Home, egui::Modifiers::NONE);
+
+    // Space-drag pans as in MagicaVoxel (no edit), and the hint bar shows the camera moves.
+    let (t, yaw, v) = (s.ed.cam.target, s.ed.cam.yaw, s.voxels());
+    s.ed.space = true;
+    s.frames(1);
+    check(s.ed.ui.camera_hints, "holding Space shows the camera moves in the hint bar".into())?;
+    s.save_png(&dir.join("app-2x-camera-hints.png"))?;
+    drag(&mut s, Button::Left, [-4.0, 3.0], 20);
+    s.ed.space = false;
+    s.frames(1);
+    check(
+        (s.ed.cam.target - t).length() > 1.0 && s.ed.cam.yaw == yaw && s.voxels() == v && !s.ed.ui.camera_hints,
+        "Space-drag pans, keeping the angle and the voxels".into(),
+    )?;
+
+    // X-click: orbit around the voxel clicked, which moves to the middle of the view.
+    press(&mut s, egui::Key::Home, egui::Modifiers::NONE);
+    let p = s.top_face_pixel([mid[0] + 300.0, mid[1] + 120.0])?;
+    s.frames_with(
+        1,
+        vec![egui::Event::Key {
+            key: egui::Key::X,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }],
+    );
+    s.stroke(p, &[]);
+    s.frames_with(
+        1,
+        vec![egui::Event::Key {
+            key: egui::Key::X,
+            physical_key: None,
+            pressed: false,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }],
+    );
+    let (w, h) = (s.ed.width as f32, s.ed.height as f32);
+    let c = s.ed.cam.view_proj(w / h).project_point3(s.ed.cam.target);
+    let moved = (s.ed.cam.target - ((lo + hi) * 0.5)).length();
+    check(
+        s.voxels() == v && c.x.abs() < 1e-3 && c.y.abs() < 1e-3 && moved > 4.0,
+        format!("X-click orbits around the voxel clicked ({:.0}), no edit", s.ed.cam.target),
+    )?;
+
+    // One voxel in large bounds: framing fits the voxel, but zooming in toward it does not
+    // trap the camera there; zoom-out and pan still reach the whole bounds.
+    let mut one = Scene::new(NEW_SIZE);
+    let at = glam::Vec3::new(100.5, 0.5, 100.5);
+    one.edit(vec![([100, 0, 100], 12)]);
+    let mut s = Shot::new(one, "Untitled", 2.0)?;
+    s.ed.ui.coach = false;
+    s.frames(2);
+    let framed = s.ed.cam.distance;
+    s.ed.pointer_moved(Some(mid));
+    s.ed.scroll(3.0);
+    let near = s.ed.cam.distance;
+    for _ in 0..10 {
+        s.ed.scroll(-10.0);
+    }
+    let out = s.ed.cam.distance;
+    drag(&mut s, Button::Middle, [-40.0, -10.0], 30);
+    let t = s.ed.cam.target;
+    let size = glam::UVec3::from(NEW_SIZE).as_vec3();
+    check(
+        near < framed && out > 9.0 * 10.0,
+        format!("one voxel: framed at {framed:.0}, zoomed in to {near:.0}, out to {out:.0} voxels"),
+    )?;
+    check(
+        (t - at).length() > 20.0 && t.cmpge(glam::Vec3::ZERO).all() && t.cmple(size).all(),
+        format!("one voxel: a pan moves over the bounds, away from it ({t:.0})"),
+    )?;
     Ok(())
 }
 
