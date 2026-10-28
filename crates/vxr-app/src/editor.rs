@@ -10,10 +10,11 @@ use vxr_core::select::{Mode, MoveDrag, Transform};
 use vxr_core::tools::{Brush, Gesture, Press, Shape, Target, Tool, plane_cell};
 use vxr_render::{EditBox, Gpu, GpuMap, Guides, OrbitCamera, Preview, Renderer, brickmap_layout, gpu::now_ms};
 
+use crate::agents::Agents;
 use crate::assistant::{Assistant, Entry, Progress};
 use crate::render::{EXPORT_SIZES, Export};
 use crate::review::{Answer, Review, Script};
-use crate::ui::{Action, AiAction, ChatView, FontBytes, Hybrid, LayerRow, Named, Stats, TreeRow};
+use crate::ui::{Action, AiAction, ChatView, EditRow, FontBytes, Hybrid, LayerRow, Named, Stats, TreeRow};
 
 /// Input quiet for this long raises the preview's budget (spikes/preview/RESULTS.md).
 const IDLE_MS: f64 = 300.0;
@@ -126,6 +127,10 @@ pub struct Editor {
     pub assistant: Assistant,
     /// The assistant version the panel shows.
     chat_shown: Option<u64>,
+    /// Terminal agents editing the window through `vxr mcp --live`, and what they did.
+    pub agents: Agents,
+    /// The agents version and history position the UI's Agent edits card shows.
+    agents_shown: Option<(u64, u64)>,
 }
 
 /// Whether a review has nothing in it: no step and no change.
@@ -150,8 +155,14 @@ fn review_allows(a: &Action) -> bool {
             | Action::ReviewBefore(_)
             | Action::AllowMore
             | Action::StopHeld
+            | Action::AllowAgents(_)
+            | Action::RegenerateToken
+            | Action::StopAgent(_)
+            | Action::StopAgents
     )
 }
+
+const REVIEW_AGENT: &str = "The user is reviewing an AI change in vxr: call again once they apply or discard it.";
 
 const REVIEW_FIRST: &str = "Apply or discard the AI change first";
 
@@ -220,6 +231,8 @@ impl Editor {
             asks: Vec::new(),
             assistant: Assistant::default(),
             chat_shown: None,
+            agents: Agents::default(),
+            agents_shown: None,
         };
         e.shape = (e.scene.reshapes(), e.scene.origin);
         e.mark_saved();
@@ -234,6 +247,8 @@ impl Editor {
         self.assistant.stop(now_ms() / 1000.0);
         self.assistant.stop_ask = false;
         self.review = None;
+        // Agent edits name steps of the scene they were made on.
+        self.agents.clear();
         let mut scene = scene;
         scene.map.track_dirty(true);
         self.map = GpuMap::new(&self.gpu.device, &self.gpu.queue, &self.layout, &scene.map, &scene.palette)?;
@@ -1206,6 +1221,25 @@ impl Editor {
                 self.ui.review = None;
             }
         }
+        let key = (self.agents.version, self.scene.history().position());
+        if self.agents_shown != Some(key) {
+            self.agents_shown = Some(key);
+            if self.agents.edits.len() < self.ui.agents_card_closed {
+                self.ui.agents_card_closed = 0;
+            }
+            self.ui.agents.edits = (0..self.agents.edits.len())
+                .map(|i| EditRow {
+                    label: self.agents.edits[i].label.clone(),
+                    applied: self.agents.in_effect(&self.scene, i),
+                })
+                .collect();
+        }
+        let v = &mut self.ui.agents;
+        (v.available, v.allowed) = (self.agents.available, self.agents.allowed);
+        if v.clients != self.agents.clients || v.error != self.agents.error {
+            v.clients = self.agents.clients.clone();
+            v.error = self.agents.error.clone();
+        }
         let stats = self.stats();
         let mut actions = Vec::new();
         let ui = &mut self.ui;
@@ -1305,6 +1339,7 @@ impl Editor {
                 | Action::ReviewBefore(_)
                 | Action::AllowMore
                 | Action::StopHeld => self.review_action(a),
+                Action::UndoAgentEdit(i) => self.undo_agent_edit(i),
                 Action::ExportPng => self.start_export(),
                 Action::CancelExport => {
                     self.export = None;
@@ -1328,6 +1363,59 @@ impl Editor {
             host.push(done);
         }
         (host, out.platform_output)
+    }
+
+    /// Whether an agent's call has to wait: the user is in the middle of a drag, a box or a
+    /// colour or material slider.
+    pub fn agent_busy(&self) -> bool {
+        self.gesture.is_some()
+            || self.moving.is_some()
+            || self.marquee.is_some()
+            || self.world_drag.is_some()
+            || self.lifting()
+            // A colour or material slider being dragged is one open edit until release.
+            || (self.ui.color_edit.is_some() && self.ctx.input(|i| i.pointer.any_down()))
+    }
+
+    /// Run a terminal agent's tool call on the scene (see [`Agents::call`]): an edit applies
+    /// at once as one undo step named after the agent. Refused while an AI change is under
+    /// review, since nothing else edits the scene then.
+    pub fn agent_call(
+        &mut self,
+        conn: u64,
+        client: &str,
+        name: &str,
+        args: &serde_json::Value,
+    ) -> Result<String, String> {
+        if self.review.is_some() {
+            return Err(REVIEW_AGENT.into());
+        }
+        self.place_box();
+        let r = self.agents.call(&mut self.scene, conn, client, name, args);
+        if let At::Object(i) = self.scene.at() {
+            self.last_object = Some(i);
+        }
+        r
+    }
+
+    /// A resource a terminal agent reads, or None for a uri that names nothing.
+    pub fn agent_read(&mut self, uri: &str) -> Option<Result<String, String>> {
+        if self.review.is_some() {
+            return Some(Err(REVIEW_AGENT.into()));
+        }
+        self.agents.read(&mut self.scene, uri)
+    }
+
+    /// The Agent edits card's Undo on edit `i`.
+    pub fn undo_agent_edit(&mut self, i: usize) {
+        self.gesture = None;
+        self.moving = None;
+        self.world_drag = None;
+        let msg = match self.agents.undo_edit(&mut self.scene, i) {
+            Ok(label) => format!("Undid {label}"),
+            Err(e) => format!("Could not undo: {e}"),
+        };
+        self.ui.toast(&self.ctx, msg);
     }
 
     /// Tab: show the world of every object, or go back to editing the last object's model

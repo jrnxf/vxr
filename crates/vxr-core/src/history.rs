@@ -191,6 +191,16 @@ impl History {
         self.undo.last().map_or(0, |(id, _)| *id)
     }
 
+    /// Whether the step that got `id` is applied (on the undo stack).
+    pub fn applied(&self, id: u64) -> bool {
+        self.step(id).is_some()
+    }
+
+    /// The applied step that got `id`, if it is still on the undo stack.
+    pub fn step(&self, id: u64) -> Option<&Step> {
+        self.undo.iter().rev().find(|(i, _)| *i == id).map(|(_, s)| s)
+    }
+
     /// Add `d` to every map cell in every step at `at`, after that map moved.
     pub fn translate(&mut self, at: At, d: [i32; 3]) {
         self.undo

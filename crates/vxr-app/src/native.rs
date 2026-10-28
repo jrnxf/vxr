@@ -62,6 +62,9 @@ struct State {
     config: wgpu::SurfaceConfiguration,
     egui: egui_winit::State,
     editor: Editor,
+    /// Terminal agents' socket, while the user allows them (`vxr mcp --live`).
+    #[cfg(unix)]
+    live: vxr_app::live::Live,
 }
 
 impl App {
@@ -108,7 +111,15 @@ impl App {
         }
         let egui =
             egui_winit::State::new(editor.ctx.clone(), egui::ViewportId::ROOT, &window, Some(ppp), None, Some(max_tex));
-        Ok(State { window, surface, config, egui, editor })
+        Ok(State {
+            window,
+            surface,
+            config,
+            egui,
+            editor,
+            #[cfg(unix)]
+            live: vxr_app::live::Live::new(vxr_mcp::live::dir()),
+        })
     }
 }
 
@@ -124,6 +135,8 @@ impl State {
         };
         let view = frame.texture.create_view(&Default::default());
         let input = self.egui.take_egui_input(&self.window);
+        #[cfg(unix)]
+        self.live.tick(&mut self.editor);
         let (actions, platform) = self.editor.frame(input, &view);
         self.window.pre_present_notify();
         self.editor.gpu.queue.present(frame);
@@ -134,6 +147,10 @@ impl State {
     }
 
     fn act(&mut self, a: Action) {
+        #[cfg(unix)]
+        if self.live.act(&a, &mut self.editor) {
+            return;
+        }
         let ctx = self.editor.ctx.clone();
         match a {
             Action::New => self.window.set_title("Untitled - vxr"),
