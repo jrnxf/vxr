@@ -568,6 +568,15 @@ async () => {
   await key('k', cmd);
   await key('Escape');
   step('Escape closes the command list', !st().cmdk);
+  // Terminal agents: no live mode in the browser; the panel points to the desktop app or
+  // files mode, with no switch.
+  await key('k', cmd);
+  for (const ch of 'terminal agents') await key(ch);
+  await key('Enter');
+  s = st();
+  step('Cmd-K Terminal agents opens the panel, without live mode', s.agents.panel && !s.agents.available && window.vxr.hit('agents-copy-files').length === 2 && window.vxr.hit('agents-allow').length === 0, JSON.stringify(s.agents));
+  await key('Escape');
+  step('Escape closes it', !st().agents.panel);
   await key('?', { shiftKey: true });
   step('? opens the command list, as the coach card says', st().cmdk);
   await key('Escape');

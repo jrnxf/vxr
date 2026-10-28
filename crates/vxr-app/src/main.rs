@@ -4,7 +4,8 @@
 //! - `vxr --stage <script.json> [scene.vox]` also runs a scripted AI request through the
 //!   review step (see `vxr_app::review::Script`), so the card and ghost can be tried by hand.
 //! - `vxr mcp --root <dir>` serves MCP on stdin and stdout: an agent opens, edits and saves the
-//!   `.vox` files under `<dir>` (see `vxr-mcp`).
+//!   `.vox` files under `<dir>` (see `vxr-mcp`). `vxr mcp --live` edits the scene open in a
+//!   running window instead, once its Terminal agents panel (Cmd-K) allows it.
 //! - `vxr --shot <dir> [scene.vox]` runs headless: it drives the editor through every tool,
 //!   saves and reopens the result, and writes `app-1x.png` and `app-2x.png` into `<dir>`.
 //! - `vxr --live <dir>`, only in a build with the `live` feature (`cargo run --release -p
@@ -12,6 +13,9 @@
 //!   providers whose keys are in `ANTHROPIC_API_KEY` and `OPENAI_API_KEY`, and writes
 //!   screenshots and each answer's stream into `<dir>` (the live check; it spends a few cents
 //!   per provider).
+//! - `vxr --agents <dir> [scene.vox]`, in the same `live` build, runs the editor headless with
+//!   terminal agents allowed, for the live mode check from a real agent (`vxr mcp --live`),
+//!   writing screenshots into `<dir>`.
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
@@ -28,6 +32,11 @@ fn main() {
         Some("--shot") => match args.get(1) {
             Some(dir) => shot::run(dir.as_ref(), args.get(2).map(|s| s.as_ref())),
             None => Err("usage: vxr --shot <dir> [scene.vox]".into()),
+        },
+        #[cfg(all(feature = "live", unix))]
+        Some("--agents") => match args.get(1) {
+            Some(dir) => shot::agents(dir.as_ref(), args.get(2).map(|s| s.as_ref())),
+            None => Err("usage: vxr --agents <dir> [scene.vox]".into()),
         },
         #[cfg(feature = "live")]
         Some("--live") => match args.get(1) {

@@ -208,6 +208,13 @@ impl Session {
         self.selection.iter().copied()
     }
 
+    /// Start from this selection instead of the user's (map cells), before any call: a
+    /// terminal agent keeps its own between calls so it never changes the user's.
+    pub fn set_selection(&mut self, cells: impl IntoIterator<Item = Cell>) {
+        self.selection = cells.into_iter().collect();
+        self.selection_before = self.selection.clone();
+    }
+
     /// A new model turn: the per-turn call count starts again.
     pub fn begin_turn(&mut self) {
         self.turn_calls = 0;

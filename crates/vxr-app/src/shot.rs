@@ -271,6 +271,8 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     ai_refused()?;
     ai_new_chat()?;
     ai_bar_failed()?;
+    #[cfg(unix)]
+    agents_live(dir)?;
 
     // Save, reopen and compare.
     let bytes = s.ed.scene.to_vox();
@@ -3577,4 +3579,292 @@ pub fn live(dir: &Path) -> Result<(), String> {
         )?;
     }
     check(ran > 0, format!("{ran} providers checked live"))
+}
+
+/// `vxr mcp --live` as an agent's MCP client sees it, against the window's socket.
+#[cfg(unix)]
+struct LiveAgent(vxr_mcp::Server<vxr_mcp::live::Live<vxr_mcp::live::Remote>>);
+
+#[cfg(unix)]
+impl LiveAgent {
+    fn new(dir: &Path, client: &str) -> LiveAgent {
+        let remote = vxr_mcp::live::Remote::new(dir.to_path_buf());
+        let mut server = vxr_mcp::Server::with(vxr_mcp::live::Live(remote));
+        let init = serde_json::json!({"jsonrpc": "2.0", "id": 0, "method": "initialize",
+            "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": client, "version": "1"}}});
+        server.handle(&init);
+        LiveAgent(server)
+    }
+}
+
+#[cfg(unix)]
+impl Shot {
+    /// One frame with live mode: the agents' requests run, then what the UI asked of live
+    /// mode goes to it, as the native window does.
+    fn live_frames(&mut self, live: &mut vxr_app::live::Live, n: usize) {
+        for _ in 0..n {
+            live.tick(&mut self.ed);
+            self.frames(1);
+            for a in std::mem::take(&mut self.host) {
+                if !live.act(&a, &mut self.ed) {
+                    self.host.push(a);
+                }
+            }
+        }
+    }
+
+    /// An agent's tool call, answered by the window while frames run: its text and whether
+    /// it was an error.
+    fn agent_call(
+        &mut self,
+        live: &mut vxr_app::live::Live,
+        agent: &mut LiveAgent,
+        name: &str,
+        args: serde_json::Value,
+    ) -> (String, bool) {
+        let msg = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": name, "arguments": args}});
+        let reply = std::thread::scope(|sc| {
+            let h = sc.spawn(|| agent.0.handle(&msg));
+            while !h.is_finished() {
+                self.live_frames(live, 1);
+            }
+            h.join().unwrap().unwrap()
+        });
+        self.live_frames(live, 2);
+        let r = &reply["result"];
+        (r["content"][0]["text"].as_str().unwrap_or("").to_string(), r["isError"].as_bool().unwrap_or(true))
+    }
+}
+
+/// Live mode end to end through a real socket in a temporary folder: Cmd-K opens the Terminal
+/// agents panel, its switch opens the socket with a token only the user can read, an agent's
+/// calls apply at once as undo steps named after it, the chip and the Agent edits card show,
+/// the card's Undo takes back an earlier edit and the agent's `undo` its last, a call waits
+/// while the user drags and is refused under review, Stop ends an agent for good, a new token
+/// turns old agents away, and the switch closes the socket.
+#[cfg(unix)]
+fn agents_live(dir: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    use vxr_mcp::live::{NOT_LIVE, REFUSED, SOCKET, STOPPED, TOKEN};
+    let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    let base = std::env::temp_dir().join(format!("vxs-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).map_err(|e| e.to_string())?;
+    let sock_dir = base.join("live");
+    let mut live = vxr_app::live::Live::new(sock_dir.clone());
+    let r = (|| -> Result<(), String> {
+        let mut s = Shot::new(house(), "house.vox", 2.0)?;
+        s.ed.ui.coach = false;
+        s.ed.cam.distance *= 1.9;
+        let h = s.ed.height as f32;
+        s.ed.cam.pan(-420.0, 0.0, h);
+        s.live_frames(&mut live, 2);
+        let mut claude = LiveAgent::new(&sock_dir, "claude-code");
+        let (t, e) = s.agent_call(&mut live, &mut claude, "scene_summary", serde_json::json!({}));
+        check(e && t == NOT_LIVE, "off by default: an agent is told how to turn it on".into())?;
+        check(!sock_dir.join(SOCKET).exists(), "no socket while off".into())?;
+
+        s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+        s.frames_with(1, vec![egui::Event::Text("terminal agents".into())]);
+        s.live_frames(&mut live, 1);
+        s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+        check(s.ed.ui.agents_panel, "Cmd-K Terminal agents opens the panel".into())?;
+        check(
+            s.ed.ui.hits.contains_key("agents-copy") && !s.ed.ui.agents.allowed,
+            "the panel shows the setup line, switched off".into(),
+        )?;
+        s.ui_click("agents-allow")?;
+        s.live_frames(&mut live, 2);
+        let mode = |p: std::path::PathBuf| std::fs::metadata(p).map(|m| m.permissions().mode() & 0o777).unwrap_or(0);
+        check(
+            live.on() && s.ed.ui.agents.allowed && sock_dir.join(SOCKET).exists(),
+            "its switch opens the socket".into(),
+        )?;
+        check(
+            mode(sock_dir.clone()) == 0o700 && mode(sock_dir.join(TOKEN)) == 0o600,
+            "the folder and the token file are the user's only (700, 600)".into(),
+        )?;
+
+        // Each call applies at once, as one undo step named after the agent.
+        let roof = s.ed.scene.map.counts[20];
+        let calls = [
+            ("paint", serde_json::json!({"slot": 3, "from_slot": 20}), "Claude Code: paint 392 voxels"),
+            ("palette_set", serde_json::json!({"slot": 3, "hex": "#D94A3A"}), "Claude Code: palette_set slot 3"),
+            (
+                "line",
+                serde_json::json!({"from": [8, 0, 8], "to": [8, 9, 8], "slot": 40}),
+                "Claude Code: line 10 voxels",
+            ),
+            ("box", serde_json::json!({"from": [9, 7, 8], "to": [12, 9, 8], "slot": 50}), "Claude Code: box 12 voxels"),
+        ];
+        for (name, args, label) in calls {
+            let (t, e) = s.agent_call(&mut live, &mut claude, name, args);
+            check(
+                !e && s.ed.scene.history().undo_label() == Some(label),
+                format!("{name} applies at once as \"{label}\" ({})", t.chars().take(60).collect::<String>()),
+            )?;
+        }
+        check(s.ed.scene.map.counts[20] == 0 && s.ed.scene.map.counts[3] == roof, "the roof is slot 3 now".into())?;
+        let names: Vec<&str> = s.ed.ui.agents.clients.iter().map(|c| c.1.as_str()).collect();
+        check(names == ["Claude Code"], format!("the panel lists the agent: {names:?}"))?;
+        s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+        s.live_frames(&mut live, 2);
+        check(!s.ed.ui.agents_panel, "Escape closes the panel".into())?;
+        check(
+            s.ed.ui.hits.contains_key("agent-stop") && s.ed.ui.hits.contains_key("agent-chip"),
+            "the hint bar shows the agent with Stop".into(),
+        )?;
+        check(
+            (0..4).all(|i| s.ed.ui.hits.contains_key(&format!("agent-undo-{i}"))),
+            "the Agent edits card lists the 4 edits, each with Undo".into(),
+        )?;
+        s.live_frames(&mut live, 40);
+        s.save_png(&dir.join("app-2x-agents.png"))?;
+
+        // The card's Undo on the first edit: reverted under the three after it.
+        s.ui_click("agent-undo-0")?;
+        s.live_frames(&mut live, 2);
+        check(
+            s.ed.scene.map.counts[20] == roof
+                && s.ed.scene.history().undo_label() == Some("Undo Claude Code: paint 392 voxels")
+                && !s.ed.ui.agents.edits[0].applied
+                && s.ed.ui.agents.edits[1..].iter().all(|e| e.applied),
+            "the card's Undo takes back the paint alone, as its own step".into(),
+        )?;
+        check(!s.ed.ui.hits.contains_key("agent-undo-0"), "its row says Undone".into())?;
+        // The agent's undo takes back its own last edit still in effect: the flag.
+        let flag = s.voxels();
+        let (t, e) = s.agent_call(&mut live, &mut claude, "undo", serde_json::json!({}));
+        check(
+            !e && t == "took back Claude Code: box 12 voxels" && s.voxels() == flag - 12,
+            format!("the agent's undo: {t}"),
+        )?;
+        // It was not the last step, so it was taken back as a step of its own: Cmd-Z undoes that.
+        s.frames_with(2, vec![key(egui::Key::Z, egui::Modifiers::COMMAND)]);
+        check(s.voxels() == flag && s.ed.ui.agents.edits[3].applied, "Cmd-Z brings the flag back".into())?;
+
+        // A call waits while the user drags, and runs when the drag ends.
+        s.tool(Tool::Add, Shape::Voxel);
+        let p = s.top_face_pixel([s.ed.width as f32 / 2.0, s.ed.height as f32 / 2.0])?;
+        s.ed.pointer_moved(Some(p));
+        s.ed.button(Button::Left, true, false);
+        let msg = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "place", "arguments": {"cells": [[0, 12, 0]], "slot": 9}}});
+        let (waited, reply) = std::thread::scope(|sc| {
+            let h = sc.spawn(|| claude.0.handle(&msg));
+            for _ in 0..30 {
+                s.live_frames(&mut live, 1);
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            let waited = !h.is_finished();
+            s.ed.button(Button::Left, false, false);
+            while !h.is_finished() {
+                s.live_frames(&mut live, 1);
+            }
+            (waited, h.join().unwrap().unwrap())
+        });
+        check(
+            waited
+                && reply["result"]["isError"] == false
+                && s.ed.scene.history().undo_label() == Some("Claude Code: place 1 voxel"),
+            "a call waits while the user drags, then applies".into(),
+        )?;
+
+        // Under review nothing else edits the scene: the agent is told to wait.
+        s.ed.stage_json(HOUSE_SCRIPT)?;
+        let (t, e) = s.agent_call(&mut live, &mut claude, "erase", serde_json::json!({"cells": [[0, 12, 0]]}));
+        check(e && t.contains("reviewing"), "a call under review is refused".into())?;
+        s.ed.discard_review();
+
+        // Stop on the chip ends the agent for good; another can still connect.
+        s.live_frames(&mut live, 2);
+        s.ui_click("agent-stop")?;
+        s.live_frames(&mut live, 3);
+        check(
+            s.ed.ui.agents.clients.is_empty() && !s.ed.ui.hits.contains_key("agent-chip"),
+            "Stop disconnects it".into(),
+        )?;
+        let (t, e) = s.agent_call(&mut live, &mut claude, "scene_summary", serde_json::json!({}));
+        let (t2, _) = s.agent_call(&mut live, &mut claude, "scene_summary", serde_json::json!({}));
+        check(e && t == STOPPED && t2 == STOPPED, "the stopped agent is told so, and stays stopped".into())?;
+        let mut codex = LiveAgent::new(&sock_dir, "codex");
+        let (_, e) =
+            s.agent_call(&mut live, &mut codex, "place", serde_json::json!({"cells": [[1, 12, 1]], "slot": 9}));
+        check(!e && s.ed.scene.history().undo_label() == Some("Codex: place 1 voxel"), "another agent edits".into())?;
+
+        // A new token from the panel disconnects every agent and turns old ones away.
+        s.ed.ui.open_agents();
+        s.live_frames(&mut live, 2);
+        s.live_frames(&mut live, 40);
+        s.save_png(&dir.join("app-2x-agents-panel.png"))?;
+        let old = std::fs::read_to_string(sock_dir.join(TOKEN)).map_err(|e| e.to_string())?;
+        s.ui_click("agents-regenerate")?;
+        s.live_frames(&mut live, 3);
+        let new = std::fs::read_to_string(sock_dir.join(TOKEN)).map_err(|e| e.to_string())?;
+        check(old != new && s.ed.ui.agents.clients.is_empty(), "Regenerate writes a new token and disconnects".into())?;
+        let (t, e) = s.agent_call(&mut live, &mut codex, "scene_summary", serde_json::json!({}));
+        check(e && t == REFUSED, "an agent with the old token is refused".into())?;
+
+        // The switch closes the socket.
+        s.ui_click("agents-allow")?;
+        s.live_frames(&mut live, 2);
+        check(!live.on() && !sock_dir.join(SOCKET).exists(), "the switch turns it off and removes the socket".into())?;
+        Ok(())
+    })();
+    drop(live);
+    let _ = std::fs::remove_dir_all(&base);
+    r
+}
+
+/// `vxr --agents <dir> [scene.vox]`, only in a build with the `live` feature: the live mode
+/// check from a real terminal agent. The editor runs headless on the scene (the house if none
+/// is given) with "Allow terminal agents" switched on through the panel, at the default
+/// socket, as the window would; while an agent is connected each applied or undone edit
+/// writes `agents-live.png` (chip and card), and once `<dir>/done` appears (or after 15 minutes) it
+/// writes `agents-live-done.png` and the scene as `agents-live.vox` and stops.
+#[cfg(all(feature = "live", unix))]
+pub fn agents(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let (scene, name) = match scene {
+        Some(p) => crate::native::open(p)?,
+        None => (house(), "house.vox".into()),
+    };
+    let mut s = Shot::new(scene, &name, 2.0)?;
+    s.ed.ui.coach = false;
+    s.ed.cam.distance *= 1.9;
+    let h = s.ed.height as f32;
+    s.ed.cam.pan(-420.0, 0.0, h);
+    let mut live = vxr_app::live::Live::new(vxr_mcp::live::dir());
+    s.ed.ui.open_agents();
+    s.live_frames(&mut live, 2);
+    s.ui_click("agents-allow")?;
+    s.live_frames(&mut live, 2);
+    if !live.on() {
+        return Err(s.ed.agents.error.clone().unwrap_or("live mode did not start".into()));
+    }
+    s.ed.ui.agents_panel = false;
+    println!("listening; touch {} to stop", dir.join("done").display());
+    let start = std::time::Instant::now();
+    let mut shown = (0, s.ed.agents.version);
+    while !dir.join("done").exists() && start.elapsed() < std::time::Duration::from_secs(900) {
+        s.live_frames(&mut live, 1);
+        let n = s.ed.agents.edits.len();
+        if s.ed.agents.version != shown.1 && !s.ed.agents.clients.is_empty() {
+            match s.ed.agents.edits.last() {
+                Some(e) if n != shown.0 => println!("edit {n}: {}", e.label),
+                _ => println!("undo: {:?}", s.ed.scene.history().undo_label()),
+            }
+            shown = (n, s.ed.agents.version);
+            s.live_frames(&mut live, 30);
+            s.save_png(&dir.join("agents-live.png"))?;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(8));
+    }
+    s.live_frames(&mut live, 40);
+    s.save_png(&dir.join("agents-live-done.png"))?;
+    std::fs::write(dir.join("agents-live.vox"), s.ed.scene.to_vox()).map_err(|e| e.to_string())?;
+    let labels: Vec<String> = s.ed.agents.edits.iter().map(|e| e.label.clone()).collect();
+    println!("{} edits: {labels:?}", labels.len());
+    Ok(())
 }

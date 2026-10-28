@@ -14,7 +14,9 @@ use vxr_core::material::{Kind, Material};
 use crate::color::{Hsv, hex, parse_hex};
 use crate::render::{EXPORT_SIZES, RenderSettings, SPP_CHOICES};
 
+mod agents;
 mod assistant;
+pub use agents::{AgentsView, EditRow, FILES_SETUP, LIVE_SETUP};
 pub use assistant::{AiAction, AskBar, ChatView, PANEL_W};
 
 // :root custom properties.
@@ -176,6 +178,9 @@ mod icon {
     pub const PANEL_RIGHT: char = '\u{e431}';
     pub const CHEVRON_RIGHT: char = '\u{e06f}';
     pub const SHIELD_CHECK: char = '\u{e1ff}';
+    pub const TERMINAL: char = '\u{e181}';
+    pub const SQUARE_TERMINAL: char = '\u{e20a}';
+    pub const REFRESH_CW: char = '\u{e145}';
 }
 
 pub use vxr_core::select::{Region, Transform};
@@ -293,6 +298,15 @@ pub enum Action {
     AllowMore,
     /// Drop the calls waiting to grow the change; what is staged stays.
     StopHeld,
+    /// Let terminal agents edit this window (true), or stop listening (for the host).
+    AllowAgents(bool),
+    /// Make a new pairing token, disconnecting every agent (for the host).
+    RegenerateToken,
+    /// Disconnect one agent, or every agent (for the host).
+    StopAgent(u64),
+    StopAgents,
+    /// Take back one agent edit (the Agent edits card's Undo).
+    UndoAgentEdit(usize),
 }
 
 /// The review card of an AI change (set by the editor while one is under review).
@@ -570,6 +584,11 @@ pub struct Hybrid {
     stats_right: f32,
     /// Where the camera bar was drawn, which the review card keeps clear of.
     nav_rect: Option<Rect>,
+    /// Terminal agents (set by the editor), the Terminal agents panel, and how many edits
+    /// there were when the Agent edits card was closed (it shows again on the next).
+    pub agents: AgentsView,
+    pub agents_panel: bool,
+    pub agents_card_closed: usize,
 }
 
 struct Command {
@@ -711,6 +730,8 @@ const COMMANDS: &[Command] = &[
     Command { label: "Ask AI…", keys: &["Tab"], run: |h| h.open_ask_bar("") },
     Command { label: "Assistant panel", keys: &["⌘", "J"], run: |h| h.toggle_ai() },
     Command { label: "Assistant keys and model", keys: &[], run: |h| h.open_ai_setup(None) },
+    Command { label: "Terminal agents (MCP)…", keys: &[], run: |h| h.open_agents() },
+    Command { label: "Agent edits", keys: &[], run: |h| h.show_agent_edits() },
 ];
 
 impl Hybrid {
@@ -798,6 +819,9 @@ impl Hybrid {
             ai: Default::default(),
             stats_right: 0.0,
             nav_rect: None,
+            agents: AgentsView::default(),
+            agents_panel: false,
+            agents_card_closed: 0,
         }
     }
 
@@ -974,6 +998,9 @@ impl Hybrid {
         if self.slot_op.take().is_some() || self.color_edit.take().is_some() || self.bounds_panel.take().is_some() {
             return;
         }
+        if std::mem::take(&mut self.agents_panel) {
+            return;
+        }
         if std::mem::take(&mut self.view_panel) || std::mem::take(&mut self.export_menu) {
             return;
         }
@@ -1032,6 +1059,7 @@ impl Hybrid {
         self.palette_panel(ctx, screen);
         self.color_editor(ctx, screen);
         self.review_card(ctx, screen);
+        self.agent_card(ctx, screen);
         if self.coach {
             self.coach_card(ctx, screen);
         }
@@ -1043,6 +1071,7 @@ impl Hybrid {
         self.hint_bar(ctx, screen);
         self.history(ctx, screen);
         self.ask_bar(ctx, screen);
+        self.agents_panel(ctx, screen);
         self.toast_panel(ctx, screen);
         if self.cmdk.is_some() {
             self.cmdk(ctx, full);
@@ -3635,7 +3664,7 @@ impl Hybrid {
     }
 
     // #hint
-    fn hint_bar(&self, ctx: &Context, screen: Rect) {
+    fn hint_bar(&mut self, ctx: &Context, screen: Rect) {
         let t = self.effective_tool();
         let armed;
         let mut items: Vec<(&str, &str)> = match (self.slot_op, t, self.shape) {
@@ -3728,7 +3757,7 @@ impl Hybrid {
         }
     }
 
-    fn hint_panel(&self, ctx: &Context, screen: Rect, items: &[(&str, &str)]) {
+    fn hint_panel(&mut self, ctx: &Context, screen: Rect, items: &[(&str, &str)]) {
         let mut job = LayoutJob::default();
         for (i, (k, v)) in items.iter().enumerate() {
             let lead = if i == 0 { 0.0 } else { 14.0 };
@@ -3744,13 +3773,16 @@ impl Hybrid {
             );
         }
         let g = ctx.fonts_mut(|f| f.layout_job(job));
-        let size = vec2(g.size().x + 28.0, 16.8 + 16.0);
+        // A connected terminal agent shows at the left, with Stop.
+        let chip = self.agent_chip_width(ctx);
+        let size = vec2(chip + g.size().x + 28.0, 16.8 + 16.0);
         // Centred on the view, kept clear of the stats corner and of #history.
         let (lo, hi) = (self.stats_right + 8.0, screen.right() - 12.0 - 82.0 - 8.0);
         let x = (screen.center().x - size.x / 2.0).min(hi - size.x).max(lo);
         let rect = Rect::from_min_size(pos2(x.round(), screen.bottom() - 12.0 - size.y), size);
         Self::panel(ctx, "hint", rect, Order::Middle, |ui, rect| {
-            ui.painter().galley(pos2(rect.left() + 14.0, rect.top() + 8.0), g, MUTED);
+            self.agent_chip(ui, rect, chip);
+            ui.painter().galley(pos2(rect.left() + chip + 14.0, rect.top() + 8.0), g, MUTED);
         });
     }
 
@@ -3876,8 +3908,9 @@ impl Hybrid {
         ctx.request_repaint_after(std::time::Duration::from_secs_f64(until - now));
         let g = ctx.fonts_mut(|f| f.layout_no_wrap(msg.clone(), inter(12.5), TEXT));
         let size = vec2(g.size().x + 28.0, g.size().y + 18.0);
-        // Centred on the view, or on the part of it left of the review card when that shows.
-        let card = self.hits.get("review").filter(|_| self.review.is_some());
+        // Centred on the view, or on the part of it left of the review card (or the Agent edits
+        // card) when that shows.
+        let card = self.hits.get("review").filter(|_| self.review.is_some()).or_else(|| self.hits.get("agent-card"));
         let cx = card.map_or(screen.center().x, |c| (76.0 + c.left()) / 2.0);
         let top = self.ai.bar_bottom.map_or(68.0, |b| b + 8.0);
         let rect = Rect::from_min_size(pos2((cx - size.x / 2.0).round(), top), size);
@@ -4270,7 +4303,7 @@ fn spaced(text: &str, font: FontId, color: Color32, spacing: f32) -> LayoutJob {
     job
 }
 
-fn group_thousands(n: u64) -> String {
+pub(crate) fn group_thousands(n: u64) -> String {
     let s = n.to_string();
     let mut out = String::new();
     for (i, c) in s.chars().enumerate() {
