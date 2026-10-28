@@ -28,7 +28,7 @@ pub struct App {
     events: Vec<egui::Event>,
     modifiers: egui::Modifiers,
     cursor: egui::CursorIcon,
-    /// Text a field copied or cut, for the page to put on the clipboard.
+    /// Text a field copied or cut in the last frame, for the page to put on the clipboard.
     copied: Option<String>,
 }
 
@@ -196,9 +196,20 @@ impl App {
         self.events.push(if cut { egui::Event::Cut } else { egui::Event::Copy });
     }
 
-    /// The text a field copied or cut since the last call, for the page's clipboard.
+    /// The text a field copied or cut in the last frame, for the page's clipboard.
     pub fn take_copied(&mut self) -> Option<String> {
         self.copied.take()
+    }
+
+    /// True when (x, y) is on the focused text field, where a right click opens the
+    /// browser's menu with Paste.
+    pub fn over_field(&self, x: f32, y: f32) -> bool {
+        let ctx = &self.editor.ctx;
+        ctx.egui_wants_keyboard_input()
+            && ctx
+                .memory(|m| m.focused())
+                .and_then(|id| ctx.read_response(id))
+                .is_some_and(|r| r.rect.contains(egui::pos2(x, y)))
     }
 
     /// IME composition from the page's hidden text field: `commit` false is a preedit update.
@@ -257,11 +268,10 @@ impl App {
         let (actions, platform) = self.editor.frame(input, &view);
         self.editor.gpu.queue.present(frame);
         self.cursor = platform.cursor_icon;
-        for c in platform.commands {
-            if let egui::OutputCommand::CopyText(text) = c {
-                self.copied = Some(text);
-            }
-        }
+        self.copied = platform.commands.into_iter().rev().find_map(|c| match c {
+            egui::OutputCommand::CopyText(text) => Some(text),
+            _ => None,
+        });
         actions
             .into_iter()
             .filter_map(|a| match a {

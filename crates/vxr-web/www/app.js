@@ -85,6 +85,15 @@ const mods = (e) => app.set_modifiers(e.shiftKey, e.altKey, e.ctrlKey, e.metaKey
 function wire() {
   canvas.addEventListener('contextmenu', (e) => e.preventDefault());
   canvas.addEventListener('pointerdown', (e) => {
+    // A right click on the focused text field lands on the hidden field put under the pointer,
+    // so the browser opens its own menu there and its Paste fires the paste event below.
+    if (e.button === 2 && app.over_field(e.offsetX, e.offsetY)) {
+      Object.assign(ime.style, { left: `${e.clientX - 8}px`, top: `${e.clientY - 8}px`, width: '16px', height: '16px' });
+      ime.focus();
+      e.preventDefault();
+      addEventListener('contextmenu', () => setTimeout(() => ime.removeAttribute('style')), { once: true, capture: true });
+      return;
+    }
     canvas.setPointerCapture(e.pointerId);
     canvas.focus();
     mods(e);
@@ -132,11 +141,16 @@ function wire() {
     e.preventDefault();
     app.paste(e.clipboardData.getData('text'));
   });
+  // The copied text goes on the clipboard inside the event (a later write can be refused), so
+  // egui takes the copy or cut in a frame drawn now.
   for (const type of ['copy', 'cut']) {
     addEventListener(type, (e) => {
       if (!app.wants_keyboard()) return;
       e.preventDefault();
       app.copy(type === 'cut');
+      step(performance.now());
+      const text = app.take_copied();
+      if (text !== undefined) e.clipboardData.setData('text/plain', text);
     });
   }
   ime.addEventListener('compositionstart', () => { composing = true; });
@@ -164,7 +178,7 @@ function save() {
 }
 
 let cursor = '';
-function tick(now) {
+function step(now) {
   for (const a of app.frame(now / 1000)) {
     if (a === 'open') fileInput.click();
     else if (a === 'save') save();
@@ -179,9 +193,10 @@ function tick(now) {
     }
     else if (a === 'exported') download(app.take_export(), app.export_name(), 'image/png');
   }
-  // Still inside the keystroke's user activation, so the browser takes the write.
-  const copied = app.take_copied();
-  if (copied !== undefined) navigator.clipboard.writeText(copied).catch(() => app.toast('Could not copy to the clipboard'));
+}
+
+function tick(now) {
+  step(now);
   const c = app.cursor();
   if (c !== cursor) canvas.style.cursor = cursor = c;
   // Keep the hidden field focused while egui is typing so the OS IME targets it.
