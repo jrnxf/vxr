@@ -1972,45 +1972,52 @@ fn camera(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     check(s.ed.cam.ortho, "the bar's Persp button turns orthographic on".into())?;
     s.ui_click("nav-proj")?;
     check(!s.ed.cam.ortho, "and back to perspective".into())?;
+    // Where the flyout opens, the render corner shown: below the bar if it ends above undo/redo,
+    // else above the bar if it clears the palette, else left of the bar; never over undo/redo or
+    // the palette, always on screen.
+    fn flyout_at(s: &mut Shot) -> Result<&'static str, String> {
+        let points = (s.ed.width as f32 / s.ed.ppp, s.ed.height as f32 / s.ed.ppp);
+        let hit = |s: &Shot, n: &str| s.ed.ui.hits.get(n).copied().ok_or(format!("no {n} at {points:?}"));
+        let (flyout, nav, palette, history) =
+            (hit(s, "view-flyout")?, hit(s, "nav")?, hit(s, "palette")?, hit(s, "history")?);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(points.0, points.1));
+        let at = if flyout.top() > nav.bottom() {
+            "below"
+        } else if flyout.bottom() < nav.top() {
+            "above"
+        } else {
+            "beside"
+        };
+        check(
+            s.ed.ui.view_panel
+                && s.ed.ui.hits.contains_key("render")
+                && screen.contains_rect(flyout)
+                && !flyout.intersects(nav)
+                && !flyout.intersects(palette)
+                && !flyout.intersects(history)
+                && (at != "beside" || flyout.right() < nav.left()),
+            format!(
+                "at {}x{} the View flyout opens {at} the bar, on screen, clear of the palette and undo/redo",
+                points.0, points.1
+            ),
+        )?;
+        Ok(at)
+    }
     s.ui_click("nav-views")?;
-    let nav = s.ed.ui.hits.get("nav").copied().ok_or("no camera bar")?;
-    let flyout = s.ed.ui.hits.get("view-flyout").copied().ok_or("no View flyout")?;
-    let screen =
-        egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(s.ed.width as f32, s.ed.height as f32) / s.ed.ppp);
-    let palette = s.ed.ui.hits.get("palette").copied().ok_or("no palette")?;
-    let history = s.ed.ui.hits.get("history").copied().ok_or("no history")?;
-    check(
-        s.ed.ui.view_panel
-            && s.ed.ui.hits.contains_key("render")
-            && screen.contains_rect(flyout)
-            && !flyout.intersects(nav)
-            && !flyout.intersects(palette)
-            && !flyout.intersects(history)
-            && flyout.left() > nav.left() - flyout.width(),
-        "the bar's Views button opens the View flyout at the screen edge, clear of the bar, palette and undo/redo"
-            .into(),
-    )?;
-    // Smaller windows, the render corner shown: the flyout still covers no other control.
-    for points in [(1024, 700), (1024, 600), (900, 520)] {
+    check(flyout_at(&mut s)? == "beside", "at the default size it opens beside the bar".into())?;
+    for (points, want) in [
+        ((1280, 1000), "above"),
+        ((1440, 1100), "above"),
+        ((1024, 700), "beside"),
+        ((1024, 600), "beside"),
+        ((900, 520), "beside"),
+    ] {
         let mut t = Shot::sized(Scene::new(NEW_SIZE), "Untitled", 1.0, points)?;
         t.ed.ui.coach = false;
         t.frames(3);
         t.ui_click("nav-views")?;
-        let hit = |n: &str| t.ed.ui.hits.get(n).copied().ok_or(format!("no {n} at {points:?}"));
-        let (flyout, nav, palette, history) = (hit("view-flyout")?, hit("nav")?, hit("palette")?, hit("history")?);
-        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(points.0 as f32, points.1 as f32));
-        check(
-            t.ed.ui.view_panel
-                && t.ed.ui.hits.contains_key("render")
-                && screen.contains_rect(flyout)
-                && !flyout.intersects(nav)
-                && !flyout.intersects(palette)
-                && !flyout.intersects(history),
-            format!(
-                "at {}x{} the View flyout stays on screen, clear of the bar, palette and undo/redo",
-                points.0, points.1
-            ),
-        )?;
+        let at = flyout_at(&mut t)?;
+        check(at == want, format!("at {}x{} it opens {want} the bar ({at})", points.0, points.1))?;
     }
     s.ui_click("view-front")?;
     check(s.ed.ui.view == Some(View::Front), "its Front button".into())?;
@@ -2023,6 +2030,7 @@ fn camera(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     let at = s.at("nav-frame")?;
     s.frames_with(3, vec![egui::Event::PointerMoved(at)]);
     let tip = s.ed.ui.hits.get("nav-tip").copied().ok_or("no tooltip")?;
+    let palette = s.ed.ui.hits.get("palette").copied().ok_or("no palette")?;
     check(!tip.intersects(palette), "the Frame scene tooltip keeps clear of the palette".into())?;
     s.save_png(&dir.join("app-2x-camera-tip.png"))?;
     s.frames_with(1, vec![egui::Event::PointerGone]);

@@ -1740,24 +1740,21 @@ impl Hybrid {
 
     // The View flyout of the camera bar: the projection (perspective, orthographic,
     // isometric) and the six side views with their number keys. It opens toward the screen
-    // edge so the scene stays clear: below the bar over the render corner (left of #history
-    // where it would reach it), else above the bar if it clears the palette, else left of the
-    // bar, always on screen. The view the camera is at shows on.
+    // edge so the scene stays clear: below the bar (over the render corner) if it ends above
+    // #history, else above the bar if it clears the palette, else left of the bar, always on
+    // screen. The view the camera is at shows on.
     fn view_panel(&mut self, ctx: &Context, screen: Rect) {
         if !self.view_panel {
             return;
         }
         let size = vec2(204.0, 210.0);
-        let palette_bottom = self.hits.get("palette").map_or(68.0 + PALETTE_H, |r| r.bottom());
+        let palette_bottom = self.hits.get("palette").map_or(screen.top(), |r| r.bottom());
         let history = history_rect(screen);
         let nav = self.hits.get("nav").copied().unwrap_or(Rect::from_min_size(screen.right_bottom(), egui::Vec2::ZERO));
         let right = nav.right().min(screen.right() - 12.0);
-        let mut below = Rect::from_min_size(pos2(right - size.x, nav.bottom() + 8.0), size);
-        if below.intersects(history) {
-            below = below.translate(vec2(history.left() - 8.0 - below.right(), 0.0));
-        }
+        let below = Rect::from_min_size(pos2(right - size.x, nav.bottom() + 8.0), size);
         let above = Rect::from_min_size(pos2(right - size.x, nav.top() - 8.0 - size.y), size);
-        let rect = if below.bottom() <= screen.bottom() - 12.0 && below.left() >= screen.left() + 12.0 {
+        let rect = if below.bottom() <= history.top() - 8.0 {
             below
         } else if above.top() >= palette_bottom + 8.0 {
             above
@@ -3775,7 +3772,7 @@ impl Hybrid {
         let dock = self.render_dock.unwrap_or_else(|| {
             Rect::from_min_max(pos2(screen.right() - 12.0 - 82.0, screen.bottom() - 52.0), screen.right_bottom())
         });
-        let palette_bottom = 68.0 + PALETTE_H;
+        let palette_bottom = self.hits.get("palette").map_or(screen.top(), |r| r.bottom());
         let mut rect = Rect::from_min_size(pos2(dock.right() - w, dock.top() - 8.0 - size.y), size);
         if rect.top() < palette_bottom + 8.0 {
             // A short window: beside the corner instead, level with its bottom.
