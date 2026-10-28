@@ -1033,7 +1033,7 @@ impl Hybrid {
         self.render_corner(ctx, screen, stats);
         self.render_panel(ctx, screen, stats);
         self.nav_bar(ctx, screen);
-        self.view_panel(ctx);
+        self.view_panel(ctx, screen);
         self.hint_bar(ctx, screen);
         self.history(ctx, screen);
         self.ask_bar(ctx, screen);
@@ -1740,29 +1740,33 @@ impl Hybrid {
 
     // The View flyout of the camera bar: the projection (perspective, orthographic,
     // isometric) and the six side views with their number keys. It opens toward the screen
-    // edge so the scene stays clear: below the bar over the render corner, else above it,
-    // else left of it, always on screen. The view the camera is at shows on.
-    fn view_panel(&mut self, ctx: &Context) {
+    // edge so the scene stays clear: below the bar over the render corner (left of #history
+    // where it would reach it), else above the bar if it clears the palette, else left of the
+    // bar, always on screen. The view the camera is at shows on.
+    fn view_panel(&mut self, ctx: &Context, screen: Rect) {
         if !self.view_panel {
             return;
         }
         let size = vec2(204.0, 210.0);
-        let screen = ctx.content_rect();
+        let palette_bottom = self.hits.get("palette").map_or(68.0 + PALETTE_H, |r| r.bottom());
+        let history = history_rect(screen);
         let nav = self.hits.get("nav").copied().unwrap_or(Rect::from_min_size(screen.right_bottom(), egui::Vec2::ZERO));
         let right = nav.right().min(screen.right() - 12.0);
-        let below = nav.bottom() + 8.0;
-        let above = nav.top() - 8.0 - size.y;
-        let top = if below + size.y <= screen.bottom() - 12.0 {
+        let mut below = Rect::from_min_size(pos2(right - size.x, nav.bottom() + 8.0), size);
+        if below.intersects(history) {
+            below = below.translate(vec2(history.left() - 8.0 - below.right(), 0.0));
+        }
+        let above = Rect::from_min_size(pos2(right - size.x, nav.top() - 8.0 - size.y), size);
+        let rect = if below.bottom() <= screen.bottom() - 12.0 && below.left() >= screen.left() + 12.0 {
             below
-        } else if above >= 68.0 + PALETTE_H + 8.0 {
+        } else if above.top() >= palette_bottom + 8.0 {
             above
         } else {
             // A short window: left of the bar, bottom-aligned with it, kept on screen.
             let top = (nav.bottom() - size.y).clamp(68.0, (screen.bottom() - 12.0 - size.y).max(68.0));
-            let rect = Rect::from_min_size(pos2((nav.left() - 8.0 - size.x).max(screen.left() + 12.0), top), size);
-            return self.view_flyout(ctx, rect);
+            Rect::from_min_size(pos2((nav.left() - 8.0 - size.x).max(screen.left() + 12.0), top), size)
         };
-        self.view_flyout(ctx, Rect::from_min_size(pos2(right - size.x, top), size));
+        self.view_flyout(ctx, rect);
     }
 
     fn view_flyout(&mut self, ctx: &Context, rect: Rect) {
@@ -3846,7 +3850,7 @@ impl Hybrid {
         if let Some((at, label, keys)) = tip {
             // Above the button, unless that crowds the palette: then below, over the render
             // corner, and not at all while the View flyout sits there.
-            let palette = Rect::from_min_size(pos2(screen.right() - 12.0 - 232.0, 68.0), vec2(232.0, PALETTE_H));
+            let palette = self.hits.get("palette").copied().unwrap_or(Rect::NOTHING);
             let shown = tooltip(ctx, at, label, keys, Some((palette.expand(4.0), !view_open)));
             self.hits.extend(shown.map(|r| ("nav-tip".to_string(), r)));
         }
@@ -3854,8 +3858,8 @@ impl Hybrid {
 
     // #history
     fn history(&mut self, ctx: &Context, screen: Rect) {
-        let rect =
-            Rect::from_min_size(pos2(screen.right() - 12.0 - 82.0, screen.bottom() - 12.0 - 40.0), vec2(82.0, 40.0));
+        let rect = history_rect(screen);
+        self.hits.insert("history".into(), rect);
         Self::panel(ctx, "history", rect, Order::Middle, |ui, rect| {
             let cy = rect.center().y;
             let mut x = rect.left() + 4.0;
@@ -4196,6 +4200,11 @@ fn nav_button(
         p.galley(r.center() - g.size() / 2.0, g, color);
     }
     resp
+}
+
+/// Undo and redo at the bottom right of `screen`.
+fn history_rect(screen: Rect) -> Rect {
+    Rect::from_min_size(pos2(screen.right() - 12.0 - 82.0, screen.bottom() - 12.0 - 40.0), vec2(82.0, 40.0))
 }
 
 /// A tooltip above `at`: what the control does and its keys, as kbd chips.

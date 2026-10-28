@@ -519,7 +519,8 @@ async () => {
   step('panning keeps the orbit point inside the model\'s bounds', inBounds && s.voxels === s0.voxels, JSON.stringify([s.cam, s.bounds]));
   for (let k = 0; k < 10; k++) c.dispatchEvent(new WheelEvent('wheel', { clientX: mx, clientY: my, deltaY: 400, bubbles: true, cancelable: true }));
   await frames();
-  step('zooming out stops at a limit and keeps the scene in view', near(st().cam[5], s.cam[5]) && s.inView[0] > 0.999 && s.inView[1] > 0.15, JSON.stringify([s.inView, s.cam[5], st().cam[5]]));
+  const z = st();
+  step('zooming out stops at a limit and keeps the scene in view', near(z.cam[5], s.cam[5]) && z.inView[0] > 0.999 && z.inView[1] > 0.15, JSON.stringify([z.inView, s.cam[5], z.cam[5]]));
   a = s;
   await key('.');
   s = st();

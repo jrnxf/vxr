@@ -1978,14 +1978,40 @@ fn camera(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     let screen =
         egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(s.ed.width as f32, s.ed.height as f32) / s.ed.ppp);
     let palette = s.ed.ui.hits.get("palette").copied().ok_or("no palette")?;
+    let history = s.ed.ui.hits.get("history").copied().ok_or("no history")?;
     check(
         s.ed.ui.view_panel
+            && s.ed.ui.hits.contains_key("render")
             && screen.contains_rect(flyout)
             && !flyout.intersects(nav)
             && !flyout.intersects(palette)
+            && !flyout.intersects(history)
             && flyout.left() > nav.left() - flyout.width(),
-        "the bar's Views button opens the View flyout at the screen edge, clear of the bar and palette".into(),
+        "the bar's Views button opens the View flyout at the screen edge, clear of the bar, palette and undo/redo"
+            .into(),
     )?;
+    // Smaller windows, the render corner shown: the flyout still covers no other control.
+    for points in [(1024, 700), (1024, 600), (900, 520)] {
+        let mut t = Shot::sized(Scene::new(NEW_SIZE), "Untitled", 1.0, points)?;
+        t.ed.ui.coach = false;
+        t.frames(3);
+        t.ui_click("nav-views")?;
+        let hit = |n: &str| t.ed.ui.hits.get(n).copied().ok_or(format!("no {n} at {points:?}"));
+        let (flyout, nav, palette, history) = (hit("view-flyout")?, hit("nav")?, hit("palette")?, hit("history")?);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(points.0 as f32, points.1 as f32));
+        check(
+            t.ed.ui.view_panel
+                && t.ed.ui.hits.contains_key("render")
+                && screen.contains_rect(flyout)
+                && !flyout.intersects(nav)
+                && !flyout.intersects(palette)
+                && !flyout.intersects(history),
+            format!(
+                "at {}x{} the View flyout stays on screen, clear of the bar, palette and undo/redo",
+                points.0, points.1
+            ),
+        )?;
+    }
     s.ui_click("view-front")?;
     check(s.ed.ui.view == Some(View::Front), "its Front button".into())?;
     s.ui_click("view-iso")?;
