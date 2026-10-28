@@ -1739,19 +1739,24 @@ impl Hybrid {
     }
 
     // The View flyout of the camera bar: the projection (perspective, orthographic,
-    // isometric) and the six side views with their number keys. It opens above the bar if it
+    // isometric) and the six side views with their number keys. It opens below the bar (over
+    // the render corner) if it ends above the undo/redo buttons, else above the bar if it
     // clears the palette, else left of the bar, always on screen. The view the camera is at
     // shows on.
     fn view_panel(&mut self, ctx: &Context, screen: Rect) {
         if !self.view_panel {
             return;
         }
-        let size = vec2(204.0, 210.0);
+        let size = vec2(204.0, 176.0);
         let palette_bottom = self.hits.get("palette").map_or(screen.top(), |r| r.bottom());
+        let history_top = self.hits.get("history").map_or(screen.bottom(), |r| r.top());
         let nav = self.hits.get("nav").copied().unwrap_or(Rect::from_min_size(screen.right_bottom(), egui::Vec2::ZERO));
         let right = nav.right().min(screen.right() - 12.0);
+        let below = Rect::from_min_size(pos2(right - size.x, nav.bottom() + 8.0), size);
         let above = Rect::from_min_size(pos2(right - size.x, nav.top() - 8.0 - size.y), size);
-        let rect = if above.top() >= palette_bottom + 8.0 {
+        let rect = if below.bottom() <= history_top - 8.0 {
+            below
+        } else if above.top() >= palette_bottom + 8.0 {
             above
         } else {
             // A short window: left of the bar, bottom-aligned with it, kept on screen.
@@ -1772,7 +1777,7 @@ impl Hybrid {
             // It can sit over the render corner (above it in layer order): its blank space takes the
             // click, not the corner.
             ui.allocate_rect(rect, Sense::click());
-            let hy = rect.top() + 18.0;
+            let hy = rect.top() + 16.0;
             let g = ui.painter().layout_job(spaced("VIEW", inter(9.0), FAINT, 0.72));
             ui.painter().galley(pos2(rect.left() + 12.0, hy - g.size().y / 2.0), g, FAINT);
             let x = Rect::from_center_size(pos2(rect.right() - 19.0, hy), vec2(22.0, 22.0));
@@ -1793,7 +1798,7 @@ impl Hybrid {
             );
             let iso = view == Some(View::Iso);
             let sel = if iso { 2 } else { ortho as usize };
-            let row = Rect::from_min_size(pos2(rect.left() + 12.0, hy + 17.0), vec2(rect.width() - 24.0, 26.0));
+            let row = Rect::from_min_size(pos2(rect.left() + 12.0, hy + 14.0), vec2(rect.width() - 24.0, 24.0));
             let mut seg = Vec::new();
             let labels = ["Persp", "Ortho", "Iso"].map(String::from);
             let names = ["view-persp", "view-ortho", "view-iso"];
@@ -1805,15 +1810,15 @@ impl Hybrid {
             }
             hits.extend(seg.into_iter().map(|(n, r)| (n.to_string(), r)));
             ui.painter().line_segment(
-                [pos2(rect.left() + 10.0, hy + 54.5), pos2(rect.right() - 10.0, hy + 54.5)],
+                [pos2(rect.left() + 10.0, hy + 47.5), pos2(rect.right() - 10.0, hy + 47.5)],
                 Stroke::new(1.0, LINE),
             );
             let cw = (rect.width() - 24.0 - 8.0) / 3.0;
             let cell = |k: usize, cy: f32| {
-                Rect::from_min_size(pos2(rect.left() + 12.0 + (k % 3) as f32 * (cw + 4.0), cy - 13.0), vec2(cw, 26.0))
+                Rect::from_min_size(pos2(rect.left() + 12.0 + (k % 3) as f32 * (cw + 4.0), cy - 12.0), vec2(cw, 24.0))
             };
             for (k, v) in View::ALL[..6].iter().copied().enumerate() {
-                let c = cell(k, hy + 78.0 + (k / 3) as f32 * 34.0);
+                let c = cell(k, hy + 68.0 + (k / 3) as f32 * 28.0);
                 let id = format!("view-{}", v.name().to_lowercase());
                 if view_chip(ui, c, &id, v.name(), &(k + 1).to_string(), view == Some(v)) {
                     run.push(Action::Snap(v));
@@ -1821,7 +1826,7 @@ impl Hybrid {
                 hits.push((id, c));
             }
             ui.painter().line_segment(
-                [pos2(rect.left() + 10.0, hy + 142.5), pos2(rect.right() - 10.0, hy + 142.5)],
+                [pos2(rect.left() + 10.0, hy + 117.5), pos2(rect.right() - 10.0, hy + 117.5)],
                 Stroke::new(1.0, LINE),
             );
             for (k, (id, label, key)) in
@@ -1829,7 +1834,7 @@ impl Hybrid {
                     .into_iter()
                     .enumerate()
             {
-                let c = cell(k, hy + 166.0);
+                let c = cell(k, hy + 138.0);
                 if view_chip(ui, c, id, label, key, guides[k]) {
                     guides[k] = !guides[k];
                 }

@@ -1972,44 +1972,57 @@ fn camera(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     check(s.ed.cam.ortho, "the bar's Persp button turns orthographic on".into())?;
     s.ui_click("nav-proj")?;
     check(!s.ed.cam.ortho, "and back to perspective".into())?;
-    // Where the flyout opens, the render corner shown: above the bar if it clears the palette,
-    // else left of the bar; never over undo/redo or the palette, always on screen.
-    fn flyout_at(s: &mut Shot) -> Result<&'static str, String> {
+    // Where the flyout opens: below the bar (over the render corner) if it ends above undo/redo,
+    // else above the bar if it clears the palette, else left of the bar; never over undo/redo or
+    // the palette, always on screen.
+    fn flyout_at(s: &mut Shot, corner: bool) -> Result<&'static str, String> {
         let points = (s.ed.width as f32 / s.ed.ppp, s.ed.height as f32 / s.ed.ppp);
         let hit = |s: &Shot, n: &str| s.ed.ui.hits.get(n).copied().ok_or(format!("no {n} at {points:?}"));
         let (flyout, nav, palette, history) =
             (hit(s, "view-flyout")?, hit(s, "nav")?, hit(s, "palette")?, hit(s, "history")?);
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(points.0, points.1));
-        let at = if flyout.bottom() < nav.top() { "above" } else { "beside" };
+        let at = if flyout.top() > nav.bottom() {
+            "below"
+        } else if flyout.bottom() < nav.top() {
+            "above"
+        } else {
+            "beside"
+        };
         check(
             s.ed.ui.view_panel
-                && s.ed.ui.hits.contains_key("render")
+                && s.ed.ui.hits.contains_key("render") == corner
                 && screen.contains_rect(flyout)
                 && !flyout.intersects(nav)
                 && !flyout.intersects(palette)
                 && !flyout.intersects(history)
                 && (at != "beside" || flyout.right() < nav.left()),
             format!(
-                "at {}x{} the View flyout opens {at} the bar, on screen, clear of the palette and undo/redo",
-                points.0, points.1
+                "at {}x{} (render corner {}) the View flyout opens {at} the bar, on screen, clear of the palette and undo/redo",
+                points.0,
+                points.1,
+                if corner { "shown" } else { "hidden" }
             ),
         )?;
         Ok(at)
     }
     s.ui_click("nav-views")?;
-    check(flyout_at(&mut s)? == "beside", "at the default size it opens beside the bar".into())?;
-    for (points, want) in [
-        ((1280, 1000), "above"),
-        ((1440, 1100), "above"),
-        ((1024, 700), "beside"),
-        ((1024, 600), "beside"),
-        ((900, 520), "beside"),
+    check(
+        flyout_at(&mut s, true)? == "below",
+        "at the default 1280x800 with the render corner shown it opens below the bar".into(),
+    )?;
+    for (points, corner, want) in [
+        ((1440, 1100), true, "below"),
+        ((1280, 1000), false, "above"),
+        ((1024, 700), true, "beside"),
+        ((1024, 600), true, "beside"),
+        ((900, 520), true, "beside"),
     ] {
         let mut t = Shot::sized(Scene::new(NEW_SIZE), "Untitled", 1.0, points)?;
         t.ed.ui.coach = false;
+        t.ed.ui.show_render = corner;
         t.frames(3);
         t.ui_click("nav-views")?;
-        let at = flyout_at(&mut t)?;
+        let at = flyout_at(&mut t, corner)?;
         check(at == want, format!("at {}x{} it opens {want} the bar ({at})", points.0, points.1))?;
     }
     s.ui_click("view-front")?;
