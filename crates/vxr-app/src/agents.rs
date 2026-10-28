@@ -18,6 +18,8 @@ type Cell = [i32; 3];
 /// One edit an agent applied: its undo step, and the step that took it back, if any.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AgentEdit {
+    /// The agent's connection, which tells two agents of the same name apart.
+    pub conn: u64,
     pub client: String,
     pub label: String,
     /// The history id of its step (`History::position` right after it).
@@ -38,9 +40,10 @@ pub struct Agents {
     pub available: bool,
     /// Why turning it on failed.
     pub error: Option<String>,
-    /// Each agent's own selection (map cells), kept between its calls so it never changes
-    /// the user's; it starts from the user's.
-    selections: HashMap<String, Vec<Cell>>,
+    /// Each agent's own selection (map cells) by connection, kept between its calls so it
+    /// never changes the user's; it starts from the user's. Kept with the model and map it
+    /// was made on, and dropped once either changes.
+    selections: HashMap<u64, (At, u64, Vec<Cell>)>,
     /// Bumped whenever the edits change.
     pub version: u64,
 }
@@ -72,9 +75,16 @@ impl Agents {
         self.version += 1;
     }
 
-    /// Run one tool call from `client` on the scene, as `vxr mcp` files mode does: an edit
-    /// applies at once as one undo step named after the client.
-    pub fn call(&mut self, scene: &mut Scene, client: &str, name: &str, args: &Value) -> Result<String, String> {
+    /// Run one tool call from connection `conn`, named `client`, on the scene, as `vxr mcp`
+    /// files mode does: an edit applies at once as one undo step named after the client.
+    pub fn call(
+        &mut self,
+        scene: &mut Scene,
+        conn: u64,
+        client: &str,
+        name: &str,
+        args: &Value,
+    ) -> Result<String, String> {
         if !vxr_mcp::live::is_tool(name) {
             return Err(format!("Unknown tool: {}", clean(name.as_bytes())));
         }
@@ -82,7 +92,7 @@ impl Agents {
             "undo" => {
                 let i = (0..self.edits.len())
                     .rev()
-                    .find(|&i| self.edits[i].client == client && self.in_effect(scene, i))
+                    .find(|&i| self.edits[i].conn == conn && self.in_effect(scene, i))
                     .ok_or("nothing of yours to undo")?;
                 self.undo_edit(scene, i).map(|l| format!("took back {l}"))
             }
@@ -108,45 +118,56 @@ impl Agents {
                 if scene.at() != At::Object(node) && !scene.edit_object(node) {
                     return Err(format!("node {node}: not an object (a group has no model of its own)"));
                 }
-                self.selections.remove(client);
-                self.query(scene, client, "scene_summary")
+                self.selections.remove(&conn);
+                self.query(scene, Some((conn, client)), "scene_summary")
             }
-            _ => self.run(scene, client, name, args),
+            _ => self.run(scene, Some((conn, client)), name, args),
         }
     }
 
     /// A resource's text, or None for a uri that names nothing.
     pub fn read(&mut self, scene: &mut Scene, uri: &str) -> Option<Result<String, String>> {
         match uri {
-            "vxr://scene/summary" => Some(self.query(scene, "", "scene_summary")),
+            "vxr://scene/summary" => Some(self.query(scene, None, "scene_summary")),
             "vxr://scene/palette" => Some(Ok(vxr_mcp::files::palette_text(scene, &[]))),
             _ => None,
         }
     }
 
-    fn query(&mut self, scene: &mut Scene, client: &str, name: &str) -> Result<String, String> {
-        self.run(scene, client, name, &json!({}))
+    fn query(&mut self, scene: &mut Scene, agent: Option<(u64, &str)>, name: &str) -> Result<String, String> {
+        self.run(scene, agent, name, &json!({}))
     }
 
-    /// One `vxr-ops` call in its own session, applied at once as one undo step.
-    fn run(&mut self, scene: &mut Scene, client: &str, name: &str, args: &Value) -> Result<String, String> {
+    /// One `vxr-ops` call in its own session, applied at once as one undo step. `agent` is
+    /// the caller's connection and name, None for a resource read.
+    fn run(
+        &mut self,
+        scene: &mut Scene,
+        agent: Option<(u64, &str)>,
+        name: &str,
+        args: &Value,
+    ) -> Result<String, String> {
         // A terminal agent is not asked per 10,000 cells: the hard limit stays.
         let limits = Limits { ask_over: Limits::default().changed_cells, ..Limits::default() };
         let mut session = Session::with_limits(scene, None, limits);
-        if let Some(sel) = self.selections.get(client) {
+        let made_on = (scene.at(), scene.reshapes());
+        let (conn, client) = agent.unwrap_or((0, ""));
+        if let Some(&(at, reshapes, ref sel)) = agent.and_then(|_| self.selections.get(&conn))
+            && (at, reshapes) == made_on
+        {
             session.set_selection(sel.iter().copied());
         }
         match session.call(scene, name, args.clone()) {
             Ok(text) => {
-                if !client.is_empty() {
-                    self.selections.insert(client.to_string(), session.selection().collect());
+                if agent.is_some() {
+                    self.selections.insert(conn, (made_on.0, made_on.1, session.selection().collect()));
                 }
                 let label = label(client, name, &session.changes(scene));
                 let before = scene.history().position();
                 session.apply_named(scene, &label);
                 let step = scene.history().position();
                 if step != before {
-                    self.edits.push(AgentEdit { client: client.to_string(), label, step, undone_by: None });
+                    self.edits.push(AgentEdit { conn, client: client.to_string(), label, step, undone_by: None });
                     self.version += 1;
                 }
                 Ok(text)
@@ -218,29 +239,29 @@ mod tests {
         s.edit(cells);
     }
 
-    fn ok(a: &mut Agents, s: &mut Scene, client: &str, name: &str, args: Value) -> String {
-        a.call(s, client, name, &args).unwrap_or_else(|e| panic!("{name}: {e}"))
+    fn ok(a: &mut Agents, s: &mut Scene, conn: u64, client: &str, name: &str, args: Value) -> String {
+        a.call(s, conn, client, name, &args).unwrap_or_else(|e| panic!("{name}: {e}"))
     }
 
     #[test]
     fn each_edit_is_one_undo_step_named_after_the_agent() {
         let (mut a, mut s) = (Agents::default(), scene());
-        ok(&mut a, &mut s, "Claude Code", "box", json!({"from": [0, 0, 0], "to": [3, 0, 3], "slot": 5}));
+        ok(&mut a, &mut s, 1, "Claude Code", "box", json!({"from": [0, 0, 0], "to": [3, 0, 3], "slot": 5}));
         assert_eq!(s.history().undo_label(), Some("Claude Code: box 16 voxels"));
-        ok(&mut a, &mut s, "Claude Code", "place", json!({"cells": [[0, 1, 0]], "slot": 7}));
+        ok(&mut a, &mut s, 1, "Claude Code", "place", json!({"cells": [[0, 1, 0]], "slot": 7}));
         assert_eq!(s.history().undo_label(), Some("Claude Code: place 1 voxel"));
-        ok(&mut a, &mut s, "Codex", "palette_set", json!({"slot": 5, "hex": "#ff0000"}));
+        ok(&mut a, &mut s, 2, "Codex", "palette_set", json!({"slot": 5, "hex": "#ff0000"}));
         assert_eq!(s.history().undo_label(), Some("Codex: palette_set slot 5"));
         // Queries and a selection leave no step.
         let n = a.edits.len();
-        ok(&mut a, &mut s, "Codex", "scene_summary", json!({}));
-        ok(&mut a, &mut s, "Codex", "select", json!({"from": [0, 0, 0], "to": [1, 0, 1]}));
+        ok(&mut a, &mut s, 2, "Codex", "scene_summary", json!({}));
+        ok(&mut a, &mut s, 2, "Codex", "select", json!({"from": [0, 0, 0], "to": [1, 0, 1]}));
         assert_eq!(a.edits.len(), n);
         let labels: Vec<&str> = a.edits.iter().map(|e| e.label.as_str()).collect();
         assert_eq!(labels, ["Claude Code: box 16 voxels", "Claude Code: place 1 voxel", "Codex: palette_set slot 5"]);
         // An error stages nothing.
-        assert!(a.call(&mut s, "Codex", "place", &json!({"cells": [[0, 1]], "slot": 7})).is_err());
-        assert!(a.call(&mut s, "Codex", "list_files", &json!({})).unwrap_err().contains("Unknown tool"));
+        assert!(a.call(&mut s, 2, "Codex", "place", &json!({"cells": [[0, 1]], "slot": 7})).is_err());
+        assert!(a.call(&mut s, 2, "Codex", "list_files", &json!({})).unwrap_err().contains("Unknown tool"));
         assert_eq!(s.history().undo_label(), Some("Codex: palette_set slot 5"));
         // Cmd-Z takes them back in order, by name.
         assert!(s.undo());
@@ -253,8 +274,8 @@ mod tests {
     #[test]
     fn undo_takes_back_one_edit_even_under_later_ones() {
         let (mut a, mut s) = (Agents::default(), scene());
-        ok(&mut a, &mut s, "Claude Code", "place", json!({"cells": [[0, 0, 0], [1, 0, 0]], "slot": 3}));
-        ok(&mut a, &mut s, "Claude Code", "place", json!({"cells": [[5, 0, 5]], "slot": 4}));
+        ok(&mut a, &mut s, 1, "Claude Code", "place", json!({"cells": [[0, 0, 0], [1, 0, 0]], "slot": 3}));
+        ok(&mut a, &mut s, 1, "Claude Code", "place", json!({"cells": [[5, 0, 5]], "slot": 4}));
         // The user's own edit on top.
         by_hand(&mut s, &[([6, 0, 6], 6)]);
         // The card's Undo on the first: reverted as a step of its own, the rest stays.
@@ -275,12 +296,12 @@ mod tests {
 
         // The agent's undo takes back its own last edit in effect, not the user's.
         assert!(s.undo());
-        let t = ok(&mut a, &mut s, "Claude Code", "undo", json!({}));
+        let t = ok(&mut a, &mut s, 1, "Claude Code", "undo", json!({}));
         assert_eq!(t, "took back Claude Code: place 1 voxel");
         assert_eq!((at(&s, [5, 0, 5]), at(&s, [6, 0, 6])), (0, 6));
-        assert!(a.call(&mut s, "Codex", "undo", &json!({})).unwrap_err().contains("nothing of yours"));
+        assert!(a.call(&mut s, 2, "Codex", "undo", &json!({})).unwrap_err().contains("nothing of yours"));
         // The last step undoes as Cmd-Z does: redo brings it back.
-        let t = ok(&mut a, &mut s, "Claude Code", "undo", json!({}));
+        let t = ok(&mut a, &mut s, 1, "Claude Code", "undo", json!({}));
         assert_eq!(t, "took back Claude Code: place 2 voxels");
         assert_eq!(at(&s, [0, 0, 0]), 0);
     }
@@ -289,10 +310,37 @@ mod tests {
     fn an_agent_keeps_its_own_selection() {
         let (mut a, mut s) = (Agents::default(), scene());
         by_hand(&mut s, &[([0, 0, 0], 2), ([1, 0, 0], 2), ([2, 0, 0], 2)]);
-        ok(&mut a, &mut s, "Claude Code", "select", json!({"from": [0, 0, 0], "to": [1, 0, 0]}));
+        ok(&mut a, &mut s, 1, "Claude Code", "select", json!({"from": [0, 0, 0], "to": [1, 0, 0]}));
         assert_eq!(s.selected_count(), 0, "the user's selection is untouched");
-        ok(&mut a, &mut s, "Claude Code", "paint", json!({"slot": 9, "selection": true}));
+        ok(&mut a, &mut s, 1, "Claude Code", "paint", json!({"slot": 9, "selection": true}));
         assert_eq!((at(&s, [0, 0, 0]), at(&s, [1, 0, 0]), at(&s, [2, 0, 0])), (9, 9, 2));
         assert_eq!(s.history().undo_label(), Some("Claude Code: paint 2 voxels"));
+    }
+
+    #[test]
+    fn agents_of_the_same_name_are_told_apart_by_connection() {
+        let (mut a, mut s) = (Agents::default(), scene());
+        by_hand(&mut s, &[([0, 0, 0], 2), ([1, 0, 0], 2)]);
+        ok(&mut a, &mut s, 1, "Claude Code", "select", json!({"from": [0, 0, 0], "to": [0, 0, 0]}));
+        ok(&mut a, &mut s, 2, "Claude Code", "select", json!({"from": [1, 0, 0], "to": [1, 0, 0]}));
+        ok(&mut a, &mut s, 1, "Claude Code", "paint", json!({"slot": 9, "selection": true}));
+        assert_eq!((at(&s, [0, 0, 0]), at(&s, [1, 0, 0])), (9, 2), "each keeps its own selection");
+        assert!(a.call(&mut s, 2, "Claude Code", "undo", &json!({})).unwrap_err().contains("nothing of yours"));
+        assert_eq!(at(&s, [0, 0, 0]), 9);
+        ok(&mut a, &mut s, 1, "Claude Code", "undo", json!({}));
+        assert_eq!(at(&s, [0, 0, 0]), 2);
+    }
+
+    #[test]
+    fn a_selection_is_dropped_once_the_map_changes() {
+        let (mut a, mut s) = (Agents::default(), scene());
+        by_hand(&mut s, &[([0, 0, 0], 2), ([1, 0, 0], 2)]);
+        ok(&mut a, &mut s, 1, "Claude Code", "select", json!({"from": [1, 0, 0], "to": [1, 0, 0]}));
+        // The user grows the model on its low side: every map cell moves.
+        let b = s.bounds();
+        let size = s.map.size_voxels();
+        s.set_bounds([b.lo[0] - 1, b.lo[1], b.lo[2]], [size[0] + 1, size[1], size[2]]).unwrap();
+        let _ = a.call(&mut s, 1, "Claude Code", "paint", &json!({"slot": 9, "selection": true}));
+        assert_eq!((at(&s, [0, 0, 0]), at(&s, [1, 0, 0])), (2, 2), "no cell painted through a stale selection");
     }
 }

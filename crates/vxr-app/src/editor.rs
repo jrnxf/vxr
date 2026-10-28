@@ -1224,6 +1224,9 @@ impl Editor {
         let key = (self.agents.version, self.scene.history().position());
         if self.agents_shown != Some(key) {
             self.agents_shown = Some(key);
+            if self.agents.edits.len() < self.ui.agents.edits.len() {
+                self.ui.agents_card_closed = 0;
+            }
             self.ui.agents.edits = (0..self.agents.edits.len())
                 .map(|i| EditRow {
                     label: self.agents.edits[i].label.clone(),
@@ -1374,12 +1377,18 @@ impl Editor {
     /// Run a terminal agent's tool call on the scene (see [`Agents::call`]): an edit applies
     /// at once as one undo step named after the agent. Refused while an AI change is under
     /// review, since nothing else edits the scene then.
-    pub fn agent_call(&mut self, client: &str, name: &str, args: &serde_json::Value) -> Result<String, String> {
+    pub fn agent_call(
+        &mut self,
+        conn: u64,
+        client: &str,
+        name: &str,
+        args: &serde_json::Value,
+    ) -> Result<String, String> {
         if self.review.is_some() {
             return Err(REVIEW_AGENT.into());
         }
         self.place_box();
-        let r = self.agents.call(&mut self.scene, client, name, args);
+        let r = self.agents.call(&mut self.scene, conn, client, name, args);
         if let At::Object(i) = self.scene.at() {
             self.last_object = Some(i);
         }

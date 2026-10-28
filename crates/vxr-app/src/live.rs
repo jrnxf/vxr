@@ -55,6 +55,10 @@ impl Live {
             Action::RegenerateToken => match self.host.as_ref().map(Host::regenerate) {
                 Some(Ok(())) => {
                     self.pending.clear();
+                    if let Some(h) = &self.host {
+                        let open = h.clients();
+                        self.pending.extend(h.poll().into_iter().filter(|r| open.iter().any(|(c, _)| *c == r.conn)));
+                    }
                     ed.ui.toast(&ctx, "New pairing token: every agent was disconnected");
                 }
                 Some(Err(e)) => ed.ui.toast(&ctx, format!("Could not make a new token: {e}")),
@@ -71,6 +75,7 @@ impl Live {
     fn stop(&mut self, ed: &mut Editor, which: impl Fn(u64) -> bool) {
         let Some(h) = &self.host else { return };
         let stopped: Vec<(u64, String)> = h.clients().into_iter().filter(|(c, _)| which(*c)).collect();
+        self.pending.extend(h.poll());
         self.pending.retain(|r| !which(r.conn));
         for (c, _) in &stopped {
             h.stop(*c);
@@ -93,13 +98,16 @@ impl Live {
     pub fn tick(&mut self, ed: &mut Editor) {
         if let Some(h) = &self.host {
             self.pending.extend(h.poll());
+            let open = h.clients();
+            self.pending.retain(|r| open.iter().any(|(c, _)| *c == r.conn));
         }
         while !ed.agent_busy() {
             let Some(r) = self.pending.pop_front() else { break };
             match r.ask.clone() {
                 Ask::Call { name, args } => {
                     let client = r.client.clone();
-                    r.answer(ed.agent_call(&client, &name, &args));
+                    let conn = r.conn;
+                    r.answer(ed.agent_call(conn, &client, &name, &args));
                 }
                 Ask::Read(uri) => match ed.agent_read(&uri) {
                     Some(text) => r.answer(text),
