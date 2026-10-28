@@ -1224,7 +1224,7 @@ impl Editor {
         let key = (self.agents.version, self.scene.history().position());
         if self.agents_shown != Some(key) {
             self.agents_shown = Some(key);
-            if self.agents.edits.len() < self.ui.agents.edits.len() {
+            if self.agents.edits.len() < self.ui.agents_card_closed {
                 self.ui.agents_card_closed = 0;
             }
             self.ui.agents.edits = (0..self.agents.edits.len())
