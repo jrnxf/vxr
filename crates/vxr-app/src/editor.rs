@@ -80,6 +80,9 @@ pub struct Editor {
     pub width: u32,
     pub height: u32,
     pub ppp: f32,
+    /// The width in points the docked assistant takes from the right of the view, as the
+    /// camera last allowed for: the scene stays centred in the space left over.
+    ai_dock: f32,
     gesture: Option<Gesture>,
     /// The selection being dragged, or a box being drawn, with the select tool.
     moving: Option<MoveDrag>,
@@ -205,6 +208,7 @@ impl Editor {
             width,
             height,
             ppp,
+            ai_dock: 0.0,
             gesture: None,
             moving: None,
             move_press: None,
@@ -321,11 +325,24 @@ impl Editor {
         self.cam.bound(lo.min(Vec3::ZERO), hi.max(size), from);
     }
 
-    /// Frame a box from the current angle and projection.
+    /// The view's width in pixels left of the docked assistant.
+    fn free_width(&self) -> f32 {
+        (self.width as f32 - self.ai_dock * self.ppp).max(1.0)
+    }
+
+    /// Move the camera sideways so the view's middle sits `px` pixels further left: the
+    /// scene's centre stays in the middle of the space the docked assistant leaves.
+    fn shift_left(&mut self, px: f32) {
+        self.cam.pan(-px, 0.0, self.height as f32);
+    }
+
+    /// Frame a box from the current angle and projection, in the space left of the docked
+    /// assistant.
     fn frame_box(&mut self, lo: Vec3, hi: Vec3) {
-        let aspect = self.width as f32 / self.height as f32;
+        let aspect = self.free_width() / self.height as f32;
         self.cam.target = (lo + hi) * 0.5;
         self.cam.fit(lo, hi, aspect, 0.9);
+        self.shift_left(self.ai_dock * self.ppp / 2.0);
     }
 
     /// Frame the model (or the floor of an empty scene), like MagicaVoxel's recenter. Keeps
@@ -392,7 +409,8 @@ impl Editor {
     /// Back to the starting view: the home angle in perspective, framing the scene.
     pub fn reset_camera(&mut self) {
         let (lo, hi) = self.scene_box();
-        self.cam = OrbitCamera::framing_aspect(lo, hi, self.width as f32 / self.height as f32);
+        self.cam = OrbitCamera::framing_aspect(lo, hi, self.free_width() / self.height as f32);
+        self.shift_left(self.ai_dock * self.ppp / 2.0);
     }
 
     /// Zoom a step about the middle of the view (the on-screen buttons, Cmd-= and Cmd--).
@@ -1244,6 +1262,12 @@ impl Editor {
         let mut actions = Vec::new();
         let ui = &mut self.ui;
         let out = self.ctx.run_ui(input, |u| actions = ui.ui(u.ctx(), &stats));
+        // The assistant docked or left: keep the scene centred in the space beside it.
+        let dock = self.ui.ai_width();
+        if dock != self.ai_dock {
+            self.shift_left((dock - self.ai_dock) * self.ppp / 2.0);
+            self.ai_dock = dock;
+        }
         let mut host = Vec::new();
         actions.extend(std::iter::repeat_n(Action::ToggleWorld, tabs));
         if let Some(text) = self.ui.asked.take() {
