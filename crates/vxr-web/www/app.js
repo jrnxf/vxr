@@ -85,6 +85,15 @@ const mods = (e) => app.set_modifiers(e.shiftKey, e.altKey, e.ctrlKey, e.metaKey
 function wire() {
   canvas.addEventListener('contextmenu', (e) => e.preventDefault());
   canvas.addEventListener('pointerdown', (e) => {
+    // A right click on the focused text field lands on the hidden field put under the pointer,
+    // so the browser opens its own menu there and its Paste fires the paste event below.
+    if (e.button === 2 && app.over_field(e.offsetX, e.offsetY)) {
+      Object.assign(ime.style, { left: `${e.clientX - 8}px`, top: `${e.clientY - 8}px`, width: '16px', height: '16px' });
+      ime.focus();
+      e.preventDefault();
+      addEventListener('contextmenu', () => setTimeout(() => ime.removeAttribute('style')), { once: true, capture: true });
+      return;
+    }
     canvas.setPointerCapture(e.pointerId);
     canvas.focus();
     mods(e);
@@ -119,13 +128,37 @@ function wire() {
   const key = (e, down) => {
     if (composing || e.isComposing) return;
     mods(e);
+    // A browser fires copy and cut only with a selection, so the hidden field gets one.
+    if (down && (e.metaKey || e.ctrlKey) && ['c', 'x'].includes(e.key.toLowerCase()) && app.wants_keyboard()) {
+      ime.value = ' ';
+      ime.select();
+    }
     if (app.key(e.key, down, e.repeat)) e.preventDefault();
     if ((e.metaKey || e.ctrlKey) && ['k', 'j', 'z', 'n', 'o', 's', 'd', 'g', '=', '+', '-'].includes(e.key.toLowerCase())) e.preventDefault();
   };
   addEventListener('keydown', (e) => key(e, true));
   addEventListener('keyup', (e) => key(e, false));
   addEventListener('blur', () => app.blur());
-  addEventListener('paste', (e) => { if (app.wants_keyboard()) app.paste(e.clipboardData.getData('text')); });
+  // While a text field has focus Cmd-C, Cmd-X and Cmd-V keep their default action, which
+  // fires these events (app.key leaves them unprevented).
+  addEventListener('paste', (e) => {
+    if (!app.wants_keyboard()) return;
+    e.preventDefault();
+    app.paste(e.clipboardData.getData('text'));
+  });
+  // The copied text goes on the clipboard inside the event (a later write can be refused), so
+  // egui takes the copy or cut in a frame drawn now.
+  for (const type of ['copy', 'cut']) {
+    addEventListener(type, (e) => {
+      ime.value = '';
+      if (!app.wants_keyboard()) return;
+      e.preventDefault();
+      app.copy(type === 'cut');
+      step(performance.now());
+      const text = app.take_copied();
+      if (text !== undefined) e.clipboardData.setData('text/plain', text);
+    });
+  }
   ime.addEventListener('compositionstart', () => { composing = true; });
   ime.addEventListener('compositionupdate', (e) => app.ime(e.data, false));
   ime.addEventListener('compositionend', (e) => { composing = false; app.ime(e.data, true); ime.value = ''; });
@@ -151,7 +184,7 @@ function save() {
 }
 
 let cursor = '';
-function tick(now) {
+function step(now) {
   for (const a of app.frame(now / 1000)) {
     if (a === 'open') fileInput.click();
     else if (a === 'save') save();
@@ -166,6 +199,10 @@ function tick(now) {
     }
     else if (a === 'exported') download(app.take_export(), app.export_name(), 'image/png');
   }
+}
+
+function tick(now) {
+  step(now);
   const c = app.cursor();
   if (c !== cursor) canvas.style.cursor = cursor = c;
   // Keep the hidden field focused while egui is typing so the OS IME targets it.

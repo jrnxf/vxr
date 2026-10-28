@@ -915,11 +915,28 @@ async () => {
     const ai = () => JSON.parse(window.vxr.ai());
     const seen = async () => (await fetch('/__fake/seen')).json();
     const until = async (f, n = 900) => { for (let i = 0; i < n && !f(); i++) await frames(1); return f(); };
+    // Cmd-V in a field leaves the keydown to the browser, whose paste event then carries the
+    // text (a prevented keydown fires none, so pasting did nothing).
+    let clipKeys = true;
+    const clipEvent = (type, text = '') => {
+      const data = new DataTransfer();
+      data.setData('text/plain', text);
+      document.activeElement.dispatchEvent(new ClipboardEvent(type, { clipboardData: data, bubbles: true, cancelable: true }));
+      return data.getData('text/plain');
+    };
+    const ime = document.getElementById('ime');
+    const selects = async (k) => !(await key(k, cmd)) && ime.selectionStart < ime.selectionEnd && document.activeElement === ime;
+    const clip = async (type, k, text = '') => {
+      clipKeys &&= type === 'paste' ? !(await key(k, cmd)) : await selects(k);
+      const out = clipEvent(type, text);
+      clipKeys &&= ime.value === '';
+      await frames();
+      return out;
+    };
     const paste = async (name, text) => {
       await clickAt(name);
       await key('a', cmd);
-      window.vxr.paste(text);
-      await frames();
+      await clip('paste', 'v', text);
     };
     // The card's ask above opened the panel on its key settings (there was no key yet).
     if (!ai().open) await key('j', cmd);
@@ -934,11 +951,45 @@ async () => {
     await key('Enter');
     await paste('ai-model', 'stand-in');
     await key('Enter');
+    await clickAt('ai-model');
+    await key('a', cmd);
+    clipKeys &&= await selects('c');
+    const copied = clipEvent('copy');
+    clipKeys &&= ime.value === '';
+    const cut = await clip('cut', 'x');
+    await key('ArrowRight');
+    await key('2');
+    await key('Enter');
+    step('Cmd-C copies and Cmd-X cuts a field\'s text onto the clipboard', copied === 'stand-in' && cut === 'stand-in' && ai().model === '2', JSON.stringify([copied, cut, ai()]));
+    await paste('ai-model', 'stand-in');
+    await key('Enter');
+    step('Cmd-V, Cmd-X and Cmd-C in a field leave the browser\'s clipboard events, Cmd-C and Cmd-X with a selection to act on', clipKeys);
     let a = ai();
     step('the compatible endpoint takes its URL and model', a.kind === 'compatible' && a.base === `${location.origin}/__fake/v1` && a.model === 'stand-in', JSON.stringify(a));
     await clickAt('ai-remember');
     step('remember in this browser shows its warning', true);
-    await paste('ai-key', 'sk-test-not-a-real-key');
+    // A right click on the focused field lands on the page's hidden field, whose browser menu
+    // has Paste; a right click elsewhere opens no menu.
+    const rightClick = (x, y) => {
+      ptr('pointerdown', x, y, 2);
+      const target = document.elementFromPoint(x, y);
+      const menu = target.dispatchEvent(new MouseEvent('contextmenu', { clientX: x, clientY: y, button: 2, bubbles: true, cancelable: true }));
+      return [target, menu];
+    };
+    await clickAt('ai-key');
+    const [away, awayMenu] = rightClick(5, 5);
+    ptr('pointerup', 5, 5, 2);
+    await frames();
+    await clickAt('ai-key');
+    await key('a', cmd);
+    const [kx, ky] = at('ai-key');
+    const [onField, menu] = rightClick(kx, ky);
+    const focused = document.activeElement === ime;
+    clipEvent('paste', 'sk-test-not-a-real-key');
+    ptr('pointerup', kx, ky, 2);
+    await frames();
+    step('a right click on a focused field opens the browser\'s menu, whose Paste reaches the field', away === c && !awayMenu && onField === ime && focused && menu && !ime.getAttribute('style'),
+      JSON.stringify([away?.id, awayMenu, onField?.id, focused, menu, ime.getAttribute('style')]));
     await key('Enter');
     await frames(10);
     a = ai();
@@ -987,7 +1038,7 @@ async () => {
     step('Stop ends a slow answer and its empty change closes', !a.running && a.answers.at(-1).progress === 'stopped' && !st().review && !a.stopAsk, JSON.stringify([a.answers.at(-1), st().review]));
     // Cmd-K: Tab asks AI with what was typed, in the prompt bar, into the same conversation.
     await key('k', cmd);
-    window.vxr.paste('one more block');
+    await clip('paste', 'v', 'one more block');
     await frames();
     await key('Tab');
     a = ai();
