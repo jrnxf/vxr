@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build the site and deploy it to Cloudflare (Workers static assets, see wrangler.jsonc).
-# Deploy only from main. Log in once with `./dev wrangler login`.
+# Deploy only from main. Workers Builds already deploys every push to main (see the README), so
+# this is for deploying by hand. Log in once with `./dev wrangler login`.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 branch="$(git -C "$here" branch --show-current)"

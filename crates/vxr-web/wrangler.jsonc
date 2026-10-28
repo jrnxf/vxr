@@ -1,5 +1,6 @@
 // The browser editor on Cloudflare: static assets only, no Worker code.
-// Build with ./build, deploy with ./deploy.
+// Build with ./build. Workers Builds deploys main with ./cloudflare-build (see the README);
+// ./deploy deploys by hand.
 {
   "name": "vxr",
   "compatibility_date": "2026-10-01",

@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# The build command for Cloudflare Workers Builds, whose image (Ubuntu, x86_64) has node and curl
+# but no nix: install the tools nix/flake.nix gives ./dev, at the same versions and checked by
+# sha256, into target/tools/, then run ./build with them. Also runs on an Apple Silicon Mac, to try
+# it outside nix. Bump the versions here with nix/flake.lock and Cargo.lock.
+set -euo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
+root="$(cd "$here/../.." && pwd)"
+tools="$root/target/tools"
+
+rust=1.99.1         # rust-overlay's stable in nix/flake.lock
+rustup=1.29.2
+wasm_bindgen=0.2.129 # the wasm-bindgen crate in Cargo.lock
+binaryen=133         # nixpkgs' binaryen in nix/flake.lock
+
+case "$(uname -sm)" in
+  "Linux x86_64")
+    rustup_target=x86_64-unknown-linux-gnu
+    rustup_sha=5be191e8c70a5007074254cb74d78dbfdd25cd5a61c27de7b8e5410122ec24f4
+    wasm_bindgen_target=x86_64-unknown-linux-musl
+    wasm_bindgen_sha=82d12bb940e2d4e72e0d5605387fc1b8ca179044e012b620f0ce4e7440e8320e
+    binaryen_target=x86_64-linux
+    binaryen_sha=2dc9c7813f5375db93d96ead4b78222fcc3e2677bbb832297af4797782a37489
+    ;;
+  "Darwin arm64")
+    rustup_target=aarch64-apple-darwin
+    rustup_sha=f7c7e11eb2e07f006e532a8aaac77b32f4527d305ac386c0c633ca6133d35ca9
+    wasm_bindgen_target=aarch64-apple-darwin
+    wasm_bindgen_sha=81d4a23d56b3c3eb8187658329116d50e0b228a93b343825fb71f70179051cd1
+    binaryen_target=arm64-macos
+    binaryen_sha=ad66da82ac13f163e424b1643f16c6dfcccc98b5966296b43e52d3cab04f84a8
+    ;;
+  *) echo "cloudflare-build: no pinned tools for $(uname -sm)" >&2; exit 1 ;;
+esac
+
+locked="$(grep -A1 '^name = "wasm-bindgen"$' "$root/Cargo.lock" | sed -n 's/^version = "\(.*\)"$/\1/p')"
+[ "$locked" = "$wasm_bindgen" ] || {
+  echo "cloudflare-build: Cargo.lock has wasm-bindgen $locked, this script pins $wasm_bindgen" >&2
+  exit 1
+}
+
+# fetch <url> <sha256> <file>
+fetch() {
+  curl -fsSL --retry 3 -o "$3" "$1"
+  echo "$2  $3" | shasum -a 256 -c - >/dev/null
+}
+
+mkdir -p "$tools/bin"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
+export RUSTUP_HOME="$tools/rustup" CARGO_HOME="$tools/cargo" RUSTUP_TOOLCHAIN="$rust"
+export PATH="$CARGO_HOME/bin:$tools/bin:$tools/binaryen-version_$binaryen/bin:$PATH"
+if [ ! -x "$CARGO_HOME/bin/rustup" ]; then
+  fetch "https://static.rust-lang.org/rustup/archive/$rustup/$rustup_target/rustup-init" "$rustup_sha" "$tmp/rustup-init"
+  chmod +x "$tmp/rustup-init"
+  "$tmp/rustup-init" -y --quiet --no-modify-path --profile minimal --default-toolchain none
+fi
+rustup toolchain install "$rust" --profile minimal --target wasm32-unknown-unknown
+
+if [ "$(wasm-bindgen --version 2>/dev/null)" != "wasm-bindgen $wasm_bindgen" ]; then
+  name="wasm-bindgen-$wasm_bindgen-$wasm_bindgen_target"
+  fetch "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/$wasm_bindgen/$name.tar.gz" \
+    "$wasm_bindgen_sha" "$tmp/wasm-bindgen.tar.gz"
+  tar -xzf "$tmp/wasm-bindgen.tar.gz" -C "$tmp"
+  cp "$tmp/$name/wasm-bindgen" "$tools/bin/"
+fi
+
+if [ ! -x "$tools/binaryen-version_$binaryen/bin/wasm-opt" ]; then
+  fetch "https://github.com/WebAssembly/binaryen/releases/download/version_$binaryen/binaryen-version_$binaryen-$binaryen_target.tar.gz" \
+    "$binaryen_sha" "$tmp/binaryen.tar.gz"
+  tar -xzf "$tmp/binaryen.tar.gz" -C "$tools"
+fi
+
+cargo --version
+wasm-bindgen --version
+wasm-opt --version
+node --version
+VXR_TOOLS=path "$here/build"

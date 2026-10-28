@@ -19,3 +19,8 @@ Early stage. The real build is a Rust workspace in `crates/`, and the first desk
 
 - A Rust core on wgpu, built both as a native app and as WebAssembly with WebGPU for the browser and the embed.
 - MagicaVoxel's feel, without its limits: sparse scenes well past 256^3, lossless `.vox` round-trip, and a scene file that is also a web embed.
+
+## Deploy
+
+- The browser editor at https://vxr.jrnxf.co deploys itself: Cloudflare Workers Builds builds every push to `main` and deploys it, and builds every other branch as a preview version that does not go live (the `Workers Builds: vxr` check on a pull request). Both run `crates/vxr-web/cloudflare-build`, which installs the same tools as `nix/`, pinned by version and sha256, and runs `crates/vxr-web/build` with them.
+- `crates/vxr-web/deploy` still deploys by hand from a clean `main`, through the nix dev shell.

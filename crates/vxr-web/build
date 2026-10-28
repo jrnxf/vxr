@@ -2,19 +2,22 @@
 # Build the browser editor as a static site in crates/vxr-web/dist/ (git-ignored):
 # the wasm (profile wasm, wasm-opt -O3), the page, the UI fonts with their licences, and the
 # prototype's island as scene.vox. Serve dist/ from any static host; deploy with ./deploy.
+# The tools come from the nix dev shell (../../dev); with VXR_TOOLS=path they come from the PATH
+# instead, as ./cloudflare-build sets up where there is no nix.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/../.." && pwd)"
 dist="$here/dist"
 fonts="$root/crates/vxr-app/fonts"
+run() { if [ "${VXR_TOOLS:-}" = path ]; then "$@"; else "$root/dev" "$@"; fi; }
 [ -f "$fonts/lucide-LICENSE.txt" ] || "$root/crates/vxr-app/fetch-fonts"
 
 cd "$root"
-./dev cargo build --profile wasm --target wasm32-unknown-unknown -p vxr-web
+run cargo build --profile wasm --target wasm32-unknown-unknown -p vxr-web
 rm -rf "$dist"
 mkdir -p "$dist/pkg" "$dist/fonts"
-./dev wasm-bindgen --target web --no-typescript --out-dir "$dist/pkg" target/wasm32-unknown-unknown/wasm/vxr_web.wasm
-./dev wasm-opt -O3 --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext \
+run wasm-bindgen --target web --no-typescript --out-dir "$dist/pkg" target/wasm32-unknown-unknown/wasm/vxr_web.wasm
+run wasm-opt -O3 --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext \
   --enable-mutable-globals --enable-reference-types -o "$dist/pkg/vxr_web_bg.wasm" "$dist/pkg/vxr_web_bg.wasm"
 cp "$here/www/index.html" "$here/www/app.js" "$here/www/style.css" "$here/www/_headers" "$dist/"
 cp "$fonts"/*.ttf "$fonts"/*.txt "$dist/fonts/"
@@ -26,6 +29,13 @@ const w = new api.VoxelWorld();
 api.generateIsland(w);
 fs.writeFileSync(process.argv[1], api.writeVox(w, api.defaultPalette()));
 " "$dist/scene.vox"
-for f in "$dist/pkg/vxr_web_bg.wasm" "$dist/pkg/vxr_web.js" "$dist/scene.vox"; do
-  printf '%-20s %9d B raw %9d B brotli\n' "$(basename "$f")" "$(wc -c <"$f")" "$(./dev brotli -c -q 11 "$f" | wc -c)"
-done
+node --input-type=module -e "
+import fs from 'node:fs';
+import path from 'node:path';
+import zlib from 'node:zlib';
+for (const f of process.argv.slice(1)) {
+  const raw = fs.readFileSync(f);
+  const br = zlib.brotliCompressSync(raw, { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 11 } });
+  console.log(path.basename(f).padEnd(20) + ' ' + String(raw.length).padStart(9) + ' B raw ' + String(br.length).padStart(9) + ' B brotli');
+}
+" "$dist/pkg/vxr_web_bg.wasm" "$dist/pkg/vxr_web.js" "$dist/scene.vox"
