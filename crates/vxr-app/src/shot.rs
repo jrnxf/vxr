@@ -1972,22 +1972,15 @@ fn camera(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     check(s.ed.cam.ortho, "the bar's Persp button turns orthographic on".into())?;
     s.ui_click("nav-proj")?;
     check(!s.ed.cam.ortho, "and back to perspective".into())?;
-    // Where the flyout opens, the render corner shown: below the bar if it ends above undo/redo,
-    // else above the bar if it clears the palette, else left of the bar; never over undo/redo or
-    // the palette, always on screen.
+    // Where the flyout opens, the render corner shown: above the bar if it clears the palette,
+    // else left of the bar; never over undo/redo or the palette, always on screen.
     fn flyout_at(s: &mut Shot) -> Result<&'static str, String> {
         let points = (s.ed.width as f32 / s.ed.ppp, s.ed.height as f32 / s.ed.ppp);
         let hit = |s: &Shot, n: &str| s.ed.ui.hits.get(n).copied().ok_or(format!("no {n} at {points:?}"));
         let (flyout, nav, palette, history) =
             (hit(s, "view-flyout")?, hit(s, "nav")?, hit(s, "palette")?, hit(s, "history")?);
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(points.0, points.1));
-        let at = if flyout.top() > nav.bottom() {
-            "below"
-        } else if flyout.bottom() < nav.top() {
-            "above"
-        } else {
-            "beside"
-        };
+        let at = if flyout.bottom() < nav.top() { "above" } else { "beside" };
         check(
             s.ed.ui.view_panel
                 && s.ed.ui.hits.contains_key("render")

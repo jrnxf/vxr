@@ -1739,24 +1739,19 @@ impl Hybrid {
     }
 
     // The View flyout of the camera bar: the projection (perspective, orthographic,
-    // isometric) and the six side views with their number keys. It opens toward the screen
-    // edge so the scene stays clear: below the bar (over the render corner) if it ends above
-    // #history, else above the bar if it clears the palette, else left of the bar, always on
-    // screen. The view the camera is at shows on.
+    // isometric) and the six side views with their number keys. It opens above the bar if it
+    // clears the palette, else left of the bar, always on screen. The view the camera is at
+    // shows on.
     fn view_panel(&mut self, ctx: &Context, screen: Rect) {
         if !self.view_panel {
             return;
         }
         let size = vec2(204.0, 210.0);
         let palette_bottom = self.hits.get("palette").map_or(screen.top(), |r| r.bottom());
-        let history = history_rect(screen);
         let nav = self.hits.get("nav").copied().unwrap_or(Rect::from_min_size(screen.right_bottom(), egui::Vec2::ZERO));
         let right = nav.right().min(screen.right() - 12.0);
-        let below = Rect::from_min_size(pos2(right - size.x, nav.bottom() + 8.0), size);
         let above = Rect::from_min_size(pos2(right - size.x, nav.top() - 8.0 - size.y), size);
-        let rect = if below.bottom() <= history.top() - 8.0 {
-            below
-        } else if above.top() >= palette_bottom + 8.0 {
+        let rect = if above.top() >= palette_bottom + 8.0 {
             above
         } else {
             // A short window: left of the bar, bottom-aligned with it, kept on screen.
@@ -3846,7 +3841,7 @@ impl Hybrid {
         self.actions.extend(run);
         if let Some((at, label, keys)) = tip {
             // Above the button, unless that crowds the palette: then below, over the render
-            // corner, and not at all while the View flyout sits there.
+            // corner, and not at all while the View flyout is open.
             let palette = self.hits.get("palette").copied().unwrap_or(Rect::NOTHING);
             let shown = tooltip(ctx, at, label, keys, Some((palette.expand(4.0), !view_open)));
             self.hits.extend(shown.map(|r| ("nav-tip".to_string(), r)));
@@ -3855,7 +3850,8 @@ impl Hybrid {
 
     // #history
     fn history(&mut self, ctx: &Context, screen: Rect) {
-        let rect = history_rect(screen);
+        let rect =
+            Rect::from_min_size(pos2(screen.right() - 12.0 - 82.0, screen.bottom() - 12.0 - 40.0), vec2(82.0, 40.0));
         self.hits.insert("history".into(), rect);
         Self::panel(ctx, "history", rect, Order::Middle, |ui, rect| {
             let cy = rect.center().y;
@@ -4197,11 +4193,6 @@ fn nav_button(
         p.galley(r.center() - g.size() / 2.0, g, color);
     }
     resp
-}
-
-/// Undo and redo at the bottom right of `screen`.
-fn history_rect(screen: Rect) -> Rect {
-    Rect::from_min_size(pos2(screen.right() - 12.0 - 82.0, screen.bottom() - 12.0 - 40.0), vec2(82.0, 40.0))
 }
 
 /// A tooltip above `at`: what the control does and its keys, as kbd chips.
