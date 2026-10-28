@@ -10,7 +10,8 @@ Early stage. The real build is a Rust workspace in `crates/`, and the first desk
   - `prototype/demo/` is the built version and is not in git: run `node prototype/src/build.mjs` (no dependencies) to create it, including the starter island `scene.vox`. Serve it with any static server, for example `python3 -m http.server -d prototype/demo`, then open `index.html` (`?scene=terrain` loads a 3.9M-voxel stress scene) or `embed.html`.
   - `prototype/src/` holds the sources and `build.mjs`.
 - `docs/market-research.md` - whether there is a market for an open-source voxel editor, and which wedge to take.
-- `docs/research/ai.md` - research and a proposal for AI in vxr: a bring-your-own-key assistant that edits the scene through tool calls with a review step, and a `vxr mcp` server for terminal agents. Not built; the AI phase in `docs/plan.md` waits for the owner's go.
+- `docs/research/ai.md` - research and a proposal for AI in vxr: a bring-your-own-key assistant that edits the scene through tool calls with a review step, and a `vxr mcp` server for terminal agents. `vxr mcp` files mode is built (`crates/vxr-mcp`); the assistant and live mode are next in the AI phase in `docs/plan.md`.
+- `vxr mcp --root <dir>` - an MCP server on stdio that lets a terminal agent open, edit and save the `.vox` files under `<dir>` (lossless, no key, no network). Setup, for Claude Code: `claude mcp add vxr -- vxr mcp --root <dir>`; for other clients `{"mcpServers": {"vxr": {"command": "vxr", "args": ["mcp", "--root", "<dir>"]}}}`.
 - `ui-directions.html` (in `vxr-design-references.zip` on the `design-references` GitHub release) - four UI directions for the editor. The pick is **D, Hybrid**.
 
 ## Direction

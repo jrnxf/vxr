@@ -3,6 +3,8 @@
 //! - `vxr [scene.vox]` opens a window, with the scene if one is given.
 //! - `vxr --stage <script.json> [scene.vox]` also runs a scripted AI request through the
 //!   review step (see `vxr_app::review::Script`), so the card and ghost can be tried by hand.
+//! - `vxr mcp --root <dir>` serves MCP on stdin and stdout: an agent opens, edits and saves the
+//!   `.vox` files under `<dir>` (see `vxr-mcp`).
 //! - `vxr --shot <dir> [scene.vox]` runs headless: it drives the editor through every tool,
 //!   saves and reopens the result, and writes `app-1x.png` and `app-2x.png` into `<dir>`.
 
@@ -15,6 +17,7 @@ mod shot;
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
+        Some("mcp") => vxr_mcp::run(&args[1..]),
         Some("--shot") => match args.get(1) {
             Some(dir) => shot::run(dir.as_ref(), args.get(2).map(|s| s.as_ref())),
             None => Err("usage: vxr --shot <dir> [scene.vox]".into()),
