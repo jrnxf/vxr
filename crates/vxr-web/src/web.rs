@@ -1,10 +1,16 @@
+use std::cell::RefCell;
+use std::rc::Rc;
 use vxr_app::Editor;
 use vxr_app::editor::{Button, NEW_SIZE};
 use vxr_app::files::{obj_files, slices_png, zip};
 use vxr_app::ui::{Action, FontBytes};
 use vxr_core::Scene;
 use vxr_render::Gpu;
+
+use vxr_app::assistant::{Assistant, Entry, Progress};
 use wasm_bindgen::prelude::*;
+
+use crate::net::{Fetch, KeyStore, WebKeys};
 
 fn err(e: impl ToString) -> JsValue {
     JsValue::from_str(&e.to_string())
@@ -15,6 +21,8 @@ fn err(e: impl ToString) -> JsValue {
 #[wasm_bindgen]
 pub struct App {
     editor: Editor,
+    /// The assistant's keys in this tab (shared with the assistant's `WebKeys`).
+    keys: Rc<RefCell<KeyStore>>,
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
     events: Vec<egui::Event>,
@@ -63,9 +71,13 @@ pub async fn start(
         .iter()
         .all(|f| !f.is_empty())
         .then_some(FontBytes { inter_regular, inter_medium, inter_semibold, mono_regular, mono_medium, icons });
-    let editor = Editor::new(gpu, scene, &name, format, (width, height), ppp, fonts)?;
+    let mut editor = Editor::new(gpu, scene, &name, format, (width, height), ppp, fonts)?;
+    // The assistant calls its provider straight from this page, with keys in this tab.
+    let keys = Rc::new(RefCell::new(KeyStore::default()));
+    editor.assistant = Assistant::new(Box::new(Fetch), Box::new(WebKeys(keys.clone())), true);
     Ok(App {
         editor,
+        keys,
         surface,
         config,
         events: Vec::new(),
@@ -461,6 +473,62 @@ impl App {
     /// array if it is not on screen. For the browser check.
     pub fn hit(&self, name: &str) -> Vec<f32> {
         self.editor.ui.hits.get(name).map(|r| vec![r.center().x, r.center().y]).unwrap_or_default()
+    }
+
+    /// A key the page read back from the browser's encrypted store (`vxrKeys.load`) at start:
+    /// `kind` is "anthropic", "openai" or "compatible".
+    pub fn restore_key(&mut self, kind: &str, key: &str) {
+        if let Some(k) = vxr_ai::Kind::from_id(kind) {
+            self.keys.borrow_mut().restore(k, key);
+            self.editor.assistant.keys_changed();
+        }
+    }
+
+    /// The assistant's state as JSON, for the browser check: the panel, the conversation's
+    /// answers, the model and which keys are kept (never the keys).
+    pub fn ai(&mut self) -> String {
+        let e = &mut self.editor;
+        let a = &mut e.assistant;
+        let kinds = vxr_ai::Kind::ALL;
+        let has: Vec<String> = kinds.iter().map(|&k| a.has_key(k).to_string()).collect();
+        let remembered: Vec<String> = kinds.iter().map(|&k| a.keys.remembered(k).to_string()).collect();
+        let answers: Vec<String> = a
+            .entries
+            .iter()
+            .filter_map(|en| match en {
+                Entry::Answer(v) => Some(format!(
+                    r#"{{"progress":{:?},"text":{:?},"calls":[{}],"model":{:?},"cost":{}}}"#,
+                    match &v.progress {
+                        Progress::Working(w) => format!("working: {w}"),
+                        Progress::Done => "done".into(),
+                        Progress::Stopped => "stopped".into(),
+                        Progress::Failed(f) => format!("failed: {f}"),
+                    },
+                    v.text,
+                    v.calls.iter().map(|c| format!("{:?}", c.tool)).collect::<Vec<_>>().join(","),
+                    v.model,
+                    v.cost.map_or("null".into(), |c| format!("{c}")),
+                )),
+                Entry::User(_) => None,
+            })
+            .collect();
+        format!(
+            r#"{{"open":{},"setup":{},"running":{},"held":{},"stopAsk":{},"kind":{:?},"model":{:?},"base":{:?},"hasKey":[{}],"remembered":[{}],"entries":{},"answers":[{}],"askBar":{},"spent":{}}}"#,
+            e.ui.ai_open,
+            e.ui.ai_setup,
+            a.running(),
+            a.held(),
+            a.stop_ask,
+            a.settings.kind.id(),
+            a.settings.model,
+            a.settings.base,
+            has.join(","),
+            remembered.join(","),
+            a.entries.len(),
+            answers.join(","),
+            e.ui.ask_bar.as_ref().map_or("null".into(), |b| format!(r#"{{"text":{:?},"sent":{}}}"#, b.text, b.sent)),
+            a.spent,
+        )
     }
 
     /// Show a short message in the editor.

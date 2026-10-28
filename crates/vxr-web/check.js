@@ -889,6 +889,114 @@ async () => {
     step('Discard leaves the file as it was', !st().review && same(bytes(), base));
   }
 
+  // The assistant from the page, through a stand-in Chat Completions server on this origin
+  // (check-server.js): Cmd-J opens the panel on its key settings, the compatible endpoint takes
+  // its URL and model, a key remembered in this browser is stored encrypted, a request from
+  // the composer streams in and stages through the review card, the card's ask continues it,
+  // Stop ends a slow answer, Cmd-K Tab opens the Ask AI bar, and the page's content security
+  // policy keeps the page off a host it does not list.
+  {
+    const base = bytes();
+    const ai = () => JSON.parse(window.vxr.ai());
+    const seen = async () => (await fetch('/__fake/seen')).json();
+    const until = async (f, n = 900) => { for (let i = 0; i < n && !f(); i++) await frames(1); return f(); };
+    const paste = async (name, text) => {
+      await clickAt(name);
+      await key('a', cmd);
+      window.vxr.paste(text);
+      await frames();
+    };
+    // The card's ask above opened the panel on its key settings (there was no key yet).
+    if (!ai().open) await key('j', cmd);
+    step('the panel opens on its key settings while there is no key', ai().open && !!at('ai-key') && !!at('ai-pick-3'), JSON.stringify(ai()));
+    await clickAt('ai-pick-3');
+    step('picking the compatible endpoint keeps its settings open', ai().setup && !!at('ai-base') && !!at('ai-key'), JSON.stringify(ai()));
+    await paste('ai-base', 'http://192.168.1.20:11434/v1');
+    step('a host the browser cannot reach says so under the URL', !!at('ai-base-limit'));
+    await paste('ai-base', 'http://localhost:8080/v1');
+    step('a local server on any port needs no line', !at('ai-base-limit'));
+    await paste('ai-base', `${location.origin}/__fake/v1`);
+    await key('Enter');
+    await paste('ai-model', 'stand-in');
+    await key('Enter');
+    let a = ai();
+    step('the compatible endpoint takes its URL and model', a.kind === 'compatible' && a.base === `${location.origin}/__fake/v1` && a.model === 'stand-in', JSON.stringify(a));
+    await clickAt('ai-remember');
+    step('remember in this browser shows its warning', true);
+    await paste('ai-key', 'sk-test-not-a-real-key');
+    await key('Enter');
+    await frames(10);
+    a = ai();
+    const stored = await new Promise((resolve) => {
+      const r = indexedDB.open('vxr-keys', 1);
+      r.onsuccess = () => {
+        const g = r.result.transaction('k').objectStore('k').get('key:compatible');
+        g.onsuccess = () => { r.result.close(); resolve(g.result); };
+      };
+    });
+    const plain = stored && new TextDecoder().decode(new Uint8Array(stored.ct)).includes('sk-test');
+    const back = await window.vxrKeys.load();
+    step('a remembered key is kept, stored encrypted and reads back', a.hasKey[2] && a.remembered[2] && !!stored && !plain && JSON.stringify(back) === '[["compatible","sk-test-not-a-real-key"]]', JSON.stringify([a.hasKey, a.remembered, !!stored, plain]));
+    if (ai().setup) await clickAt('ai-done');
+    step('the panel turns to the conversation', !ai().setup && !!at('ai-draft'), JSON.stringify(ai()));
+    // A request: streamed from the stand-in, its box staged under the card, its answer sent back.
+    await paste('ai-draft', 'add a block');
+    await key('Enter');
+    step('Enter sends the request', ai().running, JSON.stringify(ai()));
+    await until(() => !ai().running);
+    a = ai();
+    let r = st().review;
+    let sv = await seen();
+    step('the answer streams in and its calls stage through the card', a.answers.length === 1 && a.answers[0].progress === 'done' && a.answers[0].calls.join() === 'box,done' && r && r.counts[0] === 27 && r.summary === 'A stand-in block', JSON.stringify([a.answers, r]));
+    step('the key went in the header, never in the body', sv.requests === 2 && sv.auth === 2 && sv.keyInBody === 0, JSON.stringify(sv));
+    step('the stand-in reported its cost', Math.abs(a.answers[0].cost - 0.0084) < 1e-9 && Math.abs(a.spent - 0.0084) < 1e-9, JSON.stringify(a.answers[0]));
+    await frames(30);
+    // Ask for changes continues the same change and conversation.
+    await paste('review-ask', 'another one');
+    await key('Enter');
+    await until(() => !ai().running);
+    a = ai();
+    sv = await seen();
+    step('Ask for changes continues the conversation and the change', a.answers.length === 2 && a.answers[1].progress === 'done' && sv.requests === 4 && !!st().review, JSON.stringify([a.answers.length, sv]));
+    await key('Enter');
+    step('Enter applies it as one undo step', !st().review && st().undoLabel === 'AI: add a block', JSON.stringify(st().undoLabel));
+    await key('z', cmd);
+    step('undo puts the island back', same(bytes(), base));
+    // Stop ends a slow answer; with nothing staged the card closes.
+    await paste('ai-draft', 'a slow answer');
+    await key('Enter');
+    await until(() => (ai().answers.at(-1)?.text ?? '').includes('word3'));
+    await clickAt('ai-stop');
+    await frames(4);
+    a = ai();
+    step('Stop ends a slow answer and its empty change closes', !a.running && a.answers.at(-1).progress === 'stopped' && !st().review && !a.stopAsk, JSON.stringify([a.answers.at(-1), st().review]));
+    // Cmd-K: Tab asks AI with what was typed, in the prompt bar, into the same conversation.
+    await key('k', cmd);
+    window.vxr.paste('one more block');
+    await frames();
+    await key('Tab');
+    a = ai();
+    step('Tab in Cmd-K opens the Ask AI bar with the query', !st().cmdk && a.askBar && a.askBar.text === 'one more block' && !a.askBar.sent, JSON.stringify(a.askBar));
+    await key('Enter');
+    await until(() => !ai().running);
+    await frames(3);
+    a = ai();
+    step('its change lands in the card and the bar closes', a.answers.length === 4 && a.askBar === null && st().review && st().review.counts[0] === 27, JSON.stringify([a.answers.length, a.askBar, st().review]));
+    await clickAt('review-discard');
+    step('Discard leaves the island as it was', !st().review && same(bytes(), base));
+    // The content security policy: the page reaches only the hosts it lists.
+    const blocked = [];
+    const onv = (e) => blocked.push(e.blockedURI);
+    document.addEventListener('securitypolicyviolation', onv);
+    let refused = false;
+    try { await fetch('https://example.com/'); } catch { refused = true; }
+    await frames(2);
+    document.removeEventListener('securitypolicyviolation', onv);
+    step('the content security policy refuses a host it does not list', refused && blocked.some((u) => u.startsWith('https://example.com')), JSON.stringify(blocked));
+    await key('j', cmd);
+    step('Cmd-J closes the panel', !ai().open);
+  }
+
   // Save (download) and Open (file input).
   const input = document.getElementById('file');
   let picked = 0;

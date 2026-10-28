@@ -267,6 +267,10 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     materials(&mut s, dir)?;
     export(&mut s, dir)?;
     review(dir)?;
+    assistant(dir)?;
+    ai_refused()?;
+    ai_new_chat()?;
+    ai_bar_failed()?;
 
     // Save, reopen and compare.
     let bytes = s.ed.scene.to_vox();
@@ -2725,7 +2729,21 @@ fn review(dir: &Path) -> Result<(), String> {
     s.ui_click("review-after")?;
     let back = differ(&view_pixels(&mut s), &ghost);
     check(s.voxels() == v0 + 22 && back == 0, format!("After: the change again ({back} pixels differ)"))?;
-    // Dropping the door step takes its 6 removals out, and back.
+    // Dropping the door step takes its 6 removals out, and back. The card stops above the
+    // render corner, so its step list scrolls to the door.
+    s.frames(2);
+    if !s.ed.ui.hits.contains_key("review-step-4") {
+        let over = s.at("review-step-0")?;
+        let wheel = egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -200.0),
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Unknown,
+            modifiers: egui::Modifiers::NONE,
+        };
+        s.frames_with(1, vec![egui::Event::PointerMoved(over)]);
+        s.frames_with(20, vec![wheel]);
+    }
     s.ui_click("review-step-4")?;
     let c = s.ed.ui.review.clone().ok_or("no card")?;
     check(c.counts == [22, 0, 392] && c.steps[4].dropped, format!("dropping the door step: {:?}", c.counts))?;
@@ -2734,6 +2752,8 @@ fn review(dir: &Path) -> Result<(), String> {
     // The ask field takes text; Escape in it leaves the field, not the review.
     s.type_into("review-ask", "make the flag blue")?;
     check(s.ed.asks == ["make the flag blue"], format!("ask for changes reaches the assistant hook: {:?}", s.ed.asks))?;
+    // The ask above opened the assistant panel (no key yet): the card moved left of it.
+    s.frames(4);
     s.ui_click("review-ask")?;
     s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
     check(s.ed.review.is_some(), "Escape in the ask field keeps the review".into())?;
@@ -3024,4 +3044,537 @@ fn palette(s: &mut Shot, dir: &Path) -> Result<(), String> {
     s.ed.undo();
     s.ed.undo();
     check(s.ed.scene.palette[used as usize] == before, "undoing every palette edit restores the color".into())
+}
+
+fn key_event(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+    egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }
+}
+
+impl Shot {
+    /// The assistant on a scripted provider, with no key kept yet.
+    fn fake_assistant(&mut self, chunk: usize) -> vxr_app::assistant::fake::Scripted {
+        let fake = vxr_app::assistant::fake::Scripted::new(chunk);
+        self.ed.assistant =
+            vxr_app::assistant::Assistant::new(Box::new(fake.clone()), Box::new(vxr_ai::MemoryKeys::default()), false);
+        fake
+    }
+
+    /// Draw frames until the assistant's request ends or waits for the user (at most `n`).
+    fn settle(&mut self, n: usize) -> usize {
+        for k in 0..n {
+            if !self.ed.assistant.running() || self.ed.assistant.held() {
+                return k;
+            }
+            self.frames(1);
+        }
+        n
+    }
+
+    fn last_answer(&self) -> Option<vxr_app::assistant::AnswerView> {
+        match self.ed.assistant.entries.last() {
+            Some(vxr_app::assistant::Entry::Answer(a)) => Some(a.clone()),
+            _ => None,
+        }
+    }
+}
+
+/// The assistant end to end on a scripted provider, through the same pointer and key path
+/// as the window: Cmd-J opens the panel on its key settings, a key typed into the masked
+/// field is kept and the panel turns to the conversation, a request typed into the composer
+/// streams its answer, runs its calls through the review card and sends their answers back,
+/// "Ask for changes" on the card continues the same change and conversation, Enter applies
+/// it as one undo step, Stop mid-answer asks to keep or drop what was staged (both), a big
+/// change waits for Allow, Cmd-K "Ask AI" (Tab, and the row when no command matches) opens
+/// the prompt bar whose request lands in the same conversation and card, and the model
+/// picker opens the key settings for a provider without a key.
+fn assistant(dir: &Path) -> Result<(), String> {
+    use serde_json::json;
+    use vxr_ai::Kind;
+    use vxr_app::assistant::fake::anthropic;
+    use vxr_app::assistant::{CallState, Progress};
+    let mut s = Shot::new(house(), "house.vox", 2.0)?;
+    s.ed.ui.coach = false;
+    // Back off and move the house left, clear of the card, the palette and the panel.
+    s.ed.cam.distance *= 2.6;
+    let h = s.ed.height as f32;
+    s.ed.cam.pan(-640.0, 40.0, h);
+    let fake = s.fake_assistant(24);
+    s.frames(2);
+    let (v0, counts0, palette0) = (s.voxels(), s.ed.scene.map.counts, s.ed.scene.palette);
+    let same = |s: &Shot| s.voxels() == v0 && s.ed.scene.map.counts == counts0 && s.ed.scene.palette == palette0;
+    let position = s.ed.scene.history().position();
+
+    // Cmd-J: the panel, on its key settings while there is no key.
+    s.frames_with(2, vec![key_event(egui::Key::J, egui::Modifiers::COMMAND)]);
+    check(
+        s.ed.ui.ai_open && s.ed.ui.hits.contains_key("ai-key") && s.ed.ui.hits.contains_key("ai-pick-0"),
+        "Cmd-J opens the assistant panel on its key settings".into(),
+    )?;
+    s.frames(2);
+    s.save_png(&dir.join("app-2x-assistant-keys.png"))?;
+    // The compatible endpoint needs no key, but its URL, model and key stay to be filled.
+    s.ui_click("ai-pick-3")?;
+    s.frames(2);
+    check(
+        s.ed.ui.ai_setup && s.ed.ui.hits.contains_key("ai-base") && s.ed.ui.hits.contains_key("ai-key"),
+        "picking the compatible endpoint keeps its settings open".into(),
+    )?;
+    s.ui_click("ai-pick-0")?;
+    s.frames(2);
+    s.type_into("ai-key", "sk-ant-test-not-a-real-key")?;
+    s.frames(2);
+    check(
+        s.ed.assistant.keys.get(Kind::Anthropic).as_deref() == Some("sk-ant-test-not-a-real-key")
+            && !s.ed.ui.ai_setup
+            && s.ed.ui.hits.contains_key("ai-draft")
+            && s.ed.ui.hits.contains_key("ai-example-0"),
+        "a key typed into the masked field is kept, and the panel turns to the conversation".into(),
+    )?;
+    s.frames(2);
+    s.save_png(&dir.join("app-2x-assistant-empty.png"))?;
+
+    // A request from the composer: streamed, its calls staged under the card, answered back.
+    fake.answer(anthropic(
+        "I'll repaint the roof into a new red slot.",
+        &[("paint", json!({"slot": 3, "from_slot": 20})), ("palette_set", json!({"slot": 3, "hex": "#D94A3A"}))],
+    ));
+    fake.answer(anthropic("The roof is red now.", &[("done", json!({"summary": "Painted the roof red"}))]));
+    s.type_into("ai-draft", "make the roof red")?;
+    s.frames(6);
+    let mid = s.last_answer().ok_or("no answer")?;
+    check(
+        matches!(mid.progress, Progress::Working(_)) && s.ed.review.is_some() && s.ed.ui.hits.contains_key("ai-stop"),
+        format!("Enter sends it: the answer streams ({:?}), the card opens, Stop shows", mid.progress),
+    )?;
+    s.save_png(&dir.join("app-2x-assistant-working.png"))?;
+    let frames = s.settle(600);
+    let a = s.last_answer().ok_or("no answer")?;
+    let card = s.ed.ui.review.clone().ok_or("no card")?;
+    check(
+        a.progress == Progress::Done
+            && a.calls.len() == 3
+            && a.calls.iter().all(|c| c.state == CallState::Ok)
+            && a.text == "I'll repaint the roof into a new red slot.\n\nThe roof is red now."
+            && a.cost.is_some_and(|c| c > 0.0)
+            && card.counts == [0, 0, 392]
+            && card.summary.as_deref() == Some("Painted the roof red")
+            && card.working.is_none()
+            && fake.requests().len() == 2,
+        format!(
+            "the request runs in {frames} frames: {} calls, {:?}, card {:?}, {} requests",
+            a.calls.len(),
+            a.progress,
+            card.counts,
+            fake.requests().len()
+        ),
+    )?;
+    let req = &fake.requests()[1];
+    check(
+        !req.body.contains("sk-ant-test")
+            && req.headers.iter().any(|(k, v)| k == "x-api-key" && v.starts_with("sk-ant-test")),
+        "the key goes in the header only".into(),
+    )?;
+    s.frames(20);
+    s.save_png(&dir.join("app-2x-assistant.png"))?;
+
+    // Ask for changes: the same change and conversation take the next request.
+    fake.answer(anthropic(
+        "",
+        &[
+            ("line", json!({"from": [8, 0, 8], "to": [8, 9, 8], "slot": 40, "name": "flag pole"})),
+            ("done", json!({"summary": "Added a flag pole"})),
+        ],
+    ));
+    s.type_into("review-ask", "add a flag pole")?;
+    s.settle(600);
+    let card = s.ed.ui.review.clone().ok_or("no card")?;
+    check(
+        card.counts == [10, 0, 392] && s.ed.assistant.entries.len() == 4 && fake.requests().len() == 3,
+        format!("Ask for changes continues the change ({:?}) and the conversation", card.counts),
+    )?;
+    let body: serde_json::Value = serde_json::from_str(&fake.requests()[2].body).map_err(|e| e.to_string())?;
+    check(
+        body["messages"].as_array().is_some_and(|m| m.len() == 5),
+        "the follow-up request carries the whole conversation".into(),
+    )?;
+    s.frames_with(2, vec![key_event(egui::Key::Enter, egui::Modifiers::NONE)]);
+    let label = s.ed.scene.history().undo_label().map(str::to_string);
+    check(
+        s.ed.review.is_none()
+            && s.ed.scene.history().position() == position + 1
+            && label.as_deref() == Some("AI: make the roof red"),
+        format!("Enter applies it as one undo step: {label:?}"),
+    )?;
+    s.ed.undo();
+    check(same(&s), "undo takes it all back".into())?;
+
+    // Stop mid-answer with a change staged: Drop takes it away, Keep leaves it for review.
+    for keep in [false, true] {
+        fake.answer(anthropic("", &[("paint", json!({"slot": 5, "from_slot": 10}))]));
+        fake.answer(anthropic(&"Now I will look at every wall in turn and think about it. ".repeat(12), &[]));
+        let sent = fake.requests().len();
+        s.type_into("ai-draft", "make the walls green")?;
+        // Until the second answer is on its way, the first one's paint staged.
+        for _ in 0..200 {
+            if fake.requests().len() >= sent + 2 {
+                break;
+            }
+            s.frames(1);
+        }
+        s.frames(4);
+        check(s.ed.assistant.running(), "a second answer is streaming".into())?;
+        s.ui_click("ai-stop")?;
+        check(
+            !s.ed.assistant.running() && s.ed.ui.chat.stop_ask && s.ed.ui.hits.contains_key("ai-keep"),
+            "Stop ends the request and asks to keep or drop the staged change".into(),
+        )?;
+        if !keep {
+            s.frames(2);
+            s.save_png(&dir.join("app-2x-assistant-stop.png"))?;
+            s.ui_click("ai-drop")?;
+            check(s.ed.review.is_none() && same(&s), "Drop: the scene as it was".into())?;
+        } else {
+            s.ui_click("ai-keep")?;
+            check(
+                s.ed.review.as_ref().is_some_and(|r| r.card(&s.ed.scene).counts[2] > 0) && !s.ed.ui.chat.stop_ask,
+                "Keep: the change stays under review".into(),
+            )?;
+            s.ui_click("review-discard")?;
+        }
+    }
+
+    // A big change waits for Allow, then the request carries on.
+    fake.answer(anthropic("", &[("box", json!({"from": [-16, 12, -16], "to": [15, 30, 15], "slot": 60}))]));
+    fake.answer(anthropic("", &[("done", json!({"summary": "A block of sky"}))]));
+    s.type_into("ai-draft", "fill the sky")?;
+    s.settle(600);
+    check(
+        s.ed.assistant.held() && s.ed.ui.review.as_ref().is_some_and(|c| c.held.is_some()),
+        "a change past 10,000 cells waits on the card".into(),
+    )?;
+    s.frames(2);
+    s.ui_click("review-allow")?;
+    s.settle(600);
+    check(
+        !s.ed.assistant.running() && s.ed.ui.review.as_ref().is_some_and(|c| c.counts[0] == 32 * 19 * 32),
+        "Allow runs it and the request finishes".into(),
+    )?;
+    s.ui_click("review-discard")?;
+    check(same(&s), "Discard drops it".into())?;
+
+    // Cmd-K: Tab asks AI from any row, with what was typed, in the prompt bar.
+    s.ed.ui.ai_open = false;
+    s.frames_with(2, vec![key_event(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(2, vec![egui::Event::Text("open a door".into())]);
+    s.frames_with(3, vec![key_event(egui::Key::Tab, egui::Modifiers::NONE)]);
+    check(
+        s.ed.ui.cmdk.is_none() && s.ed.ui.ask_bar.as_ref().is_some_and(|b| b.text == "open a door" && !b.sent),
+        "Tab in Cmd-K opens the Ask AI bar with the query".into(),
+    )?;
+    s.frames(2);
+    s.save_png(&dir.join("app-2x-ask-bar.png"))?;
+    fake.answer(anthropic(
+        "Opening a door in the front wall.",
+        &[
+            ("box", json!({"from": [-1, 0, 5], "to": [0, 2, 5], "mode": "erase"})),
+            ("done", json!({"summary": "Opened a door"})),
+        ],
+    ));
+    s.frames_with(2, vec![key_event(egui::Key::Enter, egui::Modifiers::NONE)]);
+    check(s.ed.ui.ask_bar.as_ref().is_some_and(|b| b.sent) && s.ed.assistant.running(), "Enter sends it".into())?;
+    s.frames(3);
+    s.save_png(&dir.join("app-2x-ask-bar-working.png"))?;
+    s.settle(600);
+    s.frames(3);
+    let card = s.ed.ui.review.clone().ok_or("no card")?;
+    check(
+        card.counts == [0, 6, 0] && s.ed.ui.ask_bar.is_none() && s.ed.assistant.entries.len() == 12,
+        format!("its change lands in the card ({:?}), the bar closes, the panel's conversation has it", card.counts),
+    )?;
+    s.frames(20);
+    s.save_png(&dir.join("app-2x-ask-card.png"))?;
+    s.ui_click("review-discard")?;
+    // With no command matching, the one row asks AI.
+    s.frames_with(2, vec![key_event(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(2, vec![egui::Event::Text("put a chimney on the roof".into())]);
+    check(s.ed.ui.hits.contains_key("cmd-ask-ai"), "no command matches: the Ask AI row".into())?;
+    s.frames(2);
+    s.save_png(&dir.join("app-2x-cmdk-ask.png"))?;
+    s.frames_with(2, vec![key_event(egui::Key::Enter, egui::Modifiers::NONE)]);
+    check(
+        s.ed.ui.ask_bar.as_ref().is_some_and(|b| b.text == "put a chimney on the roof"),
+        "Enter on it opens the bar".into(),
+    )?;
+    s.frames_with(2, vec![key_event(egui::Key::Escape, egui::Modifiers::NONE)]);
+    check(s.ed.ui.ask_bar.is_none(), "Escape closes the bar".into())?;
+
+    // The model picker: a provider without a key opens its key settings.
+    s.frames_with(2, vec![key_event(egui::Key::J, egui::Modifiers::COMMAND)]);
+    s.ui_click("ai-model-chip")?;
+    check(s.ed.ui.hits.contains_key("ai-menu-1"), "the model chip opens the picker".into())?;
+    s.frames(2);
+    s.save_png(&dir.join("app-2x-assistant-models.png"))?;
+    s.ui_click("ai-menu-1")?;
+    check(
+        s.ed.assistant.settings.kind == Kind::OpenAi
+            && s.ed.assistant.settings.model == "gpt-6.1-sol"
+            && s.ed.ui.ai_setup
+            && s.ed.ui.hits.contains_key("ai-key"),
+        "gpt-6.1-sol without an OpenAI key opens its key settings".into(),
+    )?;
+    s.ui_click("ai-pick-2")?;
+    check(
+        s.ed.assistant.settings.model == "claude-sonnet-5-5" && s.ed.ui.hits.contains_key("ai-key-remove"),
+        "Sonnet uses the Anthropic key already kept".into(),
+    )?;
+    // A compatible endpoint the browser cannot reach says so under its URL, in the browser only.
+    s.ui_click("ai-pick-3")?;
+    s.type_into("ai-base", "http://192.168.1.20:11434/v1")?;
+    s.frames(2);
+    check(!s.ed.ui.hits.contains_key("ai-base-limit"), "the desktop app reaches any compatible host".into())?;
+    s.ed.assistant.settings.browser = true;
+    s.ed.assistant.version += 1;
+    s.frames(2);
+    check(
+        s.ed.ui.hits.contains_key("ai-base-limit"),
+        "the browser cannot reach a host on the LAN: the line says so".into(),
+    )?;
+    s.type_into("ai-base", "http://localhost:8080/v1")?;
+    s.frames(2);
+    check(!s.ed.ui.hits.contains_key("ai-base-limit"), "a local server on any port needs no line".into())?;
+    s.ed.assistant.settings.browser = false;
+    s.ed.assistant.version += 1;
+    s.ui_click("ai-pick-0")?;
+    s.ui_click("ai-done")?;
+    check(
+        !s.ed.ui.ai_setup && s.ed.assistant.settings.model == "claude-opus-5-5",
+        "Done goes back to the conversation".into(),
+    )?;
+    // Escape in the composer only leaves it.
+    s.ui_click("ai-draft")?;
+    s.frames_with(2, vec![key_event(egui::Key::Escape, egui::Modifiers::NONE)]);
+    check(s.ed.ui.ai_open && !s.ed.ctx.egui_wants_keyboard_input(), "Escape in the composer leaves it".into())?;
+    s.frames_with(2, vec![key_event(egui::Key::J, egui::Modifiers::COMMAND)]);
+    check(!s.ed.ui.ai_open, "Cmd-J closes the panel".into())?;
+    Ok(())
+}
+
+/// A request the editor turns down (the world is not a model) keeps its words where they were
+/// typed: the bar stays open and unsent, the composer gets its draft back, and nothing is sent.
+fn ai_refused() -> Result<(), String> {
+    use vxr_core::history::At;
+    let mut s = Shot::new(Scene::from_vox(&house().to_vox())?, "house.vox", 1.0)?;
+    s.ed.ui.coach = false;
+    let fake = s.fake_assistant(0);
+    s.ed.assistant.set_key(vxr_ai::Kind::Anthropic, "sk-ant-test-not-a-real-key", false)?;
+    s.frames(2);
+    s.frames_with(2, vec![key_event(egui::Key::Tab, egui::Modifiers::NONE)]);
+    check(s.ed.scene.at() == At::World, "the house opens in the world after Tab".into())?;
+    s.ed.ui.open_ask_bar("open a door");
+    s.frames(2);
+    s.frames_with(2, vec![key_event(egui::Key::Enter, egui::Modifiers::NONE)]);
+    check(
+        fake.requests().is_empty() && s.ed.ui.ask_bar.as_ref().is_some_and(|b| b.text == "open a door" && !b.sent),
+        "a request turned down in the world leaves the bar open and unsent with its words".into(),
+    )?;
+    s.frames_with(2, vec![key_event(egui::Key::Escape, egui::Modifiers::NONE)]);
+    s.ed.ui.ai_open = true;
+    s.frames(2);
+    s.type_into("ai-draft", "open a door")?;
+    s.frames(2);
+    check(
+        fake.requests().is_empty() && s.ed.ui.ai_draft() == "open a door",
+        "a request turned down in the world goes back into the composer".into(),
+    )?;
+    Ok(())
+}
+
+/// New conversation ends a request the way Stop does: held calls leave the card, an empty
+/// review closes, and a staged change asks Keep or Drop; the next request then runs.
+fn ai_new_chat() -> Result<(), String> {
+    use serde_json::json;
+    use vxr_app::assistant::Progress;
+    use vxr_app::assistant::fake::anthropic;
+    let mut s = Shot::new(house(), "house.vox", 1.0)?;
+    s.ed.ui.coach = false;
+    let fake = s.fake_assistant(0);
+    s.ed.assistant.set_key(vxr_ai::Kind::Anthropic, "sk-ant-test-not-a-real-key", false)?;
+    s.ed.ui.ai_open = true;
+    s.frames(2);
+    let v0 = s.voxels();
+
+    // A small change staged, then a big one held: New conversation stops it.
+    fake.answer(anthropic("", &[("paint", json!({"slot": 5, "from_slot": 10}))]));
+    fake.answer(anthropic("", &[("box", json!({"from": [-16, 12, -16], "to": [15, 30, 15], "slot": 60}))]));
+    s.type_into("ai-draft", "make the walls green")?;
+    s.settle(600);
+    check(s.ed.assistant.held(), "a big change waits on the card".into())?;
+    s.ui_click("ai-new")?;
+    s.frames(2);
+    check(
+        !s.ed.assistant.running()
+            && s.ed.assistant.entries.is_empty()
+            && s.ed.review.as_ref().is_some_and(|r| r.held.is_empty())
+            && s.ed.ui.review.as_ref().is_some_and(|c| c.held.is_none())
+            && s.ed.ui.chat.stop_ask
+            && s.ed.ui.hits.contains_key("ai-keep"),
+        "New conversation drops the held calls and asks to keep or drop the staged change".into(),
+    )?;
+    s.ui_click("ai-keep")?;
+    // The kept change takes the next request, whose calls run.
+    fake.answer(anthropic(
+        "",
+        &[
+            ("line", json!({"from": [8, 0, 8], "to": [8, 9, 8], "slot": 40, "name": "flag pole"})),
+            ("done", json!({"summary": "Added a flag pole"})),
+        ],
+    ));
+    s.type_into("review-ask", "add a flag pole")?;
+    s.settle(600);
+    let a = s.last_answer().ok_or("no answer")?;
+    let card = s.ed.ui.review.clone().ok_or("no card")?;
+    check(
+        a.progress == Progress::Done && card.counts[0] == 10 && card.held.is_none(),
+        format!("the next request runs its calls: {:?}, card {:?}", a.progress, card.counts),
+    )?;
+    s.ui_click("review-discard")?;
+
+    // New conversation while a request runs on an empty review closes the review.
+    fake.hang();
+    s.type_into("ai-draft", "make the roof red")?;
+    s.frames(4);
+    check(s.ed.assistant.running() && s.ed.review.is_some(), "a request runs on a new review".into())?;
+    s.ui_click("ai-new")?;
+    s.frames(2);
+    check(
+        !s.ed.assistant.running() && s.ed.review.is_none() && !s.ed.ui.chat.stop_ask && s.voxels() == v0,
+        "New conversation closes the empty review".into(),
+    )?;
+    Ok(())
+}
+
+/// A request from the Cmd-K bar that fails while a review is open leaves the bar open on the
+/// failure, until Escape.
+fn ai_bar_failed() -> Result<(), String> {
+    use serde_json::json;
+    use vxr_app::assistant::Progress;
+    use vxr_app::assistant::fake::anthropic;
+    let mut s = Shot::new(house(), "house.vox", 1.0)?;
+    s.ed.ui.coach = false;
+    let fake = s.fake_assistant(0);
+    s.ed.assistant.set_key(vxr_ai::Kind::Anthropic, "sk-ant-test-not-a-real-key", false)?;
+    s.frames(2);
+    fake.answer(anthropic(
+        "",
+        &[("paint", json!({"slot": 5, "from_slot": 10})), ("done", json!({"summary": "Green walls"}))],
+    ));
+    s.ed.ui.open_ask_bar("make the walls green");
+    s.frames(2);
+    s.frames_with(2, vec![key_event(egui::Key::Enter, egui::Modifiers::NONE)]);
+    s.settle(600);
+    s.frames(3);
+    check(s.ed.review.is_some() && s.ed.ui.ask_bar.is_none(), "a change lands in the card and the bar closes".into())?;
+
+    fake.fail(400, r#"{"error":{"message":"bad request"}}"#);
+    s.ed.ui.open_ask_bar("add a flag pole");
+    s.frames(2);
+    s.frames_with(2, vec![key_event(egui::Key::Enter, egui::Modifiers::NONE)]);
+    s.settle(600);
+    s.frames(3);
+    let a = s.last_answer().ok_or("no answer")?;
+    check(
+        matches!(a.progress, Progress::Failed(_))
+            && s.ed.review.is_some()
+            && s.ed.ui.ask_bar.as_ref().is_some_and(|b| b.sent)
+            && s.ed.ui.hits.contains_key("ask-bar-close"),
+        format!("a failed request keeps the bar open on its failure: {:?}", a.progress),
+    )?;
+    s.frames_with(2, vec![key_event(egui::Key::Escape, egui::Modifiers::NONE)]);
+    check(s.ed.ui.ask_bar.is_none() && s.ed.review.is_some(), "Escape closes the bar, the card stays".into())?;
+    Ok(())
+}
+
+/// The assistant against the real providers whose keys are in the environment: one request on
+/// the house through the panel, then "Ask for changes" on its card (the conversation replayed
+/// with the provider's thinking or reasoning), checked and applied. Keys stay in memory.
+#[cfg(feature = "live")]
+pub fn live(dir: &Path) -> Result<(), String> {
+    use vxr_ai::Kind;
+    use vxr_app::assistant::Progress;
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let mut ran = 0;
+    for (kind, var) in [(Kind::Anthropic, "ANTHROPIC_API_KEY"), (Kind::OpenAi, "OPENAI_API_KEY")] {
+        let Some(key) = std::env::var(var).ok().filter(|k| !k.is_empty()) else {
+            println!("skip {} ({var} is not set)", kind.name());
+            continue;
+        };
+        ran += 1;
+        let mut s = Shot::new(house(), "house.vox", 2.0)?;
+        s.ed.ui.coach = false;
+        s.ed.cam.distance *= 2.6;
+        let h = s.ed.height as f32;
+        s.ed.cam.pan(-640.0, 40.0, h);
+        let rec = dir.join(format!("{}-streams", kind.id()));
+        std::fs::create_dir_all(&rec).map_err(|e| e.to_string())?;
+        let mut net = crate::net::Net::new();
+        net.record = Some(rec);
+        let mut keys = vxr_ai::MemoryKeys::default();
+        vxr_ai::Keys::set(&mut keys, kind, &key, false)?;
+        drop(key);
+        s.ed.assistant = vxr_app::assistant::Assistant::new(Box::new(net), Box::new(keys), false);
+        s.ed.ui.ai_open = true;
+        s.frames(2);
+        let mut cost = 0.0;
+        // `VXR_LIVE_PROMPTS` ("first|then") swaps in other requests, such as harder ones that
+        // make the model reason.
+        let custom = std::env::var("VXR_LIVE_PROMPTS").ok();
+        let prompts: Vec<&str> = match &custom {
+            Some(p) => p.split('|').collect(),
+            None => vec!["make the roof red", "add a small flag on a pole on top of the roof"],
+        };
+        for (k, prompt) in prompts.into_iter().enumerate() {
+            let before = s.ed.assistant.entries.len();
+            if k == 0 {
+                s.type_into("ai-draft", prompt)?;
+            } else {
+                s.type_into("review-ask", prompt)?;
+            }
+            let t0 = std::time::Instant::now();
+            while s.ed.assistant.running() && t0.elapsed().as_secs() < 300 {
+                if s.ed.assistant.held() {
+                    s.ui_click("review-allow")?;
+                }
+                s.frames(1);
+                std::thread::sleep(std::time::Duration::from_millis(15));
+            }
+            let a = s.last_answer().ok_or("no answer")?;
+            let card = s.ed.ui.review.clone();
+            cost += a.cost.unwrap_or(0.0);
+            check(
+                a.progress == Progress::Done
+                    && s.ed.assistant.entries.len() == before + 2
+                    && card.as_ref().is_some_and(|c| c.counts.iter().sum::<usize>() > 0 || !c.slots.is_empty()),
+                format!(
+                    "{} {}: \"{prompt}\" -> {:?}, {} calls ({}), card {:?} slots {:?}, ${:.3}, {:.1} s",
+                    kind.name(),
+                    a.model,
+                    a.progress,
+                    a.calls.len(),
+                    a.calls.iter().map(|c| c.tool.as_str()).collect::<Vec<_>>().join(" "),
+                    card.as_ref().map(|c| c.counts),
+                    card.as_ref().map(|c| c.slots.iter().map(|s| s.slot).collect::<Vec<_>>()),
+                    a.cost.unwrap_or(0.0),
+                    a.secs
+                ),
+            )?;
+        }
+        s.frames(30);
+        s.save_png(&dir.join(format!("live-{}.png", kind.id())))?;
+        s.frames_with(2, vec![key_event(egui::Key::Enter, egui::Modifiers::NONE)]);
+        check(
+            s.ed.review.is_none() && s.ed.scene.history().undo_label().is_some_and(|l| l.starts_with("AI: ")),
+            format!("{}: applied as one undo step; ${cost:.3} for both requests", kind.name()),
+        )?;
+    }
+    check(ran > 0, format!("{ran} providers checked live"))
 }

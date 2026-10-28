@@ -1,0 +1,20 @@
+: OPENROUTER PROCESSING
+
+data: {"id":"gen-fixture","model":"anthropic/claude-opus-5.5","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"Painting "},"finish_reason":null}]}
+
+data: {"id":"gen-fixture","model":"anthropic/claude-opus-5.5","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"the roof."},"finish_reason":null}]}
+
+data: {"id":"gen-fixture","model":"anthropic/claude-opus-5.5","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"toolu_or","type":"function","function":{"name":"paint","arguments":""}}]},"finish_reason":null}]}
+
+data: {"id":"gen-fixture","model":"anthropic/claude-opus-5.5","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"part\": \"p3\""}}]},"finish_reason":null}]}
+
+: OPENROUTER PROCESSING
+
+data: {"id":"gen-fixture","model":"anthropic/claude-opus-5.5","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":", \"slot\": 3}"}}]},"finish_reason":null}]}
+
+data: {"id":"gen-fixture","model":"anthropic/claude-opus-5.5","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+
+data: {"id":"gen-fixture","model":"anthropic/claude-opus-5.5","object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":5100,"completion_tokens":95,"total_tokens":5195,"cost":0.0224,"prompt_tokens_details":{"cached_tokens":0}}}
+
+data: [DONE]
+

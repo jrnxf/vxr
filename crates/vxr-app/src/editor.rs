@@ -10,9 +10,10 @@ use vxr_core::select::{Mode, MoveDrag, Transform};
 use vxr_core::tools::{Brush, Gesture, Press, Shape, Target, Tool, plane_cell};
 use vxr_render::{EditBox, Gpu, GpuMap, Guides, OrbitCamera, Preview, Renderer, brickmap_layout, gpu::now_ms};
 
+use crate::assistant::{Assistant, Entry, Progress};
 use crate::render::{EXPORT_SIZES, Export};
 use crate::review::{Answer, Review, Script};
-use crate::ui::{Action, FontBytes, Hybrid, LayerRow, Named, Stats, TreeRow};
+use crate::ui::{Action, AiAction, ChatView, FontBytes, Hybrid, LayerRow, Named, Stats, TreeRow};
 
 /// Input quiet for this long raises the preview's budget (spikes/preview/RESULTS.md).
 const IDLE_MS: f64 = 300.0;
@@ -115,11 +116,21 @@ pub struct Editor {
     /// The AI change under review: staged on the scene, drawn as a ghost, with its card.
     /// While it is open nothing else edits the scene.
     pub review: Option<Review>,
-    /// The review version and `map.fills` the ghost was built at, and the card's version.
+    /// The review version and `map.fills` the ghost was built at, and the card's version
+    /// with the assistant's.
     ghost_shown: Option<(u64, u64)>,
-    card_shown: Option<u64>,
-    /// "Ask for changes" requests from the review card, for the assistant to take.
+    card_shown: Option<(u64, u64)>,
+    /// "Ask for changes" requests from the review card, which go to the assistant.
     pub asks: Vec<String>,
+    /// The AI assistant: its conversation and the request in progress, through the review step.
+    pub assistant: Assistant,
+    /// The assistant version the panel shows.
+    chat_shown: Option<u64>,
+}
+
+/// Whether a review has nothing in it: no step and no change.
+fn review_empty(r: &Review, scene: &Scene) -> bool {
+    r.session.steps().is_empty() && r.session.changes(scene) == Default::default()
 }
 
 /// What may run while an AI change is under review: the view, and the review itself.
@@ -207,6 +218,8 @@ impl Editor {
             ghost_shown: None,
             card_shown: None,
             asks: Vec::new(),
+            assistant: Assistant::default(),
+            chat_shown: None,
         };
         e.shape = (e.scene.reshapes(), e.scene.origin);
         e.mark_saved();
@@ -218,6 +231,8 @@ impl Editor {
     /// Replace the scene (after Open), reframing the camera.
     pub fn load(&mut self, scene: Scene, name: &str) -> Result<(), String> {
         // A change under review belongs to the scene it was staged on.
+        self.assistant.stop(now_ms() / 1000.0);
+        self.assistant.stop_ask = false;
         self.review = None;
         let mut scene = scene;
         scene.map.track_dirty(true);
@@ -874,18 +889,7 @@ impl Editor {
     /// is one model answer. Returns each call's answer, by turn.
     pub fn stage(&mut self, script: Script) -> Vec<Vec<Answer>> {
         if self.review.is_none() {
-            // Whatever the user had going ends here, as its own step.
-            self.place_box();
-            self.gesture = None;
-            self.moving = None;
-            self.marquee = None;
-            self.world_drag = None;
-            self.ui.color_edit = None;
-            self.ui.slot_op = None;
-            self.ui.bounds_panel = None;
-            self.ui.coach = false;
-            self.scene.commit();
-            self.review = Some(Review::new(&self.scene, &script.prompt));
+            self.open_review(&script.prompt);
         }
         let r = self.review.as_mut().unwrap();
         let mut out = Vec::new();
@@ -895,13 +899,146 @@ impl Editor {
         out
     }
 
+    /// Open a review for a request: whatever the user had going ends first, as its own step.
+    fn open_review(&mut self, prompt: &str) {
+        self.place_box();
+        self.gesture = None;
+        self.moving = None;
+        self.marquee = None;
+        self.world_drag = None;
+        self.ui.color_edit = None;
+        self.ui.slot_op = None;
+        self.ui.bounds_panel = None;
+        self.ui.coach = false;
+        self.scene.commit();
+        self.review = Some(Review::new(&self.scene, prompt));
+    }
+
+    /// Send a request to the assistant: on the change under review if one is open (the
+    /// card's "Ask for changes" continues it), else on a new one. Without a key the panel
+    /// opens on its key settings. Returns whether the request started; when it did not, a
+    /// toast says why.
+    pub fn ask(&mut self, text: &str) -> bool {
+        let text = text.trim();
+        if text.is_empty() {
+            return false;
+        }
+        if self.assistant.running() {
+            self.ui.toast(&self.ctx, "Wait for the answer, or stop it");
+            return false;
+        }
+        if !self.assistant.ready() {
+            self.ui.open_ai_setup(None);
+            self.ui.toast(&self.ctx, crate::assistant::NO_KEY);
+            return false;
+        }
+        if self.scene.at() == At::World {
+            self.ui.toast(&self.ctx, "Open an object's model (Tab) to change it with AI");
+            return false;
+        }
+        let opened = self.review.is_none();
+        if opened {
+            self.open_review(text);
+        } else if let Some(r) = &mut self.review {
+            r.session.begin_request();
+            r.show_before(&mut self.scene, false);
+        }
+        let r = self.review.as_mut().unwrap();
+        if let Err(e) = self.assistant.send(text, r, &self.scene, now_ms() / 1000.0) {
+            if opened && let Some(r) = self.review.take() {
+                r.session.discard(&mut self.scene);
+            }
+            self.ui.toast(&self.ctx, e);
+            return false;
+        }
+        true
+    }
+
+    /// What the panel and the prompt bar asked for.
+    fn ai_action(&mut self, a: AiAction) {
+        let now = now_ms() / 1000.0;
+        match a {
+            AiAction::Send(text) => {
+                if !self.ask(&text) {
+                    self.ui.ai_refused(&text);
+                }
+            }
+            AiAction::Stop => self.stop_request(now),
+            AiAction::Keep => self.assistant.stop_ask = false,
+            AiAction::Drop => {
+                self.assistant.stop_ask = false;
+                self.discard_review();
+            }
+            AiAction::SaveKey { kind, key, remember } => match self.assistant.set_key(kind, &key, remember) {
+                Ok(()) => self.ui.toast(&self.ctx, format!("Kept your {} key", kind.name())),
+                Err(e) => self.ui.toast(&self.ctx, format!("Could not keep the key: {e}")),
+            },
+            AiAction::RemoveKey(kind) => match self.assistant.remove_key(kind) {
+                Ok(()) => self.ui.toast(&self.ctx, format!("Removed the {} key", kind.name())),
+                Err(e) => self.ui.toast(&self.ctx, format!("Could not remove the key: {e}")),
+            },
+            AiAction::Settings(s) => self.assistant.set_settings(s),
+            AiAction::NewChat => {
+                self.assistant.stop_ask = false;
+                self.stop_request(now);
+                self.assistant.clear();
+            }
+        }
+        self.assistant.version += 1;
+    }
+
+    /// Stop the request: held calls are dropped from the review, an empty review closes, and
+    /// a staged change asks Keep or Drop.
+    fn stop_request(&mut self, now: f64) {
+        let staged = self.review.as_ref().is_some_and(|r| !review_empty(r, &self.scene));
+        if self.assistant.stop(now) {
+            if let Some(r) = &mut self.review {
+                r.stop();
+            }
+            if staged {
+                self.assistant.stop_ask = true;
+            } else {
+                self.close_empty_review();
+            }
+        }
+    }
+
+    /// A review the assistant opened and left without a step or a change closes by itself.
+    fn close_empty_review(&mut self) {
+        if self.review.as_ref().is_some_and(|r| review_empty(r, &self.scene))
+            && let Some(r) = self.review.take()
+        {
+            r.session.discard(&mut self.scene);
+        }
+    }
+
+    /// What the panel shows of the assistant.
+    fn chat_view(&mut self) -> ChatView {
+        let a = &mut self.assistant;
+        let kinds = vxr_ai::Kind::ALL;
+        ChatView {
+            entries: a.entries.clone(),
+            running: a.running(),
+            held: a.held(),
+            stop_ask: a.stop_ask,
+            settings: a.settings.clone(),
+            has_key: kinds.map(|k| a.has_key(k)),
+            place: a.key_place(),
+            remembered: kinds.map(|k| a.keys.remembered(k)),
+            spent: a.spent,
+        }
+    }
+
     /// [`Editor::stage`] from a script's JSON (see [`Script`]).
     pub fn stage_json(&mut self, json: &str) -> Result<Vec<Vec<Answer>>, String> {
         Ok(self.stage(Script::parse(json)?))
     }
 
-    /// Apply the change under review as one undo step named after the request.
+    /// Apply the change under review as one undo step named after the request (a request
+    /// still running stops first).
     pub fn apply_review(&mut self) {
+        self.assistant.stop(now_ms() / 1000.0);
+        self.assistant.stop_ask = false;
         let Some(r) = self.review.take() else { return };
         let label = r.label();
         let n = r.session.apply_named(&mut self.scene, &label);
@@ -915,6 +1052,8 @@ impl Editor {
 
     /// Drop the change under review: the scene is as it was, with no undo step.
     pub fn discard_review(&mut self) {
+        self.assistant.stop(now_ms() / 1000.0);
+        self.assistant.stop_ask = false;
         let Some(r) = self.review.take() else { return };
         r.session.discard(&mut self.scene);
         self.ui.toast(&self.ctx, "Discarded the AI change");
@@ -927,10 +1066,14 @@ impl Editor {
             Action::DiscardReview => self.discard_review(),
             Action::DropStep(i, dropped) => r.set_dropped(&mut self.scene, i, dropped),
             Action::ReviewBefore(on) => r.show_before(&mut self.scene, on),
+            Action::AllowMore if self.assistant.held() => self.assistant.allow(r, &mut self.scene, now_ms() / 1000.0),
             Action::AllowMore => {
                 r.allow(&mut self.scene);
             }
-            Action::StopHeld => r.stop(),
+            Action::StopHeld => {
+                self.assistant.stop_held(now_ms() / 1000.0);
+                r.stop();
+            }
             _ => {}
         }
     }
@@ -1035,10 +1178,27 @@ impl Editor {
             let (a, b) = (m.start, m.end);
             egui::Rect::from_two_pos(egui::pos2(a[0], a[1]), egui::pos2(b[0], b[1])) / self.ppp
         });
+        // The assistant's request moves on: its stream, its calls through the review.
+        if self.assistant.tick(self.review.as_mut(), &mut self.scene, now / 1000.0) {
+            self.close_empty_review();
+        }
+        if self.chat_shown != Some(self.assistant.version) {
+            self.chat_shown = Some(self.assistant.version);
+            self.ui.chat = self.chat_view();
+        }
+        let working = match self.assistant.entries.last() {
+            Some(Entry::Answer(a)) if self.assistant.running() => match &a.progress {
+                Progress::Working(w) => Some(w.clone()),
+                _ => None,
+            },
+            _ => None,
+        };
         match &self.review {
-            Some(r) if self.card_shown != Some(r.version) => {
-                self.card_shown = Some(r.version);
-                self.ui.review = Some(r.card(&self.scene));
+            Some(r) if self.card_shown != Some((r.version, self.assistant.version)) => {
+                self.card_shown = Some((r.version, self.assistant.version));
+                let mut card = r.card(&self.scene);
+                card.working = working;
+                self.ui.review = Some(card);
             }
             Some(_) => {}
             None => {
@@ -1053,7 +1213,13 @@ impl Editor {
         let mut host = Vec::new();
         actions.extend(std::iter::repeat_n(Action::ToggleWorld, tabs));
         if let Some(text) = self.ui.asked.take() {
-            self.asks.push(text);
+            self.asks.push(text.clone());
+            if !self.ask(&text) {
+                self.ui.review_ask_refused(&text);
+            }
+        }
+        for a in std::mem::take(&mut self.ui.ai_out) {
+            self.ai_action(a);
         }
         if self.review.is_some() {
             // Nothing else edits the scene while a change is under review: the view still moves.

@@ -7,9 +7,16 @@
 //!   `.vox` files under `<dir>` (see `vxr-mcp`).
 //! - `vxr --shot <dir> [scene.vox]` runs headless: it drives the editor through every tool,
 //!   saves and reopens the result, and writes `app-1x.png` and `app-2x.png` into `<dir>`.
+//! - `vxr --live <dir>`, only in a build with the `live` feature (`cargo run --release -p
+//!   vxr-app --features live -- --live <dir>`), runs the assistant headless against the real
+//!   providers whose keys are in `ANTHROPIC_API_KEY` and `OPENAI_API_KEY`, and writes
+//!   screenshots and each answer's stream into `<dir>` (the live check; it spends a few cents
+//!   per provider).
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
+#[cfg(not(target_arch = "wasm32"))]
+mod net;
 #[cfg(not(target_arch = "wasm32"))]
 mod shot;
 
@@ -21,6 +28,11 @@ fn main() {
         Some("--shot") => match args.get(1) {
             Some(dir) => shot::run(dir.as_ref(), args.get(2).map(|s| s.as_ref())),
             None => Err("usage: vxr --shot <dir> [scene.vox]".into()),
+        },
+        #[cfg(feature = "live")]
+        Some("--live") => match args.get(1) {
+            Some(dir) => shot::live(dir.as_ref()),
+            None => Err("usage: vxr --live <dir>".into()),
         },
         Some("--stage") => match args.get(1) {
             Some(script) => native::run(args.get(2).map(Into::into), Some(script.into())),

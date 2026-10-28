@@ -225,6 +225,7 @@ impl Review {
             steps,
             held: (!self.held.is_empty()).then_some((s.allowed(), s.limits.changed_cells)),
             before: s.showing_before(),
+            working: None,
         }
     }
 }

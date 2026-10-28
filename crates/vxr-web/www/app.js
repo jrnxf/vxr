@@ -1,0 +1,203 @@
+// The vxr editor's page: everything on the canvas (scene and UI) is the Rust editor (pkg/,
+// built by crates/vxr-web/build); this script forwards input, opens files, downloads saves and
+// keeps remembered assistant keys.
+import init, { start } from './pkg/vxr_web.js';
+
+const canvas = document.getElementById('c');
+const ime = document.getElementById('ime');
+const fileInput = document.getElementById('file');
+const msg = document.getElementById('msg');
+const dpr = () => devicePixelRatio || 1;
+let app, composing = false;
+
+// The assistant's keys, when the user asks this browser to remember one: encrypted with an
+// AES-GCM key that never leaves the browser (non-extractable, kept in IndexedDB), so what is
+// stored is never the key in plain text. Code running on this page can still use it, as the
+// settings say. By default keys stay in the tab's memory and nothing is stored.
+const KEYS_DB = 'vxr-keys';
+function keysDb() {
+  return new Promise((resolve, reject) => {
+    const r = indexedDB.open(KEYS_DB, 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('k');
+    r.onsuccess = () => resolve(r.result);
+    r.onerror = () => reject(r.error);
+  });
+}
+async function keysTx(mode, f) {
+  const db = await keysDb();
+  return new Promise((resolve, reject) => {
+    const t = db.transaction('k', mode);
+    const req = f(t.objectStore('k'));
+    t.oncomplete = () => { db.close(); resolve(req?.result); };
+    t.onerror = () => { db.close(); reject(t.error); };
+  });
+}
+async function wrapKey() {
+  let k = await keysTx('readonly', (s) => s.get('wrap'));
+  if (!k) {
+    k = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+    await keysTx('readwrite', (s) => s.put(k, 'wrap'));
+  }
+  return k;
+}
+window.vxrKeys = {
+  async remember(kind, key) {
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, await wrapKey(), new TextEncoder().encode(key));
+    await keysTx('readwrite', (s) => s.put({ iv, ct }, 'key:' + kind));
+  },
+  async forget(kind) {
+    await keysTx('readwrite', (s) => s.delete('key:' + kind));
+  },
+  async load() {
+    const out = [];
+    for (const kind of ['anthropic', 'openai', 'compatible']) {
+      const v = await keysTx('readonly', (s) => s.get('key:' + kind)).catch(() => null);
+      if (!v) continue;
+      try {
+        const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: v.iv }, await wrapKey(), v.ct);
+        out.push([kind, new TextDecoder().decode(pt)]);
+      } catch (e) {
+        console.warn(`vxr: a remembered ${kind} key could not be read`, e);
+      }
+    }
+    return out;
+  },
+};
+
+function show(title, text) {
+  msg.hidden = false;
+  const p = document.createElement('p');
+  const s = document.createElement('strong');
+  s.textContent = title;
+  p.append(s, text);
+  msg.replaceChildren(p);
+}
+
+function fit() {
+  canvas.width = Math.max(1, Math.round(canvas.clientWidth * dpr()));
+  canvas.height = Math.max(1, Math.round(canvas.clientHeight * dpr()));
+  app?.resize(canvas.width, canvas.height, dpr());
+}
+
+const mods = (e) => app.set_modifiers(e.shiftKey, e.altKey, e.ctrlKey, e.metaKey);
+
+function wire() {
+  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+  canvas.addEventListener('pointerdown', (e) => {
+    canvas.setPointerCapture(e.pointerId);
+    canvas.focus();
+    mods(e);
+    app.pointer_move(e.offsetX, e.offsetY);
+    app.pointer_button(e.offsetX, e.offsetY, e.button, true);
+    e.preventDefault();
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    mods(e);
+    app.pointer_move(e.offsetX, e.offsetY);
+    // A second button pressed or released during a drag (a chord) comes as a pointermove.
+    if (e.button >= 0) app.pointer_button(e.offsetX, e.offsetY, e.button, (e.buttons & [1, 4, 2][e.button]) !== 0);
+  });
+  canvas.addEventListener('pointerup', (e) => { mods(e); app.pointer_button(e.offsetX, e.offsetY, e.button, false); });
+  canvas.addEventListener('pointerleave', () => app.pointer_leave());
+  canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const k = e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? 400 : 1;
+    // A trackpad pinch comes as a wheel with Ctrl held (Chrome, Firefox): zoom, not the page.
+    if (e.ctrlKey && !e.metaKey) app.pinch(Math.exp(-e.deltaY * k * 0.01) - 1);
+    else app.wheel(e.deltaX * k, e.deltaY * k);
+  }, { passive: false });
+  // Safari sends a pinch as gesture events instead.
+  let pinchScale = 1;
+  canvas.addEventListener('gesturestart', (e) => { e.preventDefault(); pinchScale = 1; });
+  canvas.addEventListener('gesturechange', (e) => {
+    e.preventDefault();
+    app.pinch(e.scale / pinchScale - 1);
+    pinchScale = e.scale;
+  });
+  canvas.addEventListener('gestureend', (e) => e.preventDefault());
+  const key = (e, down) => {
+    if (composing || e.isComposing) return;
+    mods(e);
+    if (app.key(e.key, down, e.repeat)) e.preventDefault();
+    if ((e.metaKey || e.ctrlKey) && ['k', 'j', 'z', 'n', 'o', 's', 'd', 'g', '=', '+', '-'].includes(e.key.toLowerCase())) e.preventDefault();
+  };
+  addEventListener('keydown', (e) => key(e, true));
+  addEventListener('keyup', (e) => key(e, false));
+  addEventListener('blur', () => app.blur());
+  addEventListener('paste', (e) => { if (app.wants_keyboard()) app.paste(e.clipboardData.getData('text')); });
+  ime.addEventListener('compositionstart', () => { composing = true; });
+  ime.addEventListener('compositionupdate', (e) => app.ime(e.data, false));
+  ime.addEventListener('compositionend', (e) => { composing = false; app.ime(e.data, true); ime.value = ''; });
+  ime.addEventListener('input', () => { if (!composing) ime.value = ''; });
+  fileInput.addEventListener('change', async () => {
+    const f = fileInput.files[0];
+    fileInput.value = '';
+    if (f) app.open(new Uint8Array(await f.arrayBuffer()), f.name);
+  });
+  new ResizeObserver(fit).observe(canvas);
+}
+
+function download(bytes, name, type) {
+  const url = URL.createObjectURL(new Blob([bytes], { type }));
+  const a = Object.assign(document.createElement('a'), { href: url, download: name });
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  app.toast(`Downloaded ${name}`);
+}
+
+function save() {
+  download(app.save(), /\.vox$/i.test(app.name()) ? app.name() : 'scene.vox', 'application/octet-stream');
+}
+
+let cursor = '';
+function tick(now) {
+  for (const a of app.frame(now / 1000)) {
+    if (a === 'open') fileInput.click();
+    else if (a === 'save') save();
+    else if (a === 'embed') app.toast('The embed export is not built yet');
+    else if (a === 'obj') {
+      const zip = app.export_obj();
+      if (zip.length) download(zip, app.obj_name(), 'application/zip');
+    }
+    else if (a === 'slices') {
+      const png = app.export_slices();
+      if (png.length) download(png, app.slices_name(), 'image/png');
+    }
+    else if (a === 'exported') download(app.take_export(), app.export_name(), 'image/png');
+  }
+  const c = app.cursor();
+  if (c !== cursor) canvas.style.cursor = cursor = c;
+  // Keep the hidden field focused while egui is typing so the OS IME targets it.
+  if (app.wants_keyboard() && document.activeElement !== ime) ime.focus();
+  if (!app.wants_keyboard() && document.activeElement === ime) canvas.focus();
+  requestAnimationFrame(tick);
+}
+
+async function main() {
+  if (!navigator.gpu || !(await navigator.gpu.requestAdapter().catch(() => null))) {
+    show('This browser has no WebGPU.', 'vxr needs WebGPU: try a recent Chrome, Edge or Safari on a desktop, or download the desktop app when it ships.');
+    return;
+  }
+  await init();
+  fit();
+  const get = async (u) => {
+    const r = await fetch(u);
+    if (!r.ok) throw new Error(`${u}: ${r.status}`);
+    return new Uint8Array(await r.arrayBuffer());
+  };
+  const font = (n) => get('fonts/' + n).catch(() => new Uint8Array());
+  const [vox, ...fonts] = await Promise.all([
+    get('scene.vox'),
+    font('Inter-Regular.ttf'), font('Inter-Medium.ttf'), font('Inter-SemiBold.ttf'),
+    font('JetBrainsMono-Regular.ttf'), font('JetBrainsMono-Medium.ttf'), font('lucide.ttf'),
+  ]);
+  app = await start(canvas, vox, 'island.vox', dpr(), ...fonts);
+  window.vxr = app; // for the console and crates/vxr-web/check
+  for (const [kind, key] of await window.vxrKeys.load().catch(() => [])) app.restore_key(kind, key);
+  msg.hidden = true;
+  wire();
+  canvas.focus();
+  requestAnimationFrame(tick);
+}
+main().catch((e) => { console.error(e); show('vxr could not start.', String(e)); });
