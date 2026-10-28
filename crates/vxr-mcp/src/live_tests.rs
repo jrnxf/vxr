@@ -274,3 +274,70 @@ fn a_planted_folder_or_token_is_not_trusted() {
     assert_ne!(token(&dir), wrong);
     assert_eq!(std::fs::metadata(dir.0.join(TOKEN)).unwrap().permissions().mode() & 0o777, 0o600);
 }
+
+/// A raw connection that has presented the token, and the host's id for it.
+fn paired(dir: &Dir, host: &Host) -> (UnixStream, u64) {
+    let s = UnixStream::connect(dir.0.join(SOCKET)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let mut w = s.try_clone().unwrap();
+    w.write_all(format!("{{\"vxr\": \"live\", \"token\": \"{}\"}}\n", token(dir)).as_bytes()).unwrap();
+    let mut line = String::new();
+    BufReader::new(s.try_clone().unwrap()).read_line(&mut line).unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&line).unwrap(), json!({"ok": true}));
+    wait_for(|| !host.clients().is_empty());
+    let id = host.clients().last().unwrap().0;
+    (s, id)
+}
+
+#[test]
+fn stop_does_not_wait_for_an_agent_that_stopped_reading() {
+    let dir = Dir::new("stall");
+    let host = Host::start(&dir.0).unwrap();
+    let (s, id) = paired(&dir, &host);
+    // The agent asks for something big and then never reads its answer: the reply fills
+    // the socket and its writer blocks.
+    s.try_clone().unwrap().write_all(b"{\"id\": 1, \"read\": \"vxr://scene/summary\"}\n").unwrap();
+    let start = Instant::now();
+    let r = loop {
+        if let Some(r) = host.poll().pop() {
+            break r;
+        }
+        assert!(start.elapsed() < Duration::from_secs(5), "the read never came");
+        std::thread::sleep(Duration::from_millis(2));
+    };
+    r.answer(Ok("x".repeat(8 << 20)));
+    std::thread::sleep(Duration::from_millis(200));
+    let t = Instant::now();
+    host.stop(id);
+    assert!(t.elapsed() < Duration::from_millis(500), "Stop took {:?}", t.elapsed());
+    assert!(host.clients().is_empty());
+    // Turning live mode off does not wait either.
+    let (s2, _) = paired(&dir, &host);
+    s2.try_clone().unwrap().write_all(b"{\"id\": 1, \"read\": \"vxr://scene/summary\"}\n").unwrap();
+    let start = Instant::now();
+    let r = loop {
+        if let Some(r) = host.poll().pop() {
+            break r;
+        }
+        assert!(start.elapsed() < Duration::from_secs(5), "the read never came");
+        std::thread::sleep(Duration::from_millis(2));
+    };
+    r.answer(Ok("x".repeat(8 << 20)));
+    std::thread::sleep(Duration::from_millis(200));
+    let t = Instant::now();
+    drop(host);
+    assert!(t.elapsed() < Duration::from_millis(500), "turning off took {:?}", t.elapsed());
+    drop((s, s2));
+}
+
+#[test]
+fn a_connection_id_is_never_given_out_again() {
+    let dir = Dir::new("ids");
+    let host = Host::start(&dir.0).unwrap();
+    let (s1, first) = paired(&dir, &host);
+    drop(host);
+    let host = Host::start(&dir.0).unwrap();
+    let (s2, second) = paired(&dir, &host);
+    assert_ne!(first, second, "after off and on a new agent is not taken for the old one");
+    drop((s1, s2));
+}

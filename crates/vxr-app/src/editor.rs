@@ -1365,13 +1365,16 @@ impl Editor {
         (host, out.platform_output)
     }
 
-    /// Whether an agent's call has to wait: the user is in the middle of a drag or a box.
+    /// Whether an agent's call has to wait: the user is in the middle of a drag, a box or a
+    /// colour or material slider.
     pub fn agent_busy(&self) -> bool {
         self.gesture.is_some()
             || self.moving.is_some()
             || self.marquee.is_some()
             || self.world_drag.is_some()
             || self.lifting()
+            // A colour or material slider being dragged is one open edit until release.
+            || (self.ui.color_edit.is_some() && self.ctx.input(|i| i.pointer.any_down()))
     }
 
     /// Run a terminal agent's tool call on the scene (see [`Agents::call`]): an edit applies

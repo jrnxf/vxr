@@ -75,6 +75,12 @@ impl Agents {
         self.version += 1;
     }
 
+    /// A connection closed: its selection goes with it. Its edits stay listed, for the user
+    /// to take back.
+    pub fn forget(&mut self, conn: u64) {
+        self.selections.remove(&conn);
+    }
+
     /// Run one tool call from connection `conn`, named `client`, on the scene, as `vxr mcp`
     /// files mode does: an edit applies at once as one undo step named after the client.
     pub fn call(
@@ -328,6 +334,17 @@ mod tests {
         assert_eq!(at(&s, [0, 0, 0]), 9);
         ok(&mut a, &mut s, 1, "Claude Code", "undo", json!({}));
         assert_eq!(at(&s, [0, 0, 0]), 2);
+    }
+
+    #[test]
+    fn a_closed_connection_takes_its_selection_with_it() {
+        let (mut a, mut s) = (Agents::default(), scene());
+        by_hand(&mut s, &[([0, 0, 0], 2), ([1, 0, 0], 2)]);
+        ok(&mut a, &mut s, 1, "Claude Code", "select", json!({"from": [1, 0, 0], "to": [1, 0, 0]}));
+        a.forget(1);
+        let _ = a.call(&mut s, 1, "Claude Code", "paint", &json!({"slot": 9, "selection": true}));
+        assert_eq!(at(&s, [1, 0, 0]), 2, "the old connection's selection is gone");
+        assert_eq!(a.edits.len(), 0);
     }
 
     #[test]

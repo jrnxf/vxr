@@ -91,7 +91,12 @@ impl Live {
     fn sync(&self, ed: &mut Editor) {
         ed.agents.available = true;
         ed.agents.allowed = self.host.is_some();
-        ed.agents.clients = self.host.as_ref().map(Host::clients).unwrap_or_default();
+        let clients = self.host.as_ref().map(Host::clients).unwrap_or_default();
+        for (conn, _) in std::mem::replace(&mut ed.agents.clients, clients.clone()) {
+            if !clients.iter().any(|(c, _)| *c == conn) {
+                ed.agents.forget(conn);
+            }
+        }
     }
 
     /// Run what agents asked since the last frame, unless the user is mid-drag.

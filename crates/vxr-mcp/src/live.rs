@@ -54,7 +54,7 @@ pub fn is_tool(name: &str) -> bool {
 }
 
 /// The folder the socket and token live in: `$VXR_LIVE_DIR` if set, else `vxr` in the
-/// user's runtime directory (`$XDG_RUNTIME_DIR`), else `vxr-<user>` in the temp folder
+/// user's runtime directory (`$XDG_RUNTIME_DIR`), else `vxr-<uid>` in the temp folder
 /// (per user on macOS, where `$TMPDIR` is private).
 pub fn dir() -> PathBuf {
     let var = |k| std::env::var_os(k).filter(|v| !v.is_empty());
@@ -64,8 +64,10 @@ pub fn dir() -> PathBuf {
     if let Some(d) = var("XDG_RUNTIME_DIR") {
         return PathBuf::from(d).join("vxr");
     }
-    let user = var("USER").map(|u| u.to_string_lossy().into_owned()).unwrap_or_default();
-    let user: String = user.chars().filter(|c| c.is_ascii_alphanumeric() || "-_.".contains(*c)).collect();
+    #[cfg(unix)]
+    let user = unix::uid().to_string();
+    #[cfg(not(unix))]
+    let user = String::new();
     std::env::temp_dir().join(format!("vxr-{user}"))
 }
 
@@ -146,7 +148,7 @@ pub fn token_path(dir: &Path) -> PathBuf {
 mod unix {
     use std::collections::HashMap;
     use std::io::{BufRead, BufReader, Read, Write};
-    use std::os::unix::fs::{DirBuilderExt, FileTypeExt, OpenOptionsExt, PermissionsExt};
+    use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -165,6 +167,18 @@ mod unix {
     const HELLO_WAIT: Duration = Duration::from_secs(5);
     /// Most connections at once.
     const MAX_CONNS: usize = 16;
+    /// How long a reply may wait for the agent to read it before the connection is dropped.
+    const WRITE_WAIT: Duration = Duration::from_secs(5);
+
+    /// Connection ids, never reused in this process: a new connection after live mode is
+    /// turned off and on is never taken for an old one.
+    static NEXT_CONN: AtomicU64 = AtomicU64::new(1);
+
+    /// This process's effective user id.
+    pub(super) fn uid() -> u32 {
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        unsafe { libc::geteuid() }
+    }
 
     /// Whether two tokens are the same, in time that does not depend on where they differ.
     fn same(a: &str, b: &str) -> bool {
@@ -194,8 +208,8 @@ mod unix {
         w.flush()
     }
 
-    /// Make `dir` if needed, and check it is a folder only this user can open: not a symbolic
-    /// link and no permission for group or others.
+    /// Make `dir` if needed, and check it is a folder only this user can open: owned by
+    /// this user, not a symbolic link, and no permission for group or others.
     fn ensure_dir(dir: &Path) -> Result<(), String> {
         let shown = "the live folder";
         match std::fs::DirBuilder::new().mode(0o700).create(dir) {
@@ -204,8 +218,8 @@ mod unix {
             Err(e) => return Err(format!("could not make {shown}: {e}")),
         }
         let m = std::fs::symlink_metadata(dir).map_err(|e| format!("{shown}: {e}"))?;
-        if !m.is_dir() || m.permissions().mode() & 0o077 != 0 {
-            return Err(format!("{shown} must be a folder only you can open (mode 700)"));
+        if !m.is_dir() || m.permissions().mode() & 0o077 != 0 || m.uid() != uid() {
+            return Err(format!("{shown} must be a folder you own that only you can open (mode 700)"));
         }
         Ok(())
     }
@@ -285,15 +299,16 @@ mod unix {
         conns: Mutex<HashMap<u64, Conn>>,
         token: Mutex<String>,
         quit: AtomicBool,
-        next: AtomicU64,
     }
 
     impl Shared {
-        /// Tell a connection why it ends, and hang up.
+        /// Tell a connection why it ends, and hang up. Never waits on the connection: when
+        /// its thread is in the middle of a reply (an agent not reading blocks it), the
+        /// connection is hung up without the reason, which ends that write at once.
         fn close(&self, id: u64, reason: &str) {
             let Some(c) = self.conns.lock().unwrap().remove(&id) else { return };
-            if let Ok(mut w) = c.writer.lock() {
-                let _ = w.set_write_timeout(Some(Duration::from_millis(500)));
+            if let Ok(mut w) = c.writer.try_lock() {
+                let _ = w.set_write_timeout(Some(Duration::from_millis(200)));
                 let _ = write_line(&mut *w, &json!({"closed": reason}));
             }
             let _ = c.stream.shutdown(std::net::Shutdown::Both);
@@ -344,7 +359,6 @@ mod unix {
                 conns: Mutex::new(HashMap::new()),
                 token: Mutex::new(token),
                 quit: AtomicBool::new(false),
-                next: AtomicU64::new(1),
             });
             let (tx, rx) = channel();
             let s = shared.clone();
@@ -410,6 +424,7 @@ mod unix {
     fn serve(stream: UnixStream, shared: Arc<Shared>, tx: Sender<Request>) {
         let _ = stream.set_nonblocking(false);
         let _ = stream.set_read_timeout(Some(HELLO_WAIT));
+        let _ = stream.set_write_timeout(Some(WRITE_WAIT));
         let (Ok(read), Ok(write)) = (stream.try_clone(), stream.try_clone()) else { return };
         let mut reader = BufReader::new(read);
         let writer = Arc::new(Mutex::new(write));
@@ -421,16 +436,19 @@ mod unix {
             return refuse("open with {\"vxr\": \"live\", \"token\": ...}");
         };
         let token = hello.get("token").and_then(Value::as_str).unwrap_or("");
-        if hello.get("vxr").and_then(Value::as_str) != Some("live")
-            || !same(token, &shared.token.lock().unwrap())
-            || shared.quit.load(Ordering::SeqCst)
-        {
-            return refuse("the pairing token was refused");
-        }
         let client = client_name(hello.get("client").and_then(Value::as_str).unwrap_or(""));
-        let id = shared.next.fetch_add(1, Ordering::SeqCst);
+        let id = NEXT_CONN.fetch_add(1, Ordering::SeqCst);
         {
+            // The token and the host's end are checked under the same lock that a new token
+            // or turning off closes every connection under, so neither can slip past them.
             let mut conns = shared.conns.lock().unwrap();
+            if hello.get("vxr").and_then(Value::as_str) != Some("live")
+                || !same(token, &shared.token.lock().unwrap())
+                || shared.quit.load(Ordering::SeqCst)
+            {
+                drop(conns);
+                return refuse("the pairing token was refused");
+            }
             if conns.len() >= MAX_CONNS {
                 drop(conns);
                 return refuse("too many agents are connected");
