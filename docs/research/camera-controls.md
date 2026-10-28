@@ -21,7 +21,7 @@ How MagicaVoxel 0.99.x moves the camera, from its own shortcut list and release 
 | Set the pivot | X + left-click [S1, S2 0.99.3] | X + left-click: orbit around the voxel clicked, which moves to the middle of the view | - |
 | Recenter | 4 / F4 [S1] | `.` (Frame scene), keeping the angle and projection | `4` is vxr's Right view |
 | Reset | 5 / F5 resets to the nearest 90 degree view [S1]; "Reset" returns to the initial settings [S3] | Home (Reset camera): the starting angle in perspective, framing the scene | Home is the common key for it |
-| Snap views | View cube clicks snap to 26 angles [S2]; 5 [S1] | 1 to 6 for the six sides, 0 isometric, the View flyout from the rail or the camera bar | - |
+| Snap views | View cube clicks snap to 26 angles [S2]; 5 [S1] | 1 to 6 for the six sides, 0 isometric, the View flyout from the camera bar | - |
 | Projection | Bottom bar: Perspective, Free, Orthogonal, Isometric [S2] | O toggles, Persp / Ortho / Iso in the View flyout and on the camera bar | No free (fly) camera yet |
 | Frame selection | Not found | Cmd-K "Frame selection" and the camera bar's button | Added: framing what you work on |
 | Save and load poses | 7 / 8, camera slots on the numpad [S1] | Not yet (cameras in files are kept and editable through the scene, not shown) | - |
