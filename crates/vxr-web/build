@@ -10,7 +10,9 @@ root="$(cd "$here/../.." && pwd)"
 dist="$here/dist"
 fonts="$root/crates/vxr-app/fonts"
 run() { if [ "${VXR_TOOLS:-}" = path ]; then "$@"; else "$root/dev" "$@"; fi; }
-[ -f "$fonts/lucide-LICENSE.txt" ] || "$root/crates/vxr-app/fetch-fonts"
+if ! (cd "$fonts" 2>/dev/null && shasum -a 256 -c "$root/crates/vxr-app/fonts.sha256" >/dev/null 2>&1); then
+  "$root/crates/vxr-app/fetch-fonts"
+fi
 
 cd "$root"
 run cargo build --profile wasm --target wasm32-unknown-unknown -p vxr-web

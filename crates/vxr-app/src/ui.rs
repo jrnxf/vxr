@@ -3815,15 +3815,20 @@ impl Hybrid {
         // are bare text over the view, with a dark edge so they read over a light model.
         let chip = self.agent_chip_width(ctx);
         let size = vec2(chip + g.size().x + 28.0, 16.8 + 16.0);
-        // Centred on the view, kept clear of the stats and of the render corner.
-        let right = [self.render_dock.filter(|_| !self.full_render), self.hits.get("render-panel").copied()]
-            .into_iter()
-            .flatten()
-            .fold(screen.right() - 12.0, |x, r| x.min(r.left()));
+        // Centred on the view, kept clear of the stats, the render corner and the camera bar.
+        let row_top = screen.bottom() - 12.0 - size.y;
+        let right = [
+            self.render_dock.filter(|_| !self.full_render),
+            self.hits.get("render-panel").copied(),
+            self.nav_rect.filter(|r| r.bottom() > row_top),
+        ]
+        .into_iter()
+        .flatten()
+        .fold(screen.right() - 12.0, |x, r| x.min(r.left()));
         let (lo, hi) = (self.stats_right + 8.0, right - 8.0);
         let rect = if size.x <= hi - lo {
             let x = (screen.center().x - size.x / 2.0).min(hi - size.x).max(lo);
-            Rect::from_min_size(pos2(x.round(), screen.bottom() - 12.0 - size.y), size)
+            Rect::from_min_size(pos2(x.round(), row_top), size)
         } else {
             // Too wide for the gap (the assistant is docked): a row up, over the stats.
             let stats_top = self.hits.get("stats").map_or(screen.bottom() - 12.0, |r| r.top());
@@ -3848,9 +3853,9 @@ impl Hybrid {
         );
     }
 
-    // The camera bar: above the render corner (or the undo buttons when it is hidden), level
-    // with its right edge, so the camera's moves are always one click away. Projection, the
-    // View flyout, zoom, and the three ways back to the scene, each with a tooltip.
+    // The camera bar: above the render corner (or in the bottom right corner when it is hidden),
+    // level with its right edge, so the camera's moves are always one click away. Projection, the
+    // View flyout and the ways back to the scene, each with a tooltip.
     fn nav_bar(&mut self, ctx: &Context, screen: Rect) {
         let proj = match (self.ortho, self.view) {
             (_, Some(View::Iso)) => "Iso",
@@ -3869,7 +3874,8 @@ impl Hybrid {
             )
         });
         let palette_bottom = self.hits.get("palette").map_or(screen.top(), |r| r.bottom());
-        let mut rect = Rect::from_min_size(pos2(dock.right() - w, dock.top() - 8.0 - size.y), size);
+        let gap = if self.render_dock.is_some() { 8.0 } else { 0.0 };
+        let mut rect = Rect::from_min_size(pos2(dock.right() - w, dock.top() - gap - size.y), size);
         if rect.top() < palette_bottom + 8.0 {
             // A short window: beside the corner instead, level with its bottom.
             rect = Rect::from_min_size(pos2(dock.left() - 8.0 - w, dock.bottom() - size.y), size);
