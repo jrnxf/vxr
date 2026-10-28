@@ -152,10 +152,9 @@ impl Agents {
         let mut session = Session::with_limits(scene, None, limits);
         let made_on = (scene.at(), scene.reshapes());
         let (conn, client) = agent.unwrap_or((0, ""));
-        if let Some(&(at, reshapes, ref sel)) = agent.and_then(|_| self.selections.get(&conn))
-            && (at, reshapes) == made_on
-        {
-            session.set_selection(sel.iter().copied());
+        if let Some((at, reshapes, sel)) = agent.and_then(|_| self.selections.get(&conn)) {
+            let fresh = (*at, *reshapes) == made_on;
+            session.set_selection(sel.iter().copied().filter(|_| fresh));
         }
         match session.call(scene, name, args.clone()) {
             Ok(text) => {
@@ -340,6 +339,9 @@ mod tests {
         let b = s.bounds();
         let size = s.map.size_voxels();
         s.set_bounds([b.lo[0] - 1, b.lo[1], b.lo[2]], [size[0] + 1, size[1], size[2]]).unwrap();
+        // Nor is the user's selection taken in its place.
+        s.select_all();
+        assert_eq!(s.selected_count(), 2);
         let _ = a.call(&mut s, 1, "Claude Code", "paint", &json!({"slot": 9, "selection": true}));
         assert_eq!((at(&s, [0, 0, 0]), at(&s, [1, 0, 0])), (2, 2), "no cell painted through a stale selection");
     }
