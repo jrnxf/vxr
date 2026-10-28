@@ -3725,8 +3725,10 @@ fn agents_live(dir: &Path) -> Result<(), String> {
         s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
         check(s.ed.ui.agents_panel, "Cmd-K Terminal agents opens the panel".into())?;
         check(
-            s.ed.ui.hits.contains_key("agents-copy") && !s.ed.ui.agents.allowed,
-            "the panel shows the setup line, switched off".into(),
+            s.ed.ui.hits.contains_key("agents-copy")
+                && s.ed.ui.hits.contains_key("agents-copy-live")
+                && !s.ed.ui.agents.allowed,
+            "the panel shows the setup lines, switched off".into(),
         )?;
         s.ui_click("agents-allow")?;
         s.live_frames(&mut live, 2);
