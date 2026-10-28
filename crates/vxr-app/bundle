@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# Build vxr.app, the desktop editor as a Mac app, into <out-dir>:
+# - Contents/MacOS/vxr: the vxr binary, which also serves `vxr mcp` and runs `vxr setup`.
+# - Contents/Resources/fonts: the UI fonts and their licences (crates/vxr-app/fetch-fonts), which
+#   the binary finds beside itself (src/fonts.rs).
+# - Contents/Resources/vxr.icns: the icon, drawn by examples/icon.rs.
+# The bundle is signed ad hoc, which is all macOS needs to run a download that is not quarantined,
+# such as a Homebrew formula's.
+#
+# usage: crates/vxr-app/bundle <out-dir> [<target> ...]
+#   With no target it builds for this Mac. With aarch64-apple-darwin and x86_64-apple-darwin it
+#   builds both and joins them into one universal binary (the release workflow).
+# Builds with the cargo on the PATH, for macOS 13 and later unless MACOSX_DEPLOYMENT_TARGET says.
+set -euo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
+root="$(cd "$here/../.." && pwd)"
+[ "$#" -ge 1 ] || { echo "usage: $0 <out-dir> [<target> ...]" >&2; exit 1; }
+mkdir -p "$1"
+out="$(cd "$1" && pwd)"
+shift
+targets=("$@")
+export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-13.0}"
+
+if ! (cd "$here/fonts" 2>/dev/null && shasum -a 256 -c "$here/fonts.sha256" >/dev/null 2>&1); then
+  "$here/fetch-fonts"
+fi
+
+# One binary per target, joined with lipo when there are several.
+bins=()
+if [ "${#targets[@]}" -eq 0 ]; then
+  cargo build --release --locked -p vxr-app --manifest-path "$root/Cargo.toml"
+  bins+=("$root/target/release/vxr")
+  icon_target=()
+else
+  for target in "${targets[@]}"; do
+    cargo build --release --locked -p vxr-app --target "$target" --manifest-path "$root/Cargo.toml"
+    bins+=("$root/target/$target/release/vxr")
+  done
+  # The first target's build already holds the example's dependencies.
+  icon_target=(--target "${targets[0]}")
+fi
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+cargo run --release --locked -q -p vxr-app --example icon ${icon_target[@]+"${icon_target[@]}"} --manifest-path "$root/Cargo.toml" \
+  -- "$tmp/vxr.iconset"
+
+app="$out/vxr.app"
+rm -rf "$app"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/fonts"
+lipo -create -output "$app/Contents/MacOS/vxr" "${bins[@]}"
+iconutil -c icns "$tmp/vxr.iconset" -o "$app/Contents/Resources/vxr.icns"
+(cd "$here/fonts" && cp $(awk '{print $2}' "$here/fonts.sha256") "$app/Contents/Resources/fonts/")
+
+# The version the binary reports, which a release stamps from its tag (0.1.0 or 0.1.0-pre.3).
+version="$("$app/Contents/MacOS/vxr" --version)"
+version="${version#vxr }"
+cat > "$app/Contents/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key>
+  <string>vxr</string>
+  <key>CFBundleDisplayName</key>
+  <string>vxr</string>
+  <key>CFBundleIdentifier</key>
+  <string>co.jrnxf.vxr</string>
+  <key>CFBundleExecutable</key>
+  <string>vxr</string>
+  <key>CFBundleIconFile</key>
+  <string>vxr</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleShortVersionString</key>
+  <string>$version</string>
+  <key>CFBundleVersion</key>
+  <string>${version%%-*}</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>$MACOSX_DEPLOYMENT_TARGET</string>
+  <key>LSApplicationCategoryType</key>
+  <string>public.app-category.graphics-design</string>
+  <key>NSHighResolutionCapable</key>
+  <true/>
+</dict>
+</plist>
+EOF
+plutil -lint "$app/Contents/Info.plist" >/dev/null
+codesign --force --sign - "$app"
+echo "$app: vxr $version ($(lipo -archs "$app/Contents/MacOS/vxr"))"

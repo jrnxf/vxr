@@ -6,6 +6,9 @@
 //! - `vxr mcp --root <dir>` serves MCP on stdin and stdout: an agent opens, edits and saves the
 //!   `.vox` files under `<dir>` (see `vxr-mcp`). `vxr mcp --live` edits the scene open in a
 //!   running window instead, once its Terminal agents panel (Cmd-K) allows it.
+//! - `vxr setup claude|codex [--root <dir>]` registers both with that agent, and `vxr setup app`
+//!   adds `~/Applications/vxr.app` for Spotlight (see [`setup`]).
+//! - `vxr --version` prints the version, which a release build takes from its tag.
 //! - `vxr --shot <dir> [scene.vox]` runs headless: it drives the editor through every tool,
 //!   saves and reopens the result, and writes `app-1x.png` and `app-2x.png` into `<dir>`.
 //! - `vxr --live <dir>`, only in a build with the `live` feature (`cargo run --release -p
@@ -22,13 +25,33 @@ mod native;
 #[cfg(not(target_arch = "wasm32"))]
 mod net;
 #[cfg(not(target_arch = "wasm32"))]
+mod setup;
+#[cfg(not(target_arch = "wasm32"))]
 mod shot;
+
+#[cfg(not(target_arch = "wasm32"))]
+const HELP: &str = "\
+usage: vxr [scene.vox]          open the editor, with the scene if one is given
+       vxr mcp --root <dir>     serve MCP for a terminal agent on the .vox files under <dir>
+       vxr mcp --live           serve MCP on the scene open in the editor
+       vxr setup claude|codex   register both MCP servers with that agent
+       vxr setup app            add vxr to Spotlight (~/Applications/vxr.app)
+       vxr --version";
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("mcp") => vxr_mcp::run(&args[1..]),
+        Some("setup") => setup::run(&args[1..]),
+        Some("-V" | "--version") => {
+            println!("vxr {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
+        Some("-h" | "--help") => {
+            println!("{HELP}");
+            Ok(())
+        }
         Some("--shot") => match args.get(1) {
             Some(dir) => shot::run(dir.as_ref(), args.get(2).map(|s| s.as_ref())),
             None => Err("usage: vxr --shot <dir> [scene.vox]".into()),
@@ -47,7 +70,7 @@ fn main() {
             Some(script) => native::run(args.get(2).map(Into::into), Some(script.into())),
             None => Err("usage: vxr --stage <script.json> [scene.vox]".into()),
         },
-        Some(flag) if flag.starts_with('-') => Err(format!("unknown flag {flag}; usage: vxr [scene.vox]")),
+        Some(flag) if flag.starts_with('-') => Err(format!("unknown flag {flag}; vxr --help lists the commands")),
         path => native::run(path.map(Into::into), None),
     };
     if let Err(e) = result {

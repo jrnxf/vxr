@@ -1,0 +1,22 @@
+# Third-party notices
+
+The vxr app carries the work of others. Its UI fonts are in `vxr.app/Contents/Resources/fonts/`
+with their licences: Inter and JetBrains Mono under the SIL Open Font License 1.1, and the
+Lucide icons under the ISC License.
+
+## Rust crates
+
+vxr is built from these crates, grouped by license.
+{{#each licenses}}
+
+### {{{name}}}
+
+Used by:
+{{#each used_by}}
+- {{crate.name}} {{crate.version}}{{#if crate.repository}} ({{crate.repository}}){{/if}}
+{{/each}}
+
+````text
+{{{text}}}
+````
+{{/each}}
