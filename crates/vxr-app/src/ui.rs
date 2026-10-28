@@ -482,10 +482,8 @@ pub struct Hybrid {
     /// The camera's projection and the snap view it is at, if any (set by the editor).
     pub ortho: bool,
     pub view: Option<View>,
-    /// The View flyout beside the rail's view button is open.
+    /// The View flyout beside the camera bar is open.
     pub view_panel: bool,
-    /// It was opened from the camera bar, so it shows beside that instead.
-    view_at_nav: bool,
     /// Show the camera moves in the hint bar: Space is held or the camera is being dragged
     /// (set by the editor).
     pub camera_hints: bool,
@@ -507,8 +505,6 @@ pub struct Hybrid {
     /// Top of the mirror button in the rail, where the axis flyout lines up.
     axes_y: f32,
     voxel_y: f32,
-    /// Top of the view button in the rail, where the View flyout lines up.
-    view_y: f32,
     /// Top of the select button in the rail, where the selection flyout lines up.
     select_y: f32,
     /// How many voxels are selected, and whether Copy or Cut has filled the clipboard.
@@ -749,7 +745,6 @@ impl Hybrid {
             ortho: false,
             view: None,
             view_panel: false,
-            view_at_nav: false,
             camera_hints: false,
             camera_tip: false,
             export_menu: false,
@@ -761,7 +756,6 @@ impl Hybrid {
             hits: HashMap::new(),
             axes_y: 0.0,
             voxel_y: 0.0,
-            view_y: 0.0,
             select_y: 0.0,
             selected: 0,
             has_clip: false,
@@ -1039,7 +1033,7 @@ impl Hybrid {
         self.render_corner(ctx, screen, stats);
         self.render_panel(ctx, screen, stats);
         self.nav_bar(ctx, screen);
-        self.view_panel(ctx);
+        self.view_panel(ctx, screen);
         self.hint_bar(ctx, screen);
         self.history(ctx, screen);
         self.ask_bar(ctx, screen);
@@ -1346,7 +1340,7 @@ impl Hybrid {
 
     // #rail
     fn rail(&mut self, ctx: &Context) {
-        let h = 6.0 + rail_label_h() + 5.0 * 42.0 + 11.0 + rail_label_h() + 5.0 * 42.0 + 11.0 + 4.0 * 42.0 + 6.0 - 2.0;
+        let h = 6.0 + rail_label_h() + 5.0 * 42.0 + 11.0 + rail_label_h() + 5.0 * 42.0 + 11.0 + 2.0 * 42.0 + 6.0 - 2.0;
         let rect = Rect::from_min_size(pos2(12.0, 68.0), vec2(52.0, h));
         Self::panel(ctx, "rail", rect, Order::Middle, |ui, rect| {
             let x = rect.left() + 6.0;
@@ -1416,18 +1410,6 @@ impl Hybrid {
             self.hits.insert("lock".into(), r.rect);
             if r.clicked() {
                 self.cycle_lock();
-            }
-            y += 42.0;
-            if tool_button(ui, pos2(x, y), icon::SCAN, ".", false).clicked() {
-                self.actions.push(Action::Frame);
-            }
-            y += 42.0;
-            self.view_y = y;
-            let r = tool_button(ui, pos2(x, y), icon::AXIS_3D, "", self.view_panel);
-            self.hits.insert("view".into(), r.rect);
-            if r.clicked() {
-                self.view_panel = !self.view_panel || self.view_at_nav;
-                self.view_at_nav = false;
             }
         });
     }
@@ -1756,27 +1738,46 @@ impl Hybrid {
         }
     }
 
-    // The View flyout beside the rail's view button: the projection (perspective,
-    // orthographic, isometric) and the six side views with their number keys. Built like the
-    // selection flyout, its bottom level with the button's; the view the camera is at shows on.
-    fn view_panel(&mut self, ctx: &Context) {
+    // The View flyout of the camera bar: the projection (perspective, orthographic,
+    // isometric) and the six side views with their number keys. It opens below the bar (over
+    // the render corner) if it ends above the undo/redo buttons, else above the bar if it
+    // clears the palette, else left of the bar, always on screen. The view the camera is at
+    // shows on.
+    fn view_panel(&mut self, ctx: &Context, screen: Rect) {
         if !self.view_panel {
             return;
         }
-        // The rail's button is the last in the rail, so the flyout grows up from its bottom
-        // edge; from the camera bar it sits left of the bar, bottom-aligned with it.
-        let size = vec2(204.0, 210.0);
-        let rect = match self.hits.get("nav").filter(|_| self.view_at_nav) {
-            Some(nav) => Rect::from_min_size(nav.max - size - vec2(nav.width() + 8.0, 0.0), size),
-            None => Rect::from_min_size(pos2(self.flyout_x(), self.view_y + 40.0 + 6.0 - size.y), size),
+        let size = vec2(204.0, 176.0);
+        let palette_bottom = self.hits.get("palette").map_or(screen.top(), |r| r.bottom());
+        let history_top = Self::history_rect(screen).top();
+        let nav = self.hits.get("nav").copied().unwrap_or(Rect::from_min_size(screen.right_bottom(), egui::Vec2::ZERO));
+        let right = nav.right().min(screen.right() - 12.0);
+        let below = Rect::from_min_size(pos2(right - size.x, nav.bottom() + 8.0), size);
+        let above = Rect::from_min_size(pos2(right - size.x, nav.top() - 8.0 - size.y), size);
+        let rect = if below.bottom() <= history_top - 8.0 {
+            below
+        } else if above.top() >= palette_bottom + 8.0 {
+            above
+        } else {
+            // A short window: left of the bar, bottom-aligned with it, kept on screen.
+            let top = (nav.bottom() - size.y).clamp(68.0, (screen.bottom() - 12.0 - size.y).max(68.0));
+            Rect::from_min_size(pos2((nav.left() - 8.0 - size.x).max(screen.left() + 12.0), top), size)
         };
+        self.view_flyout(ctx, rect);
+    }
+
+    fn view_flyout(&mut self, ctx: &Context, rect: Rect) {
+        self.hits.insert("view-flyout".into(), rect);
         let (ortho, view) = (self.ortho, self.view);
         let mut guides = [self.grid, self.ground, self.frame];
         let mut run = Vec::new();
         let mut hits = Vec::new();
         let mut close = false;
-        Self::panel(ctx, "view", rect, Order::Middle, |ui, rect| {
-            let hy = rect.top() + 18.0;
+        Self::panel_filled(ctx, "view", rect, Order::Foreground, PANEL_SOLID, |ui, rect| {
+            // It can sit over the render corner (above it in layer order): its blank space takes the
+            // click, not the corner.
+            ui.allocate_rect(rect, Sense::click());
+            let hy = rect.top() + 16.0;
             let g = ui.painter().layout_job(spaced("VIEW", inter(9.0), FAINT, 0.72));
             ui.painter().galley(pos2(rect.left() + 12.0, hy - g.size().y / 2.0), g, FAINT);
             let x = Rect::from_center_size(pos2(rect.right() - 19.0, hy), vec2(22.0, 22.0));
@@ -1797,7 +1798,7 @@ impl Hybrid {
             );
             let iso = view == Some(View::Iso);
             let sel = if iso { 2 } else { ortho as usize };
-            let row = Rect::from_min_size(pos2(rect.left() + 12.0, hy + 17.0), vec2(rect.width() - 24.0, 26.0));
+            let row = Rect::from_min_size(pos2(rect.left() + 12.0, hy + 14.0), vec2(rect.width() - 24.0, 24.0));
             let mut seg = Vec::new();
             let labels = ["Persp", "Ortho", "Iso"].map(String::from);
             let names = ["view-persp", "view-ortho", "view-iso"];
@@ -1809,15 +1810,15 @@ impl Hybrid {
             }
             hits.extend(seg.into_iter().map(|(n, r)| (n.to_string(), r)));
             ui.painter().line_segment(
-                [pos2(rect.left() + 10.0, hy + 54.5), pos2(rect.right() - 10.0, hy + 54.5)],
+                [pos2(rect.left() + 10.0, hy + 47.5), pos2(rect.right() - 10.0, hy + 47.5)],
                 Stroke::new(1.0, LINE),
             );
             let cw = (rect.width() - 24.0 - 8.0) / 3.0;
             let cell = |k: usize, cy: f32| {
-                Rect::from_min_size(pos2(rect.left() + 12.0 + (k % 3) as f32 * (cw + 4.0), cy - 13.0), vec2(cw, 26.0))
+                Rect::from_min_size(pos2(rect.left() + 12.0 + (k % 3) as f32 * (cw + 4.0), cy - 12.0), vec2(cw, 24.0))
             };
             for (k, v) in View::ALL[..6].iter().copied().enumerate() {
-                let c = cell(k, hy + 78.0 + (k / 3) as f32 * 34.0);
+                let c = cell(k, hy + 68.0 + (k / 3) as f32 * 28.0);
                 let id = format!("view-{}", v.name().to_lowercase());
                 if view_chip(ui, c, &id, v.name(), &(k + 1).to_string(), view == Some(v)) {
                     run.push(Action::Snap(v));
@@ -1825,7 +1826,7 @@ impl Hybrid {
                 hits.push((id, c));
             }
             ui.painter().line_segment(
-                [pos2(rect.left() + 10.0, hy + 142.5), pos2(rect.right() - 10.0, hy + 142.5)],
+                [pos2(rect.left() + 10.0, hy + 117.5), pos2(rect.right() - 10.0, hy + 117.5)],
                 Stroke::new(1.0, LINE),
             );
             for (k, (id, label, key)) in
@@ -1833,7 +1834,7 @@ impl Hybrid {
                     .into_iter()
                     .enumerate()
             {
-                let c = cell(k, hy + 166.0);
+                let c = cell(k, hy + 138.0);
                 if view_chip(ui, c, id, label, key, guides[k]) {
                     guides[k] = !guides[k];
                 }
@@ -2746,6 +2747,7 @@ impl Hybrid {
     fn palette_panel(&mut self, ctx: &Context, screen: Rect) {
         let used_count = self.used.iter().skip(1).filter(|u| **u).count();
         let rect = Rect::from_min_size(pos2(screen.right() - 12.0 - 232.0, 68.0), vec2(232.0, PALETTE_H));
+        self.hits.insert("palette".into(), rect);
         Self::panel(ctx, "palette", rect, Order::Middle, |ui, rect| {
             let inner = rect.shrink(12.0);
             let p = ui.painter().clone();
@@ -3770,7 +3772,7 @@ impl Hybrid {
         let dock = self.render_dock.unwrap_or_else(|| {
             Rect::from_min_max(pos2(screen.right() - 12.0 - 82.0, screen.bottom() - 52.0), screen.right_bottom())
         });
-        let palette_bottom = 68.0 + PALETTE_H;
+        let palette_bottom = self.hits.get("palette").map_or(screen.top(), |r| r.bottom());
         let mut rect = Rect::from_min_size(pos2(dock.right() - w, dock.top() - 8.0 - size.y), size);
         if rect.top() < palette_bottom + 8.0 {
             // A short window: beside the corner instead, level with its bottom.
@@ -3778,7 +3780,7 @@ impl Hybrid {
         }
         self.hits.insert("nav".into(), rect);
         self.nav_rect = Some(rect);
-        let (sel, view_open) = (self.selected > 0, self.view_panel && self.view_at_nav);
+        let (sel, view_open) = (self.selected > 0, self.view_panel);
         let mut run = Vec::new();
         let mut tip: Option<(Rect, &'static str, &'static [&'static str])> = None;
         let mut hits = Vec::new();
@@ -3838,20 +3840,27 @@ impl Hybrid {
             }
         });
         if toggle_view {
-            self.view_panel = !self.view_panel || !self.view_at_nav;
-            self.view_at_nav = true;
+            self.view_panel = !self.view_panel;
         }
         self.hits.extend(hits.into_iter().map(|(n, r)| (n.to_string(), r)));
         self.actions.extend(run);
         if let Some((at, label, keys)) = tip {
-            tooltip(ctx, at, label, keys);
+            // Above the button, unless that crowds the palette: then below, over the render
+            // corner, and not at all while the View flyout is open.
+            let palette = self.hits.get("palette").copied().unwrap_or(Rect::NOTHING);
+            let shown = tooltip(ctx, at, label, keys, Some((palette.expand(4.0), !view_open)));
+            self.hits.extend(shown.map(|r| ("nav-tip".to_string(), r)));
         }
     }
 
     // #history
+    fn history_rect(screen: Rect) -> Rect {
+        Rect::from_min_size(pos2(screen.right() - 12.0 - 82.0, screen.bottom() - 12.0 - 40.0), vec2(82.0, 40.0))
+    }
+
     fn history(&mut self, ctx: &Context, screen: Rect) {
-        let rect =
-            Rect::from_min_size(pos2(screen.right() - 12.0 - 82.0, screen.bottom() - 12.0 - 40.0), vec2(82.0, 40.0));
+        let rect = Self::history_rect(screen);
+        self.hits.insert("history".into(), rect);
         Self::panel(ctx, "history", rect, Order::Middle, |ui, rect| {
             let cy = rect.center().y;
             let mut x = rect.left() + 4.0;
@@ -4195,7 +4204,10 @@ fn nav_button(
 }
 
 /// A tooltip above `at`: what the control does and its keys, as kbd chips.
-fn tooltip(ctx: &Context, at: Rect, label: &str, keys: &[&str]) {
+///
+/// It keeps off `clear.0`: where above `at` would cross it, it goes below `at` if `clear.1`
+/// allows, else it is not shown.
+fn tooltip(ctx: &Context, at: Rect, label: &str, keys: &[&str], clear: Option<(Rect, bool)>) -> Option<Rect> {
     let g = ctx.fonts_mut(|f| f.layout_no_wrap(label.into(), inter(12.0), TEXT));
     let kg: Vec<_> =
         keys.iter().map(|k| ctx.fonts_mut(|f| f.layout_no_wrap((*k).into(), mono_medium(10.5), MUTED))).collect();
@@ -4204,7 +4216,13 @@ fn tooltip(ctx: &Context, at: Rect, label: &str, keys: &[&str]) {
     let size = vec2(w, 28.0);
     let screen = ctx.content_rect();
     let x = (at.center().x - w / 2.0).clamp(screen.left() + 12.0, screen.right() - 12.0 - w).round();
-    let rect = Rect::from_min_size(pos2(x, at.top() - 8.0 - 4.0 - size.y), size);
+    let mut rect = Rect::from_min_size(pos2(x, at.top() - 8.0 - 4.0 - size.y), size);
+    if let Some((_, below_ok)) = clear.filter(|(avoid, _)| avoid.intersects(rect)) {
+        if !below_ok {
+            return None;
+        }
+        rect = Rect::from_min_size(pos2(x, at.bottom() + 8.0 + 4.0), size);
+    }
     Area::new(Id::unique("tooltip")).fade_in(false).order(Order::Tooltip).fixed_pos(rect.min).constrain(false).show(
         ctx,
         |ui| {
@@ -4226,6 +4244,7 @@ fn tooltip(ctx: &Context, at: Rect, label: &str, keys: &[&str]) {
             }
         },
     );
+    Some(rect)
 }
 
 /// kbd: 10.5 px mono, 1 px border with a 2 px bottom, right-aligned at `right_center`. Returns its width.

@@ -1296,10 +1296,10 @@ fn scene_tree(dir: &Path) -> Result<(), String> {
         format!("22-world shows a scene tree of {} rows: groups indented, linked copies, hidden rows", rows.len()),
     )?;
     let tree_right = rows.iter().map(|r| s.ed.ui.hits[&format!("tree-{}", r.node)].right()).fold(0.0, f32::max);
-    s.ui_click("view")?;
+    s.ui_click("nav-views")?;
     let flyout = s.ed.ui.hits.get("view-persp").map(|r| r.left()).unwrap_or(0.0);
-    s.ui_click("view")?;
-    check(flyout > tree_right, "the View flyout opens beside the scene tree, not over it".into())?;
+    s.ui_click("nav-views")?;
+    check(flyout > tree_right, "the View flyout opens clear of the scene tree".into())?;
 
     let slab = node(&s, "slab")?;
     let slab_voxels = s.ed.scene.world().unwrap().extent(slab).is_some();
@@ -1656,10 +1656,14 @@ fn views(dir: &Path) -> Result<(), String> {
     s.frames(3);
     let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
     let press = |s: &mut Shot, k| s.frames_with(2, vec![key(k, egui::Modifiers::NONE)]);
-    s.ui_click("view")?;
+    s.ui_click("nav-views")?;
     check(
         s.ed.ui.view_panel && s.ed.ui.hits.contains_key("view-front"),
-        "the view button opens the View flyout".into(),
+        "the camera bar's Views button opens the View flyout".into(),
+    )?;
+    check(
+        !s.ed.ui.hits.contains_key("view") && s.ed.ui.hits.contains_key("nav-frame"),
+        "the rail has no view or frame button: the camera bar holds them".into(),
     )?;
     // Guides: on by default; the flyout's buttons, G and Cmd-K turn each off and on, and each
     // changes the view.
@@ -1705,9 +1709,8 @@ fn views(dir: &Path) -> Result<(), String> {
         s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
         check(before && !after && get(&s), format!("Cmd-K '{q}' hides it and shows it again"))?;
     }
-    s.ui_click("view")?;
     if !s.ed.ui.view_panel {
-        s.ui_click("view")?;
+        s.ui_click("nav-views")?;
     }
     s.ui_click("view-ortho")?;
     let (o0, d0) = s.ed.cam.ray(10.0, 10.0, 400.0, 300.0);
@@ -1969,23 +1972,74 @@ fn camera(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     check(s.ed.cam.ortho, "the bar's Persp button turns orthographic on".into())?;
     s.ui_click("nav-proj")?;
     check(!s.ed.cam.ortho, "and back to perspective".into())?;
+    // Where the flyout opens: below the bar (over the render corner) if it ends above undo/redo,
+    // else above the bar if it clears the palette, else left of the bar; never over undo/redo or
+    // the palette, always on screen.
+    fn flyout_at(s: &mut Shot, corner: bool) -> Result<&'static str, String> {
+        let points = (s.ed.width as f32 / s.ed.ppp, s.ed.height as f32 / s.ed.ppp);
+        let hit = |s: &Shot, n: &str| s.ed.ui.hits.get(n).copied().ok_or(format!("no {n} at {points:?}"));
+        let (flyout, nav, palette, history) =
+            (hit(s, "view-flyout")?, hit(s, "nav")?, hit(s, "palette")?, hit(s, "history")?);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(points.0, points.1));
+        let at = if flyout.top() > nav.bottom() {
+            "below"
+        } else if flyout.bottom() < nav.top() {
+            "above"
+        } else {
+            "beside"
+        };
+        check(
+            s.ed.ui.view_panel
+                && s.ed.ui.hits.contains_key("render") == corner
+                && screen.contains_rect(flyout)
+                && !flyout.intersects(nav)
+                && !flyout.intersects(palette)
+                && !flyout.intersects(history)
+                && (at != "beside" || flyout.right() < nav.left()),
+            format!(
+                "at {}x{} (render corner {}) the View flyout opens {at} the bar, on screen, clear of the palette and undo/redo",
+                points.0,
+                points.1,
+                if corner { "shown" } else { "hidden" }
+            ),
+        )?;
+        Ok(at)
+    }
     s.ui_click("nav-views")?;
-    let nav = s.ed.ui.hits.get("nav").copied().ok_or("no camera bar")?;
-    let flyout = s.ed.ui.hits.get("view-front").copied().ok_or("no View flyout")?;
     check(
-        s.ed.ui.view_panel && flyout.right() < nav.left(),
-        "the bar's Views button opens the View flyout beside the bar".into(),
+        flyout_at(&mut s, true)? == "below",
+        "at the default 1280x800 with the render corner shown it opens below the bar".into(),
     )?;
+    for (points, corner, want) in [
+        ((1440, 1100), true, "below"),
+        ((1280, 1000), false, "above"),
+        ((1024, 700), true, "beside"),
+        ((1024, 600), true, "beside"),
+        ((900, 520), true, "beside"),
+    ] {
+        let mut t = Shot::sized(Scene::new(NEW_SIZE), "Untitled", 1.0, points)?;
+        t.ed.ui.coach = false;
+        t.ed.ui.show_render = corner;
+        t.frames(3);
+        t.ui_click("nav-views")?;
+        let at = flyout_at(&mut t, corner)?;
+        check(at == want, format!("at {}x{} it opens {want} the bar ({at})", points.0, points.1))?;
+    }
     s.ui_click("view-front")?;
     check(s.ed.ui.view == Some(View::Front), "its Front button".into())?;
     s.ui_click("view-iso")?;
-    // Hover: a tooltip with the shortcut (shown in the screenshot).
-    let at = s.at("nav-frame")?;
-    s.frames_with(3, vec![egui::Event::PointerMoved(at)]);
+    s.frames(2);
     s.save_png(&dir.join("app-2x-camera.png"))?;
-    s.frames_with(1, vec![egui::Event::PointerGone]);
     press(&mut s, egui::Key::Escape, egui::Modifiers::NONE);
     check(!s.ed.ui.view_panel, "Escape closes it".into())?;
+    // Hover: a tooltip with the shortcut (shown in the screenshot), clear of the palette.
+    let at = s.at("nav-frame")?;
+    s.frames_with(3, vec![egui::Event::PointerMoved(at)]);
+    let tip = s.ed.ui.hits.get("nav-tip").copied().ok_or("no tooltip")?;
+    let palette = s.ed.ui.hits.get("palette").copied().ok_or("no palette")?;
+    check(!tip.intersects(palette), "the Frame scene tooltip keeps clear of the palette".into())?;
+    s.save_png(&dir.join("app-2x-camera-tip.png"))?;
+    s.frames_with(1, vec![egui::Event::PointerGone]);
     press(&mut s, egui::Key::Home, egui::Modifiers::NONE);
 
     // Space-drag pans as in MagicaVoxel (no edit), and the hint bar shows the camera moves.
