@@ -1749,7 +1749,7 @@ impl Hybrid {
         }
         let size = vec2(204.0, 176.0);
         let palette_bottom = self.hits.get("palette").map_or(screen.top(), |r| r.bottom());
-        let history_top = self.hits.get("history").map_or(screen.bottom(), |r| r.top());
+        let history_top = Self::history_rect(screen).top();
         let nav = self.hits.get("nav").copied().unwrap_or(Rect::from_min_size(screen.right_bottom(), egui::Vec2::ZERO));
         let right = nav.right().min(screen.right() - 12.0);
         let below = Rect::from_min_size(pos2(right - size.x, nav.bottom() + 8.0), size);
@@ -3854,9 +3854,12 @@ impl Hybrid {
     }
 
     // #history
+    fn history_rect(screen: Rect) -> Rect {
+        Rect::from_min_size(pos2(screen.right() - 12.0 - 82.0, screen.bottom() - 12.0 - 40.0), vec2(82.0, 40.0))
+    }
+
     fn history(&mut self, ctx: &Context, screen: Rect) {
-        let rect =
-            Rect::from_min_size(pos2(screen.right() - 12.0 - 82.0, screen.bottom() - 12.0 - 40.0), vec2(82.0, 40.0));
+        let rect = Self::history_rect(screen);
         self.hits.insert("history".into(), rect);
         Self::panel(ctx, "history", rect, Order::Middle, |ui, rect| {
             let cy = rect.center().y;
