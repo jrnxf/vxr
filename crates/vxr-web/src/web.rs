@@ -28,6 +28,8 @@ pub struct App {
     events: Vec<egui::Event>,
     modifiers: egui::Modifiers,
     cursor: egui::CursorIcon,
+    /// Text a field copied or cut, for the page to put on the clipboard.
+    copied: Option<String>,
 }
 
 /// Start the editor on `canvas` with the `.vox` bytes (an empty array opens a new scene).
@@ -83,6 +85,7 @@ pub async fn start(
         events: Vec::new(),
         modifiers: egui::Modifiers::default(),
         cursor: egui::CursorIcon::Default,
+        copied: None,
     })
 }
 
@@ -161,9 +164,14 @@ impl App {
     }
 
     /// A DOM key event (`KeyboardEvent.key`). Returns true when the page should call
-    /// `preventDefault`: egui knows the key, or a text field has focus.
+    /// `preventDefault`: egui knows the key, or a text field has focus. While a field has focus
+    /// Cmd-C, Cmd-X and Cmd-V return false and reach egui as the browser's copy, cut and paste
+    /// events instead (`copy`, `cut`, `paste`): a prevented keydown never fires them.
     pub fn key(&mut self, key: &str, pressed: bool, repeat: bool) -> bool {
         let typing = self.editor.ctx.egui_wants_keyboard_input();
+        if typing && self.modifiers.command && ["c", "x", "v"].iter().any(|k| key.eq_ignore_ascii_case(k)) {
+            return false;
+        }
         if key == " " && !typing {
             self.editor.space = pressed;
         }
@@ -180,6 +188,17 @@ impl App {
     /// Text pasted while a text field has focus.
     pub fn paste(&mut self, text: &str) {
         self.events.push(egui::Event::Paste(text.into()));
+    }
+
+    /// Copy (`cut` false) or cut the focused text field's selection. The text comes back from
+    /// `take_copied` after the next frame.
+    pub fn copy(&mut self, cut: bool) {
+        self.events.push(if cut { egui::Event::Cut } else { egui::Event::Copy });
+    }
+
+    /// The text a field copied or cut since the last call, for the page's clipboard.
+    pub fn take_copied(&mut self) -> Option<String> {
+        self.copied.take()
     }
 
     /// IME composition from the page's hidden text field: `commit` false is a preedit update.
@@ -238,6 +257,11 @@ impl App {
         let (actions, platform) = self.editor.frame(input, &view);
         self.editor.gpu.queue.present(frame);
         self.cursor = platform.cursor_icon;
+        for c in platform.commands {
+            if let egui::OutputCommand::CopyText(text) = c {
+                self.copied = Some(text);
+            }
+        }
         actions
             .into_iter()
             .filter_map(|a| match a {

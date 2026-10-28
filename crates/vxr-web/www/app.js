@@ -125,7 +125,20 @@ function wire() {
   addEventListener('keydown', (e) => key(e, true));
   addEventListener('keyup', (e) => key(e, false));
   addEventListener('blur', () => app.blur());
-  addEventListener('paste', (e) => { if (app.wants_keyboard()) app.paste(e.clipboardData.getData('text')); });
+  // While a text field has focus Cmd-C, Cmd-X and Cmd-V keep their default action, which
+  // fires these events (app.key leaves them unprevented).
+  addEventListener('paste', (e) => {
+    if (!app.wants_keyboard()) return;
+    e.preventDefault();
+    app.paste(e.clipboardData.getData('text'));
+  });
+  for (const type of ['copy', 'cut']) {
+    addEventListener(type, (e) => {
+      if (!app.wants_keyboard()) return;
+      e.preventDefault();
+      app.copy(type === 'cut');
+    });
+  }
   ime.addEventListener('compositionstart', () => { composing = true; });
   ime.addEventListener('compositionupdate', (e) => app.ime(e.data, false));
   ime.addEventListener('compositionend', (e) => { composing = false; app.ime(e.data, true); ime.value = ''; });
@@ -166,6 +179,9 @@ function tick(now) {
     }
     else if (a === 'exported') download(app.take_export(), app.export_name(), 'image/png');
   }
+  // Still inside the keystroke's user activation, so the browser takes the write.
+  const copied = app.take_copied();
+  if (copied !== undefined) navigator.clipboard.writeText(copied).catch(() => app.toast('Could not copy to the clipboard'));
   const c = app.cursor();
   if (c !== cursor) canvas.style.cursor = cursor = c;
   // Keep the hidden field focused while egui is typing so the OS IME targets it.
