@@ -388,7 +388,7 @@ async () => {
 
   // Camera and view: the View flyout, orthographic, the six side views by key, an edit from
   // the top orthographic view, isometric, O, Cmd-K, then back to perspective and framed.
-  step('the view button opens the View flyout', (await chip('view')) && st().viewPanel && !!at('view-front'));
+  step('the camera bar opens the View flyout, and the rail has no view or frame button', (await chip('nav-views')) && st().viewPanel && !!at('view-front') && !at('view') && !!at('nav-frame'));
   await chip('view-ortho');
   step('Ortho turns orthographic on', st().ortho && st().view === null, JSON.stringify(st().cam));
   const sideViews = [['1', 'Front'], ['2', 'Back'], ['3', 'Left'], ['4', 'Right'], ['6', 'Bottom'], ['5', 'Top']];
@@ -505,7 +505,8 @@ async () => {
   c.dispatchEvent(pinch);
   await frames();
   step('a trackpad pinch zooms in', st().cam[5] < a.cam[5] && pinch.defaultPrevented, `${a.cam[5]} -> ${st().cam[5]}`);
-  // Pan far and zoom far out, as lost the scene before: the scene stays in view.
+  // Pan far and zoom far out, as lost the scene before: the orbit point stays inside the
+  // model's bounds, the distance stops at a limit, and the bounds stay in view.
   for (let i = 0; i < 4; i++) {
     await drag(mx, my, mx + 600, my + 300, 1);
     ptr('pointermove', 100, 120); await frames();
@@ -514,7 +515,11 @@ async () => {
     await drag(mx, my, mx - 500, my + 400, 2, { shiftKey: true });
   }
   s = st();
-  step('panning and zooming far away keep the scene in view', s.inView[0] > 0.999 && s.inView[1] > 0.15 && s.voxels === s0.voxels, JSON.stringify(s.inView));
+  const inBounds = s.cam.slice(0, 3).every((v, i) => v >= -1e-3 && v <= s.bounds[i] + 1); // a voxel past the bounds counts, as in the box the camera keeps to
+  step('panning keeps the orbit point inside the model\'s bounds', inBounds && s.voxels === s0.voxels, JSON.stringify([s.cam, s.bounds]));
+  for (let k = 0; k < 10; k++) c.dispatchEvent(new WheelEvent('wheel', { clientX: mx, clientY: my, deltaY: 400, bubbles: true, cancelable: true }));
+  await frames();
+  step('zooming out stops at a limit and keeps the scene in view', near(st().cam[5], s.cam[5]) && s.inView[0] > 0.999 && s.inView[1] > 0.15, JSON.stringify([s.inView, s.cam[5], st().cam[5]]));
   a = s;
   await key('.');
   s = st();
