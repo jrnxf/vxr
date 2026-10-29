@@ -424,6 +424,37 @@ fn themes(dir: &Path, load: &dyn Fn() -> Result<(Scene, String), String>) -> Res
         s.ed.ui.theme == ThemeChoice::System && s.ed.renderer.colors == vxr_app::theme::PAPER.view,
         "Cmd-K Theme: System goes back to following it (Paper while light)".into(),
     )?;
+
+    // A Render PNG export keeps Neutral's dark backdrop even while the light Paper theme shows.
+    s.ed.ui.render = vxr_app::render::RenderSettings { spp: 0, size: 0, ..Default::default() };
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("export png".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    let mut n = 0;
+    while s.ed.exported.is_none() && n < 3000 {
+        s.frames(1);
+        let _ = s.ed.gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        n += 1;
+    }
+    let Some((png, _)) = s.ed.exported.take() else {
+        return check(false, format!("the themed export did not finish in {n} frames"));
+    };
+    let mut r = png::Decoder::new(std::io::Cursor::new(&png)).read_info().map_err(|e| e.to_string())?;
+    let mut buf = vec![0; r.output_buffer_size().unwrap_or(0)];
+    let info = r.next_frame(&mut buf).map_err(|e| e.to_string())?;
+    let px = |x: u32, y: u32| {
+        let i = ((y * info.width + x) * 4) as usize;
+        [buf[i], buf[i + 1], buf[i + 2]]
+    };
+    let corners = [px(1, 1), px(info.width - 2, 1)];
+    check(
+        s.ed.ui.shown_theme(&s.ed.ctx).name == "Paper"
+            && corners
+                .iter()
+                .all(|c| c.iter().all(|&v| v < 40) && c.iter().max().unwrap() - c.iter().min().unwrap() <= 2),
+        format!("Render PNG under Paper keeps Neutral's dark grey backdrop: top corners {corners:?}"),
+    )?;
+    std::fs::write(dir.join("theme-paper-export.png"), &png).map_err(|e| e.to_string())?;
     Ok(())
 }
 
