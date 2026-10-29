@@ -1478,6 +1478,16 @@ async () => {
   await tapAt('tool-add');
   await tapAt('dock-color');
   step("the dock's colour opens the palette", st().paletteOpen && !!at('palette'), JSON.stringify(st().paletteOpen));
+  await tapAt('edit-color');
+  const [hx, hy] = window.vxr.hit('field-hex');
+  touch('pointerdown', 0, hx, hy);
+  await frames(1);
+  touch('pointerup', 0, hx, hy);
+  const focused = document.activeElement === document.getElementById('ime');
+  await frames();
+  step('a tap on a text field focuses the hidden field inside the tap', st().colorEdit && focused, JSON.stringify([st().colorEdit, document.activeElement?.id]));
+  for (let i = 0; i < 2 && st().colorEdit; i++) await key('Escape');
+  step('Escape leaves the field and closes the colour editor', !st().colorEdit, JSON.stringify(st().colorEdit));
   await tapAt('dock-color');
   await click(mx, my);
   s = st();

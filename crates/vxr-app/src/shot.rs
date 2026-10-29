@@ -67,7 +67,8 @@ impl Shot {
                 system_theme: self.system,
                 ..Default::default()
             };
-            input.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point = Some(self.ed.native_ppp);
+            input.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point =
+                Some(self.ed.native_ppp);
             let (host, _) = self.ed.frame(input, &view);
             self.host.extend(host);
         }
@@ -316,11 +317,6 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     Ok(())
 }
 
-/// The themes: the Theme menu in the top bar and Cmd-K pick one and ask the host to keep it,
-/// System follows the system's light or dark setting, and each theme recolours the UI and the
-/// view's background, ground, grid, bounds frame and selection while the voxels keep their
-/// colours. Writes `theme-<id>.png` for each theme at 1280x800 with a colour selected and the
-/// menu open.
 /// The touch layout on an iPad-sized screen (1180x820 points, 2x): the dock in place of the
 /// rail with 44-point targets, in landscape and portrait, Neutral and Paper, and the gestures
 /// through `Editor::touch_at`: a tap adds one voxel, two fingers orbit and pinch, three pan, a
@@ -381,6 +377,19 @@ fn touch(dir: &Path, load: &dyn Fn() -> Result<(Scene, String), String>) -> Resu
     at(&mut s, 1, Finger::Up, p, 60.0);
     at(&mut s, 2, Finger::Up, near, 10.0);
     check(s.voxels() == v0, "a two-finger tap undoes it".into())?;
+
+    // A resize mid-stroke keeps the finger: its lift ends the stroke as one undo step.
+    at(&mut s, 1, Finger::Down, p, 500.0);
+    at(&mut s, 1, Finger::Move, p, 200.0);
+    let (w, h, ppp) = (s.ed.width, s.ed.height, s.ed.native_ppp);
+    s.ed.resize(w, h, ppp);
+    at(&mut s, 1, Finger::Up, p, 20.0);
+    let drawn = s.voxels() == v0 + 1 && s.ed.cursor().is_none();
+    at(&mut s, 1, Finger::Down, p, 500.0);
+    at(&mut s, 2, Finger::Down, near, 20.0);
+    at(&mut s, 1, Finger::Up, p, 60.0);
+    at(&mut s, 2, Finger::Up, near, 10.0);
+    check(drawn && s.voxels() == v0, "a resize mid-stroke keeps the finger, and its stroke undoes in one step".into())?;
 
     // Two fingers landing together and moving together orbit; nothing is drawn.
     let (cam0, b) = (s.ed.cam, [mid[0] + 200.0, mid[1]]);
@@ -458,9 +467,27 @@ fn touch(dir: &Path, load: &dyn Fn() -> Result<(Scene, String), String>) -> Resu
         !s.ed.ui.docked && s.ed.ppp == 2.0 && s.ed.ui.hits.contains_key("hint"),
         "a mouse brings back the mouse layout".into(),
     )?;
+
+    // The finger that brings the touch layout lands on the mouse layout egui drew.
+    let pal = s.at("palette")?;
+    let pal = [pal.x * s.ed.ppp, pal.y * s.ed.ppp];
+    let v = s.voxels();
+    s.ed.set_touch(true);
+    let on_ui = !at(&mut s, 8, Finger::Down, pal, 500.0);
+    at(&mut s, 8, Finger::Up, pal, 50.0);
+    s.frames(2);
+    check(
+        on_ui && s.voxels() == v,
+        "the finger that brings the touch layout is the UI's where the mouse layout drew a panel".into(),
+    )?;
     Ok(())
 }
 
+/// The themes: the Theme menu in the top bar and Cmd-K pick one and ask the host to keep it,
+/// System follows the system's light or dark setting, and each theme recolours the UI and the
+/// view's background, ground, grid, bounds frame and selection while the voxels keep their
+/// colours. Writes `theme-<id>.png` for each theme at 1280x800 with a colour selected and the
+/// menu open.
 fn themes(dir: &Path, load: &dyn Fn() -> Result<(Scene, String), String>) -> Result<(), String> {
     use vxr_app::theme::ThemeChoice;
     let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };

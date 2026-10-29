@@ -141,9 +141,10 @@ impl App {
         self.events.push(egui::Event::WindowFocused(false));
     }
 
-    /// A point in CSS pixels in egui's points: the same, but in the touch layout's larger ones.
+    /// A point in CSS pixels in the points egui last laid out in: the same, but in the touch
+    /// layout's larger ones.
     fn pt(&self, x: f32, y: f32) -> egui::Pos2 {
-        let k = self.editor.native_ppp / self.editor.ppp;
+        let k = self.editor.native_ppp / self.editor.ctx.pixels_per_point();
         egui::pos2(x * k, y * k)
     }
 

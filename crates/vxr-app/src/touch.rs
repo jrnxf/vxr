@@ -77,6 +77,11 @@ impl Touches {
         Touches { slop, fingers: Vec::new(), state: State::Idle }
     }
 
+    /// A new slop, for a new scale, keeping the fingers down and what they are doing.
+    pub fn set_slop(&mut self, slop: f32) {
+        self.slop = slop;
+    }
+
     /// Fingers down now.
     pub fn count(&self) -> usize {
         self.fingers.len()

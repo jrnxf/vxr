@@ -28,8 +28,6 @@ const RAIL_W: f32 = 46.0;
 /// A rail button's size, and its step down the rail.
 const TOOL: f32 = 34.0;
 const TOOL_STEP: f32 = 36.0;
-/// Below this width in points the dock replaces the rail, as on a touch screen.
-const NARROW: f32 = 760.0;
 /// The dock's bars: 44-point buttons with 5 points of padding, 8 apart.
 const DOCK_H: f32 = 46.0;
 const DOCK_BTN: f32 = 36.0;
@@ -545,7 +543,7 @@ pub struct Hybrid {
     pub hits: HashMap<String, Rect>,
     /// The touch layout's larger targets and gestures (set by the editor, see `Editor::set_touch`).
     pub touch: bool,
-    /// The bottom dock in place of the rail: on a touch screen, or a narrow window.
+    /// The bottom dock in place of the rail, on a touch screen.
     pub docked: bool,
     /// The palette shows above the dock (its colour button toggles it).
     pub palette_open: bool,
@@ -1133,7 +1131,7 @@ impl Hybrid {
         self.keys(ctx);
         self.hits.clear();
         let screen = ctx.content_rect();
-        self.docked = self.touch || screen.width() < NARROW;
+        self.docked = self.touch;
         self.top_bar(ctx, screen);
         // The docked assistant takes the right edge; the panels anchored there move left of it.
         self.assistant_panel(ctx, screen);
@@ -1700,9 +1698,9 @@ impl Hybrid {
         });
     }
 
-    // The dock, in place of the rail on a touch screen or in a narrow window: the tools, the
-    // colour (it opens the palette above) and undo/redo along the bottom; the brushes, mirror
-    // and axis lock on a bar above. Flyouts open over both.
+    // The dock, in place of the rail on a touch screen: the tools, the colour (it opens the
+    // palette above) and undo/redo along the bottom; the brushes, mirror and axis lock on a
+    // bar above. Flyouts open over both.
     fn dock(&mut self, ctx: &Context, screen: Rect) {
         let step = DOCK_BTN + 2.0;
         let sep = 11.0;

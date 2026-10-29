@@ -156,6 +156,10 @@ function wire() {
     if (phase === 2) fingers.delete(e.pointerId);
     app.touch(e.pointerId, phase, e.offsetX, e.offsetY);
     e.preventDefault();
+    if (phase === 2) {
+      step(performance.now());
+      if (app.wants_keyboard() && document.activeElement !== ime) ime.focus();
+    }
     return true;
   };
   canvas.addEventListener('pointercancel', (e) => finger(e, 2));

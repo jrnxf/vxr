@@ -331,7 +331,7 @@ impl Editor {
         self.renderer.resize(&self.gpu.device, width, height);
         (self.width, self.height, self.native_ppp) = (width, height, ppp);
         self.ppp = ppp * if self.ui.touch { TOUCH_SCALE } else { 1.0 };
-        self.touches = Touches::new(TOUCH_SLOP * self.ppp);
+        self.touches.set_slop(TOUCH_SLOP * self.ppp);
     }
 
     /// Switch to the touch layout (a bottom dock, larger targets and touch gestures) or back
@@ -361,7 +361,7 @@ impl Editor {
             return false;
         }
         if phase == Finger::Down && self.ui_touch.is_none() && self.touches.count() == 0 {
-            let at = egui::pos2(p[0] / self.ppp, p[1] / self.ppp);
+            let at = egui::pos2(p[0], p[1]) / self.ctx.pixels_per_point();
             if self.ctx.layer_id_at(at).is_some_and(|l| l.order != egui::Order::Background) {
                 self.ui_touch = Some(id);
                 return false;
