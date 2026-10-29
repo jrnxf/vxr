@@ -124,7 +124,6 @@ impl Page {
                 }
             }
             Action::RegenerateToken if self.link == Link::Paired => {
-                self.pending.clear();
                 self.send(json!({"regenerate": true}));
             }
             Action::RegenerateToken => {}
@@ -234,7 +233,9 @@ impl Page {
                 (None, Some(uri)) => Ask::Read(uri.to_string()),
                 _ => return,
             };
-            self.pending.push_back(Request { id: id.clone(), conn, client, ask });
+            if ed.agents.clients.iter().any(|(c, _)| *c == conn) {
+                self.pending.push_back(Request { id: id.clone(), conn, client, ask });
+            }
         } else if let Some(list) = v.get("clients").and_then(Value::as_array) {
             let clients: Vec<(u64, String)> =
                 list.iter().filter_map(|c| Some((c.get(0)?.as_u64()?, shown(c.get(1)?.as_str()?, 32)))).collect();
@@ -248,6 +249,7 @@ impl Page {
         } else if let Some(ok) = v.get("regenerated").and_then(Value::as_bool) {
             let ctx = ed.ctx.clone();
             let msg = if ok {
+                self.pending.clear();
                 "New pairing token: every agent was disconnected".to_string()
             } else {
                 format!(

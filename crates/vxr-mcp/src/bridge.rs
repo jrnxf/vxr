@@ -510,21 +510,7 @@ mod server {
                 Err(e) if idle(&e) => {}
                 Err(_) => return,
             }
-            for r in host.poll() {
-                next += 1;
-                let mut msg = json!({"id": next, "conn": r.conn, "client": r.client});
-                match &r.ask {
-                    Ask::Call { name, args } => {
-                        msg["call"] = json!(name);
-                        msg["args"] = args.clone();
-                    }
-                    Ask::Read(uri) => msg["read"] = json!(uri),
-                }
-                if !send(ws, &msg) {
-                    return;
-                }
-                pending.insert(next, r);
-            }
+            let asked = host.poll();
             let now = host.clients();
             if now != clients {
                 for (c, name) in &now {
@@ -541,6 +527,21 @@ mod server {
                 if !send(ws, &json!({"clients": clients})) {
                     return;
                 }
+            }
+            for r in asked.into_iter().filter(|r| clients.iter().any(|(c, _)| *c == r.conn)) {
+                next += 1;
+                let mut msg = json!({"id": next, "conn": r.conn, "client": r.client});
+                match &r.ask {
+                    Ask::Call { name, args } => {
+                        msg["call"] = json!(name);
+                        msg["args"] = args.clone();
+                    }
+                    Ask::Read(uri) => msg["read"] = json!(uri),
+                }
+                if !send(ws, &msg) {
+                    return;
+                }
+                pending.insert(next, r);
             }
         }
     }

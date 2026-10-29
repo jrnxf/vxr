@@ -335,6 +335,10 @@ fn a_paired_page_answers_agents_as_the_window_does() {
     let call = got.iter().find(|m| m.get("call").is_some()).unwrap();
     assert_eq!(call["client"], "Claude Code");
     assert!(call["conn"].as_u64().is_some());
+    // The page hears of an agent before its first request, so it can drop requests from agents
+    // it no longer lists.
+    let listed = got.iter().position(|m| m.get("clients").and_then(Value::as_array).is_some_and(|c| c.len() == 1));
+    assert!(listed.is_some_and(|i| i < got.iter().position(|m| m.get("call").is_some()).unwrap()), "{got:?}");
     // A resource read.
     let msg = json!({"jsonrpc": "2.0", "id": 2, "method": "resources/read",
         "params": {"uri": "vxr://scene/summary", "_meta": {"io.modelcontextprotocol/protocolVersion": VERSION}}});
