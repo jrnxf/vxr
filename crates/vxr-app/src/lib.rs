@@ -1,7 +1,7 @@
 //! vxr's editor app: the Hybrid UI in egui over the brick map renderer.
 //!
 //! - [`agents`]: terminal agents editing the window through `vxr mcp --live`; `live` is the
-//!   desktop app's socket for them.
+//!   desktop app's socket for them, and [`bridge`] the browser's link to `vxr bridge`.
 //! - [`assistant`]: the AI assistant's conversation and tool loop, through the review step.
 //! - [`editor::Editor`]: the scene on the GPU, the camera, the UI and the editing gestures,
 //!   independent of the window. The native host is `src/main.rs`.
@@ -15,6 +15,7 @@
 
 pub mod agents;
 pub mod assistant;
+pub mod bridge;
 pub mod color;
 pub mod editor;
 pub mod files;

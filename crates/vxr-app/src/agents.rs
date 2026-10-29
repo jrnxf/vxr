@@ -36,8 +36,13 @@ pub struct Agents {
     pub clients: Vec<(u64, String)>,
     /// The window listens for agents ("Allow terminal agents to edit this window").
     pub allowed: bool,
-    /// Live mode can run here: the desktop app on a system with Unix domain sockets.
+    /// Live mode can run here: the desktop app on a system with Unix domain sockets, or the
+    /// browser through `vxr bridge`.
     pub available: bool,
+    /// The browser's live mode: the tab pairs with `vxr bridge` ([`crate::bridge`]).
+    pub web: bool,
+    /// The browser is opening the link to `vxr bridge`, or waiting for it to take the code.
+    pub connecting: bool,
     /// Why turning it on failed.
     pub error: Option<String>,
     /// Each agent's own selection (map cells) by connection, kept between its calls so it

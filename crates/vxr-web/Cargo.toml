@@ -10,6 +10,7 @@ crate-type = ["cdylib", "rlib"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 vxr-app = { path = "../vxr-app" }
+vxr-mcp.workspace = true
 vxr-core.workspace = true
 vxr-render.workspace = true
 egui = "0.37"

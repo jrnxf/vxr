@@ -1,6 +1,6 @@
 // The vxr editor's page: everything on the canvas (scene and UI) is the Rust editor (pkg/,
-// built by crates/vxr-web/build); this script forwards input, opens files, downloads saves and
-// keeps remembered assistant keys.
+// built by crates/vxr-web/build); this script forwards input, opens files, downloads saves,
+// keeps remembered assistant keys and holds the WebSocket to vxr bridge.
 import init, { start } from './pkg/vxr_web.js';
 
 const canvas = document.getElementById('c');
@@ -64,6 +64,68 @@ window.vxrKeys = {
     return out;
   },
 };
+
+// Terminal agents through vxr bridge on this computer (crates/vxr-mcp/src/bridge.rs): the
+// editor says when to connect and what to send (app.bridge_out), and hears what happened. A
+// browser tells a page nothing about why a WebSocket failed, so the reason is guessed from
+// the local network permission and the browser.
+let bridge = null, bridgeGen = 0;
+const isSafari = () => /safari/i.test(navigator.userAgent) && !/chrome|chromium|crios|fxios|edg|android/i.test(navigator.userAgent);
+async function bridgeDenied() {
+  // Chrome 145 and later call the permission loopback-network, earlier ones local-network-access.
+  for (const name of ['loopback-network', 'local-network-access', 'local-network']) {
+    try {
+      if ((await navigator.permissions.query({ name })).state === 'denied') return true;
+    } catch {}
+  }
+  return false;
+}
+function bridgeClose() {
+  const ws = bridge;
+  bridge = null;
+  ws?.close();
+}
+function bridgeConnect() {
+  bridgeClose();
+  const gen = ++bridgeGen;
+  let ws;
+  try {
+    ws = new WebSocket(app.bridge_url());
+  } catch (e) {
+    console.warn('vxr: the browser would not open a WebSocket to vxr bridge', e);
+    app.bridge_closed('blocked');
+    return;
+  }
+  let opened = false;
+  bridge = ws;
+  ws.onopen = () => {
+    if (bridge !== ws) return;
+    opened = true;
+    app.bridge_open();
+    bridgeFlush();
+  };
+  // The editor runs an agent's request at once, so a tab the browser draws less often (behind
+  // the terminal) still answers.
+  ws.onmessage = (e) => {
+    if (bridge !== ws || typeof e.data !== 'string') return;
+    app.bridge_message(e.data);
+    bridgeFlush();
+  };
+  ws.onclose = async () => {
+    if (bridge !== ws) return;
+    bridge = null;
+    let why = '';
+    if (!opened) why = (await bridgeDenied()) ? 'denied' : navigator.brave ? 'brave' : isSafari() ? 'safari' : '';
+    if (gen === bridgeGen) app.bridge_closed(why);
+  };
+}
+function bridgeFlush() {
+  for (const m of app.bridge_out()) {
+    if (m === 'connect') bridgeConnect();
+    else if (m === 'close') bridgeClose();
+    else if (bridge?.readyState === WebSocket.OPEN) bridge.send(m);
+  }
+}
 
 function show(title, text) {
   msg.hidden = false;
@@ -204,6 +266,7 @@ function step(now) {
       try { localStorage.setItem(THEME_KEY, app.theme()); } catch {}
     }
   }
+  bridgeFlush();
 }
 
 function tick(now) {

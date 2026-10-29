@@ -38,6 +38,10 @@ rfd = "0.15"
 ureq = { version = "3.5", default-features = false, features = ["rustls"] }
 keyring = "4.2"
 
+# The headless check's stand-in for the browser's WebSocket to `vxr bridge` (as vxr-mcp's).
+[target.'cfg(unix)'.dependencies]
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wgpu = { version = "30.0.1", default-features = false, features = ["webgpu", "wgsl", "std"] }
 

@@ -159,6 +159,7 @@ fn review_allows(a: &Action) -> bool {
             | Action::AllowMore
             | Action::StopHeld
             | Action::AllowAgents(_)
+            | Action::PairBridge
             | Action::RegenerateToken
             | Action::StopAgent(_)
             | Action::StopAgents
@@ -1254,6 +1255,7 @@ impl Editor {
         }
         let v = &mut self.ui.agents;
         (v.available, v.allowed) = (self.agents.available, self.agents.allowed);
+        (v.web, v.connecting) = (self.agents.web, self.agents.connecting);
         if v.clients != self.agents.clients || v.error != self.agents.error {
             v.clients = self.agents.clients.clone();
             v.error = self.agents.error.clone();

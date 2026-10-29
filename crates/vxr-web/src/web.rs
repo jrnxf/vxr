@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 use vxr_app::Editor;
+use vxr_app::bridge::{Out, Page};
 use vxr_app::editor::{Button, NEW_SIZE};
 use vxr_app::files::{obj_files, slices_png, zip};
 use vxr_app::theme::ThemeChoice;
@@ -33,6 +34,8 @@ pub struct App {
     copied: Option<String>,
     /// The system is in dark mode (`prefers-color-scheme`), for the System theme.
     dark: bool,
+    /// Terminal agents through `vxr bridge`; the page's script owns the WebSocket.
+    bridge: Page,
 }
 
 /// Start the editor on `canvas` with the `.vox` bytes (an empty array opens a new scene).
@@ -81,6 +84,8 @@ pub async fn start(
     // The assistant calls its provider straight from this page, with keys in this tab.
     let keys = Rc::new(RefCell::new(KeyStore::default()));
     editor.assistant = Assistant::new(Box::new(Fetch), Box::new(WebKeys(keys.clone())), true);
+    let bridge = Page::new();
+    bridge.sync(&mut editor);
     Ok(App {
         editor,
         keys,
@@ -91,6 +96,7 @@ pub async fn start(
         cursor: egui::CursorIcon::Default,
         copied: None,
         dark: true,
+        bridge,
     })
 }
 
@@ -288,6 +294,7 @@ impl App {
             ..Default::default()
         };
         input.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point = Some(ppp);
+        self.bridge.tick(&mut self.editor);
         let (actions, platform) = self.editor.frame(input, &view);
         self.editor.gpu.queue.present(frame);
         self.cursor = platform.cursor_icon;
@@ -297,6 +304,7 @@ impl App {
         });
         actions
             .into_iter()
+            .filter(|a| !self.bridge.act(a, &mut self.editor))
             .filter_map(|a| match a {
                 Action::Open => Some("open".into()),
                 Action::Save => Some("save".into()),
@@ -308,6 +316,44 @@ impl App {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Where the page's WebSocket to `vxr bridge` connects.
+    pub fn bridge_url(&self) -> String {
+        vxr_mcp::bridge::url()
+    }
+
+    /// What the page must do with its WebSocket to `vxr bridge`, oldest first: "connect" (open
+    /// one at `bridge_url`), "close", or a message to send (a JSON object).
+    pub fn bridge_out(&mut self) -> Vec<String> {
+        self.bridge
+            .take_out()
+            .into_iter()
+            .map(|o| match o {
+                Out::Connect => "connect".into(),
+                Out::Close => "close".into(),
+                Out::Send(m) => m,
+            })
+            .collect()
+    }
+
+    /// The WebSocket to `vxr bridge` opened.
+    pub fn bridge_open(&mut self) {
+        self.bridge.opened();
+    }
+
+    /// A message from `vxr bridge`. An agent's request runs at once, unless the user is in
+    /// the middle of a drag (then the next frame runs it).
+    pub fn bridge_message(&mut self, text: &str) {
+        self.bridge.message(text, &mut self.editor);
+        self.bridge.tick(&mut self.editor);
+    }
+
+    /// The WebSocket to `vxr bridge` closed or never opened: `why` is "denied" (the browser's
+    /// local network permission is denied), "blocked" (the browser refused to open it),
+    /// "safari", "brave" or "" (nothing answered), as the page could tell.
+    pub fn bridge_closed(&mut self, why: &str) {
+        self.bridge.closed(why, &mut self.editor);
     }
 
     /// Replace the scene with the `.vox` bytes the page read from a file.
@@ -381,7 +427,7 @@ impl App {
         let e = &self.editor;
         let (c, h) = (&e.cam, e.scene.history());
         format!(
-            r#"{{"voxels":{},"tool":"{:?}","shape":"{:?}","mirror":{},"mirrorAxes":[{},{},{}],"lock":{},"brushSize":{},"sizePanel":{},"lifting":{},"span":{},"selected":{},"region":"{:?}","hasClip":{},"bounds":[{},{},{}],"boundsPanel":{},"slot":{},"colorEdit":{},"slotOp":"{:?}","undo":{},"redo":{},"cmdk":{},"coach":{},"name":{:?},"size":[{},{}],"ppp":{},"cam":[{},{},{},{},{},{}],"ortho":{},"inView":[{},{}],"cameraHints":{},"view":{},"viewPanel":{},"exportMenu":{},"confirmNew":{},"theme":"{}","themeMenu":{},"themeShown":{:?},"guides":[{},{},{}],"mode":"{}","objects":{},"models":{},"picked":{},"tree":[{}],"treeOn":{},"layers":[{}],"layerOn":{},"render":{{"shown":{},"spp":{},"rows":{},"restarts":{},"timestamps":{},"panel":{},"full":{},"size":[{},{}],"maxSpp":{},"exposure":{},"gamma":{},"vignette":{},"aperture":{},"sky":{},"physicalSky":{},"export":{}}},"review":{},"undoLabel":{},"asks":{:?},"agents":{{"panel":{},"available":{}}}}}"#,
+            r#"{{"voxels":{},"tool":"{:?}","shape":"{:?}","mirror":{},"mirrorAxes":[{},{},{}],"lock":{},"brushSize":{},"sizePanel":{},"lifting":{},"span":{},"selected":{},"region":"{:?}","hasClip":{},"bounds":[{},{},{}],"boundsPanel":{},"slot":{},"colorEdit":{},"slotOp":"{:?}","undo":{},"redo":{},"cmdk":{},"coach":{},"name":{:?},"size":[{},{}],"ppp":{},"cam":[{},{},{},{},{},{}],"ortho":{},"inView":[{},{}],"cameraHints":{},"view":{},"viewPanel":{},"exportMenu":{},"confirmNew":{},"theme":"{}","themeMenu":{},"themeShown":{:?},"guides":[{},{},{}],"mode":"{}","objects":{},"models":{},"picked":{},"tree":[{}],"treeOn":{},"layers":[{}],"layerOn":{},"render":{{"shown":{},"spp":{},"rows":{},"restarts":{},"timestamps":{},"panel":{},"full":{},"size":[{},{}],"maxSpp":{},"exposure":{},"gamma":{},"vignette":{},"aperture":{},"sky":{},"physicalSky":{},"export":{}}},"review":{},"undoLabel":{},"asks":{:?},"agents":{{"panel":{},"available":{},"web":{},"allowed":{},"connecting":{},"error":{},"clients":[{}],"edits":[{}]}}}}"#,
             e.scene.map.voxels,
             e.ui.tool,
             e.ui.shape,
@@ -498,6 +544,17 @@ impl App {
             e.asks,
             e.ui.agents_panel,
             e.ui.agents.available,
+            e.ui.agents.web,
+            e.ui.agents.allowed,
+            e.ui.agents.connecting,
+            e.ui.agents.error.as_ref().map_or("null".into(), |m| format!("{m:?}")),
+            e.ui.agents.clients.iter().map(|(c, n)| format!("[{c},{n:?}]")).collect::<Vec<_>>().join(","),
+            e.ui.agents
+                .edits
+                .iter()
+                .map(|r| format!(r#"{{"label":{:?},"applied":{}}}"#, r.label, r.applied))
+                .collect::<Vec<_>>()
+                .join(","),
         )
     }
 
