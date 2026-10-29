@@ -368,6 +368,8 @@ pub struct ReviewCard {
     pub summary: Option<String>,
     /// Cells added, removed and repainted.
     pub counts: [usize; 3],
+    /// World objects and groups the change adds, moves, hides or puts on another layer.
+    pub objects: usize,
     /// Palette slots whose colour or material the change sets.
     pub slots: Vec<SlotChange>,
     pub steps: Vec<StepRow>,
@@ -3067,6 +3069,11 @@ impl Hybrid {
             0 => {}
             1 => parts.push((format!("slot {} changed", card.slots[0].slot), th().text)),
             k => parts.push((format!("{k} slots changed"), th().text)),
+        }
+        match card.objects {
+            0 => {}
+            1 => parts.push(("1 object changed".into(), th().text)),
+            k => parts.push((format!("{k} objects changed"), th().text)),
         }
         if parts.is_empty() {
             parts.push(("No changes yet".into(), th().muted));

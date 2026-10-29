@@ -403,6 +403,13 @@ impl Window {
         if name == "undo" {
             return if self.scene.undo() { Ok("took back".into()) } else { Err("nothing to undo".into()) };
         }
+        if name == "show_world" {
+            return crate::files::show_world(&mut self.scene).map(|_| "the world".into());
+        }
+        if name == "edit_object" {
+            let node = args["node"].as_u64().unwrap() as usize;
+            return if self.scene.edit_object(node) { Ok("the model".into()) } else { Err("not an object".into()) };
+        }
         let limits = vxr_ops::Limits { ask_over: vxr_ops::Limits::default().changed_cells, ..Default::default() };
         let mut o = vxr_ops::Session::with_limits(&self.scene, None, limits);
         o.set_selection(self.selection.iter().copied());
@@ -495,6 +502,63 @@ fn the_edit_tools_change_the_window_and_undo_gives_the_file_back() {
     assert!(t.ends_with("; warning: nothing changed"), "{t}");
     let t = call("crop", json!({}));
     assert!(t.starts_with("bounds x -5..5, y 0..35, z -5..5 (11 x 36 x 11); 0 cells changed"), "{t}");
+    // Seven edits, seven undo steps: undone, the save is the file's bytes.
+    assert_eq!(w.scene.history().position(), 7);
+    for _ in 0..7 {
+        assert!(w.scene.undo());
+    }
+    assert!(!w.scene.undo());
+    assert_eq!(w.scene.to_vox(), bytes);
+}
+
+#[test]
+fn the_world_tools_change_the_window_and_undo_gives_the_file_back() {
+    // The generated 22-world: the slab (node 1, 64 voxels), the trees group (2) of three
+    // linked 13-voxel trees (3, 4 and 6, in the grove group 5), the gem (7) on the hidden
+    // layer 2 and the hidden lost gem (8).
+    let f = vxr_vox::fixtures::all().into_iter().find(|f| f.name == "22-world").unwrap();
+    let bytes = vxr_vox::Document { raw: f.builder.build() }.write();
+    let mut w = Window { scene: vxr_core::Scene::from_vox(&bytes).unwrap(), selection: Vec::new(), clip: None };
+    let shown = |w: &Window| w.scene.world_voxels(true).len();
+    assert_eq!(shown(&w), 64 + 3 * 13);
+
+    let dir = Dir::new("world");
+    let host = Host::start(&dir.0).unwrap();
+    let mut a = Agent::new(&dir, "claude-code");
+    let call = |w: &mut Window, a: &mut Agent, name: &str, args: Value| {
+        let (t, e) = edit(&host, w, a, name, args);
+        assert!(!e, "{name}: {t}");
+        t
+    };
+    let t = call(&mut w, &mut a, "move_object", json!({"node": 1, "offset": [0, 0, 4]}));
+    assert!(t.starts_with("moved object 1 by [0, 0, 4], now from [-4, 0, 1] to [3, 0, 8]; 1 node changed in the world, no voxel of any model"), "{t}");
+    let t = call(&mut w, &mut a, "duplicate", json!({"node": 1}));
+    assert!(t.starts_with("copied object 1 as object 9 (its own model)"), "{t}");
+    assert_eq!(shown(&w), 2 * 64 + 39);
+    let t = call(&mut w, &mut a, "duplicate", json!({"node": 2, "linked": true}));
+    assert!(
+        t.starts_with("copied group 2 (3 objects) as group 14 (3 objects) (linked copies, sharing their models)"),
+        "{t}"
+    );
+    assert_eq!(shown(&w), 2 * 64 + 2 * 39);
+    let t = call(&mut w, &mut a, "group", json!({"nodes": [1, 9]}));
+    assert!(t.starts_with("grouped 2 nodes [1, 9] into group 15 (2 objects); 3 nodes changed"), "{t}");
+    let t = call(&mut w, &mut a, "hide", json!({"node": 15}));
+    assert!(t.starts_with("group 15 (2 objects) is hidden"), "{t}");
+    assert_eq!(shown(&w), 2 * 39);
+    let t = call(&mut w, &mut a, "ungroup", json!({"node": 14}));
+    assert!(t.starts_with("ungrouped group 14 (3 objects)"), "{t}");
+    let t = call(&mut w, &mut a, "set_layer", json!({"node": 7, "layer": 0}));
+    assert!(t.starts_with("put object 7 on layer 0; 1 node changed"), "{t}");
+    assert_eq!(shown(&w), 2 * 39 + 1);
+    // A move that does nothing says so and makes no step.
+    let t = call(&mut w, &mut a, "move_object", json!({"node": 3, "offset": [0, 0, 0]}));
+    assert!(t.ends_with("; warning: nothing changed"), "{t}");
+    // In a model the world tools refuse; show_world brings the world back.
+    call(&mut w, &mut a, "edit_object", json!({"node": 3}));
+    let (t, e) = edit(&host, &mut w, &mut a, "hide", json!({"node": 3}));
+    assert!(e && t.contains("show_world"), "{t}");
+    call(&mut w, &mut a, "show_world", json!({}));
     // Seven edits, seven undo steps: undone, the save is the file's bytes.
     assert_eq!(w.scene.history().position(), 7);
     for _ in 0..7 {

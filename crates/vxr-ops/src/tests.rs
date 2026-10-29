@@ -88,6 +88,12 @@ fn tool_schemas() {
             "crop",
             "palette_set",
             "material_set",
+            "move_object",
+            "duplicate",
+            "group",
+            "ungroup",
+            "hide",
+            "set_layer",
             "undo",
             "done"
         ]
@@ -120,6 +126,9 @@ fn tool_schemas() {
     assert_eq!(material["properties"]["refraction"]["maximum"], 3);
     let resize = &t.iter().find(|t| t.name == "resize").unwrap().parameters;
     assert_eq!(resize["required"], json!(["size"]));
+    let hide = &t.iter().find(|t| t.name == "hide").unwrap().parameters;
+    assert_eq!(hide["required"], json!(["node"]));
+    assert_eq!(hide["properties"]["hidden"]["default"], true);
 }
 
 #[test]
@@ -1091,5 +1100,265 @@ fn material_set() {
     let mut o = Session::new(&s, None);
     call(&mut o, &mut s, "material_set", json!({"slot": 10, "type": "plastic", "specular": 0.5}));
     o.discard(&mut s);
+    assert_eq!(s.to_vox(), bytes);
+}
+
+/// The generated `22-world` file: slab (node 1, 64 voxels), the trees group (2) holding
+/// tree a (3), tree b (4) and the grove group (5) with tree c (6), three linked copies of a
+/// 13-voxel tree; the gem (7) on the hidden secret layer (2) and the hidden lost gem (8),
+/// which share a 1-voxel model.
+fn world_file() -> Vec<u8> {
+    let f = vxr_vox::fixtures::all().into_iter().find(|f| f.name == "22-world").unwrap();
+    Document { raw: f.builder.build() }.write()
+}
+
+fn shown(s: &Scene) -> usize {
+    s.world_voxels(true).len()
+}
+
+#[test]
+fn the_summary_lists_the_world_by_node() {
+    let bytes = world_file();
+    let s = Scene::from_vox(&bytes).unwrap();
+    let o = Session::new(&s, Some(&bytes));
+    let sum = json(&o.summary(&s));
+    assert!(sum["mode"].as_str().unwrap().contains("move_object"));
+    let w = &sum["world"];
+    let nodes = w["nodes"].as_array().unwrap();
+    assert_eq!(nodes.iter().map(|n| n["node"].as_u64().unwrap()).collect::<Vec<_>>(), [1, 2, 3, 4, 5, 6, 7, 8]);
+    assert_eq!(
+        nodes[0],
+        json!({"node": 1, "parent": 0, "kind": "object", "model": 0, "voxels": 64, "hidden": false, "shows": true, "layer": 0, "from": [-4, 0, -3], "to": [3, 0, 4]})
+    );
+    assert_eq!(nodes[1]["kind"], "group");
+    assert_eq!(nodes[1]["objects"], 3);
+    assert_eq!(nodes[5]["parent"], 5);
+    assert_eq!(
+        (&nodes[2]["linked"], &nodes[6]["shows"], &nodes[7]["hidden"]),
+        (&json!(true), &json!(false), &json!(true))
+    );
+    assert_eq!(w["layers"], json!([{"id": 0, "hidden": false}, {"id": 1, "hidden": false}, {"id": 2, "hidden": true}]));
+    assert!(w.get("editing").is_none());
+    // No name outside file_content.
+    assert!(!w.to_string().contains("slab"));
+
+    // In one object's model the list stays, with the object being edited.
+    let mut s = Scene::from_vox(&bytes).unwrap();
+    assert!(s.edit_object(3));
+    let o = Session::new(&s, Some(&bytes));
+    let sum = json(&o.summary(&s));
+    assert_eq!(sum["world"]["editing"], 3);
+    assert!(sum["mode"].as_str().unwrap().starts_with("model"));
+    // A new scene has no world.
+    let s = empty();
+    assert!(json(&Session::new(&s, None).summary(&s)).get("world").is_none());
+}
+
+#[test]
+fn world_tools_move_copy_group_hide_and_layer_objects() {
+    let bytes = world_file();
+    let mut s = Scene::from_vox(&bytes).unwrap();
+    let models = s.world().unwrap().models.len();
+    assert_eq!(shown(&s), 64 + 3 * 13);
+    let mut o = Session::new(&s, Some(&bytes));
+
+    let t = call(&mut o, &mut s, "move_object", json!({"node": 1, "offset": [0, 0, 4]}));
+    assert_eq!(
+        t,
+        "moved object 1 by [0, 0, 4], now from [-4, 0, 1] to [3, 0, 8]; 1 node changed in the world, no voxel of any model; staged so far: 1 node in the world"
+    );
+    let t = call(&mut o, &mut s, "duplicate", json!({"node": 1}));
+    assert!(
+        t.starts_with("copied object 1 as object 9 (its own model), now from [5, 0, 1] to [12, 0, 8]; 1 node changed"),
+        "{t}"
+    );
+    assert_eq!((shown(&s), s.world().unwrap().models.len()), (64 * 2 + 39, models + 1));
+    let t = call(&mut o, &mut s, "duplicate", json!({"node": 2, "linked": true}));
+    assert!(
+        t.starts_with("copied group 2 (3 objects) as group 14 (3 objects) (linked copies, sharing their models)"),
+        "{t}"
+    );
+    assert!(t.contains("; 5 nodes changed in the world"), "{t}");
+    assert_eq!((shown(&s), s.world().unwrap().models.len()), (64 * 2 + 39 * 2, models + 1));
+    let t = call(&mut o, &mut s, "group", json!({"nodes": [1, 9, 1]}));
+    assert!(t.starts_with("grouped 2 nodes [1, 9] into group 15 (2 objects); 3 nodes changed"), "{t}");
+    let t = call(&mut o, &mut s, "ungroup", json!({"node": 2}));
+    assert!(
+        t.starts_with(
+            "ungrouped group 2 (3 objects): nodes [3, 4, 5] moved up into the top of the world; 4 nodes changed"
+        ),
+        "{t}"
+    );
+    let t = call(&mut o, &mut s, "hide", json!({"node": 15}));
+    assert!(t.starts_with("group 15 (2 objects) is hidden; 1 node changed"), "{t}");
+    assert_eq!(shown(&s), 39 * 2);
+    // The lost gem shows again; the gem's layer is hidden until it moves to another.
+    call(&mut o, &mut s, "hide", json!({"node": 8, "hidden": false}));
+    let t = call(&mut o, &mut s, "hide", json!({"node": 7, "hidden": false}));
+    assert!(
+        t.ends_with(
+            "; warning: nothing changed; warning: it still does not show: its layer or a group it is in is hidden"
+        ),
+        "{t}"
+    );
+    let t = call(&mut o, &mut s, "set_layer", json!({"node": 7, "layer": 0}));
+    assert!(t.starts_with("put object 7 on layer 0; 1 node changed"), "{t}");
+    assert_eq!(shown(&s), 39 * 2 + 2);
+    let t = call(&mut o, &mut s, "set_layer", json!({"node": 14, "new_layer": "copies"}));
+    assert!(t.starts_with("put group 14 (3 objects) on new layer 3; 5 nodes changed"), "{t}");
+    let t = call(&mut o, &mut s, "set_layer", json!({"node": 6, "layer": 2}));
+    assert!(t.ends_with("; warning: layer 2 is hidden, so object 6 does not show"), "{t}");
+    assert_eq!(shown(&s), 39 * 2 + 2 - 13);
+    let t = call(&mut o, &mut s, "move_object", json!({"node": 1, "offset": [0, 0, 0]}));
+    assert!(t.ends_with("; warning: nothing changed"), "{t}");
+    let nodes = o.changes(&s).nodes;
+    assert_eq!(nodes, 15, "7 new nodes; the slab, trees, its 3 children, tree c and both gems");
+    assert_eq!(o.changes(&s), crate::Changes { nodes, ..Default::default() }, "no cell changes");
+
+    // Before shows the file's world, After the change again.
+    let after = s.world_voxels(false);
+    o.show_before(&mut s, true);
+    assert_eq!(s.to_vox(), bytes);
+    o.show_before(&mut s, false);
+    assert_eq!(s.world_voxels(false), after);
+
+    // Dropping the first move replays the rest from the file: the slab is where it was.
+    assert!(o.set_dropped(&mut s, 0, true));
+    assert_eq!(
+        s.world().unwrap().tree.nodes[1].local.t,
+        Scene::from_vox(&bytes).unwrap().world().unwrap().tree.nodes[1].local.t
+    );
+    assert!(o.set_dropped(&mut s, 0, false));
+    assert_eq!(s.world_voxels(false), after);
+    // undo takes back the model's last change (the last set_layer).
+    let t = call(&mut o, &mut s, "undo", json!({}));
+    assert!(t.starts_with("took back step 12 (move_object)"), "{t}");
+    let t = call(&mut o, &mut s, "undo", json!({}));
+    assert!(t.starts_with("took back step 11 (set_layer)"), "{t}");
+    assert_eq!(shown(&s), 39 * 2 + 2);
+
+    // Apply: one undo step; undone, the save is the file's bytes.
+    apply_and_undo(o, &mut s, &bytes);
+    assert_eq!(s.world().unwrap().models.len(), models);
+}
+
+#[test]
+fn world_tools_refuse_cleanly() {
+    let bytes = world_file();
+    let mut s = Scene::from_vox(&bytes).unwrap();
+    let mut o = Session::new(&s, Some(&bytes));
+    for (tool, args, says) in [
+        ("move_object", json!({"node": 0, "offset": [1, 0, 0]}), "node 0 is the root"),
+        ("move_object", json!({"node": 99, "offset": [1, 0, 0]}), "node 99: not an object or group of this world"),
+        ("duplicate", json!({"node": 42}), "node 42: not an object or group"),
+        ("ungroup", json!({"node": 1}), "node 1: object 1 is not a group"),
+        ("group", json!({"nodes": []}), "nodes: give the objects or groups to group"),
+        ("group", json!({"nodes": [1, 3]}), "the nodes do not share a parent"),
+        ("set_layer", json!({"node": 1}), "give layer"),
+        ("set_layer", json!({"node": 1, "layer": 1, "new_layer": "x"}), "not both"),
+        ("set_layer", json!({"node": 1, "layer": 42}), "layer 42: no such layer; the layers are [0, 1, 2]"),
+        ("set_layer", json!({"node": 1, "new_layer": "  "}), "new_layer: a name of 1 to 64 characters"),
+        ("move_object", json!({"node": 1, "offset": [3000, 0, 0]}), "over 2048 voxels on an axis"),
+    ] {
+        let (k, m) = err(&mut o, &mut s, tool, args);
+        assert!(k == ErrorKind::Invalid && m.contains(says), "{tool}: {m}");
+    }
+    // A taken-out node is no longer in the world.
+    call(&mut o, &mut s, "ungroup", json!({"node": 5}));
+    let (_, m) = err(&mut o, &mut s, "hide", json!({"node": 5}));
+    assert!(m.starts_with("node 5: not an object or group"), "{m}");
+    o.discard(&mut s);
+    assert_eq!(s.history().position(), 0);
+    assert_eq!(s.to_vox(), bytes);
+
+    // In one object's model, and in a scene without a world, they refuse too.
+    assert!(s.edit_object(1));
+    let mut o = Session::new(&s, Some(&bytes));
+    let (_, m) = err(&mut o, &mut s, "hide", json!({"node": 1}));
+    assert!(m.contains("show_world"), "{m}");
+    let mut s = empty();
+    let mut o = Session::new(&s, None);
+    let (_, m) = err(&mut o, &mut s, "hide", json!({"node": 1}));
+    assert!(m.contains("not a world of several objects"), "{m}");
+}
+
+#[test]
+fn world_steps_apply_one_by_one_and_undo_to_the_file() {
+    let bytes = world_file();
+    let mut s = Scene::from_vox(&bytes).unwrap();
+    let mut o = Session::new(&s, Some(&bytes));
+    call(&mut o, &mut s, "move_object", json!({"node": 2, "offset": [0, 2, 0]}));
+    call(&mut o, &mut s, "palette_set", json!({"slot": 9, "hex": "#102030"}));
+    call(&mut o, &mut s, "duplicate", json!({"node": 3, "linked": true}));
+    call(&mut o, &mut s, "hide", json!({"node": 1}));
+    let after = (s.world_voxels(false), s.world_voxels(true));
+    let mut seen = Vec::new();
+    let landed = o.apply_steps(&mut s, |_, st, c| {
+        seen.push((st.tool, c.nodes, c.palette.len()));
+        st.tool.to_string()
+    });
+    assert_eq!(seen, [("move_object", 1, 0), ("palette_set", 0, 1), ("duplicate", 1, 0), ("hide", 1, 0)]);
+    assert_eq!(landed.len(), 4);
+    assert_eq!((s.world_voxels(false), s.world_voxels(true)), after);
+    for _ in 0..4 {
+        assert!(s.undo());
+    }
+    assert!(!s.undo());
+    assert_eq!(s.to_vox(), bytes);
+}
+
+#[test]
+fn dropping_a_world_step_never_retargets_the_nodes_and_layers_later_steps_made() {
+    fn hidden(s: &Scene) -> Vec<usize> {
+        let w = s.world().unwrap();
+        (1..w.tree.nodes.len()).filter(|&i| w.in_tree(i) && w.tree.nodes[i].hidden).collect()
+    }
+    let bytes = world_file();
+    let mut s = Scene::from_vox(&bytes).unwrap();
+    assert_eq!(hidden(&s), [8]);
+    let mut o = Session::new(&s, Some(&bytes));
+    assert!(call(&mut o, &mut s, "duplicate", json!({"node": 1})).starts_with("copied object 1 as object 9"));
+    assert!(call(&mut o, &mut s, "duplicate", json!({"node": 3})).starts_with("copied object 3 as object 10"));
+    call(&mut o, &mut s, "hide", json!({"node": 9}));
+    let after = s.to_vox();
+    assert_eq!(hidden(&s), [8, 9]);
+
+    // Without the slab's copy, the tree's copy is node 9: the hide named the slab's copy, so
+    // it is skipped and hides nothing.
+    assert!(o.set_dropped(&mut s, 0, true));
+    assert_eq!(s.world().unwrap().tree.nodes.len(), 10);
+    assert_eq!(hidden(&s), [8]);
+    assert!(o.set_dropped(&mut s, 0, false));
+    assert_eq!(s.to_vox(), after);
+
+    // A step on the tree's copy follows it to node 9, as do steps on a new group and layer.
+    call(&mut o, &mut s, "hide", json!({"node": 9, "hidden": false}));
+    call(&mut o, &mut s, "hide", json!({"node": 10}));
+    assert!(
+        call(&mut o, &mut s, "group", json!({"nodes": [10, 4]})).starts_with("grouped 2 nodes [10, 4] into group 11")
+    );
+    call(&mut o, &mut s, "move_object", json!({"node": 11, "offset": [0, 3, 0]}));
+    assert!(call(&mut o, &mut s, "set_layer", json!({"node": 11, "new_layer": "copy"})).contains("on new layer 3"));
+    call(&mut o, &mut s, "set_layer", json!({"node": 3, "layer": 3}));
+    let after = s.to_vox();
+    let layer_of = |s: &Scene, i: usize| s.world().unwrap().tree.nodes[i].layer;
+    assert!(o.set_dropped(&mut s, 0, true));
+    assert_eq!(hidden(&s), [8, 9]);
+    let w = s.world().unwrap();
+    assert!(matches!(&w.tree.nodes[10].kind, vxr_vox::tree::Kind::Group(k) if k == &vec![9, 4]));
+    assert_eq!(w.tree.nodes[10].local.t, [0, 0, 3], "up is the file's z");
+    assert_eq!((layer_of(&s, 9), layer_of(&s, 4), layer_of(&s, 3)), (3, 3, 3));
+    assert!(o.set_dropped(&mut s, 0, false));
+    assert_eq!(s.to_vox(), after);
+
+    // Applied one by one without the slab's copy, the same holds; undone, the file's bytes.
+    assert!(o.set_dropped(&mut s, 0, true));
+    let dropped = s.to_vox();
+    let landed = o.apply_steps(&mut s, |_, st, _| st.tool.to_string());
+    assert_eq!(s.to_vox(), dropped);
+    for _ in 0..landed.len() {
+        assert!(s.undo());
+    }
+    assert!(!s.undo());
     assert_eq!(s.to_vox(), bytes);
 }

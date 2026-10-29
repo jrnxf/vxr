@@ -578,3 +578,40 @@ fn layers_are_shown_hidden_named_added_and_assigned_in_world_mode() {
     while s.undo() {}
     assert!(s.to_vox() == bytes);
 }
+
+#[test]
+fn a_world_change_inside_an_open_edit_reverts_and_commits_with_its_colours() {
+    let bytes = fixture("22-world");
+    let mut s = vxr_core::Scene::from_vox(&bytes).unwrap();
+    let w = s.world().unwrap();
+    let (slab, tree_a) = (find(w, "slab"), find(w, "tree a"));
+    let (before, models) = (s.world_voxels(false), w.models.len());
+
+    // A move, a duplicate and a colour in one open edit, then put back: nothing to commit.
+    s.begin();
+    s.put_world(|w| w.move_by(slab, [0, 0, 4])).unwrap();
+    s.put_world(|w| w.duplicate(tree_a, false)).unwrap().unwrap();
+    s.put_color(9, [1, 2, 3, 255]);
+    assert_ne!(s.world_voxels(false), before);
+    s.revert_voxels();
+    assert_eq!(s.world_voxels(false), before);
+    assert_eq!(s.world().unwrap().models.len(), models, "the duplicate's model is gone");
+    assert_eq!(s.palette[9], [1, 2, 3, 255], "colours stay in the open edit");
+    s.put_color(9, vxr_core::Scene::from_vox(&bytes).unwrap().palette[9]);
+    s.commit();
+    assert_eq!(s.history().position(), 0);
+
+    // Again, committed: one named step for the world and the colour, undone to the bytes.
+    s.begin();
+    s.put_world(|w| w.move_by(slab, [0, 0, 4])).unwrap();
+    s.put_color(9, [1, 2, 3, 255]);
+    s.commit_named("AI: move the slab");
+    assert_eq!(s.history().position(), 1);
+    assert_eq!(s.history().undo_label(), Some("AI: move the slab"));
+    let moved = s.world_voxels(false);
+    assert_ne!(moved, before);
+    assert!(s.undo());
+    assert!(s.to_vox() == bytes, "one undo puts back the world and the colour");
+    assert!(s.redo());
+    assert_eq!((s.world_voxels(false), s.palette[9]), (moved, [1, 2, 3, 255]));
+}

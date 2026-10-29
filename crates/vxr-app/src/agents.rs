@@ -130,6 +130,8 @@ pub fn label(client: &str, tool: &str, c: &Changes) -> String {
     match (cells, c.palette.len()) {
         (1, _) => format!("{client}: {tool} 1 voxel"),
         (0, 1) => format!("{client}: {tool} slot {}", c.palette[0].0),
+        (0, 0) if c.nodes == 1 => format!("{client}: {tool} 1 object"),
+        (0, 0) if c.nodes > 1 => format!("{client}: {tool} {} objects", c.nodes),
         (0, 0) => format!("{client}: {tool}"),
         (0, k) => format!("{client}: {tool} {k} slots"),
         (n, _) => format!("{client}: {tool} {} voxels", group_thousands(n as u64)),
@@ -243,6 +245,15 @@ impl Agents {
                 return Err(format!(
                     "node {node}: edits wait for the user's review in this object's model: another object can be edited once they apply or discard them (review_status tells you)"
                 ));
+            }
+            return self.stage(scene, review, conn, client, "scene_summary", &json!({}));
+        }
+        if name == "show_world" {
+            if scene.world().is_none() {
+                return Err("the scene is one model, not a world of several objects".into());
+            }
+            if scene.at() != At::World {
+                return Err("edits wait for the user's review in this object's model: the world can be shown once they apply or discard them (review_status tells you)".into());
             }
             return self.stage(scene, review, conn, client, "scene_summary", &json!({}));
         }
@@ -388,6 +399,11 @@ impl Agents {
                 if scene.at() != At::Object(node) && !scene.edit_object(node) {
                     return Err(format!("node {node}: not an object (a group has no model of its own)"));
                 }
+                self.selections.remove(&conn);
+                self.query(scene, Some((conn, client)), "scene_summary")
+            }
+            "show_world" => {
+                vxr_mcp::files::show_world(scene)?;
                 self.selections.remove(&conn);
                 self.query(scene, Some((conn, client)), "scene_summary")
             }
@@ -836,6 +852,38 @@ mod tests {
         let e = staged(&mut a, &mut s, &mut r, 1, "Claude Code", "edit_object", json!({"node": second})).unwrap_err();
         assert!(e.contains("wait for the user's review"), "{e}");
         assert_eq!(s.at(), At::Object(first));
+    }
+
+    #[test]
+    fn world_edits_wait_for_the_review_and_land_named_after_their_agent() {
+        let f = vxr_vox::fixtures::all().into_iter().find(|f| f.name == "22-world").unwrap();
+        let bytes = f.builder.build().write();
+        let mut s = Scene::from_vox(&bytes).unwrap();
+        let (mut a, mut r) = (Agents::default(), None);
+        a.review = true;
+        let t =
+            staged(&mut a, &mut s, &mut r, 1, "Claude Code", "move_object", json!({"node": 1, "offset": [0, 0, 4]}))
+                .unwrap();
+        assert!(t.starts_with("moved object 1") && t.ends_with(WAITING), "{t}");
+        staged(&mut a, &mut s, &mut r, 1, "Claude Code", "duplicate", json!({"node": 2, "linked": true})).unwrap();
+        assert_eq!(r.as_ref().unwrap().card(&s).objects, 6);
+        // The world stays shown while they wait; another model cannot be opened.
+        assert!(staged(&mut a, &mut s, &mut r, 1, "Claude Code", "show_world", json!({})).is_ok());
+        let e = staged(&mut a, &mut s, &mut r, 1, "Claude Code", "edit_object", json!({"node": 1})).unwrap_err();
+        assert!(e.contains("wait for the user's review"), "{e}");
+        assert_eq!(a.apply_review(&mut s, r.take().unwrap()), 2);
+        let labels: Vec<&str> = a.edits.iter().map(|e| e.label.as_str()).collect();
+        assert_eq!(labels, ["Claude Code: move_object 1 object", "Claude Code: duplicate 5 objects"]);
+        // Without review, show_world brings the world back after edit_object.
+        a.review = false;
+        ok(&mut a, &mut s, 1, "Claude Code", "edit_object", json!({"node": 1}));
+        assert!(a.call(&mut s, 1, "Claude Code", "hide", &json!({"node": 1})).unwrap_err().contains("show_world"));
+        ok(&mut a, &mut s, 1, "Claude Code", "show_world", json!({}));
+        assert_eq!(s.at(), At::World);
+        ok(&mut a, &mut s, 1, "Claude Code", "hide", json!({"node": 1}));
+        assert_eq!(s.history().undo_label(), Some("Claude Code: hide 1 object"));
+        while s.undo() {}
+        assert!(s.to_vox() == bytes);
     }
 
     #[test]

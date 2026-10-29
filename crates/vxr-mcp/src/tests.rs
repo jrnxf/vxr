@@ -119,7 +119,7 @@ fn tools_come_from_the_ops_schemas() {
     for op in vxr_ops::tools() {
         assert!(names.contains(&op.name), "{} is a tool", op.name);
     }
-    for own in ["list_files", "new_scene", "open", "edit_object", "save"] {
+    for own in ["list_files", "new_scene", "open", "edit_object", "show_world", "save"] {
         assert!(names.contains(&own), "{own} is a tool");
     }
     assert!(!names.contains(&"review_status"), "review_status is live mode only");
@@ -290,6 +290,15 @@ fn a_save_keeps_every_chunk_the_edit_did_not_touch() {
     assert!(c.err("edit_object", json!({"node": 9999})).contains("not a node"));
     c.ok("edit_object", json!({"node": node}));
     assert!(summary(&mut c)["mode"].as_str().unwrap().starts_with("model"));
+    // Back in the world an object moves, as one undo step.
+    assert!(c.err("move_object", json!({"node": node, "offset": [0, 0, 2]})).contains("show_world"));
+    assert!(c.ok("show_world", json!({})).contains("move_object"));
+    assert!(
+        c.ok("move_object", json!({"node": node, "offset": [0, 0, 2]}))
+            .starts_with(&format!("moved object {node} by [0, 0, 2]"))
+    );
+    c.ok("undo", json!({}));
+    c.ok("edit_object", json!({"node": node}));
 
     // Unedited, a save is the file's own bytes.
     c.ok("save", json!({}));

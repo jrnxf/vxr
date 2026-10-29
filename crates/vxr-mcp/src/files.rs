@@ -57,6 +57,7 @@ fn own_tools() -> Vec<(&'static str, String, Value)> {
             }, "required": ["path"], "additionalProperties": false}),
         ),
         edit_object_tool(),
+        show_world_tool(),
         (
             "save",
             "Write the scene to its file (or to path), losslessly: materials, layers, cameras, names and every chunk the edits did not touch keep their bytes. The first overwrite of a file in this session keeps the old one as <name>.vox.bak.".into(),
@@ -73,6 +74,15 @@ pub(crate) fn edit_object_tool() -> (&'static str, String, Value) {
         json!({"type": "object", "properties": {
             "node": {"type": "integer", "minimum": 1, "description": "an object's node number from scene_summary"},
         }, "required": ["node"], "additionalProperties": false}),
+    )
+}
+
+/// `show_world`, in files and live mode.
+pub(crate) fn show_world_tool() -> (&'static str, String, Value) {
+    (
+        "show_world",
+        "In a file with several objects, show the world of every object again after edit_object, for the world tools (move_object, duplicate, group, ungroup, hide, set_layer). Voxels cannot be edited while it shows.".into(),
+        json!({"type": "object", "properties": {}, "additionalProperties": false}),
     )
 }
 
@@ -474,6 +484,17 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
     f.write_all(bytes).map_err(|e| format!("{name}: {e}"))
 }
 
+/// `show_world`: the world of every object, or why not.
+pub fn show_world(scene: &mut Scene) -> Result<(), String> {
+    if scene.world().is_none() {
+        return Err("the scene is one model, not a world of several objects".into());
+    }
+    if scene.at() != vxr_core::history::At::World && !scene.show_world() {
+        return Err(format!("the world is over {} voxels on an axis: it cannot be shown", vxr_core::scene::MAX_EXTENT));
+    }
+    Ok(())
+}
+
 impl Open {
     fn call(&mut self, name: &str, args: &Value) -> R {
         match name {
@@ -499,6 +520,10 @@ impl Open {
                 if !self.scene.edit_object(node) {
                     return Err(format!("node {node}: not an object (a group has no model of its own)"));
                 }
+                self.query("scene_summary")
+            }
+            "show_world" => {
+                show_world(&mut self.scene)?;
                 self.query("scene_summary")
             }
             _ => {
