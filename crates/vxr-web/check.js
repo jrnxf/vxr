@@ -906,12 +906,19 @@ async () => {
     let r = st().review;
     step('a scripted request opens the review card', !!r && answers[0].length === 3 && answers[0].every((a) => a.ok) && !!at('review-apply'), JSON.stringify(answers));
     {
-      // The card sits in the right column under the palette; with the assistant docked the palette
-      // keeps its place, the assistant takes the column under it and the card sits beside that.
+      // The card sits in the right column under the palette, or, where that column has no room
+      // above the camera bar and the render corner (a tall palette in a short window), at the top
+      // left of the palette; with the assistant docked the palette keeps its place, the assistant
+      // takes the column under it and the card sits beside that.
       const rect = (n) => window.vxr.hit_rect(n);
+      const clear = (a, b) => !b || !b.length || a[2] <= b[0] || b[2] <= a[0] || a[3] <= b[1] || b[3] <= a[1];
       const [pl, pt, pr, pb] = rect('palette');
-      const [cl, ct, cr] = rect('review');
-      step('the card sits under the palette at the right edge', Math.abs(cr - pr) < 1 && ct >= pb + 7 && ct <= pb + 9, JSON.stringify([rect('palette'), rect('review')]));
+      const card = rect('review');
+      const [cl, ct, cr] = card;
+      const under = Math.abs(cr - pr) < 1 && ct >= pb + 7 && ct <= pb + 9;
+      const beside = cr <= pl - 7 && cr >= pl - 9 && Math.abs(ct - pt) < 1;
+      step('the card sits under the palette at the right edge, or left of it when the column has no room', under || beside, JSON.stringify([rect('palette'), card]));
+      step('the card clears the palette, the camera bar and the render corner', ['palette', 'nav', 'render'].every((n) => clear(card, rect(n))) && card[3] <= innerHeight, JSON.stringify([card, rect('nav'), rect('render')]));
       await key('j', cmd);
       await frames(4);
       const [pl2, pt2, pr2, pb2] = rect('palette');
@@ -1021,6 +1028,13 @@ async () => {
     step('Cmd-V, Cmd-X and Cmd-C in a field leave the browser\'s clipboard events, Cmd-C and Cmd-X with a selection to act on', clipKeys);
     let a = ai();
     step('the compatible endpoint takes its URL and model', a.kind === 'compatible' && a.base === `${location.origin}/__fake/v1` && a.model === 'stand-in', JSON.stringify(a));
+    // Under a tall palette the assistant's column is short: scroll its settings to the row.
+    for (let i = 0; i < 20 && window.vxr.hit_rect('ai-remember')[3] > window.vxr.hit_rect('assistant')[3] - 8; i++) {
+      const [al, , ar, ab] = window.vxr.hit_rect('assistant');
+      ptr('pointermove', (al + ar) / 2, ab - 40);
+      c.dispatchEvent(new WheelEvent('wheel', { clientX: (al + ar) / 2, clientY: ab - 40, deltaY: 120, bubbles: true, cancelable: true }));
+      await frames(2);
+    }
     await clickAt('ai-remember');
     step('remember in this browser shows its warning', true);
     // A right click on the focused field lands on the page's hidden field, whose browser menu
