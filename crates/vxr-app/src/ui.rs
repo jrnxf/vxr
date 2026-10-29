@@ -1197,7 +1197,8 @@ impl Hybrid {
         self.fitted(ctx, |s| s.color_editor(ctx, screen));
         self.fitted(ctx, |s| s.review_card(ctx, screen));
         self.fitted(ctx, |s| s.agent_card(ctx, screen));
-        if self.coach {
+        // On a phone the assistant covers the tips card, which would show through it.
+        if self.coach && !(self.phone && self.ai_open) {
             self.fitted(ctx, |s| s.coach_card(ctx, screen));
         }
         if self.touch {

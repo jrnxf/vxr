@@ -544,12 +544,18 @@ fn phone(dir: &Path, load: &dyn Fn() -> Result<(Scene, String), String>) -> Resu
         };
         fits(&s, "plain")?;
         s.save_png(&dir.join(format!("app-3x-phone-{tag}.png")))?;
-        s.ed.ui.coach = false;
 
         // The assistant open: the dock stays reachable, so the colour button still opens the
-        // palette over the assistant.
+        // palette over the assistant. The tips card hides under it rather than show through.
+        let welcome = |s: &Shot| {
+            let id = egui::LayerId::new(egui::Order::Middle, egui::Id::unique("welcome"));
+            s.ed.ctx.memory(|m| m.areas().visible_last_frame(&id))
+        };
+        check(s.ed.ui.coach && welcome(&s), format!("{tag}: the tips card shows"))?;
         s.ui_click("ai-toggle")?;
         s.frames(2);
+        check(!welcome(&s), format!("{tag}: the tips card hides under the assistant"))?;
+        s.ed.ui.coach = false;
         fits(&s, "assistant open")?;
         s.save_png(&dir.join(format!("app-3x-phone-{tag}-assistant.png")))?;
         s.ui_click("dock-color")?;
