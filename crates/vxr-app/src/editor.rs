@@ -1609,7 +1609,7 @@ impl Editor {
             &self.scene.materials,
             self.cam,
             &self.ui.render,
-            self.renderer.colors.sky,
+            vxr_render::ViewColors::NEUTRAL.sky,
         );
         match r {
             Ok(x) => {
