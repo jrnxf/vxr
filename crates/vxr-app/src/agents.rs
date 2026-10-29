@@ -76,6 +76,10 @@ pub struct Agents {
     /// What each connection has not heard yet: the user applied or discarded edits of its
     /// that waited for review. Told with its next call, or by `review_status`.
     notices: HashMap<u64, Vec<String>>,
+    /// The user's view, for `look` from it; the editor sets it before each call.
+    pub camera: Option<vxr_ops::Camera>,
+    /// The last call's picture (`look`), for the host to send with its answer.
+    pub image: Option<Vec<u8>>,
 }
 
 /// Why the link to the agents is not up, which the Agents tab answers with its own words
@@ -274,7 +278,9 @@ impl Agents {
         }
         review.session.begin_request();
         let steps = review.session.steps().len();
+        review.session.set_camera(self.camera);
         let r = review.session.call(scene, name, args.clone());
+        self.image = review.session.take_image();
         // After the call: a resize or crop of the change moves its selection with the map.
         self.selections.insert(conn, (scene.at(), scene.reshapes(), review.session.selection().collect()));
         match review.session.clipboard() {
@@ -455,8 +461,10 @@ impl Agents {
         if agent.is_some() {
             session.set_clipboard(self.clips.get(&conn).cloned());
         }
+        session.set_camera(self.camera);
         match session.call(scene, name, args.clone()) {
             Ok(text) => {
+                self.image = session.take_image();
                 if agent.is_some() {
                     // After the call: a resize or crop of its own moves its selection with the map.
                     self.selections.insert(conn, (scene.at(), scene.reshapes(), session.selection().collect()));

@@ -22,6 +22,12 @@ pub const MAX_TURNS: usize = 30;
 /// Tries after the first for an overloaded provider or a dropped connection.
 const RETRIES: u32 = 3;
 
+/// The tools the assistant offers: every operation but those that answer with a picture,
+/// which its history does not carry to the model.
+fn tools() -> Vec<vxr_ops::Tool> {
+    vxr_ops::tools().into_iter().filter(|t| !vxr_ops::Op::has_image(t.name)).collect()
+}
+
 pub const NO_KEY: &str = "Add a key to use the assistant";
 
 /// How a tool call of an answer went, as the panel lists it.
@@ -286,8 +292,7 @@ impl Assistant {
             self.has[kind.index()] = Some(false);
             return self.finish(Progress::Failed(NO_KEY.into()), now);
         }
-        let req =
-            vxr_ai::request(&self.settings, key.as_deref(), vxr_ops::SYSTEM_PROMPT, &vxr_ops::tools(), &self.items);
+        let req = vxr_ai::request(&self.settings, key.as_deref(), vxr_ops::SYSTEM_PROMPT, &tools(), &self.items);
         drop(key);
         let stream = self.transport.send(req);
         let model = self.settings.model.clone();
@@ -800,7 +805,8 @@ mod tests {
         let text = first["messages"][0]["content"][0]["text"].as_str().unwrap();
         assert!(text.starts_with("Scene summary:\n{") && text.ends_with("Request: make the floor red"), "{text}");
         assert_eq!(first["system"][0]["text"], vxr_ops::SYSTEM_PROMPT);
-        assert_eq!(first["tools"].as_array().unwrap().len(), vxr_ops::tools().len());
+        assert_eq!(first["tools"].as_array().unwrap().len(), vxr_ops::tools().len() - 1, "every tool but look");
+        assert!(first["tools"].as_array().unwrap().iter().all(|t| t["name"] != "look"));
         let second = body(&reqs[1]);
         let m = second["messages"].as_array().unwrap();
         assert_eq!(m[2]["content"][0]["tool_use_id"], "toolu_1");

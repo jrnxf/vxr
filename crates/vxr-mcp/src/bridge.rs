@@ -20,7 +20,8 @@
 //! `{"vxr": "bridge", "code": ...}` and gets `{"ok": true}`, or `{"error": ...}` and a close.
 //! Then the bridge sends `{"id": n, "conn": c, "client": name, "call": tool, "args": {...}}`
 //! or `{"id": n, "conn": c, "client": name, "read": uri}`, answered with `{"id": n, "text":
-//! ..., "isError": ...}` or `{"id": n, "missing": true}`, and `{"clients": [[conn, name],
+//! ..., "isError": ...}` (with `"image"`, a base64 PNG, for a picture) or `{"id": n,
+//! "missing": true}`, and `{"clients": [[conn, name],
 //! ...]}` whenever the agents connected change. The page may send `{"stop": conn}`, `{"stop":
 //! "all"}` and `{"regenerate": true}` (a new token, answered with `{"regenerated": true}` or
 //! `{"regenerated": false, "error": ...}`).
@@ -184,6 +185,7 @@ mod server {
 
     use super::*;
     use crate::live::{Ask, Host, Request, same};
+    use crate::protocol::{Reply, is_base64};
 
     /// How long a new connection has for its handshake, and then for its pairing code.
     const HANDSHAKE_WAIT: Duration = Duration::from_secs(5);
@@ -571,10 +573,11 @@ mod server {
                     r.missing();
                 } else {
                     let text = v.get("text").and_then(Value::as_str).unwrap_or("").to_string();
-                    r.answer(if v.get("isError").and_then(Value::as_bool) == Some(true) {
+                    let image = v.get("image").and_then(Value::as_str).filter(|i| is_base64(i)).map(str::to_string);
+                    r.reply(if v.get("isError").and_then(Value::as_bool) == Some(true) {
                         Err(text)
                     } else {
-                        Ok(text)
+                        Ok(Reply { text, image })
                     });
                 }
             }

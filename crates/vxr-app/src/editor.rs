@@ -8,6 +8,7 @@ use vxr_core::history::At;
 use vxr_core::material::Material;
 use vxr_core::select::{Mode, MoveDrag, Transform};
 use vxr_core::tools::{Brush, Gesture, Press, Shape, Target, Tool, plane_cell};
+use vxr_mcp::Reply;
 use vxr_render::{EditBox, Gpu, GpuMap, Guides, OrbitCamera, Preview, Renderer, brickmap_layout, gpu::now_ms};
 
 use crate::agents::Agents;
@@ -145,6 +146,14 @@ pub struct Editor {
     pub export: Option<Export>,
     /// The last finished export's PNG and size, for the host to save or download.
     pub exported: Option<(Vec<u8>, (u32, u32))>,
+    /// Files a terminal agent's `export` made, for the host to hand over with its answer (the
+    /// desktop app writes them into Downloads, the browser downloads them).
+    pub agent_files: Vec<crate::files::File>,
+    /// The connection whose render export runs (`export` with kind render): its answer
+    /// waits for the export's end ([`Editor::take_agent_render`]).
+    agent_render: Option<u64>,
+    /// How that export ended, once it did.
+    agent_rendered: Option<Result<String, String>>,
     /// Export sizes this GPU can render.
     export_fits: [bool; 4],
     /// The scene's map replacements and origin the GPU map was built at (see `Scene::reshapes`).
@@ -272,6 +281,9 @@ impl Editor {
             loads: 0,
             export: None,
             exported: None,
+            agent_files: Vec::new(),
+            agent_render: None,
+            agent_rendered: None,
             export_fits: [false; 4],
             shape: (0, [0; 3]),
             last_object: None,
@@ -1546,7 +1558,12 @@ impl Editor {
                 | Action::StopHeld => self.review_action(a),
                 Action::UndoAgentEdit(i) => self.undo_agent_edit(i),
                 Action::ReviewAgents(on) => self.review_agents(on),
-                Action::ExportPng => self.start_export(),
+                Action::ExportPng => {
+                    if self.agent_render.is_some() {
+                        self.agent_rendered = Some(Err("the user started a render export of their own in vxr".into()));
+                    }
+                    let _ = self.start_export();
+                }
                 Action::CancelExport => {
                     self.export = None;
                     self.ui.toast(&self.ctx, "Export cancelled");
@@ -1608,21 +1625,27 @@ impl Editor {
         client: &str,
         name: &str,
         args: &serde_json::Value,
-    ) -> Option<Result<String, String>> {
+    ) -> Option<Result<Reply, String>> {
         let agents_review = self.review.as_ref().filter(|r| r.agents.is_some());
         if name == vxr_mcp::live::REVIEW_STATUS {
-            return Some(Ok(self.agents.status(conn, agents_review)));
+            return Some(Ok(self.agents.status(conn, agents_review).into()));
         }
         if self.review.is_some() && agents_review.is_none() {
             return Some(Err(REVIEW_AGENT.into()));
         }
         if name == vxr_mcp::live::SAVE || name == vxr_mcp::live::NEW_SCENE {
-            return self.agent_file(conn, client, name);
+            return self.agent_file(conn, client, name).map(|r| r.map(Reply::from));
         }
         let notice = self.agents.take_notices(conn);
         let now = self.ctx.input(|i| i.time);
         self.agents.note_call(conn, now, name);
-        let r = if self.review.is_some() || (self.agents.review && crate::agents::edits(name, args)) {
+        self.agents.camera = Some(self.look_camera());
+        self.agents.image = None;
+        let r = if name == vxr_mcp::live::RENDER_SETTINGS {
+            self.agent_render_settings(client, args)
+        } else if name == vxr_mcp::live::EXPORT_TOOL {
+            self.agent_export(conn, args)
+        } else if self.review.is_some() || (self.agents.review && crate::agents::edits(name, args)) {
             if self.review.is_none() {
                 self.open_review(None);
             }
@@ -1642,10 +1665,96 @@ impl Editor {
         if let At::Object(i) = self.scene.at() {
             self.last_object = Some(i);
         }
-        Some(match notice {
+        let r = match notice {
             Some(n) => r.map(|t| format!("{n}\n{t}")).map_err(|e| format!("{n}\n{e}")),
             None => r,
-        })
+        };
+        let image = self.agents.image.take();
+        Some(r.map(|t| Reply::with_png(t, image.as_deref())))
+    }
+
+    /// The user's view as `look` takes it, at the view's shape.
+    fn look_camera(&self) -> vxr_ops::Camera {
+        let (fwd, right, up) = self.cam.basis();
+        vxr_ops::Camera {
+            eye: self.cam.view_eye().into(),
+            fwd: fwd.into(),
+            right: right.into(),
+            up: up.into(),
+            ortho: self.cam.ortho,
+            half: if self.cam.ortho { self.cam.half_height() } else { (self.cam.fov_y * 0.5).tan() },
+            aspect: self.width.max(1) as f32 / self.height.max(1) as f32,
+        }
+    }
+
+    /// A terminal agent's `render_settings`: the Render panel's settings, as the panel sets
+    /// them (no undo step), and every setting after.
+    fn agent_render_settings(&mut self, client: &str, args: &serde_json::Value) -> Result<String, String> {
+        let before = self.ui.render.clone();
+        self.ui.render.set_from(args)?;
+        if self.ui.render != before {
+            self.ui.toast(&self.ctx, format!("{client} changed the render settings"));
+        }
+        Ok(self.ui.render.to_json().to_string())
+    }
+
+    /// A terminal agent's `export`, as the Export menu does it: the OBJ files or the PNG
+    /// slices into [`Editor::agent_files`] for the host, or a render export started whose
+    /// answer waits for it ([`Editor::agent_waits`]). Returns what it made.
+    fn agent_export(&mut self, conn: u64, args: &serde_json::Value) -> Result<String, String> {
+        if self.review.is_some() {
+            return Err("a change waits for the user's review in vxr: export once they apply or discard it".into());
+        }
+        self.agent_files.clear();
+        match args.get("kind").and_then(serde_json::Value::as_str) {
+            Some("obj") => {
+                let (files, quads) = crate::files::obj_files(&self.scene, &self.export_stem())?;
+                self.agent_files = files;
+                Ok(format!("{quads} quads"))
+            }
+            Some("slices") => {
+                let (png, [w, h], layers) = crate::files::slices_png(&self.scene)?;
+                self.agent_files = vec![(self.slices_name(), png)];
+                Ok(format!("{layers} layers side by side, {w} x {h} pixels"))
+            }
+            Some("render") => {
+                if self.export.is_some() {
+                    return Err("a render export is already running in vxr: call again once it is done".into());
+                }
+                self.start_export()?;
+                self.agent_render = Some(conn);
+                self.agent_rendered = None;
+                Ok("rendering".into())
+            }
+            _ => Err("kind: obj, slices or render".into()),
+        }
+    }
+
+    /// Whether `conn`'s answer waits for its render export to end.
+    pub fn agent_waits(&self, conn: u64) -> bool {
+        self.agent_render == Some(conn)
+    }
+
+    /// How the agent's render export ended, once it did (finished, failed or cancelled); its
+    /// PNG is then in [`Editor::agent_files`].
+    pub fn take_agent_render(&mut self) -> Option<Result<String, String>> {
+        self.agent_render?;
+        let r = self.agent_rendered.take().or_else(|| {
+            self.export.is_none().then(|| {
+                Err("the render export was cancelled in vxr (the user cancelled it or the scene changed)".to_string())
+            })
+        })?;
+        self.agent_render = None;
+        Some(r)
+    }
+
+    /// The agent waiting for its render export is gone: the export stops.
+    pub fn forget_agent_render(&mut self) {
+        if self.agent_render.take().is_some() {
+            self.export = None;
+            self.agent_rendered = None;
+            self.agent_files.clear();
+        }
     }
 
     /// An agent's `save` or `new_scene`: the window's own Save (Cmd-S, through the host, so a
@@ -1897,7 +2006,7 @@ impl Editor {
     }
 
     /// Start a PNG export of the corner's view with the Render panel's settings.
-    pub fn start_export(&mut self) {
+    pub fn start_export(&mut self) -> Result<(), String> {
         let r = Export::start(
             &self.gpu,
             &self.layout,
@@ -1913,8 +2022,12 @@ impl Editor {
                 self.export = Some(x);
                 self.ui.show_render = true;
                 self.ui.toast(&self.ctx, format!("Rendering {w}×{h} at {} spp", self.ui.render.samples()));
+                Ok(())
             }
-            Err(e) => self.ui.toast(&self.ctx, format!("Could not export: {e}")),
+            Err(e) => {
+                self.ui.toast(&self.ctx, format!("Could not export: {e}"));
+                Err(format!("could not export: {e}"))
+            }
         }
     }
 
@@ -2095,6 +2208,13 @@ impl Editor {
         }
         let done = self.export.as_mut().and_then(|x| x.after_submit(&self.gpu).map(|r| (r, x.size())));
         match done {
+            Some((Ok(png), (w, h))) if self.agent_render.is_some() && self.agent_rendered.is_none() => {
+                self.export = None;
+                self.agent_files = vec![(self.export_name(), png)];
+                self.agent_rendered =
+                    Some(Ok(format!("rendered {w} x {h} at {} samples per pixel", self.ui.render.samples())));
+                None
+            }
             Some((Ok(png), size)) => {
                 self.export = None;
                 self.exported = Some((png, size));
@@ -2102,6 +2222,9 @@ impl Editor {
             }
             Some((Err(e), _)) => {
                 self.export = None;
+                if self.agent_render.is_some() && self.agent_rendered.is_none() {
+                    self.agent_rendered = Some(Err(format!("could not export: {e}")));
+                }
                 self.ui.toast(&self.ctx, format!("Could not export: {e}"));
                 None
             }

@@ -514,3 +514,107 @@ fn the_ui_s_other_actions_have_tools() {
     c.ok("save", json!({"path": "undone.vox"}));
     assert_eq!(std::fs::read(dir.0.join("undone.vox")).unwrap(), bytes);
 }
+
+/// Standard base64 back to bytes.
+pub(crate) fn unbase64(s: &str) -> Vec<u8> {
+    let val = |c: u8| match c {
+        b'A'..=b'Z' => c - b'A',
+        b'a'..=b'z' => c - b'a' + 26,
+        b'0'..=b'9' => c - b'0' + 52,
+        b'+' => 62,
+        b'/' => 63,
+        _ => panic!("not base64: {c}"),
+    } as u32;
+    let mut out = Vec::new();
+    for q in s.as_bytes().chunks(4) {
+        let pad = q.iter().filter(|&&c| c == b'=').count();
+        let n = q.iter().take(4 - pad).enumerate().fold(0u32, |n, (i, &c)| n | val(c) << (18 - 6 * i));
+        out.extend(&n.to_be_bytes()[1..4 - pad]);
+    }
+    out
+}
+
+#[test]
+fn base64_round_trips() {
+    for n in 0..8 {
+        let b: Vec<u8> = (0..n).map(|i| (i * 77 + 3) as u8).collect();
+        let s = crate::protocol::base64(&b);
+        assert!(crate::protocol::is_base64(&s), "{s}");
+        assert_eq!(unbase64(&s), b);
+    }
+    assert_eq!(crate::protocol::base64(b"Man"), "TWFu");
+    assert_eq!(crate::protocol::base64(b"Ma"), "TWE=");
+    assert!(
+        !crate::protocol::is_base64("TW=u")
+            && !crate::protocol::is_base64("a b=")
+            && !crate::protocol::is_base64("TWE")
+    );
+}
+
+#[test]
+fn look_answers_with_a_png_picture() {
+    let d = Dir::new("look");
+    let mut c = Client::new(&d.0);
+    let list = c.request("tools/list", json!({}));
+    let look = list["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == "look").unwrap().clone();
+    assert_eq!(look["annotations"]["readOnlyHint"], true);
+    c.ok("new_scene", json!({"path": "rock.vox", "size": [8, 8, 8]}));
+    c.ok("box", json!({"from": [-1, 0, -1], "to": [1, 2, 1], "slot": 5}));
+    let r = c.request("tools/call", json!({"name": "look", "arguments": {"view": "front", "size": 128}}));
+    let content = r["result"]["content"].as_array().unwrap();
+    assert_eq!(content.len(), 2);
+    let text: Value = serde_json::from_str(content[0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!((text["view"].as_str(), text["voxels"].as_u64()), (Some("front"), Some(27)));
+    assert_eq!((content[1]["type"].as_str(), content[1]["mimeType"].as_str()), (Some("image"), Some("image/png")));
+    let png = unbase64(content[1]["data"].as_str().unwrap());
+    assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+    // Other tools answer with text only, and a failed look with its error.
+    let r = c.request("tools/call", json!({"name": "scene_summary", "arguments": {}}));
+    assert_eq!(r["result"]["content"].as_array().unwrap().len(), 1);
+    let r = c.request("tools/call", json!({"name": "look", "arguments": {"view": "current"}}));
+    assert_eq!((r["result"]["isError"].as_bool(), r["result"]["content"].as_array().unwrap().len()), (Some(true), 1));
+    // Looking is not an edit: no unsaved change to refuse a new scene over.
+    c.ok("save", json!({}));
+    c.ok("look", json!({}));
+    c.ok("new_scene", json!({"path": "other.vox", "size": [4, 4, 4]}));
+}
+
+#[test]
+fn export_writes_the_obj_and_the_slices_under_the_root() {
+    let d = Dir::new("export");
+    let mut c = Client::new(&d.0);
+    c.ok("new_scene", json!({"path": "art/rock.vox", "size": [8, 8, 8]}));
+    assert!(c.err("export", json!({"kind": "obj"})).contains("the scene is empty"));
+    c.ok("box", json!({"from": [-1, 0, -1], "to": [1, 2, 1], "slot": 5}));
+    let t: Value = serde_json::from_str(&c.ok("export", json!({"kind": "obj"}))).unwrap();
+    assert_eq!(t["exported"], json!(["art/rock.obj", "art/rock.mtl", "art/rock.png"]));
+    assert_eq!(t["what"], "6 quads");
+    let obj = std::fs::read_to_string(d.0.join("art/rock.obj")).unwrap();
+    assert!(obj.contains("mtllib rock.mtl"), "{obj}");
+    assert!(std::fs::read_to_string(d.0.join("art/rock.mtl")).unwrap().contains("map_Kd rock.png"));
+    assert_eq!(&std::fs::read(d.0.join("art/rock.png")).unwrap()[1..4], b"PNG");
+    // Again: the files are replaced.
+    c.ok("export", json!({"kind": "obj"}));
+    let t: Value = serde_json::from_str(&c.ok("export", json!({"kind": "slices"}))).unwrap();
+    assert_eq!(t["exported"], json!(["art/rock-slices.png"]));
+    assert_eq!(t["what"], "8 layers side by side, 64 x 8 pixels");
+    let t: Value = serde_json::from_str(&c.ok("export", json!({"kind": "obj", "path": "out/big.obj"}))).unwrap();
+    assert_eq!(t["exported"][0], "out/big.obj");
+    assert!(std::fs::read_to_string(d.0.join("out/big.obj")).unwrap().contains("mtllib big.mtl"));
+    c.ok("export", json!({"kind": "slices", "path": "s.png"}));
+    assert!(d.0.join("s.png").is_file());
+    for (args, says) in [
+        (json!({"kind": "render"}), "vxr mcp --live"),
+        (json!({"kind": "obj", "path": "../x.obj"}), "without .."),
+        (json!({"kind": "obj", "path": "x.vox"}), "not a .obj file"),
+        (json!({"kind": "slices", "path": "x.obj"}), "not a .png file"),
+        (json!({"kind": "gltf"}), "obj, slices or render"),
+    ] {
+        let e = c.err("export", args.clone());
+        assert!(e.contains(says), "{args}: {e}");
+    }
+    // An export is not an edit: the scene has no unsaved change from it.
+    c.ok("save", json!({}));
+    c.ok("export", json!({"kind": "obj"}));
+    c.ok("new_scene", json!({"path": "b.vox", "size": [4, 4, 4]}));
+}

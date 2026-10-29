@@ -4547,6 +4547,18 @@ impl Shot {
         name: &str,
         args: serde_json::Value,
     ) -> (String, bool) {
+        let r = self.agent_result(live, agent, name, args);
+        (r["content"][0]["text"].as_str().unwrap_or("").to_string(), r["isError"].as_bool().unwrap_or(true))
+    }
+
+    /// An agent's tool call as the MCP client gets it: the `tools/call` result.
+    fn agent_result(
+        &mut self,
+        live: &mut vxr_app::live::Live,
+        agent: &mut LiveAgent,
+        name: &str,
+        args: serde_json::Value,
+    ) -> serde_json::Value {
         let msg = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
             "params": {"name": name, "arguments": args}});
         let reply = std::thread::scope(|sc| {
@@ -4557,8 +4569,7 @@ impl Shot {
             h.join().unwrap().unwrap()
         });
         self.live_frames(live, 2);
-        let r = &reply["result"];
-        (r["content"][0]["text"].as_str().unwrap_or("").to_string(), r["isError"].as_bool().unwrap_or(true))
+        reply["result"].clone()
     }
 
     /// An agent's tool call that opens the New scene confirm, answered by `answer` once it shows: its text, whether it was an error, and the voxels while the confirm waited.
@@ -4593,6 +4604,127 @@ impl Shot {
     }
 }
 
+/// The live agent's look, render settings and exports, on the house: a picture of the
+/// user's view and a named one, the Render panel's settings without an undo step, and the OBJ,
+/// the PNG slices and a render into the downloads folder, which never replaces a file.
+#[cfg(unix)]
+fn agents_look_render(
+    s: &mut Shot,
+    live: &mut vxr_app::live::Live,
+    claude: &mut LiveAgent,
+    downloads: &Path,
+    dir: &Path,
+) -> Result<(), String> {
+    use serde_json::{Value, json};
+    let position = s.ed.scene.history().position();
+    let png_size = |b64: &str| -> Result<(u32, u32), String> {
+        let png = unbase64(b64);
+        let r = png::Decoder::new(std::io::Cursor::new(png)).read_info().map_err(|e| e.to_string())?;
+        Ok((r.info().width, r.info().height))
+    };
+    let r = s.agent_result(live, claude, "look", json!({"view": "current", "size": 300}));
+    let text: Value = serde_json::from_str(r["content"][0]["text"].as_str().unwrap_or("")).unwrap_or_default();
+    let (w, h) = png_size(r["content"][1]["data"].as_str().unwrap_or(""))?;
+    let aspect = s.ed.width as f32 / s.ed.height as f32;
+    check(
+        r["isError"] == false
+            && r["content"][1]["mimeType"] == "image/png"
+            && text["projection"] == "perspective"
+            && w == 300
+            && (h as f32 - 300.0 / aspect).abs() <= 1.0,
+        format!("look from the user's view is a PNG of the view's shape ({w} x {h}): {text}"),
+    )?;
+    let r = s.agent_result(live, claude, "look", json!({"view": "top"}));
+    if let Some(data) = r["content"][1]["data"].as_str() {
+        let _ = std::fs::write(dir.join("agent-look-top.png"), unbase64(data));
+    }
+    let text: Value = serde_json::from_str(r["content"][0]["text"].as_str().unwrap_or("")).unwrap_or_default();
+    check(
+        text["view"] == "top" && text["across"]["axis"] == "x" && text["down"]["axis"] == "z",
+        format!("look from the top spans x across and z down: {text}"),
+    )?;
+    check(s.ed.scene.history().position() == position, "looking is no undo step".into())?;
+
+    // Render settings: as the panel sets them, no undo step; a bad value changes nothing.
+    let (t, e) = s.agent_call(
+        live,
+        claude,
+        "render_settings",
+        json!({"gamma": 1.8, "physical_sky": true, "samples": 64, "export_size": "720p"}),
+    );
+    let v: Value = serde_json::from_str(&t).unwrap_or_default();
+    check(
+        !e && v["gamma"] == 1.8 && v["physical_sky"] == true && v["export_pixels"] == json!([1280, 720]),
+        format!("render_settings answers with every setting: {t}"),
+    )?;
+    check(
+        (s.ed.ui.render.gamma - 1.8).abs() < 1e-6
+            && s.ed.ui.render.physical_sky
+            && (s.ed.preview.lighting.gamma - 1.8).abs() < 1e-6
+            && s.ed.preview.lighting.physical_sky,
+        "the panel and the path tracer take them".into(),
+    )?;
+    let (t, e) = s.agent_call(live, claude, "render_settings", json!({"gamma": 1.5, "vignette": 3}));
+    check(e && t.contains("vignette") && (s.ed.ui.render.gamma - 1.8).abs() < 1e-6, format!("all or nothing: {t}"))?;
+    check(s.ed.scene.history().position() == position, "render settings are no undo step".into())?;
+
+    // Exports into the downloads folder, under the scene's name.
+    let (t, e) = s.agent_call(live, claude, "export", json!({"kind": "obj"}));
+    let names = |d: &Path| -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(d)
+            .map(|r| r.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect())
+            .unwrap_or_default();
+        v.sort();
+        v
+    };
+    check(
+        !e && names(downloads) == ["house.mtl", "house.obj", "house.png"] && t.contains("house.obj"),
+        format!("the OBJ lands in Downloads: {:?} {t}", names(downloads)),
+    )?;
+    let obj = std::fs::read_to_string(downloads.join("house.obj")).unwrap_or_default();
+    check(obj.contains("mtllib house.mtl"), "the OBJ names its .mtl".into())?;
+    let (t, e) = s.agent_call(live, claude, "export", json!({"kind": "obj"}));
+    let again = std::fs::read_to_string(downloads.join("house (1).obj")).unwrap_or_default();
+    check(
+        !e && again.contains("mtllib house (1).mtl") && downloads.join("house (1).png").is_file(),
+        format!("again it replaces nothing: {t}"),
+    )?;
+    let (t, e) = s.agent_call(live, claude, "export", json!({"kind": "slices"}));
+    check(!e && downloads.join("house-slices.png").is_file(), format!("the PNG slices land in Downloads: {t}"))?;
+    let (t, e) = s.agent_call(live, claude, "export", json!({"kind": "render"}));
+    let png = std::fs::read(downloads.join("house-render.png")).unwrap_or_default();
+    let size = png::Decoder::new(std::io::Cursor::new(png))
+        .read_info()
+        .map(|r| (r.info().width, r.info().height))
+        .unwrap_or((0, 0));
+    check(
+        !e && t.contains("rendered 1280 x 720 at 64 samples") && size == (1280, 720),
+        format!("a render export answers once traced, its PNG in Downloads ({size:?}): {t}"),
+    )?;
+    check(s.ed.exported.is_none(), "the agent's render asks the user nothing".into())?;
+    check(s.ed.scene.history().position() == position, "exports are no undo step".into())?;
+    s.ed.ui.render = vxr_app::render::RenderSettings::default();
+    Ok(())
+}
+
+/// Standard base64 back to bytes.
+fn unbase64(s: &str) -> Vec<u8> {
+    let val = |c: u8| match c {
+        b'A'..=b'Z' => c - b'A',
+        b'a'..=b'z' => c - b'a' + 26,
+        b'0'..=b'9' => c - b'0' + 52,
+        b'+' => 62,
+        _ => 63,
+    } as u32;
+    let mut out = Vec::new();
+    for q in s.as_bytes().chunks(4) {
+        let pad = q.iter().filter(|&&c| c == b'=').count();
+        let n = q.iter().take(4 - pad).enumerate().fold(0u32, |n, (i, &c)| n | val(c) << (18 - 6 * i));
+        out.extend(&n.to_be_bytes()[1..4 - pad]);
+    }
+    out
+}
+
 /// Live mode end to end through a real socket in a temporary folder: Cmd-K opens the
 /// assistant's Agents tab, its switch opens the socket with a token only the user can read, an
 /// agent's calls apply at once as undo steps named after it, the chip and the Agent edits list
@@ -4608,7 +4740,8 @@ fn agents_live(dir: &Path) -> Result<(), String> {
     let _ = std::fs::remove_dir_all(&base);
     std::fs::create_dir_all(&base).map_err(|e| e.to_string())?;
     let sock_dir = base.join("live");
-    let mut live = vxr_app::live::Live::new(sock_dir.clone());
+    let downloads = base.join("downloads");
+    let mut live = vxr_app::live::Live::new(sock_dir.clone()).downloads_to(downloads.clone());
     let r = (|| -> Result<(), String> {
         let mut s = Shot::new(house(), "house.vox", 2.0)?;
         s.ed.ui.coach = false;
@@ -4669,6 +4802,7 @@ fn agents_live(dir: &Path) -> Result<(), String> {
             )?;
         }
         check(s.ed.scene.map.counts[20] == 0 && s.ed.scene.map.counts[3] == roof, "the roof is slot 3 now".into())?;
+        agents_look_render(&mut s, &mut live, &mut claude, &downloads, dir)?;
         let names: Vec<&str> = s.ed.ui.agents.clients.iter().map(|c| c.1.as_str()).collect();
         check(names == ["Claude Code"], format!("the panel lists the agent: {names:?}"))?;
         s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
@@ -4785,6 +4919,13 @@ fn agents_live(dir: &Path) -> Result<(), String> {
         )?;
         let (t, _) = s.agent_call(&mut live, &mut claude, "review_status", serde_json::json!({}));
         check(t.starts_with("1 edit of yours wait"), format!("review_status says it waits: {t}"))?;
+        let (t, e) = s.agent_call(&mut live, &mut claude, "export", serde_json::json!({"kind": "obj"}));
+        check(e && t.contains("waits for the user's review"), format!("no export under review: {t}"))?;
+        let r = s.agent_result(&mut live, &mut claude, "look", serde_json::json!({"size": 64}));
+        check(
+            r["isError"] == false && r["content"][1]["type"] == "image",
+            "look shows the change under review".into(),
+        )?;
         s.live_frames(&mut live, 40);
         s.save_png(&dir.join("app-2x-agent-review.png"))?;
         // Apply: one undo step per edit, named after its agent; each agent hears it.

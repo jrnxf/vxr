@@ -22,6 +22,7 @@ use vxr_vox::raw::RawFile;
 use vxr_vox::tree::{Kind as NodeKind, Tree, TreeNode};
 
 use crate::args::*;
+use crate::look::Camera;
 use crate::parts::{self, Part};
 use crate::text::{clean, hex, parse_hex};
 
@@ -211,6 +212,10 @@ pub struct Session {
     done: Option<String>,
     /// Whether the scene shows the change's Before ([`Session::show_before`]).
     before: bool,
+    /// The user's view, for `look` from it ([`Session::set_camera`]).
+    pub(crate) camera: Option<Camera>,
+    /// The last `look`'s picture, until taken ([`Session::take_image`]).
+    pub(crate) image: Option<Vec<u8>>,
 }
 
 /// The `NOTE` chunk's names, cleaned, if the file has one.
@@ -262,6 +267,8 @@ impl Session {
             replaying: false,
             done: None,
             before: false,
+            camera: None,
+            image: None,
         }
     }
 
@@ -442,6 +449,7 @@ impl Session {
             Op::GetVoxels(a) => self.get_voxels(scene, &a),
             Op::Slice(a) => self.slice(scene, &a),
             Op::FindParts(a) => Ok(self.find_parts(scene, a.query.as_deref())),
+            Op::Look(a) => self.look(scene, &a),
             Op::Place(a) => {
                 self.list_limit(a.cells.len())?;
                 let slot = slot(a.slot)?;

@@ -11,3 +11,5 @@ vxr-vox.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 schemars = "1"
+# look's picture.
+png = "0.18"

@@ -2,7 +2,9 @@
 //!
 //! - [`brickmap`]: the sparse brick map (8^3 bricks with occupancy masks), edits,
 //!   dirty tracking for partial GPU uploads, and a CPU ray cast for picking.
-//! - [`export`]: OBJ export, greedy quads textured by a 256x1 palette image.
+//! - [`export`]: OBJ export, greedy quads textured by a 256x1 palette image, and PNG slices.
+//! - [`files`]: those exports as files (OBJ with `.mtl` and texture, the slices PNG) and a
+//!   stored zip of several.
 //! - [`history`]: undo and redo steps.
 //! - [`scene`]: a brick map with its palette and history, and `.vox` open and save.
 //! - [`model`]: hollow and fill, of the selection or the whole model, and resize and crop
@@ -16,6 +18,7 @@
 
 pub mod brickmap;
 pub mod export;
+pub mod files;
 pub mod history;
 pub mod model;
 pub mod scene;

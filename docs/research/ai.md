@@ -101,7 +101,7 @@ The island is about 145k voxels; a 256^3 model can hold 16.7M. Sending raw voxel
 | A height map or top-down run-length text of the model (coarse, 2 to 4 cells per character) | 500 to 2,000 tokens | When placing things "on top of" or "next to" |
 | `slice(axis, index)` as text rows, one character per palette slot | a 64x64 slice is about 1,500 tokens | When the model asks |
 | `get_voxels(region)` | capped | Small exact areas |
-| `render_view`: a PNG of the current view, or an axis view, from the existing renderer, with axis labels and a grid drawn in | 1000x625 is 36 x 23 = 828 visual tokens on Claude ([Vision](https://platform.claude.com/docs/en/build-with-claude/vision)) | Vision models, at the start and after a big change, so the model can check its own work |
+| `render_view`: a PNG of the current view, or an axis view, from the existing renderer, with axis labels and a grid drawn in (built 2026-10-29 as `look`: a CPU ray cast shaded as the editor view, the six axis views and iso framing every voxel and the user's own view in live mode, with the cells an axis view spans in its text; see `docs/decisions.md`) | 1000x625 is 36 x 23 = 828 visual tokens on Claude ([Vision](https://platform.claude.com/docs/en/build-with-claude/vision)) | Vision models, at the start and after a big change, so the model can check its own work |
 
 The user's selection and the voxel under the pointer are the cheapest context of all: "make this red" with a selection needs no picture.
 

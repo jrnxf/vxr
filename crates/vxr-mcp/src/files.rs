@@ -11,7 +11,7 @@ use vxr_core::Scene;
 use vxr_core::select::{Clip, Mode};
 use vxr_ops::{Limits, Session, clean, notes_of};
 
-use crate::protocol::{Backend, INSTRUCTIONS, PALETTE_URI, SUMMARY_URI, decode, encode};
+use crate::protocol::{Backend, INSTRUCTIONS, PALETTE_URI, Reply, SUMMARY_URI, decode, encode};
 
 const FILE_URI: &str = "vxr://file/";
 
@@ -26,9 +26,11 @@ const MAX_DEPTH: usize = 8;
 const MAX_PATH: usize = 200;
 
 const NO_SCENE: &str = "no scene open: call open or new_scene first";
+const NO_RENDER: &str = "kind render is the path-traced picture, made on the GPU by the vxr window, which files mode does not use: ask the user to open the file in vxr and connect vxr mcp --live, or call look for a quick picture";
 
 /// Tools that only read the scene.
-pub const READ_ONLY: [&str; 6] = ["list_files", "scene_summary", "get_voxels", "slice", "find_parts", "review_status"];
+pub const READ_ONLY: [&str; 7] =
+    ["list_files", "scene_summary", "get_voxels", "slice", "find_parts", "look", "review_status"];
 
 /// The files tools, as `(name, description, input schema)`.
 fn own_tools() -> Vec<(&'static str, String, Value)> {
@@ -58,6 +60,10 @@ fn own_tools() -> Vec<(&'static str, String, Value)> {
         ),
         edit_object_tool(),
         show_world_tool(),
+        export_tool(
+            "Export the open scene (the model being edited, or every shown object of a world) as files under the root, as the Export menu does. kind obj writes <name>.obj with its <name>.mtl and 256x1 palette texture <name>.png; kind slices writes every layer of the model's bounds side by side, the bottom on the left, as one PNG. path is where (relative to the root, ending in .obj for obj and .png for slices), by default beside the scene: <scene>.obj or <scene>-slices.png; an earlier file there is replaced. kind render, the path-traced picture, is made on the GPU by the vxr window: open the file in vxr and use vxr mcp --live for it, or look for a quick picture.",
+            Some(json!({"type": "string", "description": "where to write, relative to the root folder, without .."})),
+        ),
         (
             "save",
             "Write the scene to its file (or to path), losslessly: materials, layers, cameras, names and every chunk the edits did not touch keep their bytes. The first overwrite of a file in this session keeps the old one as <name>.vox.bak.".into(),
@@ -83,6 +89,21 @@ pub(crate) fn show_world_tool() -> (&'static str, String, Value) {
         "show_world",
         "In a file with several objects, show the world of every object again after edit_object, for the world tools (move_object, duplicate, group, ungroup, hide, set_layer, delete_object, rename, new_layer, hide_layer). Voxels cannot be edited while it shows.".into(),
         json!({"type": "object", "properties": {}, "additionalProperties": false}),
+    )
+}
+
+/// `export`, in files mode (with `path`) and live mode.
+pub(crate) fn export_tool(description: &str, path: Option<Value>) -> (&'static str, String, Value) {
+    let mut props = json!({
+        "kind": {"type": "string", "enum": ["obj", "slices", "render"], "description": "obj: OBJ with .mtl and palette texture; slices: every layer as one PNG; render: the path-traced PNG"},
+    });
+    if let Some(p) = path {
+        props["path"] = p;
+    }
+    (
+        "export",
+        description.into(),
+        json!({"type": "object", "properties": props, "required": ["kind"], "additionalProperties": false}),
     )
 }
 
@@ -140,8 +161,10 @@ impl Backend for Files {
         is_tool(name)
     }
 
-    fn call(&mut self, name: &str, args: &Value) -> R {
-        Files::call(self, name, args)
+    fn call(&mut self, name: &str, args: &Value) -> Result<Reply, String> {
+        let text = Files::call(self, name, args)?;
+        let image = self.open.as_mut().and_then(|o| o.image.take());
+        Ok(Reply::with_png(text, image.as_deref()))
     }
 
     fn resources(&self) -> Vec<Value> {
@@ -194,6 +217,8 @@ struct Open {
     unsaved: bool,
     /// The agent's clipboard (world cells), kept between calls.
     clip: Option<Clip>,
+    /// The last call's picture (`look`), until the server sends it.
+    image: Option<Vec<u8>>,
 }
 
 type R = Result<String, String>;
@@ -209,6 +234,7 @@ impl Files {
             "new_scene" => self.new_scene(args),
             "open" => self.open_file(args),
             "save" => self.save(args),
+            "export" => self.export(args),
             "done" => {
                 let s: String = args
                     .get("summary")
@@ -232,6 +258,11 @@ impl Files {
     /// A path under the root: relative, no `..`, ending in `.vox`, and no symlink on the
     /// way, so it cannot leave the root.
     fn resolve(&self, p: &str) -> Result<PathBuf, String> {
+        self.resolve_as(p, "vox")
+    }
+
+    /// A path under the root as [`Files::resolve`] takes it, ending in `.<ext>`.
+    fn resolve_as(&self, p: &str, ext: &str) -> Result<PathBuf, String> {
         let rel = Path::new(p);
         if p.is_empty()
             || p.contains('\0')
@@ -240,8 +271,8 @@ impl Files {
         {
             return Err(format!("{}: give a path relative to the root, without ..", clean(p.as_bytes())));
         }
-        if !rel.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("vox")) {
-            return Err(format!("{}: not a .vox file", clean(p.as_bytes())));
+        if !rel.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case(ext)) {
+            return Err(format!("{}: not a .{ext} file", clean(p.as_bytes())));
         }
         let mut cur = self.root.clone();
         for c in rel.components() {
@@ -334,7 +365,7 @@ impl Files {
             return Err(format!("size {size:?}: each side must be 1 to {MAX_NEW}"));
         }
         let scene = Scene::new([size[0] as u32, size[1] as u32, size[2] as u32]);
-        self.open = Some(Open { rel, path, scene, bytes: Vec::new(), unsaved: false, clip: None });
+        self.open = Some(Open { rel, path, scene, bytes: Vec::new(), unsaved: false, clip: None, image: None });
         let o = self.open.as_mut().unwrap();
         Ok(format!(
             "new scene of {} x {} x {}; save writes it\n{}",
@@ -351,7 +382,7 @@ impl Files {
         let path = self.resolve(&rel)?;
         let bytes = self.read_file(&path, &rel)?;
         let scene = Scene::from_vox(&bytes).map_err(|e| format!("{}: {e}", clean(rel.as_bytes())))?;
-        self.open = Some(Open { rel, path, scene, bytes, unsaved: false, clip: None });
+        self.open = Some(Open { rel, path, scene, bytes, unsaved: false, clip: None, image: None });
         let o = self.open.as_mut().unwrap();
         let hint = if o.scene.at() == vxr_core::history::At::World {
             "the file has several objects, shown as a world where voxels cannot be edited: call edit_object with a node from the summary's objects\n"
@@ -411,6 +442,48 @@ impl Files {
         o.bytes = bytes;
         o.unsaved = false;
         Ok(format!("saved {} ({} bytes, {voxels} voxels, {objects} objects)", clean(o.rel.as_bytes()), o.bytes.len()))
+    }
+
+    /// `export`: the OBJ files or the PNG slices of the open scene, written under the root.
+    fn export(&mut self, args: &Value) -> R {
+        let kind = args.get("kind").and_then(Value::as_str).ok_or("kind: obj, slices or render")?;
+        let o = self.open.as_ref().ok_or(NO_SCENE)?;
+        let stem = o.rel.strip_suffix(".vox").or_else(|| o.rel.strip_suffix(".VOX")).unwrap_or(&o.rel).to_string();
+        let (ext, default) = match kind {
+            "obj" => ("obj", format!("{stem}.obj")),
+            "slices" => ("png", format!("{stem}-slices.png")),
+            "render" => return Err(NO_RENDER.into()),
+            other => return Err(format!("kind {}: obj, slices or render", clean(other.as_bytes()))),
+        };
+        let rel = args.get("path").and_then(Value::as_str).map(str::to_string).unwrap_or(default);
+        let path = self.resolve_as(&rel, ext)?;
+        let o = self.open.as_ref().unwrap();
+        let (files, what) = match kind {
+            "obj" => {
+                let name = path.file_stem().and_then(|n| n.to_str()).ok_or("path: a file name")?.to_string();
+                let (files, quads) = vxr_core::files::obj_files(&o.scene, &name)?;
+                (files, format!("{quads} quads"))
+            }
+            _ => {
+                let name = path.file_name().and_then(|n| n.to_str()).ok_or("path: a file name")?.to_string();
+                let (png, [w, h], layers) = vxr_core::files::slices_png(&o.scene)?;
+                (vec![(name, png)], format!("{layers} layers side by side, {w} x {h} pixels"))
+            }
+        };
+        let dir = path.parent().ok_or("path: a file name")?;
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        // The folder, made now, must still be inside the root.
+        let dir = std::fs::canonicalize(dir).map_err(|e| e.to_string())?;
+        if !dir.starts_with(&self.root) {
+            return Err("not exported: the folder is outside the root".into());
+        }
+        let shown_dir = Path::new(&rel).parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+        let mut written = Vec::new();
+        for (name, bytes) in &files {
+            write_new(&dir.join(name), bytes)?;
+            written.push(clean(Path::new(&shown_dir).join(name).to_string_lossy().as_bytes()));
+        }
+        Ok(json!({"exported": written, "what": what}).to_string())
     }
 
     /// The summary of the open scene, for the `vxr://scene/summary` resource.
@@ -561,6 +634,7 @@ impl Open {
             Ok(text) => {
                 let selection: Vec<[i32; 3]> = session.selection().collect();
                 self.clip = session.clipboard().cloned();
+                self.image = session.take_image();
                 session.apply(&mut self.scene);
                 self.scene.select(selection, Mode::Replace);
                 Ok(text)

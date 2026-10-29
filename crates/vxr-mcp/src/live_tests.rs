@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use crate::live::{Ask, Host, Live, NOT_LIVE, REFUSED, Remote, SOCKET, STOPPED, TOKEN};
-use crate::protocol::{Server, VERSION};
+use crate::protocol::{Reply, Server, VERSION};
 
 /// A folder whose `live` subfolder the host makes, removed at the end of the test. Kept
 /// short: a socket path has to fit in about 100 bytes.
@@ -134,6 +134,7 @@ fn a_call_goes_over_the_socket_and_back() {
     assert!(names.contains(&"edit_object") && names.contains(&"review_status"));
     // Save and New scene are the window's own; opening a file is the user's, in its dialog.
     assert!(names.contains(&"save") && names.contains(&"new_scene"));
+    assert!(names.contains(&"look") && names.contains(&"render_settings") && names.contains(&"export"));
     for files_only in ["list_files", "open"] {
         assert!(!names.contains(&files_only), "{files_only} is files mode only");
     }
@@ -401,7 +402,13 @@ struct Window {
 }
 
 impl Window {
-    fn answer(&mut self, name: &str, args: Value) -> Result<String, String> {
+    fn answer(&mut self, name: &str, args: Value) -> Result<Reply, String> {
+        let mut image = None;
+        let r = self.run(name, args, &mut image);
+        r.map(|t| Reply::with_png(t, image.as_deref()))
+    }
+
+    fn run(&mut self, name: &str, args: Value, image: &mut Option<Vec<u8>>) -> Result<String, String> {
         if name == "undo" {
             return if self.scene.undo() { Ok("took back".into()) } else { Err("nothing to undo".into()) };
         }
@@ -423,6 +430,7 @@ impl Window {
             Ok(t) => {
                 self.selection = o.selection().collect();
                 self.clip = o.clipboard().cloned();
+                *image = o.take_image();
                 o.apply(&mut self.scene);
                 Ok(t)
             }
@@ -442,7 +450,7 @@ fn edit(host: &Host, w: &mut Window, a: &mut Agent, name: &str, args: Value) -> 
         while !h.is_finished() {
             for r in host.poll() {
                 match r.ask.clone() {
-                    Ask::Call { name, args } => r.answer(w.answer(&name, args)),
+                    Ask::Call { name, args } => r.reply(w.answer(&name, args)),
                     Ask::Read(_) => r.missing(),
                 }
             }
@@ -639,4 +647,58 @@ fn the_housekeeping_select_and_palette_tools_change_the_window_and_undo_gives_th
     }
     assert_eq!(steps, 10);
     assert_eq!(w.scene.to_vox(), bytes);
+}
+
+#[test]
+fn look_sends_its_picture_over_the_socket() {
+    let mut s = vxr_core::Scene::new([16, 16, 16]);
+    let cells: Vec<_> = (0..3).map(|y| (s.to_map([0, y, 0]), 20)).collect();
+    s.edit(cells);
+    let mut w = Window { scene: s, selection: Vec::new(), clip: None };
+    let dir = Dir::new("look");
+    let host = Host::start(&dir.0).unwrap();
+    let mut a = Agent::new(&dir, "claude-code");
+    let r = std::thread::scope(|sc| {
+        let h =
+            sc.spawn(|| a.request("tools/call", json!({"name": "look", "arguments": {"view": "left", "size": 96}})));
+        while !h.is_finished() {
+            for r in host.poll() {
+                if let Ask::Call { name, args } = r.ask.clone() {
+                    r.reply(w.answer(&name, args));
+                }
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        h.join().unwrap()
+    });
+    let content = r["result"]["content"].as_array().unwrap();
+    assert_eq!(content.len(), 2, "{r}");
+    let text: Value = serde_json::from_str(content[0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!((text["view"].as_str(), text["across"]["axis"].as_str()), (Some("left"), Some("z")));
+    assert_eq!(content[1]["mimeType"], "image/png");
+    let png = crate::tests::unbase64(content[1]["data"].as_str().unwrap());
+    assert_eq!(&png[1..4], b"PNG");
+    // A picture that is not base64 does not reach the agent.
+    let r = answering_with(
+        &host,
+        |r| r.reply(Ok(Reply { text: "x".into(), image: Some("not base64!".into()) })),
+        || a.request("tools/call", json!({"name": "look", "arguments": {}})),
+    );
+    assert_eq!(r["result"]["content"].as_array().unwrap().len(), 1, "{r}");
+}
+
+/// Run `f` while every request the host gets is answered by `answer`.
+fn answering_with<T: Send>(host: &Host, answer: impl Fn(crate::live::Request), f: impl FnOnce() -> T + Send) -> T {
+    std::thread::scope(|s| {
+        let h = s.spawn(f);
+        let start = Instant::now();
+        while !h.is_finished() {
+            for r in host.poll() {
+                answer(r);
+            }
+            assert!(start.elapsed() < Duration::from_secs(20), "the agent's request never finished");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        h.join().unwrap()
+    })
 }

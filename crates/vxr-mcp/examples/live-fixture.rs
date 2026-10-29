@@ -1,8 +1,8 @@
-//! `fixture <out.vox>`: write the file the live check starts from (see `vxr_mcp::fixture`).
+//! `live-fixture <out.vox>`: write the file the live check starts from (see `vxr_mcp::fixture`).
 
 fn main() {
     let Some(out) = std::env::args().nth(1) else {
-        eprintln!("usage: fixture <out.vox>");
+        eprintln!("usage: live-fixture <out.vox>");
         std::process::exit(2);
     };
     let bytes = vxr_mcp::fixture::world_with_extras();

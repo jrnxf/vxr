@@ -24,7 +24,7 @@ pub mod protocol;
 #[cfg(test)]
 mod tests;
 
-pub use protocol::{Backend, Server, serve};
+pub use protocol::{Backend, Reply, Server, serve};
 
 use std::path::PathBuf;
 

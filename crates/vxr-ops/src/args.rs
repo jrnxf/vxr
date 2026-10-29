@@ -529,6 +529,40 @@ pub struct PaletteCopy {
     pub to: u8,
 }
 
+/// Where look looks from.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum LookView {
+    /// From +z, toward -z.
+    Front,
+    /// From -z.
+    Back,
+    /// From -x.
+    Left,
+    /// From +x.
+    Right,
+    /// From above, -z at the top of the picture.
+    Top,
+    /// From below.
+    Bottom,
+    /// From the front-right-top corner.
+    #[default]
+    Iso,
+    /// The user's own view in the vxr window, as they see it (live mode only).
+    Current,
+}
+
+/// See the scene: a PNG picture of the voxels as the editor view draws them (palette colours, the sun from the front-right-top with shadows, the ground under the model, the selection tinted orange), and what it shows as text. Every view but current is orthographic and frames all the voxels; front, back, left, right, top and bottom look straight along an axis, so a voxel is a square and the text gives which cells the picture spans. Look after building to check the result.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Look {
+    #[serde(default)]
+    pub view: LookView,
+    /// The picture's longer side in pixels, 64 to 1024 (default 512).
+    #[schemars(range(min = 64, max = 1024))]
+    pub size: Option<u32>,
+}
+
 /// Take back your own last edit (never the user's).
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -596,6 +630,7 @@ ops! {
     "get_voxels" => GetVoxels(GetVoxels),
     "slice" => Slice(Slice),
     "find_parts" => FindParts(FindParts),
+    "look" => Look(Look),
     "place" => Place(Place),
     "erase" => Erase(Erase),
     "box" => Box(BoxShape),
@@ -637,7 +672,13 @@ ops! {
 impl Op {
     /// Whether the call only reads the scene.
     pub fn is_query(&self) -> bool {
-        matches!(self, Op::SceneSummary(_) | Op::GetVoxels(_) | Op::Slice(_) | Op::FindParts(_))
+        matches!(self, Op::SceneSummary(_) | Op::GetVoxels(_) | Op::Slice(_) | Op::FindParts(_) | Op::Look(_))
+    }
+
+    /// Whether the call answers with a picture ([`crate::Session::take_image`]) besides its
+    /// text, which only a caller that passes pictures on to the model offers.
+    pub fn has_image(name: &str) -> bool {
+        name == "look"
     }
 }
 

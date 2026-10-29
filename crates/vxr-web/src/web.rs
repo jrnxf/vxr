@@ -36,6 +36,8 @@ pub struct App {
     dark: bool,
     /// Terminal agents through `vxr bridge`; the page's script owns the WebSocket.
     bridge: Page,
+    /// Files agents exported, waiting for the page to download them.
+    downloads: Vec<vxr_app::files::File>,
 }
 
 /// Start the editor on `canvas` with the `.vox` bytes (an empty array opens a new scene).
@@ -108,6 +110,7 @@ pub async fn start(
         copied: None,
         dark: true,
         bridge,
+        downloads: Vec::new(),
     })
 }
 
@@ -349,6 +352,7 @@ impl App {
         input.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point =
             Some(self.editor.native_ppp);
         self.bridge.tick(&mut self.editor);
+        self.downloads.extend(self.bridge.take_downloads());
         let (actions, platform) = self.editor.frame(input, &view);
         self.editor.gpu.queue.present(frame);
         self.cursor = platform.cursor_icon;
@@ -391,6 +395,17 @@ impl App {
             .collect()
     }
 
+    /// The name of the next file an agent exported, for the page to download (empty when
+    /// there is none); [`App::take_agent_download`] gives its bytes.
+    pub fn agent_download_name(&self) -> String {
+        self.downloads.first().map(|f| f.0.clone()).unwrap_or_default()
+    }
+
+    /// The next file an agent exported (empty when there is none).
+    pub fn take_agent_download(&mut self) -> Vec<u8> {
+        if self.downloads.is_empty() { Vec::new() } else { self.downloads.remove(0).1 }
+    }
+
     /// The WebSocket to `vxr bridge` opened.
     pub fn bridge_open(&mut self) {
         self.bridge.opened();
@@ -401,6 +416,7 @@ impl App {
     pub fn bridge_message(&mut self, text: &str) {
         self.bridge.message(text, &mut self.editor);
         self.bridge.tick(&mut self.editor);
+        self.downloads.extend(self.bridge.take_downloads());
     }
 
     /// The WebSocket to `vxr bridge` closed or never opened: `why` is "denied" (the browser's

@@ -272,7 +272,8 @@ impl BrickMap {
     /// CPU ray cast through the map (voxel-by-voxel DDA with empty-brick skipping), for picking.
     pub fn raycast(&self, ro: [f32; 3], dir: [f32; 3], max_t: f32) -> Option<Hit> {
         let size = self.size_voxels();
-        let inv = dir.map(|d| if d.abs() < 1e-9 { 1e9_f32.copysign(d) } else { 1.0 / d });
+        // The same sign as the step below, so -0.0 (a ray straight along an axis) steps one way.
+        let inv = dir.map(|d| if d.abs() < 1e-9 { if d >= 0.0 { 1e9 } else { -1e9 } } else { 1.0 / d });
         let mut t0 = 0f32;
         let mut t1 = max_t;
         let mut entry_axis = 1usize;
@@ -387,5 +388,8 @@ mod tests {
         let h = m.raycast([40.0, 5.5, 5.5], [-1.0, 0.0, 0.0], 100.0).unwrap();
         assert_eq!((h.voxel, h.normal), ([20, 5, 5], [1, 0, 0]));
         assert!(m.raycast([-3.0, 6.5, 5.5], [1.0, 0.0, 0.0], 100.0).is_none());
+        // Negative zero across the ray, as a camera looking straight down an axis makes it.
+        let h = m.raycast([10.5, 5.5, 40.0], [-0.0, -0.0, -1.0], 100.0).unwrap();
+        assert_eq!((h.voxel, h.normal), ([10, 5, 5], [0, 0, 1]));
     }
 }
