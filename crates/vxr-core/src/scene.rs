@@ -519,9 +519,12 @@ impl Scene {
         self.selection_version += 1;
     }
 
-    /// Put back every cell the open edit changed, keeping the edit open (its colour and
-    /// material changes stay). Shape drags redraw from scratch on each move this way.
+    /// Put back every cell the open edit changed, and the bounds, keeping the edit open (its
+    /// colour and material changes stay). Shape drags redraw from scratch on each move this way.
     pub fn revert_voxels(&mut self) {
+        if let Some(b) = self.stroke.as_mut().and_then(|s| s.bounds.take()) {
+            self.reshape(b.old);
+        }
         let Some(s) = &mut self.stroke else { return };
         let changes = std::mem::take(&mut s.changes);
         s.index.clear();
@@ -667,6 +670,11 @@ impl Scene {
             let d = self.reshape(b.old);
             step.translate(d);
         }
+        if !revert && let Some(b) = step.bounds {
+            // Cells the step adds may lie outside the old bounds, so the map moves first.
+            let d = self.reshape(b.new);
+            step.translate(d);
+        }
         let mut set = |c: &Change| {
             self.map.set(c.pos[0], c.pos[1], c.pos[2], if revert { c.old } else { c.new });
         };
@@ -701,9 +709,6 @@ impl Scene {
                 self.selection_version += 1;
             }
         }
-        if !revert && let Some(b) = step.bounds {
-            self.reshape(b.new);
-        }
     }
 
     /// The model bounds: where the map sits in the world, its size, and the ground layer.
@@ -722,6 +727,16 @@ impl Scene {
     /// [`MAX_EXTENT`].
     pub fn set_bounds(&mut self, lo: [i32; 3], size: [u32; 3]) -> Option<usize> {
         self.commit();
+        self.put_bounds(lo, size)?;
+        Some(self.commit())
+    }
+
+    /// Change the model bounds as [`Scene::set_bounds`] does, inside the open edit (opening
+    /// one if needed), so a resize between other edits joins them in one undo step. Map cells
+    /// move by the shift the result gives (new minus old). Returns how many voxels were
+    /// erased and that shift, or None, changing nothing, if a size is 0 or over
+    /// [`MAX_EXTENT`] or the scene shows the world.
+    pub fn put_bounds(&mut self, lo: [i32; 3], size: [u32; 3]) -> Option<(usize, [i32; 3])> {
         if self.at == At::World || size.iter().any(|&s| s == 0 || s > MAX_EXTENT) {
             return None;
         }
@@ -729,7 +744,7 @@ impl Scene {
         let floor = old.floor.clamp(lo[1], lo[1] + size[1] as i32 - 1);
         let new = Bounds { lo, size, floor };
         if new == old {
-            return Some(0);
+            return Some((0, [0; 3]));
         }
         let inside = |w: [i32; 3]| (0..3).all(|a| w[a] >= lo[a] && w[a] < lo[a] + size[a] as i32);
         let mut outside = Vec::new();
@@ -738,19 +753,22 @@ impl Scene {
                 outside.push(p);
             }
         });
-        self.begin();
+        let mut n = 0;
         for p in outside {
-            self.put(p, 0);
+            n += self.put(p, 0) as usize;
         }
-        self.stroke.get_or_insert_default().bounds = Some(BoundsChange { old, new });
-        let n = self.commit();
-        self.reshape(new);
-        Some(n)
+        let s = self.stroke.get_or_insert_default();
+        s.bounds = Some(BoundsChange { old: s.bounds.map_or(old, |b| b.old), new });
+        // The reshape drops selected cells outside: undo puts them back.
+        if s.selection.is_none() && !self.selection.is_empty() {
+            s.selection = Some(self.selection.iter().copied().collect());
+        }
+        Some((n, self.reshape(new)))
     }
 
     /// Replace the map with one covering `b`, keeping every voxel inside it, and move every
-    /// map cell the scene remembers (selection, history, clipboard) with it. Returns the
-    /// shift from old map cells to new ones.
+    /// map cell the scene remembers (selection, history, clipboard, the open edit) with it.
+    /// Returns the shift from old map cells to new ones.
     fn reshape(&mut self, b: Bounds) -> [i32; 3] {
         let d: [i32; 3] = std::array::from_fn(|a| self.origin[a] - b.lo[a]);
         let mut map = BrickMap::new(b.size);
@@ -774,6 +792,13 @@ impl Scene {
         self.history.translate(self.at, d);
         if let Some(c) = &mut self.clipboard {
             c.from = shift(c.from);
+        }
+        if let Some(s) = &mut self.stroke {
+            s.changes.iter_mut().for_each(|c| c.pos = shift(c.pos));
+            s.index = s.changes.iter().enumerate().map(|(i, c)| (c.pos, i)).collect();
+            if let Some(sel) = &mut s.selection {
+                sel.iter_mut().for_each(|p| *p = shift(*p));
+            }
         }
         self.reshapes += 1;
         d

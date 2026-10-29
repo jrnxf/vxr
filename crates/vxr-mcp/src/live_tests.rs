@@ -388,3 +388,118 @@ fn a_connection_id_is_never_given_out_again() {
     assert_ne!(first, second, "after off and on a new agent is not taken for the old one");
     drop((s1, s2));
 }
+
+/// What the window does with an agent's calls, without review: each edit is one `vxr-ops`
+/// session applied at once as one undo step, with the agent's own selection and clipboard
+/// kept between calls; `undo` takes back the last step.
+struct Window {
+    scene: vxr_core::Scene,
+    selection: Vec<[i32; 3]>,
+    clip: Option<vxr_core::select::Clip>,
+}
+
+impl Window {
+    fn answer(&mut self, name: &str, args: Value) -> Result<String, String> {
+        if name == "undo" {
+            return if self.scene.undo() { Ok("took back".into()) } else { Err("nothing to undo".into()) };
+        }
+        let limits = vxr_ops::Limits { ask_over: vxr_ops::Limits::default().changed_cells, ..Default::default() };
+        let mut o = vxr_ops::Session::with_limits(&self.scene, None, limits);
+        o.set_selection(self.selection.iter().copied());
+        o.set_clipboard(self.clip.clone());
+        match o.call(&mut self.scene, name, args) {
+            Ok(t) => {
+                self.selection = o.selection().collect();
+                self.clip = o.clipboard().cloned();
+                o.apply(&mut self.scene);
+                Ok(t)
+            }
+            Err(e) => {
+                o.discard(&mut self.scene);
+                Err(e.message)
+            }
+        }
+    }
+}
+
+/// An agent's tool call, answered by `w` on this thread as the app's thread answers it.
+fn edit(host: &Host, w: &mut Window, a: &mut Agent, name: &str, args: Value) -> (String, bool) {
+    std::thread::scope(|s| {
+        let h = s.spawn(|| a.request("tools/call", json!({"name": name, "arguments": args})));
+        let start = Instant::now();
+        while !h.is_finished() {
+            for r in host.poll() {
+                match r.ask.clone() {
+                    Ask::Call { name, args } => r.answer(w.answer(&name, args)),
+                    Ask::Read(_) => r.missing(),
+                }
+            }
+            assert!(start.elapsed() < Duration::from_secs(20), "the agent's call never finished");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let r = h.join().unwrap();
+        let r = &r["result"];
+        (r["content"][0]["text"].as_str().unwrap().to_string(), r["isError"].as_bool().unwrap())
+    })
+}
+
+#[test]
+fn the_edit_tools_change_the_window_and_undo_gives_the_file_back() {
+    // A 4 x 4 slot-10 slab at x and z 0..3 with a slot-20 column of 3 on (1, 1), in a 32^3
+    // model, opened from its bytes.
+    let mut s = vxr_core::Scene::new([32, 32, 32]);
+    let mut cells: Vec<([i32; 3], u8)> = (0..16).map(|i| (s.to_map([i % 4, 0, i / 4]), 10)).collect();
+    cells.extend((1..4).map(|y| (s.to_map([1, y, 1]), 20)));
+    s.edit(cells);
+    let mut opened = vxr_core::Scene::from_vox(&s.to_vox()).unwrap();
+    opened.set_bounds([-16, 0, -16], [32, 32, 32]);
+    let bytes = vxr_core::Scene::from_vox(&opened.to_vox()).unwrap().to_vox();
+    let mut w = Window { scene: vxr_core::Scene::from_vox(&bytes).unwrap(), selection: Vec::new(), clip: None };
+    assert_eq!(w.scene.bounds().size, [32, 32, 32]);
+
+    let dir = Dir::new("edits");
+    let host = Host::start(&dir.0).unwrap();
+    let mut a = Agent::new(&dir, "claude-code");
+    let mut call = |name: &str, args: Value| {
+        let (t, e) = edit(&host, &mut w, &mut a, name, args);
+        assert!(!e, "{name}: {t}");
+        t
+    };
+    // The whole model up one, then (S, Cmd-A, Shift-Down) the selection down one.
+    let t = call("transform", json!({"kind": "move", "offset": [0, 1, 0]}));
+    assert!(t.starts_with("moved 19 voxels (every voxel), now from [0, 1, 0] to [3, 4, 3]; 33 cells changed"), "{t}");
+    assert_eq!(call("select", json!({"all": true})), "19 voxels selected from [0, 1, 0] to [3, 4, 3]");
+    let t = call("transform", json!({"kind": "move", "offset": [0, -1, 0]}));
+    assert!(t.starts_with("moved 19 voxels (the selection), now from [0, 0, 0] to [3, 3, 3]; 33 cells changed"), "{t}");
+    // Once more is below the ground: refused, nothing moves.
+    let (t, e) = edit(&host, &mut w, &mut a, "transform", json!({"kind": "move", "offset": [0, -1, 0]}));
+    assert!(e && t.starts_with("16 of 19 voxels would land outside the editable bounds"), "{t}");
+    // Copy in one call, paste in the next: the clipboard is the agent's, kept between calls.
+    let mut call = |name: &str, args: Value| {
+        let (t, e) = edit(&host, &mut w, &mut a, name, args);
+        assert!(!e, "{name}: {t}");
+        t
+    };
+    call("select", json!({"color": 20}));
+    assert_eq!(call("copy", json!({})), "copied 3 voxels, a 1 x 3 x 1 box from [1, 1, 1]");
+    let t = call("paste", json!({"at": [5, 0, 5]}));
+    assert!(t.starts_with("pasted at [5, 0, 5] (low corner); 3 cells changed"), "{t}");
+    // Taller bounds, then a post above the old top.
+    let t = call("resize", json!({"size": [32, 40, 32]}));
+    assert!(t.starts_with("bounds x -16..15, y 0..39, z -16..15 (32 x 40 x 32); 0 cells changed"), "{t}");
+    let t = call("box", json!({"from": [-5, 0, -5], "to": [-5, 35, -5], "slot": 4}));
+    assert!(t.starts_with("36 cells changed") && !t.contains("warning"), "{t}");
+    let t = call("material_set", json!({"slot": 10, "type": "metal", "roughness": 0.25}));
+    assert_eq!(t, "slot 10: Diffuse -> Metal (roughness 0.25, metalness 1); 16 voxels use it");
+    let t = call("hollow", json!({}));
+    assert!(t.ends_with("; warning: nothing changed"), "{t}");
+    let t = call("crop", json!({}));
+    assert!(t.starts_with("bounds x -5..5, y 0..35, z -5..5 (11 x 36 x 11); 0 cells changed"), "{t}");
+    // Seven edits, seven undo steps: undone, the save is the file's bytes.
+    assert_eq!(w.scene.history().position(), 7);
+    for _ in 0..7 {
+        assert!(w.scene.undo());
+    }
+    assert!(!w.scene.undo());
+    assert_eq!(w.scene.to_vox(), bytes);
+}

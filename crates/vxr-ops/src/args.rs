@@ -221,6 +221,114 @@ pub struct Select {
     pub mode: SelectMode,
 }
 
+/// What transform does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum TransformKind {
+    Move,
+    Rotate,
+    Flip,
+    Loop,
+}
+
+/// Move, turn, mirror or wrap the selection, or every voxel when nothing is selected, as the select flyout does. move shifts by offset [dx, dy, dz]; rotate turns 90 degrees about axis (counter-clockwise looking down it) around the middle of what moves; flip mirrors across that middle on axis; loop shifts by steps cells along axis and wraps what leaves the moved voxels' box round to its other side. The selection moves with the voxels. If any voxel would land outside the editable bounds nothing moves and the call fails: resize first.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Transform {
+    pub kind: TransformKind,
+    /// [dx, dy, dz], for move.
+    pub offset: Option<Cell>,
+    /// For rotate, flip and loop.
+    pub axis: Option<Axis>,
+    /// Cells to loop by, for loop (default 1; negative goes the other way).
+    pub steps: Option<i32>,
+}
+
+/// Copy the selected voxels to your clipboard (not the user's), for paste.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CopySelection {}
+
+/// Copy the selected voxels to your clipboard, then erase them.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Cut {}
+
+/// Paste your clipboard with the bottom centre of its box on cell at, or without at beside where it was copied from (on +x). Cells outside the editable bounds are skipped with a warning. The pasted voxels become the selection.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Paste {
+    pub at: Option<Cell>,
+}
+
+/// Erase the selected voxels; the selection empties.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Delete {}
+
+/// Keep only the voxels that can be seen from outside, a shell one voxel thick: of the selection, or of every voxel when nothing is selected.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Hollow {}
+
+/// Fill the empty space the selection (or every voxel, when nothing is selected) encloses with a slot. Space open to the outside, like the inside of a cup, is not filled.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FillInside {
+    #[schemars(range(min = 1, max = 255))]
+    pub slot: u8,
+}
+
+/// Resize the editable bounds to size [x, y, z] (1 to 2048 each), keeping the bottom and the middle on x and z, as the Bounds panel does. Grow them before building beyond them. Voxels outside the new bounds are erased, and the result says how many.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Resize {
+    pub size: [u32; 3],
+}
+
+/// Fit the editable bounds to the voxels exactly.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Crop {}
+
+/// A palette slot's material type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum MaterialKind {
+    Diffuse,
+    Metal,
+    Plastic,
+    Glass,
+    Emit,
+}
+
+/// Set a palette slot's material, as the Material tab does: its type and its sliders. Every voxel of that slot changes. A slider not given keeps its value. Each type reads its own: metal roughness and metalness, plastic roughness and specular, glass roughness, transparency, refraction and attenuation, emit emission and power.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MaterialSet {
+    #[schemars(range(min = 1, max = 255))]
+    pub slot: u8,
+    #[serde(rename = "type")]
+    pub kind: Option<MaterialKind>,
+    #[schemars(range(min = 0, max = 1))]
+    pub roughness: Option<f32>,
+    #[schemars(range(min = 0, max = 1))]
+    pub metalness: Option<f32>,
+    #[schemars(range(min = 0, max = 1))]
+    pub specular: Option<f32>,
+    #[schemars(range(min = 0, max = 1))]
+    pub transparency: Option<f32>,
+    /// Refractive index.
+    #[schemars(range(min = 1, max = 3))]
+    pub refraction: Option<f32>,
+    #[schemars(range(min = 0, max = 1))]
+    pub attenuation: Option<f32>,
+    #[schemars(range(min = 0, max = 1))]
+    pub emission: Option<f32>,
+    #[schemars(range(min = 0, max = 4))]
+    pub power: Option<f32>,
+}
+
 /// Set a palette slot's colour as #rrggbb. Every voxel of that slot changes colour. Pick an unused slot for a new colour.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -301,7 +409,17 @@ ops! {
     "fill" => Fill(Fill),
     "paint" => Paint(Paint),
     "select" => Select(Select),
+    "transform" => Transform(Transform),
+    "copy" => Copy(CopySelection),
+    "cut" => Cut(Cut),
+    "paste" => Paste(Paste),
+    "delete" => Delete(Delete),
+    "hollow" => Hollow(Hollow),
+    "fill_inside" => FillInside(FillInside),
+    "resize" => Resize(Resize),
+    "crop" => Crop(Crop),
     "palette_set" => PaletteSet(PaletteSet),
+    "material_set" => MaterialSet(MaterialSet),
     "undo" => Undo(Undo),
     "done" => Done(Done),
 }
@@ -383,6 +501,9 @@ fn tidy(v: &mut Value) {
                         }
                     }
                 }
+            }
+            if let Some(Value::Array(values)) = o.get_mut("enum") {
+                values.retain(|v| !v.is_null());
             }
             if o.get("default").is_some_and(Value::is_null) {
                 o.remove("default");

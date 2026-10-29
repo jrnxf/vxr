@@ -77,7 +77,17 @@ fn tool_schemas() {
             "fill",
             "paint",
             "select",
+            "transform",
+            "copy",
+            "cut",
+            "paste",
+            "delete",
+            "hollow",
+            "fill_inside",
+            "resize",
+            "crop",
             "palette_set",
+            "material_set",
             "undo",
             "done"
         ]
@@ -102,6 +112,14 @@ fn tool_schemas() {
     assert_eq!(boxed["properties"]["mode"]["enum"], json!(["add", "erase", "paint"]));
     assert_eq!(boxed["properties"]["slot"]["minimum"], 1);
     assert_eq!(boxed["properties"]["from"]["minItems"], 3);
+    let transform = &t.iter().find(|t| t.name == "transform").unwrap().parameters;
+    assert_eq!(transform["required"], json!(["kind"]));
+    assert_eq!(transform["properties"]["kind"]["enum"], json!(["move", "rotate", "flip", "loop"]));
+    let material = &t.iter().find(|t| t.name == "material_set").unwrap().parameters;
+    assert_eq!(material["properties"]["type"]["enum"], json!(["diffuse", "metal", "plastic", "glass", "emit"]));
+    assert_eq!(material["properties"]["refraction"]["maximum"], 3);
+    let resize = &t.iter().find(|t| t.name == "resize").unwrap().parameters;
+    assert_eq!(resize["required"], json!(["size"]));
 }
 
 #[test]
@@ -683,7 +701,7 @@ fn summary_shape() {
     assert_eq!(sum["voxels"], 19);
     assert_eq!(
         sum["editable"],
-        json!({"from": [-16, 0, -16], "to": [15, 31, 15], "ground_y": 0, "headroom": "nothing can go above y 31"})
+        json!({"from": [-16, 0, -16], "to": [15, 31, 15], "ground_y": 0, "headroom": "nothing can go above y 31 until resize grows the bounds"})
     );
     assert_eq!(
         sum["slots_used"][0],
@@ -738,4 +756,297 @@ fn named_parts_keep_their_ids_across_replay() {
     let r = call(&mut o, &mut s, "place", json!({"cells": [[2, 1, 3]], "slot": 9, "name": "sail"}));
     assert!(r.ends_with("part p5 \"sail\""), "{r}");
     assert!(call(&mut o, &mut s, "paint", json!({"slot": 6, "part": "p3"})).starts_with("1 cells changed"));
+}
+
+/// [`small`] as a file opened from disk, its model 32^3 like [`empty`], so a save has bytes
+/// to compare.
+fn opened() -> Scene {
+    let mut s = Scene::from_vox(&small().to_vox()).unwrap();
+    s.set_bounds([-16, 0, -16], [32, 32, 32]);
+    let s = Scene::from_vox(&s.to_vox()).unwrap();
+    assert_eq!((s.bounds().lo, s.bounds().size), ([-16, 0, -16], [32, 32, 32]));
+    s
+}
+
+/// Apply `o`, then undo it: the scene saves as the bytes it had before.
+fn apply_and_undo(o: Session, s: &mut Scene, bytes: &[u8]) {
+    let position = s.history().position();
+    o.apply(s);
+    assert_eq!(s.history().position(), position + 1, "one undo step");
+    assert!(s.undo());
+    assert_eq!(s.to_vox(), bytes, "undo gives the file's bytes back");
+}
+
+#[test]
+fn transform_moves_the_whole_model_or_the_selection() {
+    let mut s = opened();
+    let (bytes, before) = (s.to_vox(), voxels(&s));
+    let mut o = Session::new(&s, None);
+    // Nothing selected: every voxel moves. Up one: the slab's 16 cells empty, 16 fill a layer
+    // up (one of them the column's bottom, repainted) and the column's top grows by one.
+    let r = call(&mut o, &mut s, "transform", json!({"kind": "move", "offset": [0, 1, 0]}));
+    assert!(r.starts_with("moved 19 voxels (every voxel), now from [0, 1, 0] to [3, 4, 3]; 33 cells changed"), "{r}");
+    assert_eq!(
+        (get(&mut o, &mut s, [2, 0, 2]), get(&mut o, &mut s, [2, 1, 2]), get(&mut o, &mut s, [1, 4, 1])),
+        (0, 10, 20)
+    );
+    // The editor's S, Cmd-A, Shift-Down: back down one.
+    call(&mut o, &mut s, "select", json!({"all": true}));
+    let r = call(&mut o, &mut s, "transform", json!({"kind": "move", "offset": [0, -1, 0]}));
+    assert!(r.starts_with("moved 19 voxels (the selection), now from [0, 0, 0] to [3, 3, 3]; 33 cells changed"), "{r}");
+    assert_eq!(o.staged(), 0);
+    // Below the ground is outside the bounds: nothing moves and the call says so.
+    let (k, m) = err(&mut o, &mut s, "transform", json!({"kind": "move", "offset": [0, -1, 0]}));
+    assert_eq!(k, ErrorKind::Invalid);
+    assert!(
+        m.starts_with(
+            "16 of 19 voxels would land outside the editable bounds (x -16..15, y 0..31, z -16..15): nothing moved"
+        ),
+        "{m}"
+    );
+    assert_eq!(o.staged(), 0);
+    assert_eq!(voxels(&s), before);
+    assert_eq!(err(&mut o, &mut s, "transform", json!({"kind": "flip"})).1, "axis is needed for rotate, flip and loop");
+    assert_eq!(err(&mut o, &mut s, "transform", json!({"kind": "move"})).1, "move needs offset [dx, dy, dz]");
+    // The red column on its own: turned about z it lies along x, through its middle.
+    call(&mut o, &mut s, "select", json!({"color": 20}));
+    let r = call(&mut o, &mut s, "transform", json!({"kind": "rotate", "axis": "z"}));
+    assert!(r.starts_with("turned 3 voxels (the selection), now from [0, 2, 1] to [2, 2, 1]; 4 cells changed"), "{r}");
+    assert_eq!(
+        json(&call(&mut o, &mut s, "get_voxels", json!({"from": [0, 1, 1], "to": [2, 3, 1]})))["filled"]
+            .as_array()
+            .map(Vec::len),
+        Some(3)
+    );
+    // Flipped across its own middle on x it lands on itself.
+    let r = call(&mut o, &mut s, "transform", json!({"kind": "flip", "axis": "x"}));
+    assert!(r.ends_with("; warning: nothing changed"), "{r}");
+    apply_and_undo(o, &mut s, &bytes);
+
+    // Loop the whole model one cell along x: the slab wraps onto itself, the column moves.
+    let mut o = Session::new(&s, None);
+    let r = call(&mut o, &mut s, "transform", json!({"kind": "loop", "axis": "x"}));
+    assert!(r.starts_with("looped 19 voxels (every voxel), now from [0, 0, 0] to [3, 3, 3]; 6 cells changed"), "{r}");
+    assert_eq!(get(&mut o, &mut s, [2, 2, 1]), 20);
+    let r = call(&mut o, &mut s, "transform", json!({"kind": "loop", "axis": "x", "steps": -1}));
+    assert!(r.starts_with("looped 19 voxels (every voxel), now from [0, 0, 0] to [3, 3, 3]; 6 cells changed"), "{r}");
+    assert_eq!(o.staged(), 0);
+    o.discard(&mut s);
+    assert_eq!(s.to_vox(), bytes);
+}
+
+#[test]
+fn copy_cut_paste_and_delete() {
+    let mut s = opened();
+    let bytes = s.to_vox();
+    let mut o = Session::new(&s, None);
+    assert_eq!(err(&mut o, &mut s, "copy", json!({})).1, "nothing is selected: call select first");
+    assert_eq!(err(&mut o, &mut s, "paste", json!({})).1, "the clipboard is empty: copy or cut first");
+    call(&mut o, &mut s, "select", json!({"color": 20}));
+    assert_eq!(call(&mut o, &mut s, "copy", json!({})), "copied 3 voxels, a 1 x 3 x 1 box from [1, 1, 1]");
+    // At a cell: the bottom centre of the box goes there, and the pasted voxels are selected.
+    let r = call(&mut o, &mut s, "paste", json!({"at": [5, 0, 5]}));
+    assert!(r.starts_with("pasted at [5, 0, 5] (low corner); 3 cells changed"), "{r}");
+    assert_eq!(o.selection().count(), 3);
+    // Without at: beside where it was copied from, on +x.
+    let r = call(&mut o, &mut s, "paste", json!({}));
+    assert!(r.starts_with("pasted at [2, 1, 1] (low corner); 3 cells changed"), "{r}");
+    assert_eq!(get(&mut o, &mut s, [2, 3, 1]), 20);
+    // Cut takes the slab and erases it.
+    call(&mut o, &mut s, "select", json!({"color": 10}));
+    let r = call(&mut o, &mut s, "cut", json!({}));
+    assert!(r.starts_with("cut 16 voxels; 16 cells changed"), "{r}");
+    assert_eq!(o.selection().count(), 0);
+    assert_eq!(err(&mut o, &mut s, "delete", json!({})).1, "nothing is selected: call select first");
+    // Pasted at the far corner, part of it falls outside and the call says how much.
+    let r = call(&mut o, &mut s, "paste", json!({"at": [15, 0, 15]}));
+    assert!(r.starts_with("pasted at [13, 0, 13] (low corner); 9 cells changed"), "{r}");
+    assert!(
+        r.ends_with("; warning: 7 cells were outside the editable bounds (x -16..15, y 0..31, z -16..15) and skipped"),
+        "{r}"
+    );
+    assert_eq!(o.selection().count(), 9);
+    let r = call(&mut o, &mut s, "delete", json!({}));
+    assert!(r.starts_with("9 cells changed"), "{r}");
+    // undo takes back the delete, not the cut's copy before it.
+    let r = call(&mut o, &mut s, "undo", json!({}));
+    assert!(r.starts_with("took back step 11 (delete)"), "{r}");
+    // Dropping the copy replays the rest: both pastes find the clipboard empty.
+    assert!(o.set_dropped(&mut s, 3, true));
+    assert_eq!(get(&mut o, &mut s, [5, 0, 5]), 0);
+    assert_eq!(get(&mut o, &mut s, [13, 0, 13]), 10, "the cut's own copy still pastes");
+    assert!(o.set_dropped(&mut s, 3, false));
+    assert_eq!(get(&mut o, &mut s, [5, 0, 5]), 20);
+    let added = o.changes(&s).added.len();
+    assert_eq!(added, 3 + 3 + 9);
+    apply_and_undo(o, &mut s, &bytes);
+}
+
+#[test]
+fn the_clipboard_carries_from_one_session_to_the_next() {
+    let mut s = small();
+    let mut o = Session::new(&s, None);
+    call(&mut o, &mut s, "select", json!({"color": 20}));
+    call(&mut o, &mut s, "copy", json!({}));
+    let clip = o.clipboard().cloned();
+    o.apply(&mut s);
+    let mut o = Session::new(&s, None);
+    o.set_clipboard(clip.clone());
+    call(&mut o, &mut s, "paste", json!({"at": [-5, 0, -5]}));
+    assert_eq!(get(&mut o, &mut s, [-5, 2, -5]), 20);
+    // Discard leaves the clipboard as the session got it.
+    call(&mut o, &mut s, "select", json!({"color": 10}));
+    call(&mut o, &mut s, "copy", json!({}));
+    assert_eq!(o.clipboard().unwrap().voxels.len(), 16);
+    assert!(o.set_dropped(&mut s, 2, true));
+    assert_eq!(o.clipboard(), clip.as_ref());
+}
+
+#[test]
+fn hollow_and_fill_inside() {
+    let mut s = empty();
+    let mut o = Session::new(&s, None);
+    call(&mut o, &mut s, "box", json!({"from": [0, 0, 0], "to": [4, 4, 4], "slot": 1}));
+    let r = call(&mut o, &mut s, "hollow", json!({}));
+    assert!(r.starts_with("27 cells changed; staged so far: 98 added"), "{r}");
+    assert_eq!(get(&mut o, &mut s, [2, 2, 2]), 0);
+    let r = call(&mut o, &mut s, "hollow", json!({}));
+    assert!(r.ends_with("; warning: nothing changed"), "{r}");
+    let r = call(&mut o, &mut s, "fill_inside", json!({"slot": 2}));
+    assert!(r.starts_with("27 cells changed; staged so far: 125 added"), "{r}");
+    assert_eq!(get(&mut o, &mut s, [2, 2, 2]), 2);
+    // A selected cup with an open top encloses nothing.
+    call(&mut o, &mut s, "box", json!({"from": [8, 0, 8], "to": [10, 2, 10], "slot": 3, "hollow": true}));
+    call(&mut o, &mut s, "erase", json!({"cells": [[9, 2, 9]]}));
+    call(&mut o, &mut s, "select", json!({"color": 3}));
+    let r = call(&mut o, &mut s, "fill_inside", json!({"slot": 4}));
+    assert!(r.ends_with("; warning: nothing changed"), "{r}");
+    // Only the selection is hollowed: the cube stays filled.
+    call(&mut o, &mut s, "place", json!({"cells": [[9, 2, 9]], "slot": 3}));
+    call(&mut o, &mut s, "select", json!({"color": 3}));
+    let r = call(&mut o, &mut s, "fill_inside", json!({"slot": 4}));
+    assert!(r.starts_with("1 cells changed"), "{r}");
+    call(&mut o, &mut s, "select", json!({"from": [8, 0, 8], "to": [10, 2, 10]}));
+    let r = call(&mut o, &mut s, "hollow", json!({}));
+    assert!(r.starts_with("1 cells changed"), "{r}");
+    assert_eq!(get(&mut o, &mut s, [2, 2, 2]), 2);
+    o.begin_turn();
+    assert_eq!(
+        err(&mut o, &mut s, "fill_inside", json!({"slot": 0})).1,
+        "slot 0 is empty, not a colour: slots are 1 to 255"
+    );
+}
+
+#[test]
+fn resize_grows_the_bounds_to_build_above_them() {
+    let mut s = opened();
+    let bytes = s.to_vox();
+    let mut o = Session::new(&s, None);
+    let r = call(&mut o, &mut s, "box", json!({"from": [0, 30, 0], "to": [0, 35, 0], "slot": 4}));
+    assert!(r.starts_with("2 cells changed"), "{r}");
+    assert!(
+        r.ends_with("; warning: 4 cells were outside the editable bounds (x -16..15, y 0..31, z -16..15) and skipped"),
+        "{r}"
+    );
+    let r = call(&mut o, &mut s, "resize", json!({"size": [32, 40, 32]}));
+    assert!(r.starts_with("bounds x -16..15, y 0..39, z -16..15 (32 x 40 x 32); 0 cells changed"), "{r}");
+    assert!(!r.contains("warning"), "{r}");
+    let r = call(&mut o, &mut s, "box", json!({"from": [0, 30, 0], "to": [0, 35, 0], "slot": 4}));
+    assert!(r.starts_with("4 cells changed"), "{r}");
+    assert!(!r.contains("warning"), "{r}");
+    let summary = call(&mut o, &mut s, "scene_summary", json!({}));
+    assert!(summary.contains("nothing can go above y 39"), "{summary}");
+    // The same size again changes nothing.
+    let r = call(&mut o, &mut s, "resize", json!({"size": [32, 40, 32]}));
+    assert!(r.ends_with("; warning: nothing changed"), "{r}");
+    assert_eq!(err(&mut o, &mut s, "resize", json!({"size": [0, 4, 4]})).1, "size [0, 4, 4]: each side is 1 to 2048");
+    // Dropping both resizes replays the box into the old bounds, clipped again.
+    assert!(o.set_dropped(&mut s, 1, true));
+    assert!(o.set_dropped(&mut s, 3, true));
+    assert_eq!(s.bounds().size, [32, 32, 32]);
+    assert_eq!(o.staged(), 2);
+    assert!(o.set_dropped(&mut s, 1, false));
+    assert_eq!((s.bounds().size, o.staged()), ([32, 40, 32], 6));
+    assert_eq!(get(&mut o, &mut s, [0, 35, 0]), 4);
+    // One undo step: the bounds and the voxels above the old ones go, and redo brings both.
+    let position = s.history().position();
+    o.apply(&mut s);
+    assert_eq!(s.history().position(), position + 1);
+    let after = voxels(&s);
+    assert!(s.undo());
+    assert_eq!(s.to_vox(), bytes);
+    assert!(s.redo());
+    assert_eq!((s.bounds().size, voxels(&s)), ([32, 40, 32], after));
+}
+
+#[test]
+fn resize_shrinks_and_crop_fits_and_discard_puts_back() {
+    let mut s = opened();
+    let (bytes, before, bounds) = (s.to_vox(), voxels(&s), s.bounds());
+    let mut o = Session::new(&s, None);
+    call(&mut o, &mut s, "select", json!({"color": 20}));
+    // Kept: the bottom, and the middle on x and z.
+    let r = call(&mut o, &mut s, "resize", json!({"size": [4, 32, 4]}));
+    assert!(r.starts_with("bounds x -2..1, y 0..31, z -2..1 (4 x 32 x 4); 12 cells changed"), "{r}");
+    assert!(r.ends_with("; warning: 12 voxels outside the new bounds were erased"), "{r}");
+    let c = o.changes(&s);
+    assert_eq!((c.added.len(), c.removed.len(), c.repainted.len()), (0, 12, 0));
+    assert!(o.ghost(&s).is_empty(), "erased cells are outside the map, with no ghost");
+    assert_eq!(o.selection().count(), 3, "the selection moves with the map");
+    let r = call(&mut o, &mut s, "transform", json!({"kind": "move", "offset": [-1, 0, 0]}));
+    assert!(r.starts_with("moved 3 voxels (the selection), now from [0, 1, 1] to [0, 3, 1]"), "{r}");
+    let r = call(&mut o, &mut s, "crop", json!({}));
+    assert!(r.starts_with("bounds x 0..1, y 0..3, z 0..1 (2 x 4 x 2); 0 cells changed"), "{r}");
+    let r = call(&mut o, &mut s, "crop", json!({}));
+    assert!(r.ends_with("; warning: nothing changed"), "{r}");
+    assert_eq!(get(&mut o, &mut s, [0, 3, 1]), 20);
+    // Dropping the first resize replays the rest on the full bounds.
+    assert!(o.set_dropped(&mut s, 1, true));
+    assert_eq!(s.bounds().size, [4, 4, 4]);
+    assert_eq!(get(&mut o, &mut s, [3, 0, 3]), 10);
+    assert!(o.set_dropped(&mut s, 1, false));
+    assert_eq!(s.bounds().size, [2, 4, 2]);
+    o.discard(&mut s);
+    assert_eq!((voxels(&s), s.bounds()), (before, bounds));
+    assert_eq!(s.to_vox(), bytes);
+    let mut o = Session::new(&empty(), None);
+    let mut e = empty();
+    assert_eq!(err(&mut o, &mut e, "crop", json!({})).1, "the model is empty: there is nothing to crop to");
+}
+
+#[test]
+fn material_set() {
+    let mut s = opened();
+    let bytes = s.to_vox();
+    let mut o = Session::new(&s, None);
+    let r = call(&mut o, &mut s, "material_set", json!({"slot": 10, "type": "metal", "roughness": 0.2}));
+    assert_eq!(r, "slot 10: Diffuse -> Metal (roughness 0.2, metalness 1); 16 voxels use it");
+    let r = call(
+        &mut o,
+        &mut s,
+        "material_set",
+        json!({"slot": 20, "type": "glass", "refraction": 1.5, "attenuation": 0.25}),
+    );
+    assert_eq!(
+        r,
+        "slot 20: Diffuse -> Glass (roughness 0.1, transparency 0.8, refraction 1.5, attenuation 0.25); 3 voxels use it"
+    );
+    let r = call(&mut o, &mut s, "material_set", json!({"slot": 20, "type": "glass"}));
+    assert!(r.ends_with("; warning: nothing changed"), "{r}");
+    assert_eq!(err(&mut o, &mut s, "material_set", json!({"slot": 4, "refraction": 5})).1, "refraction 5: 1 to 3");
+    assert_eq!(s.materials[10].kind, vxr_core::material::Kind::Metal);
+    // Dropping a step puts its material back: the glass the next step set keeps the default
+    // refraction.
+    assert!(o.set_dropped(&mut s, 1, true));
+    assert_eq!((s.materials[20].kind, s.materials[20].ior), (vxr_core::material::Kind::Glass, 1.3));
+    assert_eq!(s.materials[10].rough, 0.2);
+    let r = call(&mut o, &mut s, "material_set", json!({"slot": 10, "type": "emit", "power": 2}));
+    assert_eq!(r, "slot 10: Metal -> Emit (emission 1, power 2); 16 voxels use it");
+    apply_and_undo(o, &mut s, &bytes);
+    assert_eq!(s.materials[10], vxr_core::material::Material::default());
+    // Discard puts materials back too.
+    let mut o = Session::new(&s, None);
+    call(&mut o, &mut s, "material_set", json!({"slot": 10, "type": "plastic", "specular": 0.5}));
+    o.discard(&mut s);
+    assert_eq!(s.to_vox(), bytes);
 }

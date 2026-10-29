@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use serde_json::{Value, json};
 use vxr_core::Scene;
 use vxr_core::history::At;
+use vxr_core::select::Clip;
 use vxr_ops::{Changes, Limits, Op, Session, clean};
 
 use crate::review::Review;
@@ -62,6 +63,8 @@ pub struct Agents {
     /// never changes the user's; it starts from the user's. Kept with the model and map it
     /// was made on, and dropped once either changes.
     selections: HashMap<u64, (At, u64, Vec<Cell>)>,
+    /// Each agent's own clipboard by connection (world cells), for its paste.
+    clips: HashMap<u64, Clip>,
     /// Bumped whenever the edits change.
     pub version: u64,
     /// "Review every agent change": edits wait in a change under review for the user to
@@ -104,16 +107,16 @@ pub fn limits() -> Limits {
 }
 
 /// Whether a call changes the scene, so with review on it waits for the user: an edit or a
-/// colour, not a query, a selection, `undo` or `done`.
+/// colour, not a query, a selection, a copy, `undo` or `done`.
 pub fn edits(name: &str, args: &Value) -> bool {
     matches!(Op::parse(name, args.clone()),
-        Ok(op) if !op.is_query() && !matches!(op, Op::Select(_) | Op::Undo(_) | Op::Done(_)))
+        Ok(op) if !op.is_query() && !matches!(op, Op::Select(_) | Op::Copy(_) | Op::Undo(_) | Op::Done(_)))
 }
 
 /// Whether a step of a change under review is an edit (what Apply lands and the notices
-/// count), not a selection, an `undo`, `done` or a call that failed.
+/// count), not a selection, a copy, an `undo`, `done` or a call that failed.
 fn is_edit(st: &vxr_ops::Step) -> bool {
-    st.ok && !matches!(st.tool, "select" | "undo" | "done")
+    st.ok && !matches!(st.tool, "select" | "copy" | "undo" | "done")
 }
 
 /// "1 edit", "3 edits".
@@ -146,6 +149,7 @@ impl Agents {
     pub fn clear(&mut self) {
         self.edits.clear();
         self.selections.clear();
+        self.clips.clear();
         self.version += 1;
     }
 
@@ -153,6 +157,7 @@ impl Agents {
     /// stay listed, for the user to take back.
     pub fn forget(&mut self, conn: u64) {
         self.selections.remove(&conn);
+        self.clips.remove(&conn);
         self.notices.remove(&conn);
         self.seen.remove(&conn);
         self.last.remove(&conn);
@@ -248,10 +253,18 @@ impl Agents {
         let made_on = (scene.at(), scene.reshapes());
         let seed = self.selection_of(conn, made_on).unwrap_or_else(|| scene.selection().collect());
         review.session.set_lane(conn, seed);
+        if review.session.clipboard().is_none() {
+            review.session.set_clipboard(self.clips.get(&conn).cloned());
+        }
         review.session.begin_request();
         let steps = review.session.steps().len();
         let r = review.session.call(scene, name, args.clone());
-        self.selections.insert(conn, (made_on.0, made_on.1, review.session.selection().collect()));
+        // After the call: a resize or crop of the change moves its selection with the map.
+        self.selections.insert(conn, (scene.at(), scene.reshapes(), review.session.selection().collect()));
+        match review.session.clipboard() {
+            Some(c) => self.clips.insert(conn, c.clone()),
+            None => self.clips.remove(&conn),
+        };
         if review.session.steps().len() != steps || name == "undo" {
             let names = review.agents.get_or_insert_default();
             if !names.iter().any(|(c, _)| *c == conn) {
@@ -410,10 +423,18 @@ impl Agents {
         if let Some(sel) = agent.and_then(|_| self.selection_of(conn, made_on)) {
             session.set_selection(sel);
         }
+        if agent.is_some() {
+            session.set_clipboard(self.clips.get(&conn).cloned());
+        }
         match session.call(scene, name, args.clone()) {
             Ok(text) => {
                 if agent.is_some() {
-                    self.selections.insert(conn, (made_on.0, made_on.1, session.selection().collect()));
+                    // After the call: a resize or crop of its own moves its selection with the map.
+                    self.selections.insert(conn, (scene.at(), scene.reshapes(), session.selection().collect()));
+                    match session.clipboard() {
+                        Some(c) => self.clips.insert(conn, c.clone()),
+                        None => self.clips.remove(&conn),
+                    };
                 }
                 let label = label(client, name, &session.changes(scene));
                 let before = scene.history().position();
@@ -671,6 +692,79 @@ mod tests {
         staged(&mut a, &mut s, &mut r, 1, "Claude Code", "place", json!({"cells": [[6, 0, 6]], "slot": 3})).unwrap();
         assert!(r.is_none());
         assert_eq!(s.history().undo_label(), Some("Claude Code: place 1 voxel"));
+    }
+
+    #[test]
+    fn each_agent_copies_and_pastes_its_own_and_resize_keeps_its_selection() {
+        let (mut a, mut s, mut r) = (Agents::default(), scene(), None);
+        by_hand(&mut s, &[([0, 0, 0], 5), ([0, 1, 0], 5), ([3, 0, 3], 6)]);
+        let (bytes, position) = (s.to_vox(), s.history().position());
+        // A copy in one call pastes in the next; another agent's clipboard is its own.
+        ok(&mut a, &mut s, 1, "Claude Code", "select", json!({"color": 5}));
+        assert_eq!(
+            ok(&mut a, &mut s, 1, "Claude Code", "copy", json!({})),
+            "copied 2 voxels, a 1 x 2 x 1 box from [0, 0, 0]"
+        );
+        ok(&mut a, &mut s, 2, "Codex", "select", json!({"color": 6}));
+        ok(&mut a, &mut s, 2, "Codex", "copy", json!({}));
+        let t = ok(&mut a, &mut s, 1, "Claude Code", "paste", json!({"at": [-4, 0, -4]}));
+        assert!(t.starts_with("pasted at [-4, 0, -4] (low corner); 2 cells changed"), "{t}");
+        let t = ok(&mut a, &mut s, 2, "Codex", "paste", json!({"at": [4, 0, 4]}));
+        assert!(t.starts_with("pasted at [4, 0, 4] (low corner); 1 cells changed"), "{t}");
+        assert_eq!((at(&s, [-4, 1, -4]), at(&s, [4, 0, 4])), (5, 6));
+        // Wider on x moves every map cell; the agent's selection (what it pasted) moves too.
+        let t = ok(&mut a, &mut s, 1, "Claude Code", "resize", json!({"size": [18, 24, 16]}));
+        assert!(t.starts_with("bounds x -9..8, y 0..23, z -8..7 (18 x 24 x 16); 0 cells changed"), "{t}");
+        let t = ok(&mut a, &mut s, 1, "Claude Code", "transform", json!({"kind": "move", "offset": [0, 16, 0]}));
+        assert!(t.starts_with("moved 2 voxels (the selection), now from [-4, 16, -4] to [-4, 17, -4]"), "{t}");
+        let labels: Vec<&str> = a.edits.iter().map(|e| e.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            [
+                "Claude Code: paste 2 voxels",
+                "Codex: paste 1 voxel",
+                "Claude Code: resize",
+                "Claude Code: transform 4 voxels"
+            ]
+        );
+        assert_eq!(s.history().position(), position + 4, "a copy and a selection leave no step");
+        for _ in 0..4 {
+            assert!(s.undo());
+        }
+        assert_eq!(s.to_vox(), bytes);
+
+        // With review on, the edits wait and land one undo step each; a copy is not an edit.
+        a.review = true;
+        a.clients = vec![(1, "Claude Code".into())];
+        staged(&mut a, &mut s, &mut r, 1, "Claude Code", "select", json!({"color": 6})).unwrap();
+        let t = staged(&mut a, &mut s, &mut r, 1, "Claude Code", "copy", json!({})).unwrap();
+        assert!(!t.contains(WAITING) && r.is_none(), "{t}");
+        let t = staged(&mut a, &mut s, &mut r, 1, "Claude Code", "paste", json!({"at": [-6, 0, 6]})).unwrap();
+        assert!(t.ends_with(WAITING), "{t}");
+        staged(&mut a, &mut s, &mut r, 1, "Claude Code", "material_set", json!({"slot": 6, "type": "emit"})).unwrap();
+        staged(&mut a, &mut s, &mut r, 1, "Claude Code", "resize", json!({"size": [16, 20, 16]})).unwrap();
+        staged(&mut a, &mut s, &mut r, 1, "Claude Code", "select", json!({"color": 5})).unwrap();
+        staged(&mut a, &mut s, &mut r, 1, "Claude Code", "transform", json!({"kind": "move", "offset": [0, 18, 0]}))
+            .unwrap();
+        assert_eq!(s.history().position(), position, "nothing lands while it waits");
+        assert!(a.status(1, r.as_ref()).starts_with("4 edits of yours wait"));
+        assert_eq!(a.apply_review(&mut s, r.take().unwrap()), 4);
+        let labels: Vec<&str> = a.edits[4..].iter().map(|e| e.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            [
+                "Claude Code: paste 1 voxel",
+                "Claude Code: material_set",
+                "Claude Code: resize",
+                "Claude Code: transform 4 voxels"
+            ]
+        );
+        assert_eq!((s.bounds().size, at(&s, [0, 19, 0]), at(&s, [-6, 0, 6])), ([16, 20, 16], 5, 6));
+        assert_eq!(s.materials[6].kind, vxr_core::material::Kind::Emit);
+        for _ in 0..4 {
+            assert!(s.undo());
+        }
+        assert_eq!(s.to_vox(), bytes);
     }
 
     #[test]
