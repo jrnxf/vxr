@@ -905,7 +905,25 @@ async () => {
     await frames(4);
     let r = st().review;
     step('a scripted request opens the review card', !!r && answers[0].length === 3 && answers[0].every((a) => a.ok) && !!at('review-apply'), JSON.stringify(answers));
-    step('the card counts the box and lists slot 3', r && r.counts[0] + r.counts[2] === 48 && r.counts[0] > 0 && r.slots.join() === '3' && r.steps.length === 2 && r.summary === 'a red block', JSON.stringify(r));
+    {
+      // The card sits in the right column under the palette; with the assistant docked the palette
+      // keeps its place, the assistant takes the column under it and the card sits beside that.
+      const rect = (n) => window.vxr.hit_rect(n);
+      const [pl, pt, pr, pb] = rect('palette');
+      const [cl, ct, cr] = rect('review');
+      step('the card sits under the palette at the right edge', Math.abs(cr - pr) < 1 && ct >= pb + 7 && ct <= pb + 9, JSON.stringify([rect('palette'), rect('review')]));
+      await key('j', cmd);
+      await frames(4);
+      const [pl2, pt2, pr2, pb2] = rect('palette');
+      const [al, at2, ar] = rect('assistant');
+      const [cl2, ct2, cr2, cb2] = rect('review');
+      step('with the assistant open the palette stays at the top right', pl2 === pl && pt2 === pt && pr2 === pr && pb2 === pb, JSON.stringify([rect('palette'), [pl, pt, pr, pb]]));
+      step('the assistant sits under the palette', at2 >= pb2 + 7 && Math.abs(ar - pr2) < 1 && al < pl2, JSON.stringify(rect('assistant')));
+      step('the card sits beside the assistant, clear of the palette and the assistant', cr2 <= al - 7 && ct2 < pt + 1 && cl2 > 0, JSON.stringify(rect('review')));
+      await key('j', cmd);
+      await frames(4);
+    }
+    step('the card counts the box and lists slot 3',r && r.counts[0] + r.counts[2] === 48 && r.counts[0] > 0 && r.slots.join() === '3' && r.steps.length === 2 && r.summary === 'a red block', JSON.stringify(r));
     step('staged on the scene, no undo step yet', st().voxels === v0 + r.counts[0] && st().undoLabel === null, `${st().voxels}`);
     await key('z', cmd);
     await click(mx, my);
