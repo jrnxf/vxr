@@ -22,7 +22,7 @@ async (stage, view) => {
   const rect = (n) => window.vxr.hit_rect(n);
   const on = (r) => r.length === 4 && r[0] >= -0.5 && r[1] >= -0.5 && r[2] <= W + 0.5 && r[3] <= H + 0.5;
   const targets = ['tool-add', 'tool-erase', 'tool-paint', 'tool-pick', 'select', 'dock-color', 'undo', 'redo', 'voxel',
-    'brush-box', 'brush-face', 'brush-line', 'center', 'mirror', 'lock', 'open', 'save', 'export', 'theme', 'ai-toggle'];
+    'brush-box', 'brush-face', 'brush-line', 'center', 'mirror', 'lock', 'open', 'save', 'export', 'theme', 'ai-toggle', 'keys'];
   // Every dock and top bar target is on screen, and the dock's are at least 44 CSS px.
   const reachable = (what) => {
     const lost = targets.filter((n) => !on(rect(n)));
@@ -66,6 +66,10 @@ async (stage, view) => {
     step('Edit opens the colour editor', window.vxr.hit('sv').length > 0);
     shown('sv', 'the colour editor');
     reachable('with the colour editor open');
+  } else if (stage === 'commands') {
+    await tap('keys');
+    step('the keyboard button opens the command list', window.vxr.hit('cmdk').length > 0);
+    shown('cmdk', 'the command list');
   }
   return out.join('\n');
 }

@@ -1492,8 +1492,9 @@ impl Hybrid {
         let sel_w = name.size().x + 34.0;
         // Over the dock, undo and redo are on it.
         let history = !self.touch;
-        // Held upright a phone has room for the file buttons, the assistant, the theme and
-        // Embed (as an icon) only: no name, no New (Cmd-K) and no keyboard button.
+        // Held upright a phone has room for the file buttons, the theme, the assistant and the
+        // keyboard button only: no name, no New and no Embed (both in the command list, which the
+        // keyboard button opens).
         let slim = self.narrow;
         let w = if slim {
             4.0 + 3.0 * 36.0 + 4.0
@@ -1596,24 +1597,19 @@ impl Hybrid {
         }
         // The right island, laid out from the right edge.
         let embed_label = ctx.fonts_mut(|f| f.layout_no_wrap("Embed".into(), sans_semibold(13.0), th().on_accent));
-        let ew = if slim { 36.0 } else { 10.0 + 16.0 + 6.0 + embed_label.size().x + 10.0 };
-        let rw = if slim {
-            4.0 + 36.0 + 4.0 + 36.0 + 4.0 + ew + 4.0
-        } else {
-            4.0 + 36.0 + 4.0 + 36.0 + 4.0 + 36.0 + 4.0 + ew + 4.0
-        };
+        let ew = if slim { 0.0 } else { 10.0 + 16.0 + 6.0 + embed_label.size().x + 10.0 + 4.0 };
+        let rw = 4.0 + 36.0 + 4.0 + 36.0 + 4.0 + 36.0 + 4.0 + ew;
         let right = Rect::from_min_size(pos2(screen.right() - 12.0 - rw, 12.0), vec2(rw, 40.0));
         let mut theme_tip = None;
         Self::panel(ctx, "top-right", right, Order::Middle, |ui, rect| {
             let cy = rect.center().y;
-            let embed = Rect::from_min_size(pos2(rect.right() - 4.0 - ew, cy - 16.0), vec2(ew, 32.0));
-            let resp = ui.interact(embed, Id::unique("embed"), Sense::click());
-            let fill = if resp.hovered() { th().accent_hover } else { th().accent };
-            let p = ui.painter();
-            p.rect_filled(embed, CornerRadius::same(8), fill);
-            if slim {
-                p.text(embed.center(), Align2::CENTER_CENTER, icon::CODE, icon_font(16.0), th().on_accent);
-            } else {
+            let edge = rect.right() - ew;
+            if !slim {
+                let embed = Rect::from_min_size(pos2(edge, cy - 16.0), vec2(ew - 4.0, 32.0));
+                let resp = ui.interact(embed, Id::unique("embed"), Sense::click());
+                let fill = if resp.hovered() { th().accent_hover } else { th().accent };
+                let p = ui.painter();
+                p.rect_filled(embed, CornerRadius::same(8), fill);
                 p.text(
                     pos2(embed.left() + 18.0, cy),
                     Align2::CENTER_CENTER,
@@ -1622,18 +1618,18 @@ impl Hybrid {
                     th().on_accent,
                 );
                 p.galley(pos2(embed.left() + 32.0, cy - embed_label.size().y / 2.0), embed_label, th().on_accent);
-            }
-            if resp.clicked() {
-                self.actions.push(Action::Embed);
-            }
-            if !slim {
-                let mut kx = embed.left() - 4.0 - 36.0;
-                if tbtn(ui, &mut kx, cy, Some(icon::KEYBOARD), "", "keys", true).clicked() {
-                    self.cmdk = Some(String::new());
+                if resp.clicked() {
+                    self.actions.push(Action::Embed);
                 }
             }
+            let mut kx = edge - 4.0 - 36.0;
+            let r = tbtn(ui, &mut kx, cy, Some(icon::KEYBOARD), "", "keys", true);
+            self.hits.insert("keys".into(), r.rect);
+            if r.clicked() {
+                self.cmdk = Some(String::new());
+            }
             // The assistant panel (Cmd-J).
-            let mut ax = embed.left() - 4.0 - 36.0 - if slim { 0.0 } else { 4.0 + 36.0 };
+            let mut ax = edge - 4.0 - 36.0 - 4.0 - 36.0;
             let r = tbtn_on(ui, &mut ax, cy, Some(icon::SPARKLES), "", "assistant", true, self.ai_open);
             self.hits.insert("ai-toggle".into(), r.rect);
             if self.ai_open {
@@ -4711,6 +4707,7 @@ impl Hybrid {
         let h = 8.0 + 40.0 + 9.0 + shown.max(1) as f32 * 34.0 + 8.0;
         let rect =
             Rect::from_min_size(pos2(screen.center().x - w / 2.0, (screen.height() * 0.18).max(70.0)), vec2(w, h));
+        self.hits.insert("cmdk".into(), rect);
         Self::panel(ctx, "cmdk", rect, Order::Foreground, |ui, rect| {
             let field = Rect::from_min_size(rect.min + vec2(8.0, 8.0), vec2(rect.width() - 16.0, 40.0));
             ui.painter().text(
@@ -5396,6 +5393,7 @@ mod tests {
             "export",
             "theme",
             "ai-toggle",
+            "keys",
         ] {
             let Some(r) = h.hits.get(n) else {
                 bad.push(format!("no {n} button"));

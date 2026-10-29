@@ -81,7 +81,7 @@ done
 for view in 390x844 844x390; do
   axi emulate --viewport "${view}x3,mobile,touch" >/dev/null
   axi open "$url" >/dev/null
-  for stage in plain assistant palette select export colour; do
+  for stage in plain assistant palette select export colour commands; do
     got="$(axi eval --full "async () => ($(cat "$here/check-phone.js"))('$stage', '$view')" | unwrap)"
     axi screenshot "$shots/web-phone-$view-$stage.png" >/dev/null
     echo "wrote $shots/web-phone-$view-$stage.png"

@@ -511,6 +511,7 @@ fn phone(dir: &Path, load: &dyn Fn() -> Result<(Scene, String), String>) -> Resu
         "export",
         "theme",
         "ai-toggle",
+        "keys",
     ];
     for css in [(360u32, 780u32), (390, 844), (430, 932), (844, 390), (932, 430)] {
         let tag = format!("{}x{}", css.0, css.1);
@@ -587,6 +588,13 @@ fn phone(dir: &Path, load: &dyn Fn() -> Result<(Scene, String), String>) -> Resu
         check(s.ed.ui.color_edit.is_some(), format!("{tag}: Edit opens the colour editor"))?;
         fits(&s, "colour editor open")?;
         s.save_png(&dir.join(format!("app-3x-phone-{tag}-colour.png")))?;
+
+        // The keyboard button opens the command list, the only way to it without a keyboard.
+        s.ui_click("keys")?;
+        s.frames(2);
+        check(s.ed.ui.cmdk.is_some(), format!("{tag}: the keyboard button opens the command list"))?;
+        fits(&s, "command list open")?;
+        s.save_png(&dir.join(format!("app-3x-phone-{tag}-commands.png")))?;
     }
     Ok(())
 }
