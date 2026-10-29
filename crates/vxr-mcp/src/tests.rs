@@ -343,6 +343,61 @@ fn a_save_keeps_every_chunk_the_edit_did_not_touch() {
 }
 
 #[test]
+fn make_object_saves_the_new_objects_losslessly() {
+    let dir = Dir::new("make-object");
+    let original = fixture();
+    std::fs::write(dir.0.join("world.vox"), &original).unwrap();
+    let mut c = Client::new(&dir.0);
+    c.ok("open", json!({"path": "world.vox"}));
+    let s = summary(&mut c);
+    let slab = s["file_content"]["objects"].as_array().unwrap().iter().find(|o| o["name"] == "slab").unwrap()["node"]
+        .as_u64()
+        .unwrap();
+    assert!(c.err("make_object", json!({"from_slot": GREY})).contains("one object's model"));
+    c.ok("edit_object", json!({"node": slab}));
+    let s = summary(&mut c);
+    let grey = s["slots_used"].as_array().unwrap().iter().find(|x| x["slot"] == GREY).unwrap().clone();
+    let (from, to) = (grey["from"].clone(), grey["to"].clone());
+    let half = [from[0].as_i64().unwrap() + 3, to[1].as_i64().unwrap(), to[2].as_i64().unwrap()];
+    let t = c.ok("make_object", json!({"from": from, "to": half, "name": "slab left"}));
+    let node = s["world"]["nodes"].as_array().unwrap().iter().map(|n| n["node"].as_u64().unwrap()).max().unwrap() + 1;
+    assert!(t.starts_with(&format!("new object {node} \"slab left\": 32 voxels")), "{t}");
+    c.ok("rename", json!({"node": slab, "name": "slab right"}));
+    c.ok("save", json!({}));
+
+    let saved = std::fs::read(dir.0.join("world.vox")).unwrap();
+    let (a, b) = (vxr_core::Scene::from_vox(&original).unwrap(), vxr_core::Scene::from_vox(&saved).unwrap());
+    assert_eq!(a.world_voxels(false), b.world_voxels(false), "every voxel where it was");
+    let w = b.world().unwrap();
+    assert_eq!(w.objects().len(), a.world().unwrap().objects().len() + 1);
+    let named = |n: &str| w.objects().into_iter().find(|&i| w.tree.nodes[i].name.as_deref() == Some(n.as_bytes()));
+    assert!(named("slab left").is_some() && named("slab right").is_some());
+    // Materials, layers, cameras, render settings, notes and the palette keep their bytes.
+    let (before, after) = (chunks(&original), chunks(&saved));
+    for kept in ["MATL", "LAYR", "rCAM", "rOBJ", "NOTE", "RGBA"] {
+        let of = |c: &[(String, Vec<u8>)]| c.iter().filter(|x| x.0 == kept).map(|x| x.1.clone()).collect::<Vec<_>>();
+        assert_eq!(of(&before), of(&after), "{kept} kept");
+    }
+    // Each edit was one undo step: back to the file's bytes.
+    c.ok("undo", json!({}));
+    c.ok("undo", json!({}));
+    c.ok("save", json!({}));
+    assert_eq!(std::fs::read(dir.0.join("world.vox")).unwrap(), original);
+
+    // A new scene saves as two objects.
+    c.ok("new_scene", json!({"path": "new.vox", "size": [8, 8, 8]}));
+    c.ok("box", json!({"from": [-4, 0, -4], "to": [3, 0, 3], "slot": 2}));
+    c.ok("box", json!({"from": [0, 1, 0], "to": [0, 3, 0], "slot": 3}));
+    assert!(
+        c.ok("make_object", json!({"from_slot": 3, "name": "pole"})).starts_with("new object 2 \"pole\": 3 voxels")
+    );
+    c.ok("save", json!({}));
+    let new = vxr_core::Scene::from_vox(&std::fs::read(dir.0.join("new.vox")).unwrap()).unwrap();
+    assert_eq!(new.world().unwrap().objects().len(), 2);
+    assert_eq!(new.world_voxels(false).len(), 67);
+}
+
+#[test]
 fn file_names_are_data() {
     let dir = Dir::new("names");
     std::fs::write(dir.0.join("ok.vox"), fixture()).unwrap();

@@ -6,6 +6,11 @@
 //! step, [`Session::discard`] puts everything back and leaves none. Each call is a step of the
 //! review card; dropping one replays the others from the scene as it was.
 //!
+//! The world tools change the world inside that edit at once, where it shows. While one
+//! object's model shows, `make_object` and `rename` are staged like removals: the voxels a new
+//! object takes stay in the map, drawn as a ghost and read by every query as gone from the
+//! model, and the new objects and names are made in the world only at Apply.
+//!
 //! While a session is open nothing else may edit the scene: an undo or a commit from the
 //! editor would close the open edit with the staged cells in it.
 
@@ -145,6 +150,8 @@ pub enum Ghost {
     Added,
     Repainted,
     Removed,
+    /// Taken into a new object by `make_object`.
+    Moved,
 }
 
 /// The staged change against the scene as it was, in world cells (sorted), as the review
@@ -161,11 +168,41 @@ pub struct Changes {
     pub palette: Vec<(u8, [u8; 4], [u8; 4])>,
     /// Slot, old material, new material.
     pub materials: Vec<(u8, Material, Material)>,
-    /// World nodes (objects and groups) the change adds, takes out, moves, hides or puts on
-    /// another layer: a world change has no cells.
+    /// World nodes (objects and groups) the change adds, takes out, moves, hides, names or
+    /// puts on another layer: a world change has no cells.
     pub nodes: usize,
     /// Layers of the world the change adds, renames, hides or shows.
     pub layers: usize,
+    /// The new objects `make_object` staged, in order.
+    pub objects: Vec<NewObject>,
+    /// The names `rename` staged while a model shows: node and name (None clears it).
+    pub names: Vec<(usize, Option<String>)>,
+}
+
+/// A new object the change makes from voxels of the model, as the review card lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewObject {
+    /// Its node once the change is applied.
+    pub node: usize,
+    pub name: Option<String>,
+    pub voxels: usize,
+}
+
+/// A world change staged while a model shows, made in the world at Apply, in order.
+#[derive(Clone, Debug)]
+enum Pending {
+    /// A new object holding these voxels of the model (map cells and slots), as node `node`:
+    /// those still in `Session::moved` under its index (an edit that sets a cell again
+    /// gives it back to the model).
+    Object {
+        node: usize,
+        name: Option<String>,
+        voxels: Vec<(Cell, u8)>,
+    },
+    Name {
+        node: usize,
+        name: Option<String>,
+    },
 }
 
 pub struct Session {
@@ -174,6 +211,11 @@ pub struct Session {
     pub(crate) base: HashMap<Cell, u8>,
     /// Map cells the change removes; they still hold their old voxel in the map.
     pub(crate) removed: HashSet<Cell>,
+    /// Map cells a new object takes (by its index in `pending`); they still hold their voxel
+    /// in the map.
+    pub(crate) moved: HashMap<Cell, usize>,
+    /// World changes made at Apply ([`Pending`]).
+    pending: Vec<Pending>,
     /// Cells whose value differs from `base`.
     staged: usize,
     pub(crate) palette_before: [[u8; 4]; 256],
@@ -243,6 +285,8 @@ impl Session {
             limits,
             base: HashMap::new(),
             removed: HashSet::new(),
+            moved: HashMap::new(),
+            pending: Vec::new(),
             staged: 0,
             palette_before: scene.palette,
             materials_before: scene.materials,
@@ -393,6 +437,7 @@ impl Session {
                 | Op::PaletteSwap(_)
                 | Op::PaletteCopy(_)
                 | Op::MaterialSet(_)
+                | Op::MakeObject(_)
                 | Op::MoveObject(_)
                 | Op::Duplicate(_)
                 | Op::Group(_)
@@ -408,7 +453,7 @@ impl Session {
         self.show_before(scene, false);
         let edit = !matches!(op, Op::Select(_) | Op::Copy(_));
         let refs = self.refer(&mut op.clone());
-        let mark = Mark::of(scene);
+        let mark = self.mark(scene);
         let r = self.run(scene, op.clone());
         if matches!(&r, Err(e) if e.kind == ErrorKind::NeedsApproval) {
             // Not run: the same call comes again once the user answers.
@@ -430,7 +475,7 @@ impl Session {
                 lane: self.lane,
                 op: (replay && r.is_ok()).then_some(op),
                 refs,
-                made: if replay && r.is_ok() { mark.made(scene) } else { Made::default() },
+                made: if replay && r.is_ok() { self.made_since(&mark, scene) } else { Made::default() },
             });
             // A new edit of this caller's: what its undo took back cannot come back.
             if replay && edit && self.steps.last().is_some_and(|s| s.ok) {
@@ -619,6 +664,7 @@ impl Session {
                 self.rebound(scene, scene.to_world(lo), std::array::from_fn(|k| (hi[k] - lo[k] + 1) as u32))
             }
             Op::MaterialSet(a) => self.material_set(scene, &a),
+            Op::MakeObject(a) => self.make_object(scene, &a),
             Op::MoveObject(a) => {
                 let what = self.node(scene, a.node)?;
                 let t = self.world_edit(scene, |w| w.move_by(a.node, a.offset))?.1;
@@ -697,6 +743,15 @@ impl Session {
                 let new = (!name.is_empty()).then_some(name);
                 let to = new.map_or("no name".to_string(), |n| Value::from(n).to_string());
                 match (a.node, a.layer) {
+                    (Some(n), None) if scene.at() != At::World => {
+                        let what = self.model_node(scene, n)?;
+                        self.open(scene);
+                        self.pending.push(Pending::Name { node: n, name: new.map(str::to_string) });
+                        Ok(format!(
+                            "{what} is named {to} (staged: the world takes the name when the user applies the change); {}",
+                            self.staged_text(scene)
+                        ))
+                    }
                     (Some(n), None) => {
                         let what = self.node(scene, n)?;
                         let t = self.world_edit(scene, |w| w.set_name(n, new))?.1;
@@ -869,6 +924,7 @@ impl Session {
     pub fn ghost(&self, scene: &Scene) -> Vec<(Cell, Ghost)> {
         let size = scene.map.size_voxels();
         let mut out = self.staged_cells(scene);
+        out.extend(self.moved.keys().map(|&p| (p, Ghost::Moved)));
         out.retain(|(p, _)| (0..3).all(|k| p[k] >= 0 && p[k] < size[k] as i32));
         out
     }
@@ -906,6 +962,7 @@ impl Session {
                 Ghost::Added => c.added.push((w, v)),
                 Ghost::Removed => c.removed.push((w, b)),
                 Ghost::Repainted => c.repainted.push((w, b, v)),
+                Ghost::Moved => {}
             }
         }
         c.added.sort_unstable();
@@ -923,6 +980,16 @@ impl Session {
             c.nodes = changed_nodes(old, &w.tree);
             c.layers = changed_layers(old, &w.tree);
         }
+        for (k, p) in self.pending.iter().enumerate() {
+            match p {
+                Pending::Object { node, name, .. } => {
+                    let voxels = self.moved.values().filter(|&&j| j == k).count();
+                    c.objects.push(NewObject { node: *node, name: name.clone(), voxels });
+                }
+                Pending::Name { node, name } => c.names.push((*node, name.clone())),
+            }
+        }
+        c.nodes += self.pending.len();
         c
     }
 
@@ -942,9 +1009,7 @@ impl Session {
         if !self.open {
             return 0;
         }
-        for &p in &self.removed {
-            scene.put(p, 0);
-        }
+        self.flush(scene);
         match label {
             Some(l) => scene.commit_named(l),
             None => scene.commit(),
@@ -976,9 +1041,7 @@ impl Session {
                 continue;
             }
             let changes = self.changes(scene);
-            for &p in &self.removed {
-                scene.put(p, 0);
-            }
+            self.flush(scene);
             let before = scene.history().position();
             scene.commit_named(&label(i, &self.steps[i], &changes));
             if scene.history().position() != before {
@@ -988,6 +1051,8 @@ impl Session {
             self.open = false;
             self.base.clear();
             self.removed.clear();
+            self.moved.clear();
+            self.pending.clear();
             self.staged = 0;
             self.palette_before = scene.palette;
             self.materials_before = scene.materials;
@@ -1031,13 +1096,13 @@ impl Session {
 
     /// A cell as the change has it: staged removals are empty.
     pub(crate) fn get(&self, scene: &Scene, p: Cell) -> u8 {
-        if self.removed.contains(&p) { 0 } else { scene.map.get(p[0], p[1], p[2]) }
+        if self.removed.contains(&p) || self.moved.contains_key(&p) { 0 } else { scene.map.get(p[0], p[1], p[2]) }
     }
 
     /// Every voxel as the change has it (map cells).
     pub(crate) fn for_each(&self, scene: &Scene, mut f: impl FnMut(Cell, u8)) {
         scene.for_each_voxel(|p, v| {
-            if !self.removed.contains(&p) {
+            if !self.removed.contains(&p) && !self.moved.contains_key(&p) {
                 f(p, v)
             }
         });
@@ -1056,13 +1121,14 @@ impl Session {
     }
 
     pub(crate) fn slot_count(&self, scene: &Scene, s: u8) -> usize {
-        let gone = self.removed.iter().filter(|p| scene.map.get(p[0], p[1], p[2]) == s).count();
+        let gone =
+            self.removed.iter().chain(self.moved.keys()).filter(|p| scene.map.get(p[0], p[1], p[2]) == s).count();
         scene.map.counts[s as usize] as usize - gone
     }
 
     /// Voxels in the scene as the change has it.
     pub(crate) fn voxel_count(&self, scene: &Scene) -> usize {
-        scene.map.voxels as usize - self.removed.len()
+        scene.map.voxels as usize - self.removed.len() - self.moved.len()
     }
 
     /// The selected voxels that still hold one, as world cells.
@@ -1093,6 +1159,8 @@ impl Session {
 
     /// Stage one map cell: removals keep their old voxel in the map.
     fn set(&mut self, scene: &mut Scene, p: Cell, v: u8) {
+        // A cell a new object took is the model's again.
+        self.moved.remove(&p);
         let cur = self.get(scene, p);
         let b = *self.base.entry(p).or_insert_with(|| scene.map.get(p[0], p[1], p[2]));
         if v == 0 && b != 0 {
@@ -1328,6 +1396,11 @@ impl Session {
         if scene.at() == At::World {
             return Err(invalid(WORLD));
         }
+        if !self.moved.is_empty() {
+            return Err(invalid(
+                "the bounds cannot change after make_object in one change: resize or crop first, or in a later request once the user applied this one",
+            ));
+        }
         let was = scene.bounds();
         let inside = |w: Cell| (0..3).all(|k| w[k] >= lo[k] && w[k] < lo[k] + size[k] as i32);
         let outside = self.voxels_where(scene, |w, _| !inside(w));
@@ -1501,6 +1574,174 @@ impl Session {
             s += &format!("; warning: layer {id} is hidden, so {what} does not show");
         }
         Ok(s)
+    }
+
+    /// The voxels `a` names as the change has them (map cells and slots, sorted), made into
+    /// a new object made at Apply ([`Pending::Object`]).
+    fn make_object(&mut self, scene: &mut Scene, a: &MakeObject) -> Result<String, Error> {
+        if scene.at() == At::World {
+            return Err(invalid(
+                "the scene shows the world of several objects: make_object takes voxels from one object's model, which the user opens (Tab)",
+            ));
+        }
+        let name = a.name.as_deref().map(|n| n.chars().filter(|c| !c.is_control()).collect::<String>());
+        let name = name.as_deref().map(str::trim).filter(|n| !n.is_empty());
+        if name.is_some_and(|n| n.chars().count() > MAX_LAYER_NAME) {
+            return Err(invalid(format!("name: at most {MAX_LAYER_NAME} characters")));
+        }
+        let cells: Vec<Cell> = if let Some(cells) = self.parts_cells(scene, &a.part, &a.parts)? {
+            cells
+        } else if let Some(from) = a.from_slot {
+            let from = slot(from)?;
+            self.voxels_where(scene, |_, v| v == from)
+        } else if a.selection {
+            self.selected(scene)
+        } else if let (Some(f), Some(t)) = (a.from, a.to) {
+            let (lo, hi) = order(f, t);
+            self.voxels_where(scene, |q, _| inside(q, lo, hi))
+        } else {
+            return Err(invalid("give part or parts, from_slot, selection: true, or a box (from, to)"));
+        };
+        let mut voxels: Vec<(Cell, u8)> = cells
+            .into_iter()
+            .map(|w| scene.to_map(w))
+            .filter_map(|p| Some((p, self.get(scene, p))).filter(|c| c.1 != 0))
+            .collect();
+        voxels.sort_unstable();
+        voxels.dedup();
+        let left = self.voxel_count(scene);
+        let this = match scene.at() {
+            At::Object(i) => format!("object {i}"),
+            _ => "this model".to_string(),
+        };
+        if voxels.is_empty() {
+            return Err(invalid("no voxels there: those cells are empty, or another make_object took them"));
+        }
+        if voxels.len() >= left {
+            return Err(invalid(format!(
+                "those are all {left} voxels of {this}: it is that object already; rename names it"
+            )));
+        }
+        if let Some(vxr_core::scene::SplitError::Linked) = scene.split_error(voxels.len()) {
+            return Err(invalid(format!(
+                "{this} is a linked copy, sharing its model with other objects: its voxels would leave every copy. The user can make it its own object first (Cmd-D duplicates it with a model of its own)"
+            )));
+        }
+        let node = self.next_node(scene);
+        let k = self.pending.len();
+        for &(p, _) in &voxels {
+            self.moved.insert(p, k);
+        }
+        let (lo, hi) = bounds(voxels.iter().map(|c| scene.to_world(c.0))).expect("voxels");
+        let n = voxels.len();
+        self.pending.push(Pending::Object { node, name: name.map(str::to_string), voxels });
+        self.open(scene);
+        let called = name.map_or_else(String::new, |n| format!(" {}", Value::from(n)));
+        Ok(format!(
+            "new object {node}{called}: {n} voxels from {lo:?} to {hi:?}, out of {this}, which keeps {}; staged: the object is made when the user applies the change, and its voxels read as gone from this model",
+            left - n
+        ))
+    }
+
+    /// The map cells staged new object `node` takes.
+    pub(crate) fn moved_cells(&self, node: usize) -> Vec<Cell> {
+        let Some(k) = self.pending.iter().position(|p| matches!(p, Pending::Object { node: n, .. } if *n == node))
+        else {
+            return Vec::new();
+        };
+        self.moved.iter().filter(|e| *e.1 == k).map(|e| *e.0).collect()
+    }
+
+    /// "5 \"mug\"": the staged new object that took most of `cells`, if one took any.
+    pub(crate) fn moved_into(&self, cells: &[Cell]) -> Option<String> {
+        let mut by: HashMap<usize, usize> = HashMap::new();
+        for c in cells {
+            if let Some(&k) = self.moved.get(c) {
+                *by.entry(k).or_default() += 1;
+            }
+        }
+        let (&k, _) = by.iter().max_by_key(|e| (*e.1, std::cmp::Reverse(*e.0)))?;
+        let Pending::Object { node, name, .. } = &self.pending[k] else { return None };
+        Some(match name {
+            Some(n) => format!("{node} {}", Value::from(n.as_str())),
+            None => node.to_string(),
+        })
+    }
+
+    /// Node `n` that `rename` may name while a model shows: an object or group of the world,
+    /// or a new object staged, as text; or why not.
+    fn model_node(&self, scene: &Scene, n: usize) -> Result<String, Error> {
+        let staged = self.pending.iter().any(|p| matches!(p, Pending::Object { node, .. } if *node == n));
+        match scene.world() {
+            _ if staged => Ok(format!("new object {n}")),
+            Some(w) if n != 0 && w.in_tree(n) => Ok(node_text(w, n)),
+            None if n == 1 && !self.pending.is_empty() => Ok("object 1".into()),
+            None => Err(invalid(NO_WORLD.to_string() + ", or after make_object, whose world has this model as node 1")),
+            Some(_) => Err(invalid(format!(
+                "node {n}: not an object or group of this world, nor one make_object staged; the summary's world list has them"
+            ))),
+        }
+    }
+
+    /// The node the next new object of the world gets: after every node of the world and
+    /// every staged object. A new scene's world has its model as node 1.
+    fn next_node(&self, scene: &Scene) -> usize {
+        let objects = self.pending.iter().filter(|p| matches!(p, Pending::Object { .. })).count();
+        scene.world().map_or(2, |w| w.tree.nodes.len()) + objects
+    }
+
+    /// How many nodes and which layers the world has, staged objects counted, before a step.
+    fn mark(&self, scene: &Scene) -> Mark {
+        Mark {
+            nodes: self.next_node(scene),
+            layers: scene.world().map_or(Vec::new(), |w| w.layers().iter().map(|l| l.id).collect()),
+        }
+    }
+
+    /// The nodes and layers the world gained since `m`, staged objects counted.
+    fn made_since(&self, m: &Mark, scene: &Scene) -> Made {
+        Made {
+            nodes: (m.nodes..self.next_node(scene)).collect(),
+            layers: scene
+                .world()
+                .map_or(Vec::new(), |w| w.layers().iter().map(|l| l.id).filter(|id| !m.layers.contains(id)).collect()),
+        }
+    }
+
+    /// Make what the change staged: erase the removed cells, then make the new objects and
+    /// names in the world, in order, inside the open edit.
+    fn flush(&mut self, scene: &mut Scene) {
+        for &p in &self.removed {
+            scene.put(p, 0);
+        }
+        // A new object left without voxels is not made: the nodes after it close up.
+        let staged: HashSet<usize> = self
+            .pending
+            .iter()
+            .filter_map(|p| match p {
+                Pending::Object { node, .. } => Some(*node),
+                Pending::Name { .. } => None,
+            })
+            .collect();
+        let mut nodes: HashMap<usize, usize> = HashMap::new();
+        for (k, p) in std::mem::take(&mut self.pending).into_iter().enumerate() {
+            match p {
+                Pending::Object { node, name, voxels } => {
+                    let kept: Vec<(Cell, u8)> =
+                        voxels.into_iter().filter(|(c, _)| self.moved.get(c) == Some(&k)).collect();
+                    if let Ok(n) = scene.put_object(&kept, name.as_deref()) {
+                        nodes.insert(node, n);
+                    }
+                }
+                Pending::Name { node, name } => {
+                    let node = if staged.contains(&node) { nodes.get(&node).copied() } else { Some(node) };
+                    if let Some(n) = node {
+                        scene.put_node_name(n, name.as_deref());
+                    }
+                }
+            }
+        }
+        self.moved.clear();
     }
 
     /// The face at world cell `c` on `side`, as map cells: the voxels of its colour connected
@@ -1693,6 +1934,8 @@ impl Session {
         }
         self.base.clear();
         self.removed.clear();
+        self.moved.clear();
+        self.pending.clear();
         self.staged = 0;
         self.selection = self.selection_before.clone();
         self.clip = self.clip_before.clone();
@@ -1743,9 +1986,9 @@ impl Session {
             }
         }
         self.switch(lane);
-        let mark = Mark::of(scene);
+        let mark = self.mark(scene);
         if self.run(scene, op).is_ok() {
-            self.steps[i].made = mark.made(scene);
+            self.steps[i].made = self.made_since(&mark, scene);
         }
         true
     }
@@ -1813,28 +2056,10 @@ fn world_args(op: &mut Op) -> (Vec<&mut usize>, Option<&mut i32>) {
     }
 }
 
-/// How many nodes the world had and its layers, before a step.
+/// How many nodes the world had (with those staged) and its layers, before a step.
 struct Mark {
     nodes: usize,
     layers: Vec<i32>,
-}
-
-impl Mark {
-    fn of(scene: &Scene) -> Mark {
-        match scene.world() {
-            Some(w) => Mark { nodes: w.tree.nodes.len(), layers: w.layers().iter().map(|l| l.id).collect() },
-            None => Mark { nodes: 0, layers: Vec::new() },
-        }
-    }
-
-    /// The nodes and layers the world gained since.
-    fn made(&self, scene: &Scene) -> Made {
-        let Some(w) = scene.world() else { return Made::default() };
-        Made {
-            nodes: (self.nodes..w.tree.nodes.len()).collect(),
-            layers: w.layers().iter().map(|l| l.id).filter(|id| !self.layers.contains(id)).collect(),
-        }
-    }
 }
 
 /// What staging some cells did.

@@ -84,8 +84,8 @@ impl Session {
         let mut out = json!({
             "mode": match scene.at() {
                 At::World => "world: the world tools (move_object, duplicate, group, ungroup, hide, set_layer, delete_object, rename, new_layer, hide_layer) change its objects and layers; voxels cannot be edited until one object's model is open",
-                At::Object(_) => "model: every voxel tool edits this object's model; the world tools need the world shown",
-                At::Map => "model: every voxel tool edits it",
+                At::Object(_) => "model: every voxel tool edits this object's model, make_object makes some of its voxels an object of their own and rename names objects; the other world tools need the world shown",
+                At::Map => "model: every voxel tool edits it, and make_object makes some of its voxels an object of their own (the scene becomes a world of objects)",
             },
             "axes": "x right, y up, z toward the viewer; the user looks from the front-right (+x, +y, +z side). Left is -x, behind is -z.",
             "editable": {"from": b.lo, "to": hi, "ground_y": b.lo[1], "headroom": format!("nothing can go above y {} until resize grows the bounds", hi[1])},
@@ -100,6 +100,9 @@ impl Session {
         let parts = self.part_order();
         if let Some(w) = scene.world() {
             out["world"] = world_list(scene, w);
+        }
+        if let Some(v) = self.staged_world(scene) {
+            out["staged_world"] = v;
         }
         if !parts.is_empty() {
             let more = parts.len().saturating_sub(SUMMARY_PARTS);
@@ -158,6 +161,33 @@ impl Session {
         })
     }
 
+    /// The new objects and names `make_object` and `rename` staged while a model shows.
+    fn staged_world(&self, scene: &Scene) -> Option<Value> {
+        let c = self.changes(scene);
+        if c.objects.is_empty() && c.names.is_empty() {
+            return None;
+        }
+        let objects: Vec<Value> = c
+            .objects
+            .iter()
+            .map(|o| {
+                let cells = self.moved_cells(o.node).into_iter().map(|p| scene.to_world(p));
+                let mut v = json!({"node": o.node, "name": o.name, "voxels": o.voxels});
+                if let Some((lo, hi)) = vxr_core::select::bounds(cells) {
+                    v["from"] = json!(lo);
+                    v["to"] = json!(hi);
+                }
+                v
+            })
+            .collect();
+        let names: Vec<Value> = c.names.iter().map(|(n, name)| json!({"node": n, "name": name})).collect();
+        Some(json!({
+            "about": "what this change makes in the world when the user applies it, not in the world yet: new objects (their voxels read as gone from this model) and names, as you gave them",
+            "new_objects": objects,
+            "names": names,
+        }))
+    }
+
     /// The parts the model named first (newest first), then the scene's biggest part of each
     /// name ("red blob", "beige wall") of at least [`SMALL`] voxels, so a small house shows
     /// beside a big lawn, then the rest by size.
@@ -178,10 +208,14 @@ impl Session {
     fn part_line(&self, scene: &Scene, i: usize) -> Option<String> {
         let p = &self.parts[i];
         let cells: Vec<Cell> = self.part_cells(scene, i).into_iter().map(|c| scene.to_world(c)).collect();
-        let (lo, hi) = vxr_core::select::bounds(cells.iter().copied())?;
         let what = match p.slots.first() {
             None => format!("{} {} (named by you)", p.id, Value::from(p.name.as_str())),
             Some(s) => format!("{} {} (slot {s}{})", p.id, p.name, if p.slots.len() > 1 { " and shades" } else { "" }),
+        };
+        let Some((lo, hi)) = vxr_core::select::bounds(cells.iter().copied()) else {
+            // Gone from the model: say which new object took it.
+            let into = self.moved_into(&p.cells)?;
+            return Some(format!("{what}: in new object {into} (staged), gone from this model"));
         };
         let on = p.on.map(|o| format!(", on {}", self.parts[o].id)).unwrap_or_default();
         Some(format!(

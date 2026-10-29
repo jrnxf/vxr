@@ -582,6 +582,43 @@ fn the_world_tools_change_the_window_and_undo_gives_the_file_back() {
 }
 
 #[test]
+fn make_object_splits_the_window_s_model_and_undo_gives_the_file_back() {
+    // The generated 23-desk: one model of a desk, a cup with coffee in it and a book.
+    let f = vxr_vox::fixtures::all().into_iter().find(|f| f.name == "23-desk").unwrap();
+    let bytes = vxr_vox::Document { raw: f.builder.build() }.write();
+    let mut w = Window { scene: vxr_core::Scene::from_vox(&bytes).unwrap(), selection: Vec::new(), clip: None };
+    let all = w.scene.world_voxels(false);
+
+    let dir = Dir::new("split");
+    let host = Host::start(&dir.0).unwrap();
+    let mut a = Agent::new(&dir, "claude-code");
+    let call = |w: &mut Window, a: &mut Agent, name: &str, args: Value| {
+        let (t, e) = edit(&host, w, a, name, args);
+        assert!(!e, "{name}: {t}");
+        t
+    };
+    let t = call(&mut w, &mut a, "make_object", json!({"parts": ["white", "orange"], "name": "mug"}));
+    assert!(t.starts_with("new object 2 \"mug\": 60 voxels"), "{t}");
+    let t = call(&mut w, &mut a, "make_object", json!({"from_slot": 4, "name": "book"}));
+    assert!(t.starts_with("new object 3 \"book\": 60 voxels"), "{t}");
+    call(&mut w, &mut a, "rename", json!({"node": 1, "name": "desk"}));
+    let (t, e) = edit(&host, &mut w, &mut a, "rename", json!({"node": 7, "name": "x"}));
+    assert!(e && t.starts_with("node 7: not an object"), "{t}");
+    let world = w.scene.world().unwrap();
+    let names: Vec<_> = world.objects().into_iter().map(|i| world.tree.nodes[i].name.clone().unwrap()).collect();
+    // Each call is its own step, and each new object goes right after the desk, as Selection
+    // to new object puts it.
+    assert_eq!(names, [b"desk".to_vec(), b"book".to_vec(), b"mug".to_vec()]);
+    assert_eq!(w.scene.world_voxels(false), all, "nothing moved in the world");
+    // Three edits, three undo steps: undone, the save is the file's bytes.
+    assert_eq!(w.scene.history().position(), 3);
+    for _ in 0..3 {
+        assert!(w.scene.undo());
+    }
+    assert_eq!(w.scene.to_vox(), bytes);
+}
+
+#[test]
 fn the_housekeeping_select_and_palette_tools_change_the_window_and_undo_gives_the_file_back() {
     // The generated 22-world: the slab (node 1, 64 voxels on layer 0), the trees group (2)
     // of three linked 13-voxel trees on layer 1, the gem (7) on the hidden layer 2 and the

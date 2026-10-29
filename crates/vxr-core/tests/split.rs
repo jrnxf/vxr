@@ -277,4 +277,76 @@ proptest! {
             }
         }
     }
+
+    /// The same inside an open edit (an AI change, applied at once): random groups of a
+    /// random model, some voxels painted first, become objects with the map staying on the
+    /// model; the edit closes as one undo step that keeps every world voxel and undoes to the
+    /// file, and putting the edit back instead leaves the file as it was.
+    #[test]
+    fn objects_made_inside_an_edit_keep_every_world_voxel(
+        voxels in prop::collection::btree_map((0i32..12, 0i32..12, 0i32..12), 1u8..=255, 3..120),
+        group in prop::collection::vec(0u8..3, 120),
+        new_scene in any::<bool>(),
+        revert in any::<bool>(),
+    ) {
+        let voxels: BTreeMap<[i32; 3], u8> = voxels.into_iter().map(|((x, y, z), c)| ([x, y, z], c)).collect();
+        let mut s = if new_scene {
+            let mut s = Scene::new([12, 12, 12]);
+            s.edit(voxels.iter().map(|(&p, &c)| (p, c)));
+            s
+        } else {
+            Scene::from_vox(&one_model(&voxels)).unwrap()
+        };
+        let bytes = s.to_vox();
+        let mut cells = Vec::new();
+        s.for_each_voxel(|p, v| cells.push((p, v)));
+        // Group 0 stays; groups 1 and 2 become objects. The first voxel is repainted in the
+        // same edit.
+        let (at, start) = (s.at(), s.history().position());
+        s.begin();
+        s.put(cells[0].0, 7);
+        cells[0].1 = 7;
+        let expect = map_voxels(&s);
+        let mut made = Vec::new();
+        for g in 1..3u8 {
+            let part: Vec<_> = cells.iter().zip(&group).filter(|(_, k)| **k == g).map(|(c, _)| *c).collect();
+            match s.put_object(&part, Some(&format!("part {g}"))) {
+                Ok(n) => made.push((n, part.len())),
+                Err(e) => {
+                    let left = cells.len() - made.iter().map(|m| m.1).sum::<usize>();
+                    prop_assert!(part.is_empty() || part.len() >= left, "{:?}", e);
+                }
+            }
+        }
+        if made.is_empty() {
+            s.revert_voxels();
+            s.commit();
+            prop_assert!(s.to_vox() == bytes);
+            return Ok(());
+        }
+        prop_assert!(matches!(s.at(), At::Object(_)), "the map stays on the model");
+        if revert {
+            s.revert_voxels();
+            s.commit();
+            prop_assert_eq!(s.at(), at);
+            prop_assert_eq!(s.history().position(), start);
+            prop_assert!(s.to_vox() == bytes, "put back: the file as it was");
+            return Ok(());
+        }
+        let position = s.history().position();
+        s.commit();
+        prop_assert_eq!(s.history().position(), position + 1, "one undo step");
+        prop_assert_eq!(s.world().unwrap().objects().len(), 1 + made.len());
+        for (n, k) in &made {
+            prop_assert_eq!(object_voxels(&s, *n).len(), *k);
+        }
+        prop_assert_eq!(s.world_voxels(false), expect.clone());
+        let saved = s.to_vox();
+        prop_assert_eq!(Scene::from_vox(&saved).unwrap().world_voxels(false), expect);
+        prop_assert!(s.undo());
+        prop_assert_eq!(s.at(), at);
+        prop_assert!(s.to_vox() == bytes, "undone: the file");
+        prop_assert!(s.redo());
+        prop_assert!(s.to_vox() == saved, "redone: the same file");
+    }
 }

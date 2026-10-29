@@ -1493,6 +1493,29 @@ async () => {
     const deskUndone = same(bytes(), deskFile);
     await key('z', { metaKey: true, shiftKey: true });
     step('undo and redo give the file and the split back', deskUndone && same(bytes(), deskSplit) && st().objects === 2, JSON.stringify(st()));
+    // Organize into objects (AI): Cmd-K sends the canned request to the stand-in provider
+    // (check-server.js), whose make_object and rename calls show on the review card as new
+    // objects and a name, the voxels still in the model; Enter makes them in the world as one
+    // undo step.
+    await key('z', cmd);
+    await key('k', cmd);
+    for (const ch of 'organize into objects') await key(ch);
+    await key('Enter');
+    const lines = () => (st().review?.world || []).map((l) => `${l.label} ${l.text} ${l.detail}`.trim()).join('|');
+    for (let i = 0; i < 900 && !(lines().includes('OBJECT 1') && st().review.summary); i++) await frames(1);
+    s = st();
+    step("Cmd-K 'Organize into objects (AI)' sends the canned request", s.review?.prompt.startsWith('Split this scene into one object per real-world thing') && s.review.summary === 'A stand-in block', JSON.stringify(s.review));
+    step('the review card lists the new objects and the name, no voxel changes', s.review && s.review.counts.join() === '0,0,0' && s.review.objects === 3 && lines() === 'NEW 2 "mug" 60 voxels|NEW 3 "book" 60 voxels|OBJECT 1 named "desk"' && window.vxr.hit('review-object-2').length === 2, JSON.stringify(s.review));
+    step('staged: the voxels stay in the model, the world as it was', s.voxels === 296 && s.objects === 1 && same(bytes(), deskFile), JSON.stringify(s));
+    await key('Enter');
+    await frames(2);
+    s = st();
+    step('Enter makes them in the world as one undo step', s.review === null && s.objects === 3 && s.voxels === 176 && s.tree.map((r) => r.name).join() === 'desk,mug,book' && s.undoLabel?.startsWith('AI: Split this scene'), JSON.stringify(s));
+    await key('Tab');
+    step('the world shows every voxel, each in one object', st().mode === 'world' && st().voxels === 296, JSON.stringify(st()));
+    await key('Tab');
+    await key('z', cmd);
+    step('undo gives the file back', same(bytes(), deskFile) && st().objects === 1, JSON.stringify(st()));
     await key('Escape');
     await key('a');
   } finally {

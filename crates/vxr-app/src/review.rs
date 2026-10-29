@@ -15,7 +15,7 @@ use serde_json::Value;
 use vxr_core::Scene;
 use vxr_ops::{Changes, ErrorKind, Session};
 
-use crate::ui::{ReviewCard, SlotChange, StepRow};
+use crate::ui::{ReviewCard, SlotChange, StepRow, WorldLine};
 
 /// One tool call, as a model sends it: the tool's name and its JSON input.
 #[derive(Clone, Debug, PartialEq)]
@@ -195,7 +195,8 @@ impl Review {
         scene.ghost_mask(cells.into_iter().map(|(p, g)| {
             let kind = match g {
                 vxr_ops::Ghost::Added => 1,
-                vxr_ops::Ghost::Repainted => 2,
+                // A new object's voxels keep their colour, outlined, as repainted ones do.
+                vxr_ops::Ghost::Repainted | vxr_ops::Ghost::Moved => 2,
                 vxr_ops::Ghost::Removed => 3,
             };
             (p, kind)
@@ -248,6 +249,7 @@ impl Review {
             summary: s.done().map(str::to_string),
             counts: [c.added.len(), c.removed.len(), c.repainted.len()],
             objects: c.nodes,
+            world: world_lines(c),
             slots,
             steps,
             held: (!self.held.is_empty()).then_some((s.allowed(), s.limits.changed_cells)),
@@ -255,6 +257,29 @@ impl Review {
             working: None,
         }
     }
+}
+
+/// The card's lines for the new objects and names a change makes: "NEW 2", "\"mug\"",
+/// "60 voxels"; "OBJECT 1", "named \"desk\"".
+fn world_lines(c: &Changes) -> Vec<WorldLine> {
+    let quoted = |n: &Option<String>| n.as_deref().map(|n| Value::from(n).to_string());
+    let made = c.objects.iter().map(|o| WorldLine {
+        node: o.node,
+        label: format!("NEW {}", o.node),
+        text: quoted(&o.name).unwrap_or_else(|| "object".into()),
+        detail: format!(
+            "{} voxel{}",
+            crate::ui::group_thousands(o.voxels as u64),
+            if o.voxels == 1 { "" } else { "s" }
+        ),
+    });
+    let named = c.names.iter().map(|(node, name)| WorldLine {
+        node: *node,
+        label: format!("OBJECT {node}"),
+        text: quoted(name).map_or_else(|| "name cleared".into(), |n| format!("named {n}")),
+        detail: String::new(),
+    });
+    made.chain(named).collect()
 }
 
 /// A step's line on the card: what it answered up to the first `;` ("8 cells changed", or the

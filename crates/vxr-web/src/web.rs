@@ -598,13 +598,22 @@ impl App {
             e.preview.lighting.physical_sky,
             e.export.as_ref().map_or("null".into(), |x| format!("{:?}", x.progress().0)),
             e.ui.review.as_ref().map_or("null".into(), |c| format!(
-                r#"{{"prompt":{:?},"agents":{},"summary":{},"counts":[{},{},{}],"slots":[{}],"steps":[{}],"held":{},"before":{}}}"#,
+                r#"{{"prompt":{:?},"agents":{},"summary":{},"counts":[{},{},{}],"objects":{},"world":[{}],"slots":[{}],"steps":[{}],"held":{},"before":{}}}"#,
                 c.prompt,
                 c.agents,
                 c.summary.as_ref().map_or("null".into(), |s| format!("{s:?}")),
                 c.counts[0],
                 c.counts[1],
                 c.counts[2],
+                c.objects,
+                c.world
+                    .iter()
+                    .map(|l| format!(
+                        r#"{{"node":{},"label":{:?},"text":{:?},"detail":{:?}}}"#,
+                        l.node, l.label, l.text, l.detail
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(","),
                 c.slots.iter().map(|s| s.slot.to_string()).collect::<Vec<_>>().join(","),
                 c.steps
                     .iter()

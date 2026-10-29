@@ -272,6 +272,7 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     new_scene_command(dir)?;
     scene_tree(dir)?;
     to_object(dir)?;
+    organize(dir)?;
     render(&mut s, dir)?;
     materials(&mut s, dir)?;
     export(&mut s, dir)?;
@@ -1823,6 +1824,115 @@ fn scene_tree(dir: &Path) -> Result<(), String> {
     while s.ed.scene.undo() {}
     check(s.ed.scene.to_vox() == bytes, "every tree edit undone: byte-identical save".into())?;
     Ok(())
+}
+
+/// Cmd-K "Organize into objects (AI)" on the generated 23-desk, one model: without a key the
+/// request waits in the composer; with one (a scripted provider) it runs, and the model's
+/// make_object and rename calls stage a mug, a book and the desk's name on the review card,
+/// the voxels still in the model and outlined; Apply makes them in the world as one undo step,
+/// every voxel in exactly one object, and undo gives the file's bytes back.
+fn organize(dir: &Path) -> Result<(), String> {
+    use serde_json::json;
+    use vxr_app::assistant::Progress;
+    use vxr_app::assistant::fake::anthropic;
+    use vxr_core::history::At;
+    let bytes = vxr_vox::fixtures::all()
+        .into_iter()
+        .find(|f| f.name == "23-desk")
+        .ok_or("no 23-desk fixture")?
+        .builder
+        .build()
+        .write();
+    let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    let (none, cmd) = (egui::Modifiers::NONE, egui::Modifiers::COMMAND);
+    let run = |s: &mut Shot| {
+        s.frames_with(2, vec![key(egui::Key::K, cmd)]);
+        s.frames_with(1, vec![egui::Event::Text("organize into objects".into())]);
+        s.frames_with(2, vec![key(egui::Key::Enter, none)]);
+    };
+    // No key yet: the key settings open and the request waits in the composer.
+    let mut s = Shot::new(Scene::from_vox(&bytes)?, "23-desk.vox", 2.0)?;
+    s.ed.ui.coach = false;
+    s.frames(2);
+    run(&mut s);
+    check(
+        s.ed.ui.ai_draft() == vxr_app::ui::ORGANIZE && s.ed.review.is_none(),
+        "Cmd-K 'Organize into objects (AI)' without a key keeps the request in the composer".into(),
+    )?;
+
+    let mut s = Shot::new(Scene::from_vox(&bytes)?, "23-desk.vox", 2.0)?;
+    s.ed.ui.coach = false;
+    let fake = s.fake_assistant(0);
+    s.ed.assistant.set_key(vxr_ai::Kind::Anthropic, "sk-ant-test-not-a-real-key", false)?;
+    s.frames(3);
+    let (total, all, position) = (s.voxels(), s.ed.scene.world_voxels(false), s.ed.scene.history().position());
+    fake.answer(anthropic(
+        "A desk with a mug and a book.",
+        &[
+            ("make_object", json!({"parts": ["white", "orange"], "name": "mug"})),
+            ("make_object", json!({"from_slot": vxr_vox::fixtures::BLUE, "name": "book"})),
+            ("rename", json!({"node": 1, "name": "desk"})),
+            ("done", json!({"summary": "Split into a desk, a mug and a book"})),
+        ],
+    ));
+    run(&mut s);
+    s.settle(600);
+    let sent = fake.requests().first().map(|r| r.body.contains(vxr_app::ui::ORGANIZE)).unwrap_or(false);
+    let a = s.last_answer().ok_or("no answer")?;
+    check(sent && a.progress == Progress::Done, format!("the canned request runs: {:?}", a.progress))?;
+    let card = s.ed.ui.review.clone().ok_or("no review card")?;
+    let lines: Vec<String> = card.world.iter().map(|l| format!("{} {} {}", l.label, l.text, l.detail)).collect();
+    check(
+        card.counts == [0, 0, 0]
+            && lines == ["NEW 2 \"mug\" 60 voxels", "NEW 3 \"book\" 60 voxels", "OBJECT 1 named \"desk\" "]
+            && s.ed.ui.hits.contains_key("review-object-2"),
+        format!("the card lists the new objects and the name, no voxel changes: {:?} {lines:?}", card.counts),
+    )?;
+    check(
+        s.voxels() == total
+            && s.ed.scene.history().position() == position
+            && s.ed.scene.world().is_some_and(|w| w.objects().len() == 1),
+        "staged: the voxels stay in the model, the world as it was, no undo step".into(),
+    )?;
+    // Before shows the model as it was, with no ghost: the outlines are all that differ.
+    let after = view_pixels(&mut s);
+    s.ui_click("review-before")?;
+    let before = view_pixels(&mut s);
+    s.ui_click("review-after")?;
+    let (changed, back) = (differ(&after, &before), differ(&view_pixels(&mut s), &after));
+    check(
+        changed > 500 && back == 0,
+        format!("the new objects' voxels show outlined ({changed} pixels change, {back} after Before and After)"),
+    )?;
+    s.frames(40);
+    s.save_png(&dir.join("app-2x-organize.png"))?;
+    s.ui_click("review-apply")?;
+    s.frames(2);
+    let w = s.ed.scene.world().ok_or("no world")?;
+    let names: Vec<String> = w
+        .objects()
+        .into_iter()
+        .map(|i| String::from_utf8_lossy(w.tree.nodes[i].name.as_deref().unwrap_or_default()).into_owned())
+        .collect();
+    let mut seen = std::collections::BTreeMap::new();
+    let mut twice = false;
+    for i in w.objects() {
+        w.for_each_object_voxel(i, |p, c| twice |= seen.insert(p, c).is_some());
+    }
+    check(
+        names == ["desk", "mug", "book"]
+            && !twice
+            && seen == all
+            && s.ed.scene.at() == At::Object(1)
+            && s.ed.scene.history().position() == position + 1
+            && s.ed.ui.tree.len() == 3,
+        format!("Apply makes them in the world as one undo step, every voxel in one object: {names:?}"),
+    )?;
+    s.frames(40);
+    s.save_png(&dir.join("app-2x-organized.png"))?;
+    s.ed.undo();
+    s.frames(2);
+    check(s.ed.scene.to_vox() == bytes, "undo gives the file's bytes back".into())
 }
 
 /// Selection to new object on the generated 23-desk, one model: the cup and the coffee are
