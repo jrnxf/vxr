@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use vxr_mcp::bridge::{PORT, normalize_code};
 
 use crate::Editor;
+use crate::agents::Fail;
 use crate::ui::Action;
 
 /// What the page's script does with the WebSocket.
@@ -47,6 +48,17 @@ struct Request {
     conn: u64,
     client: String,
     ask: Ask,
+}
+
+/// What kind of failure the page's script's reason is.
+pub fn failure_kind(why: &str) -> Fail {
+    match why {
+        "denied" => Fail::Denied,
+        "blocked" => Fail::Blocked,
+        "safari" => Fail::Safari,
+        "brave" => Fail::Brave,
+        _ => Fail::Nothing,
+    }
 }
 
 /// Why the WebSocket did not open, as the page's script tells [`Page::closed`].
@@ -119,16 +131,25 @@ impl Page {
                     self.code = c;
                     self.link = Link::Connecting;
                     ed.agents.error = None;
+                    ed.agents.fail = None;
                     self.out.push(Out::Connect);
                 }
-                None => ed.agents.error = Some(BAD_CODE.into()),
+                None => {
+                    ed.agents.error = Some(BAD_CODE.into());
+                    ed.agents.fail = Some(Fail::Other);
+                }
             },
             Action::PairBridge | Action::AllowAgents(true) => {}
+            Action::DismissAgentsError => {
+                ed.agents.error = None;
+                ed.agents.fail = None;
+            }
             Action::AllowAgents(false) => {
                 if self.link != Link::Off {
                     self.out.push(Out::Close);
                     let was = std::mem::replace(&mut self.link, Link::Off);
                     self.drop_all(ed);
+                    ed.agents.since = None;
                     if was == Link::Paired {
                         ed.ui.toast(&ctx, "Terminal agents can no longer edit this tab");
                     }
@@ -204,16 +225,24 @@ impl Page {
         self.code.clear();
         match was {
             Link::Off => return,
-            Link::Connecting => ed.agents.error = Some(failure(why)),
+            Link::Connecting => {
+                ed.agents.error = Some(failure(why));
+                ed.agents.fail = Some(failure_kind(why));
+            }
             Link::Pairing => {
-                ed.agents.error.get_or_insert_with(|| HUNG_UP.into());
+                if ed.agents.error.is_none() {
+                    ed.agents.error = Some(HUNG_UP.into());
+                    ed.agents.fail = Some(Fail::Hung);
+                }
             }
             Link::Paired => {
                 let ctx = ed.ctx.clone();
                 ed.ui.toast(&ctx, "vxr bridge stopped: agents can no longer edit this tab");
                 ed.agents.error = Some(LOST.into());
+                ed.agents.fail = Some(Fail::Lost);
             }
         }
+        ed.agents.since = None;
         self.drop_all(ed);
         self.sync(ed);
     }
@@ -226,10 +255,13 @@ impl Page {
                 if v.get("ok").and_then(Value::as_bool) == Some(true) {
                     self.link = Link::Paired;
                     ed.agents.error = None;
+                    ed.agents.fail = None;
                     let ctx = ed.ctx.clone();
+                    ed.agents.since = Some(ctx.input(|i| i.time));
                     ed.ui.toast(&ctx, "Paired with vxr bridge: terminal agents can edit this tab");
                 } else {
                     let e = v.get("error").and_then(Value::as_str).unwrap_or(HUNG_UP);
+                    ed.agents.fail = Some(if e == vxr_mcp::bridge::WRONG_CODE { Fail::Wrong } else { Fail::Other });
                     ed.agents.error = Some(shown(e, 300));
                     self.link = Link::Off;
                     self.out.push(Out::Close);
@@ -314,5 +346,7 @@ impl Page {
         ed.agents.web = true;
         ed.agents.allowed = self.link == Link::Paired;
         ed.agents.connecting = matches!(self.link, Link::Connecting | Link::Pairing);
+        let now = ed.ctx.input(|i| i.time);
+        ed.agents.note_clients(now);
     }
 }

@@ -157,7 +157,7 @@ pub struct Editor {
     chat_shown: Option<u64>,
     /// Terminal agents editing the window through `vxr mcp --live`, and what they did.
     pub agents: Agents,
-    /// The agents version and history position the UI's Agent edits card shows.
+    /// The agents version and history position the Agents tab's Agent edits list shows.
     agents_shown: Option<(u64, u64)>,
 }
 
@@ -184,7 +184,9 @@ fn review_allows(a: &Action) -> bool {
             | Action::AllowMore
             | Action::StopHeld
             | Action::AllowAgents(_)
+            | Action::ReviewAgents(_)
             | Action::PairBridge
+            | Action::DismissAgentsError
             | Action::RegenerateToken
             | Action::StopAgent(_)
             | Action::StopAgents
@@ -194,6 +196,8 @@ fn review_allows(a: &Action) -> bool {
 const REVIEW_AGENT: &str = "The user is reviewing an AI change in vxr: call again once they apply or discard it.";
 
 const REVIEW_FIRST: &str = "Apply or discard the AI change first";
+
+const AGENTS_FIRST: &str = "Apply or discard the agents' change first";
 
 impl Editor {
     pub fn new(
@@ -280,7 +284,10 @@ impl Editor {
         // A change under review belongs to the scene it was staged on.
         self.assistant.stop(now_ms() / 1000.0);
         self.assistant.stop_ask = false;
-        self.review = None;
+        if let Some(r) = self.review.take().filter(|r| r.agents.is_some()) {
+            // The agents hear that their edits that waited are gone.
+            self.agents.discard_review(&mut self.scene, r);
+        }
         // Agent edits name steps of the scene they were made on.
         self.agents.clear();
         let mut scene = scene;
@@ -1047,8 +1054,12 @@ impl Editor {
     /// opens a review (an open review takes more calls, as "Ask for changes" will), each turn
     /// is one model answer. Returns each call's answer, by turn.
     pub fn stage(&mut self, script: Script) -> Vec<Vec<Answer>> {
+        if self.review.as_ref().is_some_and(|r| r.agents.is_some()) {
+            self.ui.toast(&self.ctx, AGENTS_FIRST);
+            return Vec::new();
+        }
         if self.review.is_none() {
-            self.open_review(&script.prompt);
+            self.open_review(Some(&script.prompt));
         }
         let r = self.review.as_mut().unwrap();
         let mut out = Vec::new();
@@ -1058,8 +1069,9 @@ impl Editor {
         out
     }
 
-    /// Open a review for a request: whatever the user had going ends first, as its own step.
-    fn open_review(&mut self, prompt: &str) {
+    /// Open a review for a request, or for terminal agents' edits (None): whatever the user
+    /// had going ends first, as its own step.
+    fn open_review(&mut self, prompt: Option<&str>) {
         self.place_box();
         self.gesture = None;
         self.moving = None;
@@ -1070,7 +1082,10 @@ impl Editor {
         self.ui.bounds_panel = None;
         self.ui.coach = false;
         self.scene.commit();
-        self.review = Some(Review::new(&self.scene, prompt));
+        self.review = Some(match prompt {
+            Some(p) => Review::new(&self.scene, p),
+            None => Review::for_agents(&self.scene),
+        });
     }
 
     /// Send a request to the assistant: on the change under review if one is open (the
@@ -1086,6 +1101,10 @@ impl Editor {
             self.ui.toast(&self.ctx, "Wait for the answer, or stop it");
             return false;
         }
+        if self.review.as_ref().is_some_and(|r| r.agents.is_some()) {
+            self.ui.toast(&self.ctx, AGENTS_FIRST);
+            return false;
+        }
         if !self.assistant.ready() {
             self.ui.open_ai_setup(None);
             self.ui.toast(&self.ctx, crate::assistant::NO_KEY);
@@ -1097,7 +1116,7 @@ impl Editor {
         }
         let opened = self.review.is_none();
         if opened {
-            self.open_review(text);
+            self.open_review(Some(text));
         } else if let Some(r) = &mut self.review {
             r.session.begin_request();
             r.show_before(&mut self.scene, false);
@@ -1199,6 +1218,15 @@ impl Editor {
         self.assistant.stop(now_ms() / 1000.0);
         self.assistant.stop_ask = false;
         let Some(r) = self.review.take() else { return };
+        if r.agents.is_some() {
+            let n = self.agents.apply_review(&mut self.scene, r);
+            let msg = match n {
+                0 => "Nothing to apply".to_string(),
+                1 => "Applied 1 agent edit".to_string(),
+                n => format!("Applied {n} agent edits"),
+            };
+            return self.ui.toast(&self.ctx, msg);
+        }
         let label = r.label();
         let n = r.session.apply_named(&mut self.scene, &label);
         let msg = if n > 0 || self.scene.history().undo_label() == Some(label.as_str()) {
@@ -1214,6 +1242,10 @@ impl Editor {
         self.assistant.stop(now_ms() / 1000.0);
         self.assistant.stop_ask = false;
         let Some(r) = self.review.take() else { return };
+        if r.agents.is_some() {
+            self.agents.discard_review(&mut self.scene, r);
+            return self.ui.toast(&self.ctx, "Discarded the agents' change");
+        }
         r.session.discard(&mut self.scene);
         self.ui.toast(&self.ctx, "Discarded the AI change");
     }
@@ -1368,23 +1400,31 @@ impl Editor {
         let key = (self.agents.version, self.scene.history().position());
         if self.agents_shown != Some(key) {
             self.agents_shown = Some(key);
-            if self.agents.edits.len() < self.ui.agents_card_closed {
-                self.ui.agents_card_closed = 0;
-            }
             self.ui.agents.edits = (0..self.agents.edits.len())
                 .map(|i| EditRow {
+                    conn: self.agents.edits[i].conn,
                     label: self.agents.edits[i].label.clone(),
                     applied: self.agents.in_effect(&self.scene, i),
                 })
                 .collect();
         }
         let v = &mut self.ui.agents;
-        (v.available, v.allowed) = (self.agents.available, self.agents.allowed);
+        (v.available, v.allowed, v.review) = (self.agents.available, self.agents.allowed, self.agents.review);
         (v.web, v.connecting) = (self.agents.web, self.agents.connecting);
         if v.clients != self.agents.clients || v.error != self.agents.error {
             v.clients = self.agents.clients.clone();
             v.error = self.agents.error.clone();
         }
+        (v.fail, v.since) = (self.agents.fail, self.agents.since);
+        v.times = self
+            .agents
+            .clients
+            .iter()
+            .map(|(c, _)| {
+                let (seen, last) = self.agents.times(*c);
+                (seen.unwrap_or(0.0), last)
+            })
+            .collect();
         let stats = self.stats();
         let mut actions = Vec::new();
         let ui = &mut self.ui;
@@ -1491,6 +1531,7 @@ impl Editor {
                 | Action::AllowMore
                 | Action::StopHeld => self.review_action(a),
                 Action::UndoAgentEdit(i) => self.undo_agent_edit(i),
+                Action::ReviewAgents(on) => self.review_agents(on),
                 Action::ExportPng => self.start_export(),
                 Action::CancelExport => {
                     self.export = None;
@@ -1532,8 +1573,11 @@ impl Editor {
     }
 
     /// Run a terminal agent's tool call on the scene (see [`Agents::call`]): an edit applies
-    /// at once as one undo step named after the agent. Refused while an AI change is under
-    /// review, since nothing else edits the scene then.
+    /// at once as one undo step named after the agent, or with "Review every agent change"
+    /// on, waits in the agents' change under review ([`Agents::stage`]), which every later
+    /// call goes into until the user applies or discards it. Refused while an AI change is
+    /// under review, since nothing else edits the scene then. What the agent has not heard
+    /// yet (the user applied or discarded its edits) comes first.
     pub fn agent_call(
         &mut self,
         conn: u64,
@@ -1541,26 +1585,70 @@ impl Editor {
         name: &str,
         args: &serde_json::Value,
     ) -> Result<String, String> {
-        if self.review.is_some() {
+        let agents_review = self.review.as_ref().filter(|r| r.agents.is_some());
+        if name == vxr_mcp::live::REVIEW_STATUS {
+            return Ok(self.agents.status(conn, agents_review));
+        }
+        if self.review.is_some() && agents_review.is_none() {
             return Err(REVIEW_AGENT.into());
         }
-        self.place_box();
-        let r = self.agents.call(&mut self.scene, conn, client, name, args);
+        let notice = self.agents.take_notices(conn);
+        let now = self.ctx.input(|i| i.time);
+        self.agents.note_call(conn, now, name);
+        let r = if self.review.is_some() || (self.agents.review && crate::agents::edits(name, args)) {
+            if self.review.is_none() {
+                self.open_review(None);
+            }
+            let review = self.review.as_mut().unwrap();
+            let r = self.agents.stage(&mut self.scene, review, conn, client, name, args);
+            // A change whose every call failed is no change: it closes.
+            if !review.session.steps().iter().any(|s| s.ok)
+                && let Some(review) = self.review.take()
+            {
+                review.session.discard(&mut self.scene);
+            }
+            r
+        } else {
+            self.place_box();
+            self.agents.call(&mut self.scene, conn, client, name, args)
+        };
         if let At::Object(i) = self.scene.at() {
             self.last_object = Some(i);
         }
-        r
-    }
-
-    /// A resource a terminal agent reads, or None for a uri that names nothing.
-    pub fn agent_read(&mut self, uri: &str) -> Option<Result<String, String>> {
-        if self.review.is_some() {
-            return Some(Err(REVIEW_AGENT.into()));
+        match notice {
+            Some(n) => r.map(|t| format!("{n}\n{t}")).map_err(|e| format!("{n}\n{e}")),
+            None => r,
         }
-        self.agents.read(&mut self.scene, uri)
     }
 
-    /// The Agent edits card's Undo on edit `i`.
+    /// A resource a terminal agent reads, or None for a uri that names nothing. Under the
+    /// agents' review it reads the scene with their change.
+    pub fn agent_read(&mut self, uri: &str) -> Option<Result<String, String>> {
+        match &mut self.review {
+            Some(r) if r.agents.is_some() => match uri {
+                "vxr://scene/summary" => {
+                    Some(r.session.call(&mut self.scene, "scene_summary", serde_json::json!({})).map_err(|e| e.message))
+                }
+                _ => self.agents.read(&mut self.scene, uri),
+            },
+            Some(_) => Some(Err(REVIEW_AGENT.into())),
+            None => self.agents.read(&mut self.scene, uri),
+        }
+    }
+
+    /// The Agents tab's "Review every agent change" switch. Turned off, a change
+    /// already waiting stays for the user to apply or discard.
+    fn review_agents(&mut self, on: bool) {
+        self.agents.review = on;
+        let msg = match (on, self.review.as_ref().is_some_and(|r| r.agents.is_some())) {
+            (true, _) => "Agents' edits now wait for your review",
+            (false, true) => "Agents' edits apply at once after this change under review",
+            (false, false) => "Agents' edits apply at once",
+        };
+        self.ui.toast(&self.ctx, msg);
+    }
+
+    /// Undo on edit `i` in the Agents tab's Agent edits list.
     pub fn undo_agent_edit(&mut self, i: usize) {
         self.gesture = None;
         self.moving = None;

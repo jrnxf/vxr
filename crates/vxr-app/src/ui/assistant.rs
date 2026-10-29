@@ -171,7 +171,14 @@ fn icon_button(ui: &mut Ui, r: Rect, glyph: char, id: &str, on: bool) -> egui::R
 }
 
 /// The accent button (#apply's look), greyed out when not `enabled`.
-fn accent_button(ui: &mut Ui, r: Rect, glyph: Option<char>, label: &str, id: &str, enabled: bool) -> egui::Response {
+pub(super) fn accent_button(
+    ui: &mut Ui,
+    r: Rect,
+    glyph: Option<char>,
+    label: &str,
+    id: &str,
+    enabled: bool,
+) -> egui::Response {
     let resp = ui.interact(r, Id::unique(("aiacc", id)), if enabled { Sense::click() } else { Sense::hover() });
     let p = ui.painter();
     let (fill, ink) = if !enabled {
@@ -257,7 +264,7 @@ impl Hybrid {
     pub fn toggle_ai(&mut self) {
         if self.ai_open {
             self.ai_open = false;
-        } else if !self.chat.ready() {
+        } else if !self.chat.ready() && self.review.is_none() {
             self.open_ai_setup(None);
         } else {
             self.ai_open = true;
@@ -307,28 +314,50 @@ impl Hybrid {
 
     // The docked panel.
     pub(super) fn assistant_panel(&mut self, ctx: &Context, screen: Rect) {
+        self.review_slot = None;
+        self.ai_body = None;
         if !self.ai_open {
             self.ai.menu = false;
             return;
         }
         let rect = if self.sheet() {
-            // A phone held upright: the width of the screen, down to the dock.
+            // A phone held upright: the width of the screen, down to the dock. While a change is
+            // under review only the lower half, so the scene and its ghost show above it.
             let bottom = self.dock_rows(screen).last().map_or(screen.bottom() - 12.0, |r| r.top() - 8.0);
-            Rect::from_min_max(pos2(screen.left() + 12.0, TOP), pos2(screen.right() - 12.0, bottom.max(TOP + 240.0)))
+            let bottom = bottom.max(TOP + 240.0);
+            let top = if self.review.is_some() { ((TOP + bottom) / 2.0).min(bottom - 240.0) } else { TOP };
+            Rect::from_min_max(pos2(screen.left() + 12.0, top), pos2(screen.right() - 12.0, bottom))
         } else {
+            // The right column, top to bottom: the palette is its top block (`palette_panel`).
             Rect::from_min_max(
                 pos2(screen.right() - 12.0 - PANEL_W, TOP),
                 pos2(screen.right() - 12.0, (screen.bottom() - 12.0).max(TOP + 240.0)),
             )
         };
-        let setup = self.ai_setup || !self.chat.ready();
+        let blk = if self.docked() { self.palette_block_h() } else { 0.0 };
+        // The half sheet of a review on a phone gives the card the composer's room (the card
+        // has its own field to ask for changes), except while a request runs or waits on Keep
+        // or Drop, which the composer holds.
+        let compact = self.sheet() && self.review.is_some() && !self.chat.running && !self.chat.stop_ask;
+        let agents_tab = self.agents_panel;
+        let (agents_tone, agents_n) = self.agents_status();
+        // The review card sits at the end of the thread, as wide as the thread.
+        let review_h = self.review_height(ctx, rect.width() - 24.0 - 6.0);
+        let (mut slot_out, mut body_out, mut tab_click) = (None, None, None);
+        // The keys wait while a change is under review: its card is in the chat.
+        let setup = (self.ai_setup || !self.chat.ready()) && review_h.is_none();
         let chat = &self.chat;
         let st = &mut self.ai;
         let mut out: Vec<AiAction> = Vec::new();
         let mut hits: Vec<(String, Rect)> = Vec::new();
         let (mut close, mut toggle_setup, mut send, mut focus, mut setup_done) = (false, false, None, false, false);
         let mut menu_at = None;
-        Self::panel(ctx, "assistant", rect, Order::Middle, |ui, rect| {
+        Self::panel(ctx, "assistant", rect, Order::Middle, |ui, full| {
+            // Under the palette block, when the palette heads the column.
+            let rect = Rect::from_min_max(pos2(full.left(), full.top() + blk), full.max);
+            if blk > 0.0 {
+                ui.painter().hline(full.x_range(), rect.top(), Stroke::new(1.0, th().line));
+            }
             let inner = rect.shrink(12.0);
             let p = ui.painter().clone();
             // Header: ASSISTANT, then new conversation, keys and close on the right.
@@ -353,7 +382,50 @@ impl Hybrid {
                     }
                 }
             }
-            let top = inner.top() + 15.0 + 12.0;
+            // Tabs: the chat, and the terminal agents (a dot while one is connected).
+            let ty = inner.top() + 15.0 + 8.0;
+            let mut tx = inner.left();
+            for (id, label, on) in [("ai-tab-chat", "Chat", !agents_tab), ("ai-tab-agents", "Agents", agents_tab)] {
+                let g = p.layout_no_wrap(label.into(), sans_medium(12.0), if on { th().text } else { th().muted });
+                let is_agents = id == "ai-tab-agents";
+                let count =
+                    (is_agents && agents_n > 0).then(|| p.layout_no_wrap(agents_n.to_string(), mono(10.5), th().muted));
+                let dot = if is_agents { agents_tone } else { None };
+                let extra = dot.map_or(0.0, |_| 12.0) + count.as_ref().map_or(0.0, |c| c.size().x + 6.0);
+                let r = Rect::from_min_size(pos2(tx, ty), vec2(g.size().x + 20.0 + extra, 26.0));
+                tx = r.right() + 4.0;
+                let resp = ui.interact(r, Id::unique(id), Sense::click());
+                if on {
+                    p.rect_filled(r, CornerRadius::same(7), th().hover);
+                } else if resp.hovered() {
+                    p.rect_filled(r, CornerRadius::same(7), th().tint(9));
+                }
+                let gc = if on || resp.hovered() { th().text } else { th().muted };
+                let gw = g.size().x;
+                p.galley(pos2(r.left() + 10.0, r.center().y - g.size().y / 2.0), g, gc);
+                let mut x = r.left() + 10.0 + gw + 6.0;
+                if let Some(t) = dot {
+                    p.circle_filled(pos2(x + 2.75, r.center().y), 2.75, t.color());
+                    x += 8.0 + 4.0;
+                }
+                if let Some(c) = count {
+                    p.galley(pos2(x, r.center().y - c.size().y / 2.0), c, th().muted);
+                }
+                hits.push((id.into(), r));
+                if resp.clicked() {
+                    tab_click = Some(id == "ai-tab-agents");
+                }
+            }
+            p.hline(rect.x_range(), ty + 26.0 + 6.0, Stroke::new(1.0, th().line));
+            if agents_tab {
+                // The Agents tab draws over the panel (`agents_tab`).
+                body_out = Some(Rect::from_min_max(
+                    pos2(rect.left(), ty + 26.0 + 8.0),
+                    pos2(rect.right(), rect.bottom() - 8.0),
+                ));
+                return;
+            }
+            let top = ty + 26.0 + 14.0;
             if setup {
                 let body = Rect::from_min_max(pos2(inner.left(), top), inner.max);
                 ui.scope_builder(UiBuilder::new().max_rect(body), |ui| {
@@ -372,7 +444,7 @@ impl Hybrid {
             let text_h = rows as f32 * 18.0;
             let comp_h = 10.0 + text_h + 6.0 + 28.0 + 8.0;
             let comp = Rect::from_min_size(pos2(inner.left(), inner.bottom() - comp_h), vec2(w, comp_h));
-            let mut bottom = comp.top() - 10.0;
+            let mut bottom = if compact { inner.bottom() } else { comp.top() - 10.0 };
             if chat.stop_ask {
                 let b = Rect::from_min_size(pos2(inner.left(), bottom - 76.0), vec2(w, 76.0));
                 bottom = b.top() - 10.0;
@@ -410,6 +482,7 @@ impl Hybrid {
                         ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
                         let w = body.width() - 6.0;
                         if chat.entries.is_empty()
+                            && review_h.is_none()
                             && let Some(t) = Self::ai_welcome(ui, w, &mut hits)
                         {
                             st.draft = t.to_string();
@@ -420,9 +493,18 @@ impl Hybrid {
                                 Entry::Answer(a) => Self::ai_answer(ui, w, i, a, st, &mut hits),
                             }
                         }
+                        // The change under review, under the reply that made it.
+                        if let Some(h) = review_h {
+                            ui.add_space(10.0);
+                            let (r, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+                            slot_out = Some((r, body));
+                        }
                     },
                 );
             });
+            if compact {
+                return;
+            }
             // The composer: the request, the model chip, the spend, Send or Stop.
             let id = Id::unique("ai-draft");
             let focused = ui.memory(|m| m.has_focus(id));
@@ -488,6 +570,11 @@ impl Hybrid {
                 }
             }
         });
+        self.review_slot = slot_out;
+        self.ai_body = body_out;
+        if let Some(agents) = tab_click {
+            self.agents_panel = agents;
+        }
         if let Some(chip) = menu_at {
             self.ai_model_menu(ctx, chip, &mut out, &mut hits);
         }

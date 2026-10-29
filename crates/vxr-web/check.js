@@ -577,18 +577,25 @@ async () => {
   for (const ch of 'terminal agents') await key(ch);
   await key('Enter');
   s = st();
-  step('Cmd-K Terminal agents opens the panel, with vxr bridge and its code', s.agents.panel && s.agents.available && s.agents.web && !s.agents.allowed && ['agents-copy-bridge', 'agents-code', 'agents-allow', 'agents-copy-live'].every((h) => window.vxr.hit(h).length === 2), JSON.stringify(s.agents));
-  await click(...window.vxr.hit('agents-allow'));
-  s = st();
-  step('the switch without a code asks for one', !s.agents.allowed && !s.agents.connecting && /Type the code vxr bridge printed/.test(s.agents.error), JSON.stringify(s.agents));
+  step('Cmd-K Terminal agents opens the Agents tab: the bridge command and the code field', s.agents.panel && s.agents.available && s.agents.web && !s.agents.allowed && ['agents-copy-bridge', 'agents-code'].every((h) => window.vxr.hit(h).length === 2) && window.vxr.hit('agents-disconnect').length === 0, JSON.stringify(s.agents));
   await click(...window.vxr.hit('agents-code'));
-  for (const ch of 'K7QF-3MXP') await key(ch);
-  await key('Enter');
+  for (const ch of 'k7u') await key(ch);
+  s = st();
+  step('the code field upper-cases what is typed and refuses a character no code has', s.agents.code === 'K7' && !s.agents.connecting, JSON.stringify(s.agents));
+  for (const ch of 'qf-3mxp') await key(ch);
   for (let i = 0; i < 100 && !/Nothing answered/.test(st().agents.error ?? ''); i++) await frames(3);
   s = st();
-  step('with nothing on its port the panel says to run vxr bridge', !s.agents.allowed && !s.agents.connecting && /Nothing answered on 127\.0\.0\.1:41723: run vxr bridge/.test(s.agents.error), JSON.stringify(s.agents));
+  step('the eighth character connects; with nothing on its port the step turns red and says to run vxr bridge', !s.agents.allowed && !s.agents.connecting && s.agents.fail === 'Nothing' && /Nothing answered on 127\.0\.0\.1:41723: run vxr bridge/.test(s.agents.error) && window.vxr.hit('agents-retry').length === 2, JSON.stringify(s.agents));
+  await click(...window.vxr.hit('agents-retry'));
+  await frames(3);
+  s = st();
+  step('Try again clears the error and the code', !s.agents.fail && !s.agents.error && s.agents.code === '', JSON.stringify(s.agents));
   await key('Escape');
-  step('Escape closes it', !st().agents.panel);
+  if (st().agents.panel) await key('Escape');
+  step('Escape leaves the Agents tab', !st().agents.panel);
+  // The panel is open on the chat: close it for what follows (the palette is a block of its column).
+  if (JSON.parse(window.vxr.ai()).open) await key('j', cmd);
+  await frames(2);
   await key('?', { shiftKey: true });
   step('? opens the command list, as the coach card says', st().cmdk);
   await key('Escape');
@@ -905,7 +912,21 @@ async () => {
     await frames(4);
     let r = st().review;
     step('a scripted request opens the review card', !!r && answers[0].length === 3 && answers[0].every((a) => a.ok) && !!at('review-apply'), JSON.stringify(answers));
-    step('the card counts the box and lists slot 3', r && r.counts[0] + r.counts[2] === 48 && r.counts[0] > 0 && r.slots.join() === '3' && r.steps.length === 2 && r.summary === 'a red block', JSON.stringify(r));
+    {
+      // The change under review opens the assistant, a full-height column whose top block is the
+      // palette (one row); the card sits in its thread, clear of the camera bar and the render corner.
+      const rect = (n) => window.vxr.hit_rect(n);
+      const clear = (a, b) => !b || !b.length || a[2] <= b[0] || b[2] <= a[0] || a[3] <= b[1] || b[3] <= a[1];
+      const [al, at2, ar, ab] = rect('assistant');
+      const [pl, pt, pr, pb] = rect('palette');
+      const card = rect('review');
+      const [cl, ct, cr] = card;
+      step('the change under review opens the assistant, full height at the right edge', !!al && Math.abs(at2 - 60) < 1 && Math.abs(ar - (innerWidth - 12)) < 1 && ab <= innerHeight, JSON.stringify(rect('assistant')));
+      step('the palette is the top block of the column, one row', pl === al && pt === at2 && pr === ar && pb - pt < 70, JSON.stringify([rect('palette'), rect('assistant')]));
+      step('the card sits in the thread, under the palette block', cl >= al && cr <= ar && ct >= pb, JSON.stringify([card, rect('assistant')]));
+      step('the camera bar and the render corner stay left of the column', ['nav', 'render'].every((n) => clear(rect('assistant'), rect(n))), JSON.stringify([rect('nav'), rect('render')]));
+    }
+    step('the card counts the box and lists slot 3',r && r.counts[0] + r.counts[2] === 48 && r.counts[0] > 0 && r.slots.join() === '3' && r.steps.length === 2 && r.summary === 'a red block', JSON.stringify(r));
     step('staged on the scene, no undo step yet', st().voxels === v0 + r.counts[0] && st().undoLabel === null, `${st().voxels}`);
     await key('z', cmd);
     await click(mx, my);
@@ -923,6 +944,9 @@ async () => {
     step('ask for changes reaches the assistant hook', JSON.stringify(st().asks) === '["bigger"]' && !!st().review, JSON.stringify(st().asks));
     await key('Escape');
     step('Escape discards: the file as it was, no undo step', !st().review && same(bytes(), base) && st().undoLabel === null);
+    // The change opened the panel; close it again for what follows.
+    if (JSON.parse(window.vxr.ai()).open) await key('j', cmd);
+    await frames(2);
     window.vxr.stage(script);
     await frames(3);
     await key('Enter');
@@ -1003,6 +1027,13 @@ async () => {
     step('Cmd-V, Cmd-X and Cmd-C in a field leave the browser\'s clipboard events, Cmd-C and Cmd-X with a selection to act on', clipKeys);
     let a = ai();
     step('the compatible endpoint takes its URL and model', a.kind === 'compatible' && a.base === `${location.origin}/__fake/v1` && a.model === 'stand-in', JSON.stringify(a));
+    // Under a tall palette the assistant's column is short: scroll its settings to the row.
+    for (let i = 0; i < 20 && window.vxr.hit_rect('ai-remember')[3] > window.vxr.hit_rect('assistant')[3] - 8; i++) {
+      const [al, , ar, ab] = window.vxr.hit_rect('assistant');
+      ptr('pointermove', (al + ar) / 2, ab - 40);
+      c.dispatchEvent(new WheelEvent('wheel', { clientX: (al + ar) / 2, clientY: ab - 40, deltaY: 120, bubbles: true, cancelable: true }));
+      await frames(2);
+    }
     await clickAt('ai-remember');
     step('remember in this browser shows its warning', true);
     // A right click on the focused field lands on the page's hidden field, whose browser menu

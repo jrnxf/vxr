@@ -275,6 +275,10 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     materials(&mut s, dir)?;
     export(&mut s, dir)?;
     review(dir)?;
+    review_phone(dir)?;
+    assistant_column(dir)?;
+    column_short_window(dir)?;
+    agents_states(dir)?;
     assistant(dir)?;
     ai_refused()?;
     ai_new_chat()?;
@@ -3155,6 +3159,225 @@ const HOUSE_SCRIPT: &str = r##"{"prompt": "make the roof red, add a flag and ope
     {"name": "done", "input": {"summary": "Painted the roof red, added a flag on a pole and opened a door"}}
 ]}"##;
 
+/// The palette and the assistant share one full-height column at the right: closed, the palette
+/// is its own card at the top right; open, it is the column's top block (one row until it is
+/// opened), the assistant fills the rest and the change under review sits in its thread, clear of
+/// the camera bar and the render corner. At 1280x800, also with a palette of eight swatch rows.
+fn assistant_column(dir: &Path) -> Result<(), String> {
+    let mut s = Shot::new(house(), "house.vox", 2.0)?;
+    s.ed.ui.coach = false;
+    s.ed.cam.distance *= 1.9;
+    let h = s.ed.height as f32;
+    s.ed.cam.pan(-420.0, 0.0, h);
+    s.frames(2);
+    let window = s.ed.width as f32 / 2.0;
+    let rect = |s: &Shot, name: &str| s.ed.ui.hits.get(name).copied().ok_or(format!("no {name} on screen"));
+    let palette0 = rect(&s, "palette")?;
+    check(
+        (palette0.right() - (window - 12.0)).abs() < 0.5 && (palette0.top() - 60.0).abs() < 0.5,
+        format!("closed: the palette is its own card at the top right: {palette0:?}"),
+    )?;
+    s.ed.ui.ai_open = true;
+    s.frames(4);
+    let (pal, ai) = (rect(&s, "palette")?, rect(&s, "assistant")?);
+    s.save_png(&dir.join("app-2x-column.png"))?;
+    check(
+        (ai.right() - (window - 12.0)).abs() < 0.5
+            && (ai.top() - 60.0).abs() < 0.5
+            && (ai.bottom() - (s.ed.height as f32 / 2.0 - 12.0)).abs() < 0.5,
+        format!("open: the assistant runs the column's whole height at the right edge: {ai:?}"),
+    )?;
+    check(
+        ai.contains_rect(pal) && (pal.top() - ai.top()).abs() < 0.5 && (pal.right() - ai.right()).abs() < 0.5,
+        format!("open: the palette is the column's top block: {pal:?} in {ai:?}"),
+    )?;
+    check(
+        pal.height() < 70.0 && s.ed.ui.hits.contains_key("edit-color"),
+        format!("open: it is one row ({:.0} tall) with Edit", pal.height()),
+    )?;
+    let (nav, render) = (rect(&s, "nav")?, rect(&s, "render")?);
+    check(
+        nav.right() < ai.left() && render.right() < ai.left(),
+        "open: the camera bar and the render corner sit left of the column".into(),
+    )?;
+    // A change under review sits in the thread.
+    let answers = s.ed.stage_json(HOUSE_SCRIPT)?;
+    check(answers[0].len() == 6, "a scripted request stages the card for the layout check".into())?;
+    s.frames(40);
+    let (pal, ai, card) = (rect(&s, "palette")?, rect(&s, "assistant")?, rect(&s, "review")?);
+    s.save_png(&dir.join("app-2x-column-review.png"))?;
+    check(
+        ai.contains_rect(card)
+            || (card.left() >= ai.left() && card.right() <= ai.right() && card.top() >= pal.bottom()),
+        format!("the card sits in the assistant's thread, under the palette block: {card:?} in {ai:?}"),
+    )?;
+    check(
+        !card.intersects(pal) && s.ed.ui.hits.contains_key("review-apply"),
+        "the card clears the palette and shows Apply".into(),
+    )?;
+    // Opening the palette block keeps everything in the column.
+    s.ui_click("palette-open")?;
+    s.frames(40);
+    let (pal, ai, card) = (rect(&s, "palette")?, rect(&s, "assistant")?, rect(&s, "review")?);
+    s.save_png(&dir.join("app-2x-column-palette.png"))?;
+    check(
+        !s.ed.ui.palette_folded && pal.height() > 100.0 && ai.contains_rect(pal) && card.top() >= pal.bottom(),
+        format!("the palette block opens inside the column and the card stays under it: {pal:?}, {card:?}"),
+    )?;
+    s.ui_click("palette-fold")?;
+    s.frames(4);
+    check(
+        s.ed.ui.palette_folded && rect(&s, "palette")?.height() < 70.0,
+        "its chevron folds it to one row again".into(),
+    )?;
+    Ok(())
+}
+
+/// The Agents tab's checklist in every state it has: the browser's twelve (not paired, typing, connecting,
+/// a wrong code, paired with no agent, one agent editing, several, the bridge stopped, local access
+/// refused, Safari or Brave blocked) and the desktop app's two, each with the hits it offers and its
+/// tab label, in Neutral, and three of them in Paper. The code field's typing, pasting and refusing.
+fn agents_states(dir: &Path) -> Result<(), String> {
+    use vxr_app::agents::Fail;
+    use vxr_app::theme::ThemeChoice;
+    let has = |s: &Shot, ks: &[&str]| ks.iter().all(|k| s.ed.ui.hits.contains_key(*k));
+    let lacks = |s: &Shot, ks: &[&str]| ks.iter().all(|k| !s.ed.ui.hits.contains_key(*k));
+    // (name, web, allowed, connecting, fail, agents (name, last call seconds ago), shot name)
+    type State = (&'static str, bool, bool, bool, Option<Fail>, &'static [(&'static str, Option<f64>)]);
+    let states: [State; 12] = [
+        ("not-paired", true, false, false, None, &[]),
+        ("typing", true, false, false, None, &[]),
+        ("connecting", true, false, true, None, &[]),
+        ("wrong-code", true, false, false, Some(Fail::Wrong), &[]),
+        ("paired", true, true, false, None, &[]),
+        ("editing", true, true, false, None, &[("Claude Code", Some(1.0))]),
+        ("several", true, true, false, None, &[("Claude Code", Some(1.0)), ("Codex", Some(38.0))]),
+        ("bridge-stopped", true, false, false, Some(Fail::Lost), &[]),
+        ("denied", true, false, false, Some(Fail::Denied), &[]),
+        ("safari", true, false, false, Some(Fail::Safari), &[]),
+        ("desktop-off", false, false, false, None, &[]),
+        ("desktop-live", false, true, false, None, &[("Claude Code", Some(1.0))]),
+    ];
+    for theme in [ThemeChoice::Neutral, ThemeChoice::Paper] {
+        for (name, web, allowed, connecting, fail, agents) in states {
+            if theme == ThemeChoice::Paper && !["several", "not-paired", "wrong-code"].contains(&name) {
+                continue;
+            }
+            let mut s = Shot::new(house(), "house.vox", 2.0)?;
+            s.ed.ui.theme = theme;
+            s.ed.ui.coach = false;
+            s.frames(2);
+            let now = s.ed.ctx.input(|i| i.time);
+            let a = &mut s.ed.agents;
+            (a.available, a.web, a.allowed, a.connecting, a.fail) = (true, web, allowed, connecting, fail);
+            a.error = fail.map(|_| "the link failed".to_string());
+            a.since = allowed.then_some(now - 240.0);
+            a.clients = agents.iter().enumerate().map(|(i, (n, _))| (i as u64 + 1, n.to_string())).collect();
+            a.note_clients(now - 240.0);
+            for (i, (_, last)) in agents.iter().enumerate() {
+                if let Some(ago) = last {
+                    a.note_call(i as u64 + 1, now - ago, "box");
+                }
+            }
+            s.ed.ui.open_agents();
+            s.frames(6);
+            if name == "typing" {
+                s.type_into("agents-code", "k7qf3")?;
+                s.frames(4);
+            }
+            let ok = match name {
+                "not-paired" | "typing" => {
+                    has(&s, &["agents-copy-bridge", "agents-code"]) && lacks(&s, &["agents-disconnect", "agents-retry"])
+                }
+                "connecting" => has(&s, &["agents-cancel"]) && lacks(&s, &["agents-retry", "agents-disconnect"]),
+                "wrong-code" | "denied" => has(&s, &["agents-code", "agents-retry"]) && lacks(&s, &["agents-desktop"]),
+                "bridge-stopped" => has(&s, &["agents-copy-bridge", "agents-retry", "agents-code"]),
+                "safari" => has(&s, &["agents-desktop", "agents-code"]) && lacks(&s, &["agents-retry"]),
+                "paired" => {
+                    has(
+                        &s,
+                        &["agents-copy", "agents-copy-live", "agents-review", "agents-disconnect", "agents-regenerate"],
+                    ) && lacks(&s, &["agents-code"])
+                }
+                "editing" => {
+                    has(&s, &["agents-stop-1", "agents-review", "agents-disconnect"]) && lacks(&s, &["agents-copy"])
+                }
+                "several" => has(&s, &["agents-stop-1", "agents-stop-2", "agents-review", "agents-disconnect"]),
+                "desktop-off" => {
+                    has(&s, &["agents-allow"]) && lacks(&s, &["agents-code", "agents-copy", "agents-review"])
+                }
+                _ => {
+                    has(&s, &["agents-allow", "agents-stop-1", "agents-review", "agents-regenerate"])
+                        && lacks(&s, &["agents-code", "agents-disconnect"])
+                }
+            };
+            check(ok, format!("{name}: the checklist offers its own controls"))?;
+            let hits_ok = has(&s, &["ai-tab-agents", "agents-panel"]);
+            check(hits_ok, format!("{name}: the Agents tab shows"))?;
+            let suffix = if theme == ThemeChoice::Paper { "-paper" } else { "" };
+            s.save_png(&dir.join(format!("app-2x-agents-{name}{suffix}.png")))?;
+            if name == "typing" {
+                check(s.ed.ui.agents_code == "K7QF3", "typing: upper case as typed".into())?;
+            }
+        }
+    }
+    // The code field: a paste in any form fills every cell, and the eighth character connects.
+    let mut s = Shot::new(house(), "house.vox", 2.0)?;
+    s.ed.ui.coach = false;
+    s.frames(2);
+    let a = &mut s.ed.agents;
+    (a.available, a.web) = (true, true);
+    s.ed.ui.open_agents();
+    s.frames(4);
+    s.ui_click("agents-code")?;
+    s.frames_with(2, vec![egui::Event::Paste("k7qf 3mxp".into())]);
+    s.frames(2);
+    check(s.ed.ui.agents_code == "K7QF3MXP", format!("a paste in any form fills all cells: {}", s.ed.ui.agents_code))?;
+    check(s.host.contains(&Action::PairBridge), "the eighth character connects".into())?;
+    s.host.clear();
+    s.ed.ui.agents_code.clear();
+    s.frames_with(2, vec![egui::Event::Paste("o1l".into())]);
+    check(s.ed.ui.agents_code == "011", format!("O reads as 0, I and L as 1: {}", s.ed.ui.agents_code))?;
+    s.frames_with(2, vec![egui::Event::Text("u".into())]);
+    check(s.ed.ui.agents_code == "011", "a character no code has is refused".into())?;
+    s.save_png(&dir.join("app-2x-agents-code.png"))?;
+    Ok(())
+}
+
+/// A palette of eight swatch rows (over 104 colours), opened, in a 1280x800 window with the
+/// assistant open and a change under review: the column holds, clear of the camera bar and the
+/// render corner.
+fn column_short_window(dir: &Path) -> Result<(), String> {
+    let mut scene = house();
+    let cells: Vec<_> =
+        (0..120u8).map(|i| (scene.to_map([i as i32 % 32 - 16, 0, -10 - i as i32 / 32]), 100 + i)).collect();
+    scene.edit(cells);
+    let mut s = Shot::new(scene, "house.vox", 2.0)?;
+    s.ed.ui.coach = false;
+    s.ed.ui.palette_folded = false;
+    s.ed.ui.ai_open = true;
+    s.frames(2);
+    let answers = s.ed.stage_json(HOUSE_SCRIPT)?;
+    check(answers[0].len() == 6, "a scripted request stages the card for the short window check".into())?;
+    s.frames(40);
+    let rect = |s: &Shot, name: &str| s.ed.ui.hits.get(name).copied().ok_or(format!("no {name} on screen"));
+    let (palette, ai, card, nav, render) =
+        (rect(&s, "palette")?, rect(&s, "assistant")?, rect(&s, "review")?, rect(&s, "nav")?, rect(&s, "render")?);
+    s.save_png(&dir.join("app-2x-column-short.png"))?;
+    check(palette.height() > 270.0, format!("the palette shows eight swatch rows ({:.0} tall)", palette.height()))?;
+    let screen =
+        egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(s.ed.width as f32 / 2.0, s.ed.height as f32 / 2.0));
+    check(
+        screen.contains_rect(ai) && ai.contains_rect(palette) && card.left() >= ai.left() && card.right() <= ai.right(),
+        format!("the palette and the card stay in the column: {palette:?}, {card:?} in {ai:?}"),
+    )?;
+    check(
+        [nav, render].iter().all(|r| !ai.intersects(*r)),
+        "the camera bar and the render corner stay clear of the column".into(),
+    )?;
+    Ok(())
+}
+
 /// The review step of an AI change, driven by scripted tool calls through the same session,
 /// card and ghost the assistant will use: exact counts, the ghost in the view and its
 /// removals hidden from the render corner, Before and After, a dropped step, every other edit
@@ -3172,6 +3395,9 @@ fn review(dir: &Path) -> Result<(), String> {
     let position = s.ed.scene.history().position();
     let same = |s: &Shot| s.voxels() == v0 && s.ed.scene.map.counts == counts0 && s.ed.scene.palette == palette0;
     let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    // A change under review opens the assistant, which narrows the view: start with it open.
+    s.ed.ui.ai_open = true;
+    s.frames(2);
     let plain = view_pixels(&mut s);
     let answers = s.ed.stage_json(HOUSE_SCRIPT)?;
     let ok = answers[0].iter().all(|a| matches!(a, vxr_app::review::Answer::Ok(_)));
@@ -3306,6 +3532,81 @@ fn review(dir: &Path) -> Result<(), String> {
     check(c.held.is_none() && c.counts[0] == 1 + 32 * 21 * 32, format!("Allow stages it: +{} added", c.counts[0]))?;
     s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
     check(same(&s), "and Escape drops it all".into())?;
+    Ok(())
+}
+
+/// A change under review on a phone held upright (390x844, 3x): the assistant opens as a sheet
+/// over the lower half only, so the scene and the change's ghost show above it, with Before,
+/// Discard and Apply in the sheet. Closing the sheet sticks while the change waits, and the
+/// sparkles button opens it again on the card. Writes `app-3x-phone-390x844-review.png`.
+fn review_phone(dir: &Path) -> Result<(), String> {
+    let mut s = Shot::sized(house(), "house.vox", 3.0, (390, 844))?;
+    s.ed.set_touch(true);
+    s.ed.ui.coach = false;
+    s.frames(3);
+    let plain = view_pixels(&mut s);
+    let position = s.ed.scene.history().position();
+    s.ed.stage_json(HOUSE_SCRIPT)?;
+    s.frames(3);
+    let ghost = view_pixels(&mut s);
+    // The view's pixels the ghost changes where no UI covers them, below the top bar (the
+    // card's parts count as the sheet that clips them).
+    let shown = |s: &Shot| {
+        let screen = s.ed.ctx.content_rect();
+        let (w, ppp) = (s.ed.width as usize, s.ed.width as f32 / screen.width());
+        let top = s.ed.ui.hits.get("ai-toggle").map_or(0.0, |r| r.bottom());
+        let a = plain.as_chunks::<4>().0.iter();
+        a.zip(ghost.as_chunks::<4>().0)
+            .enumerate()
+            .filter(|(i, (x, y))| {
+                let p = egui::pos2((i % w) as f32 / ppp, (i / w) as f32 / ppp);
+                x != y && p.y > top && !s.ed.ui.hits.iter().any(|(n, r)| !n.starts_with("review") && r.contains(p))
+            })
+            .count()
+    };
+    // In the sheet's thread: under its tabs, above its bottom.
+    let in_sheet = |s: &Shot| {
+        let (sheet, tabs) = (s.ed.ui.hits.get("assistant"), s.ed.ui.hits.get("ai-tab-chat"));
+        let thread = sheet.zip(tabs).map(|(sh, t)| egui::Rect::from_min_max(egui::pos2(sh.left(), t.bottom()), sh.max));
+        ["review-before", "review-discard", "review-apply"]
+            .iter()
+            .all(|n| s.ed.ui.hits.get(*n).zip(thread).is_some_and(|(r, th)| th.contains_rect(*r)))
+    };
+    let half = s.ed.ctx.content_rect().height() / 2.0;
+    let sheet = s.ed.ui.hits.get("assistant").copied().ok_or("the review opens no sheet")?;
+    let seen = shown(&s);
+    check(
+        s.ed.ui.ai_open && sheet.height() <= half && in_sheet(&s) && seen > 2000,
+        format!(
+            "upright phone review: the sheet ({sheet:?}) takes at most half the screen, {seen} pixels of the ghost show above it, Before, Discard and Apply are in it ({})",
+            in_sheet(&s)
+        ),
+    )?;
+    s.frames(40);
+    s.save_png(&dir.join("app-3x-phone-390x844-review.png"))?;
+    s.ui_click("ai-close")?;
+    s.frames(3);
+    let all = shown(&s);
+    check(
+        !s.ed.ui.ai_open && s.ed.review.is_some() && !s.ed.ui.hits.contains_key("assistant") && all > seen,
+        format!("closing the sheet sticks while the change waits: {all} pixels of the ghost show"),
+    )?;
+    s.ui_click("ai-toggle")?;
+    s.frames(3);
+    check(s.ed.ui.ai_open && in_sheet(&s), "the sparkles button opens the sheet on the card again".into())?;
+    // A request still running keeps the composer's Stop in the sheet, to keep what it staged.
+    s.ed.ui.chat.running = true;
+    s.frames(2);
+    let stop =
+        s.ed.ui.hits.get("ai-stop").zip(s.ed.ui.hits.get("assistant")).is_some_and(|(r, sh)| sh.contains_rect(*r));
+    s.ed.ui.chat.running = false;
+    s.frames(2);
+    check(stop, "a running request shows Stop in the review sheet".into())?;
+    s.ui_click("review-apply")?;
+    check(
+        s.ed.review.is_none() && s.ed.scene.history().position() == position + 1,
+        "Apply in the sheet lands the change as one undo step".into(),
+    )?;
     Ok(())
 }
 
@@ -3767,6 +4068,8 @@ fn assistant(dir: &Path) -> Result<(), String> {
         !s.ed.assistant.running() && s.ed.ui.review.as_ref().is_some_and(|c| c.counts[0] == 32 * 19 * 32),
         "Allow runs it and the request finishes".into(),
     )?;
+    // The thread scrolls to the card, which takes a few frames after it changes size.
+    s.frames(4);
     s.ui_click("review-discard")?;
     check(same(&s), "Discard drops it".into())?;
 
@@ -3801,7 +4104,11 @@ fn assistant(dir: &Path) -> Result<(), String> {
     )?;
     s.frames(20);
     s.save_png(&dir.join("app-2x-ask-card.png"))?;
+    s.frames(4);
     s.ui_click("review-discard")?;
+    // The change opened the panel; close it again.
+    s.ed.ui.ai_open = false;
+    s.frames(2);
     // With no command matching, the one row asks AI.
     s.frames_with(2, vec![key_event(egui::Key::K, egui::Modifiers::COMMAND)]);
     s.frames_with(2, vec![egui::Event::Text("put a chimney on the roof".into())]);
@@ -4143,10 +4450,10 @@ impl Shot {
     }
 }
 
-/// Live mode end to end through a real socket in a temporary folder: Cmd-K opens the Terminal
-/// agents panel, its switch opens the socket with a token only the user can read, an agent's
-/// calls apply at once as undo steps named after it, the chip and the Agent edits card show,
-/// the card's Undo takes back an earlier edit and the agent's `undo` its last, a call waits
+/// Live mode end to end through a real socket in a temporary folder: Cmd-K opens the
+/// assistant's Agents tab, its switch opens the socket with a token only the user can read, an
+/// agent's calls apply at once as undo steps named after it, the chip and the Agent edits list
+/// show, the list's Undo takes back an earlier edit and the agent's `undo` its last, a call waits
 /// while the user drags and is refused under review, Stop ends an agent for good, a new token
 /// turns old agents away, and the switch closes the socket.
 #[cfg(unix)]
@@ -4177,13 +4484,18 @@ fn agents_live(dir: &Path) -> Result<(), String> {
         s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
         check(s.ed.ui.agents_panel, "Cmd-K Terminal agents opens the panel".into())?;
         check(
-            s.ed.ui.hits.contains_key("agents-copy")
-                && s.ed.ui.hits.contains_key("agents-copy-live")
+            s.ed.ui.hits.contains_key("agents-allow")
+                && !s.ed.ui.hits.contains_key("agents-copy")
                 && !s.ed.ui.agents.allowed,
-            "the panel shows the setup lines, switched off".into(),
+            "the tab shows the allow step, switched off, and no setup lines yet".into(),
         )?;
         s.ui_click("agents-allow")?;
         s.live_frames(&mut live, 2);
+        s.live_frames(&mut live, 4);
+        check(
+            s.ed.ui.hits.contains_key("agents-copy") && s.ed.ui.hits.contains_key("agents-copy-live"),
+            "once it listens the connect step shows the setup lines".into(),
+        )?;
         let mode = |p: std::path::PathBuf| std::fs::metadata(p).map(|m| m.permissions().mode() & 0o777).unwrap_or(0);
         check(
             live.on() && s.ed.ui.agents.allowed && sock_dir.join(SOCKET).exists(),
@@ -4218,19 +4530,21 @@ fn agents_live(dir: &Path) -> Result<(), String> {
         check(names == ["Claude Code"], format!("the panel lists the agent: {names:?}"))?;
         s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
         s.live_frames(&mut live, 2);
-        check(!s.ed.ui.agents_panel, "Escape closes the panel".into())?;
+        check(!s.ed.ui.agents_panel, "Escape leaves the Agents tab".into())?;
         check(
             s.ed.ui.hits.contains_key("agent-stop") && s.ed.ui.hits.contains_key("agent-chip"),
             "the hint bar shows the agent with Stop".into(),
         )?;
+        s.ui_click("ai-tab-agents")?;
+        s.live_frames(&mut live, 4);
         check(
-            (0..4).all(|i| s.ed.ui.hits.contains_key(&format!("agent-undo-{i}"))),
-            "the Agent edits card lists the 4 edits, each with Undo".into(),
+            s.ed.ui.agents_panel && (0..4).all(|i| s.ed.ui.hits.contains_key(&format!("agent-undo-{i}"))),
+            "the Agents tab lists the 4 edits, each with Undo".into(),
         )?;
         s.live_frames(&mut live, 40);
         s.save_png(&dir.join("app-2x-agents.png"))?;
 
-        // The card's Undo on the first edit: reverted under the three after it.
+        // The list's Undo on the first edit: reverted under the three after it.
         s.ui_click("agent-undo-0")?;
         s.live_frames(&mut live, 2);
         check(
@@ -4238,7 +4552,7 @@ fn agents_live(dir: &Path) -> Result<(), String> {
                 && s.ed.scene.history().undo_label() == Some("Undo Claude Code: paint 392 voxels")
                 && !s.ed.ui.agents.edits[0].applied
                 && s.ed.ui.agents.edits[1..].iter().all(|e| e.applied),
-            "the card's Undo takes back the paint alone, as its own step".into(),
+            "the list's Undo takes back the paint alone, as its own step".into(),
         )?;
         check(!s.ed.ui.hits.contains_key("agent-undo-0"), "its row says Undone".into())?;
         // The agent's undo takes back its own last edit still in effect: the flag.
@@ -4284,6 +4598,98 @@ fn agents_live(dir: &Path) -> Result<(), String> {
         let (t, e) = s.agent_call(&mut live, &mut claude, "erase", serde_json::json!({"cells": [[0, 12, 0]]}));
         check(e && t.contains("reviewing"), "a call under review is refused".into())?;
         s.ed.discard_review();
+
+        // Review every agent change: the panel's second switch, off by default.
+        use vxr_app::agents::WAITING;
+        s.ed.ui.open_agents();
+        s.live_frames(&mut live, 2);
+        check(!s.ed.ui.agents.review && s.ed.ui.hits.contains_key("agents-review"), "review is off by default".into())?;
+        s.ui_click("agents-review")?;
+        s.live_frames(&mut live, 2);
+        check(s.ed.agents.review && s.ed.ui.agents.review, "its switch turns review on".into())?;
+        s.live_frames(&mut live, 40);
+        s.save_png(&dir.join("app-2x-agents-review-panel.png"))?;
+        s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+        s.live_frames(&mut live, 2);
+        // Edits wait as a preview: no undo step, drawn as the AI change is, one card for every agent.
+        let (voxels, label) = (s.voxels(), s.ed.scene.history().undo_label().map(str::to_string));
+        let undo_label = |s: &Shot| s.ed.scene.history().undo_label().map(str::to_string);
+        let (t, e) = s.agent_call(
+            &mut live,
+            &mut claude,
+            "box",
+            serde_json::json!({"from": [9, 10, 12], "to": [12, 11, 12], "slot": 50}),
+        );
+        check(
+            !e && t.ends_with(WAITING),
+            format!("with review on an edit waits ({})", t.chars().take(60).collect::<String>()),
+        )?;
+        let mut codex = LiveAgent::new(&sock_dir, "codex");
+        let (t, e) =
+            s.agent_call(&mut live, &mut codex, "place", serde_json::json!({"cells": [[14, 10, 8]], "slot": 9}));
+        check(!e && t.ends_with(WAITING), "another agent's edit joins the same change".into())?;
+        s.live_frames(&mut live, 2);
+        let card = s.ed.ui.review.clone();
+        check(
+            card.as_ref().is_some_and(|c| c.agents && c.prompt == "Claude Code and Codex" && c.counts == [9, 0, 0])
+                && s.ed.ui.hits.contains_key("review-apply")
+                && !s.ed.ui.hits.contains_key("review-ask"),
+            format!("the agent change card lists both agents' edits: {:?}", card.map(|c| (c.prompt, c.counts))),
+        )?;
+        check(
+            s.voxels() == voxels + 9 && undo_label(&s) == label,
+            "staged on the scene as a ghost, with no undo step yet".into(),
+        )?;
+        let (t, _) = s.agent_call(&mut live, &mut claude, "review_status", serde_json::json!({}));
+        check(t.starts_with("1 edit of yours wait"), format!("review_status says it waits: {t}"))?;
+        s.live_frames(&mut live, 40);
+        s.save_png(&dir.join("app-2x-agent-review.png"))?;
+        // Apply: one undo step per edit, named after its agent; each agent hears it.
+        s.ui_click("review-apply")?;
+        s.live_frames(&mut live, 2);
+        let n = s.ed.agents.edits.len();
+        let last: Vec<&str> = s.ed.agents.edits[n - 2..].iter().map(|e| e.label.as_str()).collect();
+        check(
+            s.ed.review.is_none()
+                && undo_label(&s).as_deref() == Some("Codex: place 1 voxel")
+                && last == ["Claude Code: box 8 voxels", "Codex: place 1 voxel"],
+            format!("Apply lands each edit as an undo step named after its agent: {last:?}"),
+        )?;
+        let (t, _) = s.agent_call(&mut live, &mut claude, "review_status", serde_json::json!({}));
+        check(t.starts_with("vxr: the user applied your 1 edit"), format!("review_status tells the agent: {t}"))?;
+        let (t, _) = s.agent_call(&mut live, &mut codex, "scene_summary", serde_json::json!({}));
+        check(t.starts_with("vxr: the user applied your 1 edit"), "the other hears it with its next call".into())?;
+        // Discard: the scene is as it was, and the agent hears it.
+        let (voxels, label) = (s.voxels(), undo_label(&s));
+        s.agent_call(&mut live, &mut claude, "erase", serde_json::json!({"cells": [[14, 10, 8]]}));
+        check(s.ed.ui.review.as_ref().is_some_and(|c| c.counts == [0, 1, 0]), "an erase waits too".into())?;
+        s.ui_click("review-discard")?;
+        s.live_frames(&mut live, 2);
+        check(
+            s.ed.review.is_none() && s.voxels() == voxels && undo_label(&s) == label,
+            "Discard leaves the scene and its undo steps as they were".into(),
+        )?;
+        let (t, _) = s.agent_call(&mut live, &mut claude, "scene_summary", serde_json::json!({}));
+        check(t.starts_with("vxr: the user discarded"), "the agent hears it was discarded".into())?;
+        // The assistant's request waits for the agents' change, and Stop leaves the change for the user.
+        s.agent_call(&mut live, &mut codex, "place", serde_json::json!({"cells": [[8, 12, 8]], "slot": 9}));
+        check(!s.ed.ask("make it red"), "the assistant waits for the agents' change".into())?;
+        let conn = s.ed.agents.clients.iter().find(|c| c.1 == "Codex").map(|c| c.0).unwrap_or(0);
+        s.ed.ui.open_agents();
+        s.live_frames(&mut live, 2);
+        s.ui_click(&format!("agents-stop-{conn}"))?;
+        s.live_frames(&mut live, 3);
+        let (t, e) = s.agent_call(&mut live, &mut codex, "scene_summary", serde_json::json!({}));
+        check(
+            e && t == STOPPED && s.ed.ui.review.as_ref().is_some_and(|c| c.counts == [1, 0, 0]),
+            "Stop during a review cuts the agent off; its edit waits for the user".into(),
+        )?;
+        s.ui_click("review-discard")?;
+        s.ui_click("agents-review")?;
+        s.live_frames(&mut live, 2);
+        check(s.ed.review.is_none() && !s.ed.agents.review, "review off again".into())?;
+        s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+        s.live_frames(&mut live, 2);
 
         // Stop on the chip ends the agent for good; another can still connect.
         s.live_frames(&mut live, 2);
@@ -4464,7 +4870,7 @@ impl Shot {
 /// and Regenerate in the panel behave as on desktop; the switch and the bridge stopping end it.
 #[cfg(unix)]
 fn agents_bridge(dir: &Path) -> Result<(), String> {
-    use vxr_app::bridge::{BAD_CODE, LOST, Page};
+    use vxr_app::bridge::{LOST, Page};
     use vxr_mcp::bridge::{Bridge, Config, WRONG_CODE, show_code};
     use vxr_mcp::live::{NOT_LIVE, REFUSED, SOCKET, STOPPED, TOKEN};
     let base = std::env::temp_dir().join(format!("vxw-{}", std::process::id()));
@@ -4491,30 +4897,44 @@ fn agents_bridge(dir: &Path) -> Result<(), String> {
             v.web
                 && v.available
                 && !v.allowed
-                && ["agents-copy-bridge", "agents-code", "agents-allow", "agents-copy-live"]
-                    .iter()
-                    .all(|k| s.ed.ui.hits.contains_key(*k)),
-            "the browser's panel says to run vxr bridge and takes its code, switched off".into(),
+                && ["agents-copy-bridge", "agents-code"].iter().all(|k| s.ed.ui.hits.contains_key(*k))
+                && !s.ed.ui.hits.contains_key("agents-disconnect"),
+            "the browser's tab says to run vxr bridge and takes its code, not paired".into(),
         )?;
         let mut claude = LiveAgent::new(&sock_dir, "claude-code");
         let (t, e) = s.bridge_call(&mut page, &mut script, &mut claude, "scene_summary", serde_json::json!({}));
         check(e && t == NOT_LIVE && !sock_dir.join(SOCKET).exists(), "before pairing an agent finds nothing".into())?;
 
-        // A code that cannot be one, then a wrong one.
-        s.ui_click("agents-allow")?;
+        // Fewer than eight characters open nothing; a character no code has is refused; a wrong
+        // code is refused by the bridge.
+        s.type_into("agents-code", "K7Q")?;
         s.bridge_frames(&mut page, &mut script, 2);
         check(
-            s.ed.ui.agents.error.as_deref() == Some(BAD_CODE) && script.ws.is_none(),
-            "no code: nothing opens".into(),
+            s.ed.ui.agents_code == "K7Q" && script.ws.is_none() && s.ed.ui.agents.error.is_none(),
+            "three characters: nothing opens".into(),
         )?;
+        s.type_into("agents-code", "k7u")?;
+        check(s.ed.ui.agents_code == "K7", "a character no code has (U) is refused".into())?;
         s.type_into("agents-code", "0000-0000")?;
         let refused = s.bridge_until(&mut page, &mut script, |s| s.ed.ui.agents.error.as_deref() == Some(WRONG_CODE));
         check(
-            refused && !s.ed.ui.agents.allowed && !sock_dir.join(SOCKET).exists(),
-            "a wrong code is refused, with no socket for agents".into(),
+            refused
+                && s.ed.ui.agents.fail == Some(vxr_app::agents::Fail::Wrong)
+                && !s.ed.ui.agents.allowed
+                && !sock_dir.join(SOCKET).exists()
+                && s.ed.ui.hits.contains_key("agents-retry"),
+            "the eighth character connects, a wrong code is refused, with no socket for agents".into(),
+        )?;
+        s.bridge_frames(&mut page, &mut script, 40);
+        s.save_png(&dir.join("app-2x-agents-web-wrong.png"))?;
+        s.ui_click("agents-retry")?;
+        s.bridge_frames(&mut page, &mut script, 3);
+        check(
+            s.ed.ui.agents.fail.is_none() && s.ed.ui.agents_code.is_empty() && s.ed.ui.agents.error.is_none(),
+            "Try again clears the error and the code".into(),
         )?;
 
-        // The code vxr bridge printed, typed loosely, and Enter.
+        // The code vxr bridge printed, typed loosely: spaces, dashes, case and O for 0 are read.
         s.type_into("agents-code", &show_code(&code).to_lowercase())?;
         let paired = s.bridge_until(&mut page, &mut script, |s| s.ed.ui.agents.allowed);
         check(
@@ -4599,21 +5019,30 @@ fn agents_bridge(dir: &Path) -> Result<(), String> {
         let (t, e) = s.bridge_call(&mut page, &mut script, &mut codex, "scene_summary", serde_json::json!({}));
         check(old != new && e && t == REFUSED, "Regenerate makes a new token and turns old agents away".into())?;
 
-        // The switch ends the link: the bridge closes the agents' socket.
-        s.ui_click("agents-allow")?;
+        // Disconnect ends the link: the bridge closes the agents' socket.
+        s.ui_click("agents-disconnect")?;
         let off = s.bridge_until(&mut page, &mut script, |_| !sock_dir.join(SOCKET).exists() && !bridge.paired());
         s.bridge_frames(&mut page, &mut script, 2);
-        check(off && !s.ed.ui.agents.allowed, "the switch unpairs the tab and the socket closes".into())?;
+        check(off && !s.ed.ui.agents.allowed, "Disconnect unpairs the tab and the socket closes".into())?;
         let mut fresh = LiveAgent::new(&sock_dir, "claude-code");
         let (t, e) = s.bridge_call(&mut page, &mut script, &mut fresh, "scene_summary", serde_json::json!({}));
         check(e && t == NOT_LIVE, "an agent then finds the tab off".into())?;
 
         // The same code pairs again; the bridge stopping is shown.
-        s.ui_click("agents-allow")?;
-        check(s.bridge_until(&mut page, &mut script, |s| s.ed.ui.agents.allowed), "the switch pairs again".into())?;
+        s.type_into("agents-code", &show_code(&code))?;
+        check(s.bridge_until(&mut page, &mut script, |s| s.ed.ui.agents.allowed), "the code pairs again".into())?;
         drop(bridge);
         let lost = s.bridge_until(&mut page, &mut script, |s| !s.ed.ui.agents.allowed);
-        check(lost && s.ed.ui.agents.error.as_deref() == Some(LOST), "the bridge stopping turns the tab off".into())?;
+        check(
+            lost && s.ed.ui.agents.error.as_deref() == Some(LOST)
+                && s.ed.ui.agents.fail == Some(vxr_app::agents::Fail::Lost),
+            "the bridge stopping turns the tab off".into(),
+        )?;
+        s.bridge_frames(&mut page, &mut script, 4);
+        check(
+            ["agents-copy-bridge", "agents-retry", "agents-code"].iter().all(|k| s.ed.ui.hits.contains_key(*k)),
+            "its step turns red with the command, Try again and the code field for the new code".into(),
+        )?;
         s.bridge_frames(&mut page, &mut script, 40);
         s.save_png(&dir.join("app-2x-agents-web-lost.png"))?;
         Ok(())
@@ -4624,8 +5053,8 @@ fn agents_bridge(dir: &Path) -> Result<(), String> {
 
 /// `vxr --agents <dir> [scene.vox]`, only in a build with the `live` feature: the live mode
 /// check from a real terminal agent. The editor runs headless on the scene (the house if none
-/// is given) with "Allow terminal agents" switched on through the panel, at the default
-/// socket, as the window would; while an agent is connected each applied or undone edit
+/// is given) with "Allow agents to edit this window" switched on through the Agents tab, at the
+/// default socket, as the window would; while an agent is connected each applied or undone edit
 /// writes `agents-live.png` (chip and card), and once `<dir>/done` appears (or after 15 minutes) it
 /// writes `agents-live-done.png` and the scene as `agents-live.vox` and stops.
 #[cfg(all(feature = "live", unix))]
