@@ -136,8 +136,11 @@ pub struct Editor {
     /// frame's actions; agents wait until then ([`Editor::agent_busy`]).
     agent_host: Vec<Action>,
     /// An agent's `new_scene` that asked the user through the New scene confirm: the agent's
-    /// connection and, once the confirm closed, whether the user started the new scene.
-    agent_new: Option<(u64, Option<bool>)>,
+    /// connection, [`Editor::loads`] when it asked and, once the confirm closed, whether the
+    /// user started the new scene.
+    agent_new: Option<(u64, u64, Option<bool>)>,
+    /// How many scenes were loaded (opened or started new), to tell which scene is shown.
+    loads: u64,
     /// A PNG render export in progress (the corner pauses meanwhile).
     pub export: Option<Export>,
     /// The last finished export's PNG and size, for the host to save or download.
@@ -266,6 +269,7 @@ impl Editor {
             saved_at: 0,
             agent_host: Vec::new(),
             agent_new: None,
+            loads: 0,
             export: None,
             exported: None,
             export_fits: [false; 4],
@@ -289,6 +293,7 @@ impl Editor {
 
     /// Replace the scene (after Open), reframing the camera.
     pub fn load(&mut self, scene: Scene, name: &str) -> Result<(), String> {
+        self.loads += 1;
         // A change under review belongs to the scene it was staged on.
         self.assistant.stop(now_ms() / 1000.0);
         self.assistant.stop_ask = false;
@@ -1549,7 +1554,7 @@ impl Editor {
                 other => host.push(other),
             }
         }
-        if let Some((_, answer @ None)) = &mut self.agent_new
+        if let Some((_, _, answer @ None)) = &mut self.agent_new
             && !self.ui.confirm_new
         {
             *answer = Some(started);
@@ -1580,7 +1585,7 @@ impl Editor {
         // A save an agent asked for runs first, so it saves the scene as the agent left it.
         !self.agent_host.is_empty()
             // An agent's New scene waits for the user's answer to its confirm.
-            || matches!(self.agent_new, Some((_, None)))
+            || matches!(self.agent_new, Some((_, _, None)))
             || self.gesture.is_some()
             || self.moving.is_some()
             || self.marquee.is_some()
@@ -1670,15 +1675,19 @@ impl Editor {
             }));
         }
         match self.agent_new.take() {
-            Some((c, Some(false))) if c == conn => {
-                return Some(Err(format!("the user kept {scene}: they cancelled New scene, so nothing changed")));
+            Some((c, at, Some(false))) if c == conn => {
+                return Some(Err(if self.loads == at {
+                    format!("the user kept {scene}: they cancelled New scene, so nothing changed")
+                } else {
+                    format!("the user opened {scene} instead of starting a new scene: New scene did not run")
+                }));
             }
             // The user started it from the confirm, as the UI's New does.
-            Some((c, Some(true))) if c == conn => {}
+            Some((c, _, Some(true))) if c == conn => {}
             _ if self.scene.history().position() != self.saved_at => {
                 self.ui.cmdk = None;
                 self.ui.confirm_new = true;
-                self.agent_new = Some((conn, None));
+                self.agent_new = Some((conn, self.loads, None));
                 return None;
             }
             _ => {
