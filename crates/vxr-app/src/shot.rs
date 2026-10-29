@@ -275,6 +275,7 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     materials(&mut s, dir)?;
     export(&mut s, dir)?;
     review(dir)?;
+    review_phone(dir)?;
     assistant_column(dir)?;
     column_short_window(dir)?;
     agents_states(dir)?;
@@ -3531,6 +3532,73 @@ fn review(dir: &Path) -> Result<(), String> {
     check(c.held.is_none() && c.counts[0] == 1 + 32 * 21 * 32, format!("Allow stages it: +{} added", c.counts[0]))?;
     s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
     check(same(&s), "and Escape drops it all".into())?;
+    Ok(())
+}
+
+/// A change under review on a phone held upright (390x844, 3x): the assistant opens as a sheet
+/// over the lower half only, so the scene and the change's ghost show above it, with Before,
+/// Discard and Apply in the sheet. Closing the sheet sticks while the change waits, and the
+/// sparkles button opens it again on the card. Writes `app-3x-phone-390x844-review.png`.
+fn review_phone(dir: &Path) -> Result<(), String> {
+    let mut s = Shot::sized(house(), "house.vox", 3.0, (390, 844))?;
+    s.ed.set_touch(true);
+    s.ed.ui.coach = false;
+    s.frames(3);
+    let plain = view_pixels(&mut s);
+    let position = s.ed.scene.history().position();
+    s.ed.stage_json(HOUSE_SCRIPT)?;
+    s.frames(3);
+    let ghost = view_pixels(&mut s);
+    // The view's pixels the ghost changes where no UI covers them, below the top bar (the
+    // card's parts count as the sheet that clips them).
+    let shown = |s: &Shot| {
+        let screen = s.ed.ctx.content_rect();
+        let (w, ppp) = (s.ed.width as usize, s.ed.width as f32 / screen.width());
+        let top = s.ed.ui.hits.get("ai-toggle").map_or(0.0, |r| r.bottom());
+        let a = plain.as_chunks::<4>().0.iter();
+        a.zip(ghost.as_chunks::<4>().0)
+            .enumerate()
+            .filter(|(i, (x, y))| {
+                let p = egui::pos2((i % w) as f32 / ppp, (i / w) as f32 / ppp);
+                x != y && p.y > top && !s.ed.ui.hits.iter().any(|(n, r)| !n.starts_with("review") && r.contains(p))
+            })
+            .count()
+    };
+    // In the sheet's thread: under its tabs, above its bottom.
+    let in_sheet = |s: &Shot| {
+        let (sheet, tabs) = (s.ed.ui.hits.get("assistant"), s.ed.ui.hits.get("ai-tab-chat"));
+        let thread = sheet.zip(tabs).map(|(sh, t)| egui::Rect::from_min_max(egui::pos2(sh.left(), t.bottom()), sh.max));
+        ["review-before", "review-discard", "review-apply"]
+            .iter()
+            .all(|n| s.ed.ui.hits.get(*n).zip(thread).is_some_and(|(r, th)| th.contains_rect(*r)))
+    };
+    let half = s.ed.ctx.content_rect().height() / 2.0;
+    let sheet = s.ed.ui.hits.get("assistant").copied().ok_or("the review opens no sheet")?;
+    let seen = shown(&s);
+    check(
+        s.ed.ui.ai_open && sheet.height() <= half && in_sheet(&s) && seen > 2000,
+        format!(
+            "upright phone review: the sheet ({sheet:?}) takes at most half the screen, {seen} pixels of the ghost show above it, Before, Discard and Apply are in it ({})",
+            in_sheet(&s)
+        ),
+    )?;
+    s.frames(40);
+    s.save_png(&dir.join("app-3x-phone-390x844-review.png"))?;
+    s.ui_click("ai-close")?;
+    s.frames(3);
+    let all = shown(&s);
+    check(
+        !s.ed.ui.ai_open && s.ed.review.is_some() && !s.ed.ui.hits.contains_key("assistant") && all > seen,
+        format!("closing the sheet sticks while the change waits: {all} pixels of the ghost show"),
+    )?;
+    s.ui_click("ai-toggle")?;
+    s.frames(3);
+    check(s.ed.ui.ai_open && in_sheet(&s), "the sparkles button opens the sheet on the card again".into())?;
+    s.ui_click("review-apply")?;
+    check(
+        s.ed.review.is_none() && s.ed.scene.history().position() == position + 1,
+        "Apply in the sheet lands the change as one undo step".into(),
+    )?;
     Ok(())
 }
 

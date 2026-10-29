@@ -1,5 +1,5 @@
 //! The desktop app's end of live mode: the socket ([`vxr_mcp::live::Host`]), opened and
-//! closed by the Terminal agents panel's switch, and the agents' requests, run on the
+//! closed by the Agents tab's switch, and the agents' requests, run on the
 //! editor's thread once a frame ([`Editor::agent_call`]). A request waits while the user is
 //! in the middle of a drag, so an agent never edits under the pointer.
 

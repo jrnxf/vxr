@@ -9,9 +9,9 @@
 //!   any port, for `crates/vxr-web/check`), and its `Host` must name the loopback address and
 //!   this port, which turns away DNS rebinding. Anything else gets 403 and is hung up on.
 //! - Pairing: the bridge prints a random code ([`new_code`]); the user types it into the
-//!   page's Terminal agents panel, and the page sends it first. Nothing is forwarded before it
-//!   matches (compared in constant time). Five wrong codes retire it and print a new one. One
-//!   page at a time.
+//!   assistant's Agents tab in the page, and the page sends it first. Nothing is forwarded
+//!   before it matches (compared in constant time). Five wrong codes retire it and print a new
+//!   one. One page at a time.
 //! - Once paired, the bridge hosts the desktop app's socket ([`crate::live::Host`]), so `vxr
 //!   mcp --live` connects to it unchanged with its token file, and forwards each agent's
 //!   request to the page and the page's answer back. The page leaving closes the socket.
@@ -73,13 +73,11 @@ pub fn code_char_skipped(c: char) -> bool {
 pub fn normalize_code(s: &str) -> Option<String> {
     let mut out = String::new();
     for c in s.chars() {
-        let c = match c.to_ascii_uppercase() {
-            ' ' | '-' => continue,
-            'O' => '0',
-            'I' | 'L' => '1',
-            c => c,
-        };
-        if !c.is_ascii() || !ALPHABET.contains(&(c as u8)) || out.len() == CODE_LEN {
+        if code_char_skipped(c) {
+            continue;
+        }
+        let c = code_char(c)?;
+        if out.len() == CODE_LEN {
             return None;
         }
         out.push(c);
@@ -165,7 +163,7 @@ vxr-live server (vxr mcp --live) edits the scene in that tab, as it does the des
 Ctrl-C stops it."#;
 
 #[cfg(unix)]
-const NEXT: &str = "In the page, press Cmd-K, choose \"Terminal agents (MCP)…\", type the code and turn on\n\"Allow terminal agents to edit this tab\". Then your agent's vxr-live server (vxr mcp --live)\nedits the scene there. Ctrl-C stops.";
+const NEXT: &str = "In the page, press Cmd-K, choose \"Terminal agents (MCP)…\" and type the code: the tab\nconnects on its eighth character. Then your agent's vxr-live server (vxr mcp --live)\nedits the scene there. Ctrl-C stops.";
 
 #[cfg(unix)]
 mod server {

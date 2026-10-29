@@ -35,7 +35,7 @@ const HELP: &str = r#"usage: vxr mcp --root <dir> | vxr mcp --live
 Serves MCP on stdin and stdout for a terminal agent such as Claude Code.
 
   --root <dir>  open, edit and save the .vox files under <dir>
-  --live        edit the scene open in the vxr window, once its Terminal agents panel
+  --live        edit the scene open in the vxr window, once the assistant's Agents tab
                 (Cmd-K "Terminal agents (MCP)…") allows it, or in a vxr.jrnxf.co tab
                 paired with `vxr bridge`
 

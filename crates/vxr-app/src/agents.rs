@@ -1,7 +1,7 @@
 //! Terminal agents editing the window through `vxr mcp --live` (`docs/research/ai.md`
 //! section 3, live mode): each edit call applies at once as one undo step named after the
-//! agent ("Claude Code: paint 412 voxels"), listed in the Agent edits card with an Undo of
-//! its own. With "Review every agent change" on, edits wait instead in one change under
+//! agent ("Claude Code: paint 412 voxels"), listed in the assistant's Agents tab with an Undo
+//! of its own. With "Review every agent change" on, edits wait instead in one change under
 //! review that every agent adds to ([`Agents::stage`]), drawn as the assistant's is, until
 //! the user applies it (each edit then lands as the same undo step) or discards it; each
 //! agent hears which on its next call or from `review_status`. The socket is the host's
@@ -39,7 +39,7 @@ pub struct Agents {
     pub edits: Vec<AgentEdit>,
     /// The connected agents: connection and name, set by the host each frame.
     pub clients: Vec<(u64, String)>,
-    /// The window listens for agents ("Allow terminal agents to edit this window").
+    /// The window listens for agents ("Allow agents to edit this window" in the Agents tab).
     pub allowed: bool,
     /// Live mode can run here: the desktop app on a system with Unix domain sockets, or the
     /// browser through `vxr bridge`.
@@ -267,7 +267,7 @@ impl Agents {
     }
 
     /// The user applied the agents' change under review: each edit kept lands as one undo
-    /// step named after its agent, as without review, listed in the Agent edits card, and
+    /// step named after its agent, as without review, listed in the Agents tab, and
     /// each agent hears what became of its edits. Returns how many steps landed.
     pub fn apply_review(&mut self, scene: &mut Scene, review: Review) -> usize {
         let names = review.agents.clone().unwrap_or_default();

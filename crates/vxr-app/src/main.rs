@@ -5,7 +5,7 @@
 //!   review step (see `vxr_app::review::Script`), so the card and ghost can be tried by hand.
 //! - `vxr mcp --root <dir>` serves MCP on stdin and stdout: an agent opens, edits and saves the
 //!   `.vox` files under `<dir>` (see `vxr-mcp`). `vxr mcp --live` edits the scene open in a
-//!   running window instead, once its Terminal agents panel (Cmd-K) allows it.
+//!   running window instead, once the assistant's Agents tab (Cmd-K) allows it.
 //! - `vxr bridge` lets `vxr mcp --live` edit the scene open in the browser editor at
 //!   vxr.jrnxf.co instead: the page pairs with it over a loopback WebSocket with the code it
 //!   prints (see `vxr_mcp::bridge`).

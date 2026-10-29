@@ -264,7 +264,7 @@ impl Hybrid {
     pub fn toggle_ai(&mut self) {
         if self.ai_open {
             self.ai_open = false;
-        } else if !self.chat.ready() {
+        } else if !self.chat.ready() && self.review.is_none() {
             self.open_ai_setup(None);
         } else {
             self.ai_open = true;
@@ -321,9 +321,12 @@ impl Hybrid {
             return;
         }
         let rect = if self.sheet() {
-            // A phone held upright: the width of the screen, down to the dock.
+            // A phone held upright: the width of the screen, down to the dock. While a change is
+            // under review only the lower half, so the scene and its ghost show above it.
             let bottom = self.dock_rows(screen).last().map_or(screen.bottom() - 12.0, |r| r.top() - 8.0);
-            Rect::from_min_max(pos2(screen.left() + 12.0, TOP), pos2(screen.right() - 12.0, bottom.max(TOP + 240.0)))
+            let bottom = bottom.max(TOP + 240.0);
+            let top = if self.review.is_some() { ((TOP + bottom) / 2.0).min(bottom - 240.0) } else { TOP };
+            Rect::from_min_max(pos2(screen.left() + 12.0, top), pos2(screen.right() - 12.0, bottom))
         } else {
             // The right column, top to bottom: the palette is its top block (`palette_panel`).
             Rect::from_min_max(
@@ -332,6 +335,9 @@ impl Hybrid {
             )
         };
         let blk = if self.docked() { self.palette_block_h() } else { 0.0 };
+        // The half sheet of a review on a phone gives the card the composer's room: the card
+        // has its own field to ask for changes.
+        let compact = self.sheet() && self.review.is_some();
         let agents_tab = self.agents_panel;
         let (agents_tone, agents_n) = self.agents_status();
         // The review card sits at the end of the thread, as wide as the thread.
@@ -437,7 +443,7 @@ impl Hybrid {
             let text_h = rows as f32 * 18.0;
             let comp_h = 10.0 + text_h + 6.0 + 28.0 + 8.0;
             let comp = Rect::from_min_size(pos2(inner.left(), inner.bottom() - comp_h), vec2(w, comp_h));
-            let mut bottom = comp.top() - 10.0;
+            let mut bottom = if compact { inner.bottom() } else { comp.top() - 10.0 };
             if chat.stop_ask {
                 let b = Rect::from_min_size(pos2(inner.left(), bottom - 76.0), vec2(w, 76.0));
                 bottom = b.top() - 10.0;
@@ -495,6 +501,9 @@ impl Hybrid {
                     },
                 );
             });
+            if compact {
+                return;
+            }
             // The composer: the request, the model chip, the spend, Send or Stop.
             let id = Id::unique("ai-draft");
             let focused = ui.memory(|m| m.has_focus(id));

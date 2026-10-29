@@ -1,10 +1,10 @@
 //! Terminal agents in the Hybrid UI (`docs/research/ai.md` section 3, live mode, after the
-//! `mcp.html` and `mcp-live.html` mocks): the Terminal agents panel (Cmd-K) with "Allow
-//! terminal agents to edit this window", the setup line, the pairing token and the agents
-//! connected; the chip in the hint bar while an agent is connected, with Stop; and the
-//! Agent edits card, each applied call with an Undo of its own. In the browser the panel
-//! says to run `vxr bridge` and takes the pairing code it prints ([`crate::bridge`]). Drawn
-//! in the panel style.
+//! `mcp.html` and `mcp-live.html` mocks): the assistant panel's Agents tab (Cmd-K), a checklist
+//! with "Allow agents to edit this window", the setup line and the agents connected, then the
+//! review switch and the Agent edits list, each applied call with an Undo of its own; and the
+//! chip in the hint bar while an agent is connected, with Stop. In the browser the tab says to
+//! run `vxr bridge` and takes the pairing code it prints ([`crate::bridge`]). Drawn in the
+//! panel style.
 
 pub use crate::agents::Fail;
 use egui::{ScrollArea, UiBuilder};
@@ -53,6 +53,8 @@ pub struct AgentsView {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct EditRow {
+    /// The agent's connection, which tells two agents of the same name apart.
+    pub conn: u64,
     pub label: String,
     /// The edit is in the scene (not undone).
     pub applied: bool,
@@ -581,13 +583,14 @@ impl Tab {
         let (conn, name) = self.v.clients[i].clone();
         let (since, last) = self.v.times.get(i).copied().unwrap_or((self.now, None));
         let is_editing = editing(self.now, last);
-        let n = self.v.edits.iter().filter(|e| e.label.starts_with(&format!("{name}: "))).count();
+        let n = self.v.edits.iter().filter(|e| e.conn == conn).count();
         let what = self
             .v
             .edits
             .iter()
             .rev()
-            .find_map(|e| e.label.strip_prefix(&format!("{name}: ")))
+            .find(|e| e.conn == conn)
+            .and_then(|e| e.label.strip_prefix(&format!("{name}: ")))
             .map(str::to_string)
             .unwrap_or_default();
         let r = self.block(ui, 44.0);

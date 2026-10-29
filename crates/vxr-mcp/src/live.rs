@@ -102,7 +102,7 @@ pub fn client_name(raw: &str) -> String {
 }
 
 /// Text for the agent when the window is not there to edit.
-pub const NOT_LIVE: &str = "vxr is not open, or live editing is off. Ask the user to open vxr, press Cmd-K, choose \"Terminal agents\" and turn on \"Allow terminal agents to edit this window\"; in the browser editor at vxr.jrnxf.co, to run `vxr bridge` in a terminal and pair the tab there with the code it prints. Then call again.";
+pub const NOT_LIVE: &str = "vxr is not open, or live editing is off. Ask the user to open vxr, press Cmd-K, choose \"Terminal agents (MCP)…\" and turn on \"Allow agents to edit this window\"; in the browser editor at vxr.jrnxf.co, to run `vxr bridge` in a terminal and pair the tab there with the code it prints. Then call again.";
 pub const STOPPED: &str = "The user pressed Stop in vxr: this server will not edit the window again. Stop here and tell the user; they can reconnect it (in Claude Code, /mcp) when they want you to edit again.";
 pub const REFUSED: &str = "vxr refused this server's pairing token: the user made a new one. Restart this MCP server (in Claude Code, /mcp) to pair again.";
 

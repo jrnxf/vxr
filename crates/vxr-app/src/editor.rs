@@ -157,7 +157,7 @@ pub struct Editor {
     chat_shown: Option<u64>,
     /// Terminal agents editing the window through `vxr mcp --live`, and what they did.
     pub agents: Agents,
-    /// The agents version and history position the UI's Agent edits card shows.
+    /// The agents version and history position the Agents tab's Agent edits list shows.
     agents_shown: Option<(u64, u64)>,
 }
 
@@ -1402,6 +1402,7 @@ impl Editor {
             self.agents_shown = Some(key);
             self.ui.agents.edits = (0..self.agents.edits.len())
                 .map(|i| EditRow {
+                    conn: self.agents.edits[i].conn,
                     label: self.agents.edits[i].label.clone(),
                     applied: self.agents.in_effect(&self.scene, i),
                 })
@@ -1635,7 +1636,7 @@ impl Editor {
         }
     }
 
-    /// The Terminal agents panel's "Review every agent change" switch. Turned off, a change
+    /// The Agents tab's "Review every agent change" switch. Turned off, a change
     /// already waiting stays for the user to apply or discard.
     fn review_agents(&mut self, on: bool) {
         self.agents.review = on;
@@ -1647,7 +1648,7 @@ impl Editor {
         self.ui.toast(&self.ctx, msg);
     }
 
-    /// The Agent edits card's Undo on edit `i`.
+    /// Undo on edit `i` in the Agents tab's Agent edits list.
     pub fn undo_agent_edit(&mut self, i: usize) {
         self.gesture = None;
         self.moving = None;

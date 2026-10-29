@@ -336,7 +336,7 @@ pub enum Action {
     /// Disconnect one agent, or every agent (for the host).
     StopAgent(u64),
     StopAgents,
-    /// Take back one agent edit (the Agent edits card's Undo).
+    /// Take back one agent edit (Undo in the Agents tab's Agent edits list).
     UndoAgentEdit(usize),
     /// The theme was picked (for the host to keep: `Hybrid::theme`).
     Theme,
@@ -659,8 +659,7 @@ pub struct Hybrid {
     stats_right: f32,
     /// Where the camera bar was drawn, which the review card keeps clear of.
     nav_rect: Option<Rect>,
-    /// Terminal agents (set by the editor), the Terminal agents panel, and how many edits
-    /// there were when the Agent edits card was closed (it shows again on the next).
+    /// Terminal agents (set by the editor), as the assistant's Agents tab shows them.
     pub agents: AgentsView,
     /// The assistant panel shows its Agents tab (the Terminal agents controls and the Agent
     /// edits list) instead of the chat.
@@ -1202,9 +1201,11 @@ impl Hybrid {
         self.narrow = self.phone && screen.width() < NARROW_W;
         self.short = self.phone && !self.narrow;
         // A change under review needs its card: the panel opens on the chat (where it sits in the
-        // thread) when one appears, and stays open until it is applied or discarded.
+        // thread) when one appears, and stays open until it is applied or discarded. On a phone
+        // held upright it is a sheet over the scene, which the user may close to look: the
+        // sparkles button opens it again.
         let reviewing = self.review.is_some();
-        if reviewing {
+        if reviewing && (!self.review_seen || !self.narrow) {
             if !self.review_seen {
                 self.agents_panel = false;
             }
@@ -1516,12 +1517,14 @@ impl Hybrid {
 
     /// Contents drawn straight over what is behind them, clipped to `clip` (no fill, no shadow).
     fn bare(ctx: &Context, id: &str, rect: Rect, clip: Rect, contents: impl FnOnce(&mut Ui, Rect)) {
+        let seen = rect.intersect(clip);
+        let seen = if seen.is_positive() { seen } else { Rect::from_min_size(clip.min, vec2(0.0, 0.0)) };
         let shown =
-            Area::new(Id::unique(id)).fade_in(false).order(Order::Middle).fixed_pos(rect.min).constrain(false).show(
+            Area::new(Id::unique(id)).fade_in(false).order(Order::Middle).fixed_pos(seen.min).constrain(false).show(
                 ctx,
                 |ui| {
                     ui.set_clip_rect(clip);
-                    ui.allocate_rect(rect, Sense::hover());
+                    ui.allocate_rect(seen, Sense::hover());
                     contents(ui, rect);
                 },
             );
@@ -3017,11 +3020,6 @@ impl Hybrid {
         }
     }
 
-    // The review card of an AI change: not in the mockups' Hybrid set (docs/research/ai.md,
-    // section 2, and its review mock). A .panel by the palette (see `card_origin`): the request,
-    // what the change adds, removes and repaints, the palette slots it sets, the steps with a
-    // checkbox each, Before and After, a field to ask for changes, and Discard and Apply. Over
-    // 10,000 cells it asks before staging more.
     /// The review card's text laid out for a card `w` wide, and how tall it is.
     fn review_measure(ctx: &Context, card: &ReviewCard, w: f32) -> ReviewMeasure {
         let inner_w = w - 24.0;
@@ -3126,6 +3124,11 @@ impl Hybrid {
         self.review.as_ref().map(|c| Self::review_measure(ctx, c, w).h)
     }
 
+    // The review card of an AI change: not in the mockups' Hybrid set (docs/research/ai.md,
+    // section 2, and its review mock). Drawn in the assistant's thread (`review_slot`): the
+    // request, what the change adds, removes and repaints, the palette slots it sets, the steps
+    // with a checkbox each, Before and After, a field to ask for changes, and Discard and Apply.
+    // Over 10,000 cells it asks before staging more.
     fn review_card(&mut self, ctx: &Context) {
         let Some(card) = self.review.take() else {
             self.ask_focus = false;
@@ -3401,7 +3404,7 @@ impl Hybrid {
                     .frame(egui::Frame::NONE)
                     .margin(egui::Margin::ZERO)
                     .desired_width(tr.width());
-                let resp = ui.put(tr, edit);
+                let resp = ui.place(tr, edit);
                 hits.push(("review-ask".into(), fr));
                 ask_focus = resp.has_focus();
                 if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) && !ask.trim().is_empty() {

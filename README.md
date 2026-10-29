@@ -14,7 +14,7 @@ vxr setup claude   # optional: let Claude Code edit scenes (or: vxr setup codex)
 ```
 
 - `vxr` opens the editor, and `vxr scene.vox` opens a file in it. `vxr setup app` adds `~/Applications/vxr.app`, so Spotlight opens it too; it links to Homebrew's copy, so `brew upgrade vxr` updates it.
-- `vxr setup claude` (or `vxr setup codex`) registers vxr's two MCP servers with that agent, for every project: `vxr` edits the `.vox` files in `~/vxr` (`--root <dir>` picks another folder), and `vxr-live` edits the scene open in the editor while its Terminal agents panel allows it. Running it again replaces both, so it is also how to change the folder.
+- `vxr setup claude` (or `vxr setup codex`) registers vxr's two MCP servers with that agent, for every project: `vxr` edits the `.vox` files in `~/vxr` (`--root <dir>` picks another folder), and `vxr-live` edits the scene open in the editor while the assistant's Agents tab allows it. Running it again replaces both, so it is also how to change the folder.
 - macOS 13 or later, on Apple silicon or Intel: the release is one universal app, with nothing to compile. Until the first full release, brew installs the latest pre-release (`v0.1.0-pre.N`), and `brew upgrade vxr` moves to the next one.
 - The browser editor at https://vxr.jrnxf.co needs nothing installed.
 
