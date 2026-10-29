@@ -1178,7 +1178,9 @@ impl Hybrid {
         if self.phone {
             // Under the flyouts, which open over the camera bar and the render corner.
             self.render_corner(ctx, screen, stats);
-            if !sheet {
+            if sheet {
+                self.nav_rect = None;
+            } else {
                 self.nav_bar(ctx, screen);
             }
         }
