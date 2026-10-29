@@ -71,6 +71,7 @@ struct FrameU {
     cam_u: [f32; 4],
     cam_f: [f32; 4],
     post: [f32; 4],
+    backdrop: [[f32; 4]; 2],
 }
 
 #[repr(C)]
@@ -262,6 +263,8 @@ pub struct Preview {
     last_post: [f32; 3],
     /// Sampling stops at this many samples per pixel until something changes.
     pub max_spp: u32,
+    /// The editor view's background gradient behind the scene (`ViewColors::sky`).
+    backdrop: [[u8; 3]; 2],
     cursor: u32,
     frame_counter: u32,
     force_restart: bool,
@@ -539,6 +542,7 @@ impl Preview {
             last_key: None,
             last_post: [1.0, 2.2, 0.0],
             max_spp: MAX_SPP,
+            backdrop: crate::ViewColors::NEUTRAL.sky,
             cursor: 0,
             frame_counter: 0,
             force_restart: true,
@@ -599,6 +603,15 @@ impl Preview {
             );
         }
         queue.write_buffer(&self.ghost, 0, bytemuck::cast_slice(words));
+    }
+
+    /// Show the editor view's background gradient (the theme's `ViewColors::sky`) behind the
+    /// scene. Restarts sampling when it changes.
+    pub fn set_backdrop(&mut self, sky: [[u8; 3]; 2]) {
+        if sky != self.backdrop {
+            self.backdrop = sky;
+            self.force_restart = true;
+        }
     }
 
     /// Drop all accumulated samples on the next frame (a new scene).
@@ -683,6 +696,7 @@ impl Preview {
             cam_u: [up.x, up.y, up.z, focus],
             cam_f: [fwd.x, fwd.y, fwd.z, l.sky.max(0.0)],
             post: [2.2 / l.gamma.max(0.1), l.vignette.clamp(0.0, 1.0), 0.0, 0.0],
+            backdrop: self.backdrop.map(|c| [c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0, 0.0]),
         };
         queue.write_buffer(&self.frame_buf, 0, bytemuck::bytes_of(&u));
     }

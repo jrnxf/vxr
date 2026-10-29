@@ -20,6 +20,7 @@ struct CameraUniform {
     select: [u32; 4],
     pix: [f32; 4],
     bounds: [u32; 4],
+    colors: [[f32; 4]; 8],
 }
 
 /// What the editor view draws besides the voxels, in map coordinates. Off by default, so a
@@ -38,6 +39,49 @@ pub struct Guides {
     pub frame: bool,
     /// Line width in pixels (the display's pixels per point).
     pub line: f32,
+}
+
+/// The editor view's own colours, from the UI theme, in sRGB. Voxels keep their palette colours.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ViewColors {
+    /// The background's radial gradient: the colour at its centre (50% across, 35% down) and
+    /// the one it reaches at 70% of a 120% x 90% ellipse.
+    pub sky: [[u8; 3]; 2],
+    /// The ground, fading into the background away from the model.
+    pub tile: [u8; 3],
+    /// The ground under the model bounds.
+    pub base: [u8; 3],
+    /// The voxel grid's lines.
+    pub grid: [u8; 3],
+    /// The bounds frame's edges.
+    pub frame: [u8; 3],
+    /// The selection's tint (the theme's accent) and its voxel edges.
+    pub select: [u8; 3],
+    pub select_edge: [u8; 3],
+}
+
+impl ViewColors {
+    /// shadcn/ui's Neutral (dark): greys with no hue.
+    pub const NEUTRAL: ViewColors = ViewColors {
+        sky: [[0x1c; 3], [0x0a; 3]],
+        tile: [0x19; 3],
+        base: [0x24; 3],
+        grid: [0x52; 3],
+        frame: [0xa1; 3],
+        select: [0xe5; 3],
+        select_edge: [0x17; 3],
+    };
+
+    fn uniform(&self) -> [[f32; 4]; 8] {
+        let c = |c: [u8; 3]| [c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0, 1.0];
+        [self.sky[0], self.sky[1], self.tile, self.base, self.grid, self.frame, self.select, self.select_edge].map(c)
+    }
+}
+
+impl Default for ViewColors {
+    fn default() -> Self {
+        Self::NEUTRAL
+    }
 }
 
 pub struct Renderer {
@@ -67,6 +111,7 @@ pub struct Renderer {
     ghost: wgpu::Buffer,
     ghost_words: u32,
     pub guides: Guides,
+    pub colors: ViewColors,
 }
 
 impl Renderer {
@@ -225,6 +270,7 @@ impl Renderer {
             ghost,
             ghost_words: 0,
             guides: Guides::default(),
+            colors: ViewColors::default(),
         }
     }
 
@@ -306,6 +352,7 @@ impl Renderer {
             select: [self.sel_words, self.width.div_ceil(FRAME_TILE), self.ghost_words, 0],
             pix: [pix[0], pix[1], g.floor as f32, g.line.max(1.0)],
             bounds: [g.bounds[0], g.bounds[1], g.bounds[2], flags],
+            colors: self.colors.uniform(),
         };
         queue.write_buffer(&self.cam, 0, bytemuck::bytes_of(&u));
     }

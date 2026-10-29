@@ -110,6 +110,7 @@ impl Export {
         materials: &[Material; 256],
         cam: OrbitCamera,
         settings: &RenderSettings,
+        backdrop: [[u8; 3]; 2],
     ) -> Result<Self, String> {
         let (w, h) = settings.export_size();
         if !Preview::fits(&gpu.device, w, h) {
@@ -119,6 +120,7 @@ impl Export {
         preview.set_materials(&gpu.queue, materials);
         preview.lighting = settings.lighting(cam.distance);
         preview.max_spp = settings.samples();
+        preview.set_backdrop(backdrop);
         Ok(Self { preview, cam, readback: None })
     }
 

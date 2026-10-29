@@ -3,6 +3,7 @@ use std::rc::Rc;
 use vxr_app::Editor;
 use vxr_app::editor::{Button, NEW_SIZE};
 use vxr_app::files::{obj_files, slices_png, zip};
+use vxr_app::theme::ThemeChoice;
 use vxr_app::ui::{Action, FontBytes};
 use vxr_core::Scene;
 use vxr_render::Gpu;
@@ -30,6 +31,8 @@ pub struct App {
     cursor: egui::CursorIcon,
     /// Text a field copied or cut in the last frame, for the page to put on the clipboard.
     copied: Option<String>,
+    /// The system is in dark mode (`prefers-color-scheme`), for the System theme.
+    dark: bool,
 }
 
 /// Start the editor on `canvas` with the `.vox` bytes (an empty array opens a new scene).
@@ -87,6 +90,7 @@ pub async fn start(
         modifiers: egui::Modifiers::default(),
         cursor: egui::CursorIcon::Default,
         copied: None,
+        dark: true,
     })
 }
 
@@ -106,6 +110,22 @@ impl App {
             self.modifiers = m;
             self.events.push(egui::Event::ModifiersChanged(m));
         }
+    }
+
+    /// The system went dark (true) or light: the System theme follows it.
+    pub fn set_system_dark(&mut self, dark: bool) {
+        self.dark = dark;
+    }
+
+    /// Pick a theme by its id (`system`, `neutral`, `paper`, `gruvbox`, `tokyo-night`,
+    /// `kanagawa`, `nord`), as the page kept it. False for an unknown id.
+    pub fn set_theme(&mut self, id: &str) -> bool {
+        ThemeChoice::from_id(id).map(|c| self.editor.ui.theme = c).is_some()
+    }
+
+    /// The picked theme's id, for the page to keep after a "theme" action.
+    pub fn theme(&self) -> String {
+        self.editor.ui.theme.id().into()
     }
 
     /// The window lost focus: release held keys so nothing sticks.
@@ -245,7 +265,8 @@ impl App {
     }
 
     /// Draw a frame at `time` seconds. Returns what the page must do: "open", "save", "embed",
-    /// "obj" (download `export_obj`), "slices" (download `export_slices`) or "exported" (a render export is ready: `take_export`).
+    /// "obj" (download `export_obj`), "slices" (download `export_slices`), "exported" (a render export is ready: `take_export`)
+    /// or "theme" (a theme was picked: keep `theme`).
     pub fn frame(&mut self, time: f64) -> Vec<String> {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
@@ -263,6 +284,7 @@ impl App {
             time: Some(time),
             focused: true,
             events: std::mem::take(&mut self.events),
+            system_theme: Some(if self.dark { egui::Theme::Dark } else { egui::Theme::Light }),
             ..Default::default()
         };
         input.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point = Some(ppp);
@@ -282,6 +304,7 @@ impl App {
                 Action::ExportObj => Some("obj".into()),
                 Action::ExportSlices => Some("slices".into()),
                 Action::Exported => Some("exported".into()),
+                Action::Theme => Some("theme".into()),
                 _ => None,
             })
             .collect()
@@ -358,7 +381,7 @@ impl App {
         let e = &self.editor;
         let (c, h) = (&e.cam, e.scene.history());
         format!(
-            r#"{{"voxels":{},"tool":"{:?}","shape":"{:?}","mirror":{},"mirrorAxes":[{},{},{}],"lock":{},"brushSize":{},"sizePanel":{},"lifting":{},"span":{},"selected":{},"region":"{:?}","hasClip":{},"bounds":[{},{},{}],"boundsPanel":{},"slot":{},"colorEdit":{},"slotOp":"{:?}","undo":{},"redo":{},"cmdk":{},"coach":{},"name":{:?},"size":[{},{}],"ppp":{},"cam":[{},{},{},{},{},{}],"ortho":{},"inView":[{},{}],"cameraHints":{},"view":{},"viewPanel":{},"exportMenu":{},"confirmNew":{},"guides":[{},{},{}],"mode":"{}","objects":{},"models":{},"picked":{},"tree":[{}],"treeOn":{},"layers":[{}],"layerOn":{},"render":{{"shown":{},"spp":{},"rows":{},"restarts":{},"timestamps":{},"panel":{},"full":{},"size":[{},{}],"maxSpp":{},"exposure":{},"gamma":{},"vignette":{},"aperture":{},"sky":{},"physicalSky":{},"export":{}}},"review":{},"undoLabel":{},"asks":{:?},"agents":{{"panel":{},"available":{}}}}}"#,
+            r#"{{"voxels":{},"tool":"{:?}","shape":"{:?}","mirror":{},"mirrorAxes":[{},{},{}],"lock":{},"brushSize":{},"sizePanel":{},"lifting":{},"span":{},"selected":{},"region":"{:?}","hasClip":{},"bounds":[{},{},{}],"boundsPanel":{},"slot":{},"colorEdit":{},"slotOp":"{:?}","undo":{},"redo":{},"cmdk":{},"coach":{},"name":{:?},"size":[{},{}],"ppp":{},"cam":[{},{},{},{},{},{}],"ortho":{},"inView":[{},{}],"cameraHints":{},"view":{},"viewPanel":{},"exportMenu":{},"confirmNew":{},"theme":"{}","themeMenu":{},"themeShown":{:?},"guides":[{},{},{}],"mode":"{}","objects":{},"models":{},"picked":{},"tree":[{}],"treeOn":{},"layers":[{}],"layerOn":{},"render":{{"shown":{},"spp":{},"rows":{},"restarts":{},"timestamps":{},"panel":{},"full":{},"size":[{},{}],"maxSpp":{},"exposure":{},"gamma":{},"vignette":{},"aperture":{},"sky":{},"physicalSky":{},"export":{}}},"review":{},"undoLabel":{},"asks":{:?},"agents":{{"panel":{},"available":{}}}}}"#,
             e.scene.map.voxels,
             e.ui.tool,
             e.ui.shape,
@@ -403,6 +426,9 @@ impl App {
             e.ui.view_panel,
             e.ui.export_menu,
             e.ui.confirm_new,
+            e.ui.theme.id(),
+            e.ui.theme_menu,
+            e.ui.shown_theme(&e.ctx).name,
             e.ui.grid,
             e.ui.ground,
             e.ui.frame,

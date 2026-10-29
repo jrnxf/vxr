@@ -7,3 +7,9 @@ canvas#c { position: fixed; inset: 0; width: 100%; height: 100%; display: block;
 #msg[hidden] { display: none; }
 #msg p { max-width: 30em; margin: 0; color: #a1a1a1; }
 #msg strong { display: block; color: #fafafa; font-size: 16px; margin-bottom: 4px; }
+/* Before the editor draws: shadcn Neutral, light or dark like the System theme. */
+@media (prefers-color-scheme: light) {
+  html, body { background: #ffffff; color: #0a0a0a; }
+  #msg p { color: #737373; }
+  #msg strong { color: #0a0a0a; }
+}

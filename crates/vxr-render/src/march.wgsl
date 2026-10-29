@@ -14,6 +14,10 @@ struct Camera {
     pix: vec4<f32>,
     // The model bounds' size (map voxels); w = which guides show (GRID | GROUND | FRAME).
     bounds: vec4<u32>,
+    // The theme's view colours in sRGB, 0 to 1 (`ViewColors`): the background gradient's inner
+    // and outer colour, the ground's tile and base, the grid, the bounds frame, the selection
+    // tint and its edges.
+    colors: array<vec4<f32>, 8>,
 };
 
 @group(0) @binding(0) var<uniform> cam: Camera;
@@ -30,10 +34,10 @@ struct Camera {
 // 1 added, 2 repainted, 3 removed (still in the map until Apply, drawn as what goes).
 @group(2) @binding(1) var<storage, read> ghost: array<u32>;
 
-// Selection highlight, the UI's accent #e5e5e5 (shadcn Neutral's --primary) in linear light, with
-// edges in its --primary-foreground #171717 so a selection reads on pale voxels too.
-const SELECT_TINT: vec3<f32> = vec3<f32>(0.789, 0.789, 0.789);
-const SELECT_EDGE: vec3<f32> = vec3<f32>(0.008, 0.008, 0.008);
+// Selection highlight, the theme's accent, with edges in the colour on its accent so a selection
+// reads on pale voxels too.
+fn select_tint() -> vec3<f32> { return srgb_to_linear(cam.colors[6].rgb); }
+fn select_edge() -> vec3<f32> { return srgb_to_linear(cam.colors[7].rgb); }
 // Ghost tints, the UI's OK #6ee7a8 (added) and DANGER #ff6467 (removed) in linear light;
 // repainted cells keep their new colour with an accent edge.
 const ADDED_TINT: vec3<f32> = vec3<f32>(0.155, 0.799, 0.392);
@@ -87,15 +91,13 @@ fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
     return pow(c, vec3<f32>(2.2));
 }
 
-// The editor background: a radial gradient from #1c1c1c at 50% 35% to #0a0a0a (shadcn Neutral's
-// --background) at 70% of a 120% x 90% ellipse, the Hybrid mockups' shape with no hue.
+// The editor background: a radial gradient from the theme's inner colour at 50% 35% to its
+// outer colour at 70% of a 120% x 90% ellipse, the Hybrid mockups' shape, mixed in sRGB.
 fn background(px: vec2<f32>) -> vec3<f32> {
     let uv = px * cam.size.zw - vec2<f32>(0.5, 0.35);
     let r = length(uv / vec2<f32>(1.2, 0.9));
     let k = clamp(r / 0.7, 0.0, 1.0);
-    let inner = vec3<f32>(28.0, 28.0, 28.0) / 255.0;
-    let outer = vec3<f32>(10.0, 10.0, 10.0) / 255.0;
-    return srgb_to_linear(mix(inner, outer, k));
+    return srgb_to_linear(mix(cam.colors[0].rgb, cam.colors[1].rgb, k));
 }
 
 const GRID: u32 = 1u;
@@ -114,8 +116,8 @@ fn ground(ray: Ray, bg: vec3<f32>, max_t: f32) -> vec3<f32> {
     let r = max(length(size) * 0.5, 16.0);
     var col = bg;
     if ((cam.bounds.w & GROUND) != 0u) {
-        let tile = srgb_to_linear(vec3<f32>(25.0, 25.0, 25.0) / 255.0);
-        let base = srgb_to_linear(vec3<f32>(36.0, 36.0, 36.0) / 255.0);
+        let tile = srgb_to_linear(cam.colors[2].rgb);
+        let base = srgb_to_linear(cam.colors[3].rgb);
         let fade = clamp(1.0 - away / (r * 2.0), 0.0, 1.0);
         col = mix(bg, tile, fade * fade * 0.85);
         if (away == 0.0) { col = base; }
@@ -130,8 +132,7 @@ fn ground(ray: Ray, bg: vec3<f32>, max_t: f32) -> vec3<f32> {
         let line = 1.0 - min(min(d.x, d.y), 1.0);
         // Lines closer than about three pixels fade out instead of turning to noise.
         let dense = clamp(1.5 - max(fw.x, fw.y) * 3.0, 0.0, 1.0);
-        let ink = srgb_to_linear(vec3<f32>(82.0, 82.0, 82.0) / 255.0);
-        col = mix(col, ink, line * dense * 0.8);
+        col = mix(col, srgb_to_linear(cam.colors[4].rgb), line * dense * 0.8);
     }
     return col;
 }
@@ -195,7 +196,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let f = fract(hp);
             let e = min(min(f, 1.0 - f) + abs(n), vec3<f32>(1.0));
             let edge = min(e.x, min(e.y, e.z)) < 0.07;
-            col = select(mix(col, SELECT_TINT * (amb + 0.85 * diff + 0.2), 0.45), mix(col, SELECT_EDGE, 0.8), edge);
+            col = select(mix(col, select_tint() * (amb + 0.85 * diff + 0.2), 0.45), mix(col, select_edge(), 0.8), edge);
         }
         let kind = ghost_kind(voxel);
         if (kind != 0u) {
@@ -208,7 +209,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             if (kind == 1u) {
                 col = mix(col, ADDED_TINT * lit, select(0.5, 0.9, edge));
             } else if (kind == 2u) {
-                col = select(col, SELECT_TINT * lit, edge);
+                col = select(col, select_tint() * lit, edge);
             } else {
                 col = select(mix(col * 0.35, REMOVED_TINT * 0.35, 0.5), REMOVED_TINT * lit, edge);
             }
@@ -224,8 +225,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         col = ground(ray, col, far);
     }
     if ((cam.bounds.w & FRAME) != 0u) {
-        let ink = srgb_to_linear(vec3<f32>(161.0, 161.0, 161.0) / 255.0);
-        col = mix(col, ink, frame_cover(ray, gid.xy, far) * 0.55);
+        col = mix(col, srgb_to_linear(cam.colors[5].rgb), frame_cover(ray, gid.xy, far) * 0.55);
     }
     let srgb = pow(clamp(col, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(1.0 / 2.2));
     textureStore(out_color, gid.xy, vec4<f32>(srgb, 1.0));

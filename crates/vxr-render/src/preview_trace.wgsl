@@ -256,7 +256,7 @@ fn pack_info(h: Hit, d: vec3<f32>) -> u32 {
 fn backdrop(px: vec2<f32>) -> vec3<f32> {
     let uv = px * frame.size.zw - vec2<f32>(0.5, 0.35);
     let k = clamp(length(uv / vec2<f32>(1.2, 0.9)) / 0.7, 0.0, 1.0);
-    return pow(mix(vec3<f32>(28.0, 28.0, 28.0), vec3<f32>(10.0, 10.0, 10.0), k) / 255.0, vec3<f32>(2.2));
+    return pow(mix(frame.backdrop[0].rgb, frame.backdrop[1].rgb, k), vec3<f32>(2.2));
 }
 
 fn ray_box(ro: vec3<f32>, d: vec3<f32>, lo: vec3<f32>, hi: vec3<f32>, t0: f32, t1: f32) -> bool {
