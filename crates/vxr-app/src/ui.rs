@@ -163,7 +163,6 @@ mod icon {
     pub const REDO: char = '\u{e2a0}';
     pub const SEARCH: char = '\u{e151}';
     pub const CHEVRON_DOWN: char = '\u{e06d}';
-    pub const CHEVRON_UP: char = '\u{e070}';
     pub const ARROW_LEFT_RIGHT: char = '\u{e24a}';
     pub const COPY: char = '\u{e09e}';
     pub const APERTURE: char = '\u{e040}';
@@ -354,6 +353,8 @@ struct ReviewMeasure {
     row_h: f32,
     slot_h: f32,
     h: f32,
+    /// The part of `h` from Before and After down: the footer a phone's half sheet pins.
+    foot_h: f32,
 }
 
 /// The review card of an AI change (set by the editor while one is under review).
@@ -478,6 +479,8 @@ const SWATCH: f32 = 19.0;
 const SWATCH_STEP: f32 = 22.0;
 /// The most swatch rows the palette shows before it scrolls.
 const SWATCH_ROWS: f32 = 8.0;
+/// Swatches to a row.
+const PALETTE_COLS: usize = 8;
 
 /// Readouts for the stats corner.
 #[derive(Clone, Debug, Default)]
@@ -581,8 +584,10 @@ pub struct Hybrid {
     /// The touch layout: the bottom dock in place of the rail, larger targets and gestures
     /// (set by the editor, see `Editor::set_touch`).
     pub touch: bool,
-    /// The palette shows above the dock (its colour button toggles it).
+    /// The palette shows beside the rail, or above the dock (their colour buttons toggle it).
     pub palette_open: bool,
+    /// The palette opened only for the colour editor or a swap or copy, and closes with them.
+    palette_for_edit: bool,
     /// The top of the dock's upper bar, where flyouts open above, and the view it is centred on.
     dock_top: f32,
     dock_view: Rect,
@@ -600,6 +605,10 @@ pub struct Hybrid {
     voxel_y: f32,
     /// Top of the select button in the rail, where the selection flyout lines up.
     select_y: f32,
+    /// Top of the colour button in the rail, where the palette lines up.
+    color_y: f32,
+    /// The rail's width: one column of buttons, or more on a window too short for one.
+    rail_w: f32,
     /// How many voxels are selected, and whether Copy or Cut has filled the clipboard.
     pub selected: usize,
     pub has_clip: bool,
@@ -666,13 +675,15 @@ pub struct Hybrid {
     /// The assistant panel shows its Agents tab (the Terminal agents controls and the Agent
     /// edits list) instead of the chat.
     pub agents_panel: bool,
-    /// The palette block at the top of the assistant's column is folded to one row.
-    pub palette_folded: bool,
     /// A change was under review at the last frame: the panel opens on it when it appears.
     review_seen: bool,
-    /// Where the review card sits in the assistant's thread this frame, and the thread's view
-    /// that clips it.
-    review_slot: Option<(Rect, Rect)>,
+    /// The review card's footer was pinned last frame (`review_slot`): when it is pinned anew
+    /// the thread opens on the card's top.
+    review_pinned: bool,
+    /// Where the review card sits in the assistant's thread this frame, the thread's view that
+    /// clips it, and on a phone's half sheet where its footer (Before and After, Ask for
+    /// changes, Discard and Apply) is pinned under the thread.
+    review_slot: Option<(Rect, Rect, Option<Rect>)>,
     /// The assistant panel's body under its tabs, where the Agents tab draws.
     ai_body: Option<Rect>,
     /// The pairing code typed into the panel, in the browser (kept for this tab only).
@@ -804,10 +815,11 @@ const COMMANDS: &[Command] = &[
     Command { label: "Open .vox", keys: &["⌘", "O"], run: |h| h.actions.push(Action::Open) },
     Command { label: "Save .vox", keys: &["⌘", "S"], run: |h| h.actions.push(Action::Save) },
     Command { label: "Embed", keys: &[], run: |h| h.actions.push(Action::Embed) },
+    Command { label: "Show palette", keys: &[], run: |h| h.toggle_palette() },
     Command { label: "Edit color", keys: &[], run: |h| h.open_color_edit() },
     Command { label: "Edit material", keys: &[], run: |h| h.open_material_edit() },
-    Command { label: "Swap color with…", keys: &[], run: |h| h.slot_op = Some(SlotOp::Swap) },
-    Command { label: "Copy color to…", keys: &[], run: |h| h.slot_op = Some(SlotOp::Copy) },
+    Command { label: "Swap color with…", keys: &[], run: |h| h.arm_slot_op(SlotOp::Swap) },
+    Command { label: "Copy color to…", keys: &[], run: |h| h.arm_slot_op(SlotOp::Copy) },
     Command {
         label: "Toggle render preview",
         keys: &[],
@@ -884,6 +896,7 @@ impl Hybrid {
             hits: HashMap::new(),
             touch: false,
             palette_open: false,
+            palette_for_edit: false,
             dock_top: 0.0,
             dock_view: Rect::NOTHING,
             dock_area: Rect::NOTHING,
@@ -893,6 +906,8 @@ impl Hybrid {
             axes_y: 0.0,
             voxel_y: 0.0,
             select_y: 0.0,
+            color_y: 0.0,
+            rail_w: RAIL_W,
             selected: 0,
             has_clip: false,
             world: false,
@@ -931,8 +946,8 @@ impl Hybrid {
             nav_rect: None,
             agents: AgentsView::default(),
             agents_panel: false,
-            palette_folded: true,
             review_seen: false,
+            review_pinned: false,
             review_slot: None,
             ai_body: None,
             agents_code: String::new(),
@@ -1028,8 +1043,10 @@ impl Hybrid {
 
     /// Open the colour editor on the current slot.
     pub fn open_color_edit(&mut self) {
-        // The two side panels share the space left of the palette and the render corner.
+        // It opens beside the palette, and shares the space left of the render corner with
+        // the Render panel.
         self.render_panel = false;
+        self.open_palette_for_edit();
         if self.color_edit.is_none() {
             let c = self.palette[self.slot as usize];
             self.color_edit = Some(ColorEdit {
@@ -1038,6 +1055,19 @@ impl Hybrid {
                 fields: Default::default(),
             });
         }
+    }
+
+    /// Wait for a swatch click to swap or copy the current colour with, the palette open.
+    fn arm_slot_op(&mut self, op: SlotOp) {
+        self.open_palette_for_edit();
+        self.slot_op = Some(op);
+    }
+
+    /// Open the palette for the colour editor or a swap or copy, to close with them unless it
+    /// was open already.
+    fn open_palette_for_edit(&mut self) {
+        self.palette_for_edit |= !self.palette_open;
+        self.palette_open = true;
     }
 
     /// Open the colour editor on its Material tab.
@@ -1072,12 +1102,9 @@ impl Hybrid {
         };
     }
 
-    /// Escape: cancel an armed swap or copy, else close the colour editor, the Bounds panel,
-    /// the View flyout or the Render panel, else leave the full render view, else deselect,
-    /// else the coach card.
     /// Where flyouts beside the rail start: right of the rail, or of the scene tree when it shows.
     fn flyout_x(&self) -> f32 {
-        12.0 + RAIL_W + 8.0 + if self.tree.is_empty() { 0.0 } else { TREE_W + 8.0 }
+        12.0 + self.rail_w + 8.0 + if self.tree.is_empty() { 0.0 } else { TREE_W + 8.0 }
     }
 
     /// Where a flyout of `size` opens: beside the rail level with `y` (its button's top), or
@@ -1119,6 +1146,9 @@ impl Hybrid {
         }
     }
 
+    /// Escape: cancel an armed swap or copy, else close the colour editor, the Bounds panel,
+    /// the View flyout, the palette or the Render panel, else leave the full render view, else
+    /// deselect, else the coach card.
     fn escape(&mut self) {
         if self.ask_bar.take().is_some() || std::mem::take(&mut self.ai.menu) {
             return;
@@ -1132,6 +1162,7 @@ impl Hybrid {
         if std::mem::take(&mut self.view_panel)
             || std::mem::take(&mut self.export_menu)
             || std::mem::take(&mut self.theme_menu)
+            || std::mem::take(&mut self.palette_open)
         {
             return;
         }
@@ -1223,7 +1254,7 @@ impl Hybrid {
         if self.touch {
             self.dock(ctx, screen);
         } else {
-            self.rail(ctx);
+            self.rail(ctx, screen);
         }
         // On a phone every panel fits the room the dock leaves.
         let region = self.phone.then(|| self.panel_region(full));
@@ -1818,12 +1849,15 @@ impl Hybrid {
     }
 
     // #rail
-    fn rail(&mut self, ctx: &Context) {
-        let h = 6.0 + 5.0 * TOOL_STEP + 9.0 + 5.0 * TOOL_STEP + 9.0 + 2.0 * TOOL_STEP + 6.0 - 2.0;
-        let rect = Rect::from_min_size(pos2(12.0, TOP), vec2(RAIL_W, h));
+    fn rail(&mut self, ctx: &Context, screen: Rect) {
+        // Down to the stats row; on a window too short for that, the sections go on in a column
+        // beside.
+        let (at, size) = rail_layout(screen.bottom() - 12.0 - 28.0 - 8.0 - TOP);
+        self.rail_w = size.x;
+        let rect = Rect::from_min_size(pos2(12.0, TOP), size);
         Self::panel(ctx, "rail", rect, Order::Middle, |ui, rect| {
-            let x = rect.left() + 6.0;
-            let mut y = rect.top() + 6.0;
+            let start = |i: usize| rect.min + at[i];
+            let Pos2 { x, mut y } = start(0);
             let tool = self.tool;
             for (t, ic, k) in [
                 (Tool::Add, icon::BOX, "A"),
@@ -1844,7 +1878,10 @@ impl Hybrid {
                 }
                 y += TOOL_STEP;
             }
-            rail_sep(ui, rect, &mut y);
+            let Pos2 { x, mut y } = start(1);
+            if at[1].y > at[0].y {
+                rail_sep(ui, x, &mut y);
+            }
             let shape = self.shape;
             for (s, ic, k) in [
                 (Shape::Voxel, icon::POINTER, "V"),
@@ -1874,8 +1911,10 @@ impl Hybrid {
             if r.clicked() {
                 self.center_brush();
             }
-            y += TOOL_STEP;
-            rail_sep(ui, rect, &mut y);
+            let Pos2 { x, mut y } = start(2);
+            if at[2].y > at[1].y {
+                rail_sep(ui, x, &mut y);
+            }
             self.axes_y = y;
             let r = tool_button(ui, pos2(x, y), icon::FLIP, "M", self.mirror);
             self.hits.insert("mirror".into(), r.rect);
@@ -1887,6 +1926,23 @@ impl Hybrid {
             self.hits.insert("lock".into(), r.rect);
             if r.clicked() {
                 self.cycle_lock();
+            }
+            y += TOOL_STEP;
+            // The current colour; the palette opens beside it.
+            self.color_y = y;
+            let c = Rect::from_min_size(pos2(x, y), vec2(TOOL, TOOL));
+            let resp = ui.interact(c, Id::unique("rail-color"), Sense::click());
+            let p = ui.painter();
+            if self.palette_open {
+                p.rect(c, CornerRadius::same(8), th().accent_bg, Stroke::new(1.0, th().ring), StrokeKind::Inside);
+            } else if resp.hovered() {
+                p.rect_filled(c, CornerRadius::same(8), th().hover);
+            }
+            let sw = Rect::from_center_size(c.center(), vec2(20.0, 20.0));
+            p.rect(sw, CornerRadius::same(6), self.color(self.slot), Stroke::new(1.0, th().line2), StrokeKind::Outside);
+            self.hits.insert("rail-color".into(), c);
+            if resp.clicked() {
+                self.toggle_palette();
             }
         });
     }
@@ -2032,7 +2088,7 @@ impl Hybrid {
         p.rect(sw, CornerRadius::same(6), self.color(self.slot), Stroke::new(1.0, th().line2), StrokeKind::Outside);
         hits.push(("dock-color", c));
         if resp.clicked() {
-            self.palette_open = !self.palette_open;
+            self.toggle_palette();
         }
         *x += DOCK_BTN + 2.0;
     }
@@ -2162,7 +2218,7 @@ impl Hybrid {
         let layers: &[LayerRow] = if world { &self.layers } else { &[] };
         let layers_h = if world { 1.0 + 30.0 + layers.len() as f32 * row_h } else { 0.0 };
         let rect = Rect::from_min_size(
-            pos2(if self.touch { 12.0 } else { 12.0 + RAIL_W + 8.0 }, TOP),
+            pos2(if self.touch { 12.0 } else { 12.0 + self.rail_w + 8.0 }, TOP),
             vec2(TREE_W, 36.0 + rows as f32 * row_h + layers_h + 6.0),
         );
         let objects = self.tree.iter().filter(|r| !r.group).count();
@@ -2471,16 +2527,13 @@ impl Hybrid {
 
     // The View flyout of the camera bar: the projection (perspective, orthographic,
     // isometric) and the six side views with their number keys. It opens below the bar (over
-    // the render corner) if it fits on screen, else above the bar if it clears the palette,
-    // else left of the bar and the palette, always on screen. The view the camera is at
-    // shows on.
+    // the render corner) if it fits on screen, else above the bar if it clears the top bar,
+    // else left of the bar, always on screen. The view the camera is at shows on.
     fn view_panel(&mut self, ctx: &Context, screen: Rect) {
         if !self.view_panel {
             return;
         }
         let size = vec2(204.0, 176.0);
-        let palette_bottom =
-            self.hits.get("palette").filter(|r| r.left() < screen.right()).map_or(screen.top(), |r| r.bottom());
         let floor = screen.bottom() - 12.0;
         let nav = self.hits.get("nav").copied().unwrap_or(Rect::from_min_size(screen.right_bottom(), egui::Vec2::ZERO));
         let right = nav.right().min(screen.right() - 12.0);
@@ -2491,15 +2544,12 @@ impl Hybrid {
             Rect::from_min_size(pos2(nav.left() - 8.0 - size.x, nav.top().min(floor - size.y)), size)
         } else if below.bottom() <= floor {
             below
-        } else if above.top() >= palette_bottom + 8.0 {
+        } else if above.top() >= TOP {
             above
         } else {
-            // A short window: left of the bar, bottom-aligned with it, kept on screen and left of
-            // the palette when it would reach up beside it.
+            // A short window: left of the bar, bottom-aligned with it, kept on screen.
             let top = (nav.bottom() - size.y).clamp(TOP, (screen.bottom() - 12.0 - size.y).max(TOP));
-            let palette = self.hits.get("palette").copied().filter(|p| p.bottom() + 8.0 > top);
-            let right = palette.map_or(nav.left(), |p| nav.left().min(p.left()));
-            Rect::from_min_size(pos2((right - 8.0 - size.x).max(screen.left() + 12.0), top), size)
+            Rect::from_min_size(pos2((nav.left() - 8.0 - size.x).max(screen.left() + 12.0), top), size)
         };
         self.view_flyout(ctx, rect);
     }
@@ -3118,17 +3168,21 @@ impl Hybrid {
         if rows > 0 {
             h += 14.0 + 12.0 + 6.0 + rows as f32 * row_h;
         }
-        h += 12.0 + 28.0 + 8.0 + 32.0 + 12.0;
-        if !card.agents {
-            h += 30.0 + 12.0;
-        }
-        ReviewMeasure { inner_w, prompt, summary, held_text, counts_text, counts_h, rows, row_h, slot_h, h }
+        let foot_h = 12.0 + 28.0 + 8.0 + 32.0 + 12.0 + if card.agents { 0.0 } else { 30.0 + 12.0 };
+        h += foot_h;
+        ReviewMeasure { inner_w, prompt, summary, held_text, counts_text, counts_h, rows, row_h, slot_h, h, foot_h }
     }
 
     /// The height the review card takes in the assistant's thread, with none when no change is
     /// under review.
     pub(super) fn review_height(&self, ctx: &Context, w: f32) -> Option<f32> {
         self.review.as_ref().map(|c| Self::review_measure(ctx, c, w).h)
+    }
+
+    /// The height of the review card's footer (Before and After down), with none when no
+    /// change is under review.
+    pub(super) fn review_foot_height(&self, ctx: &Context, w: f32) -> Option<f32> {
+        self.review.as_ref().map(|c| Self::review_measure(ctx, c, w).foot_h)
     }
 
     // The review card of an AI change: not in the mockups' Hybrid set (docs/research/ai.md,
@@ -3145,14 +3199,26 @@ impl Hybrid {
         };
         // The card sits in the assistant's thread (`review_slot`); with no slot (the panel shows
         // its Agents tab or its keys) nothing is drawn.
-        let Some((slot, clip)) = self.review_slot else {
+        let Some((slot, clip, pinned)) = self.review_slot else {
             self.review = Some(card);
             return;
         };
         let w = slot.width();
-        let ReviewMeasure { inner_w, prompt, summary, held_text, counts_text, counts_h, rows, row_h, slot_h, h } =
-            Self::review_measure(ctx, &card, w);
-        let rect = Rect::from_min_size(slot.min, vec2(w, h));
+        let ReviewMeasure {
+            inner_w,
+            prompt,
+            summary,
+            held_text,
+            counts_text,
+            counts_h,
+            rows,
+            row_h,
+            slot_h,
+            h,
+            foot_h,
+        } = Self::review_measure(ctx, &card, w);
+        // With the footer pinned, the card in the thread ends under its steps.
+        let rect = Rect::from_min_size(slot.min, vec2(w, if pinned.is_some() { h - foot_h + 12.0 } else { h }));
         let mut hits: Vec<(String, Rect)> = Vec::new();
         let mut actions = Vec::new();
         let mut scroll = self.review_scroll.min(card.steps.len().saturating_sub(rows));
@@ -3162,7 +3228,7 @@ impl Hybrid {
         let mut sent = None;
         Self::bare(ctx, "review", rect, clip, |ui, rect| {
             let inner = rect.shrink(12.0);
-            let p = ui.painter().clone();
+            let mut p = ui.painter().clone();
             p.rect(rect, CornerRadius::same(10), th().tint(9), Stroke::new(1.0, th().line), StrokeKind::Inside);
             // Header: AI CHANGE (or AGENT CHANGE), and how many steps.
             let hy = inner.top() + 7.5;
@@ -3358,7 +3424,16 @@ impl Hybrid {
                 }
                 y += rows as f32 * row_h;
             }
-            // Before and After.
+            // Before and After, down to Apply: under the steps, or pinned under the thread.
+            let inner = if let Some(foot) = pinned {
+                ui.set_clip_rect(foot);
+                p = ui.painter().clone();
+                p.hline(foot.x_range(), foot.top(), Stroke::new(1.0, th().line));
+                y = foot.top();
+                Rect::from_min_max(pos2(foot.left() + 12.0, inner.top()), pos2(foot.right() - 12.0, inner.bottom()))
+            } else {
+                inner
+            };
             y += 12.0;
             let seg = Rect::from_min_size(pos2(inner.left(), y), vec2(inner_w, 28.0));
             let mut seg_hits = Vec::new();
@@ -3499,140 +3574,57 @@ impl Hybrid {
         (slots, all, used_count)
     }
 
-    /// The assistant is docked at the right and the palette is the top block of its column.
-    pub(super) fn docked(&self) -> bool {
-        !self.touch && self.ai_width() > 0.0
-    }
-
-    /// Swatches to a row: eight in the palette's own panel, as many as the assistant's column
-    /// holds when the palette heads it.
-    fn palette_cols(&self) -> usize {
-        if self.docked() { ((PANEL_W - 24.0 - 4.0) / SWATCH_STEP) as usize } else { 8 }
-    }
-
-    /// The palette's block in the assistant's column is folded to one row: the current colour,
-    /// its edit button and a chevron. It opens while a colour is edited or a swap waits.
-    pub(super) fn palette_compact(&self) -> bool {
-        self.docked() && self.palette_folded && self.color_edit.is_none() && self.slot_op.is_none()
-    }
-
     /// The palette panel's height.
     pub(super) fn palette_height(&self) -> f32 {
-        let rows = (self.palette_slots().0.len() as f32 / self.palette_cols() as f32).ceil();
+        let rows = (self.palette_slots().0.len() as f32 / PALETTE_COLS as f32).ceil();
         12.0 + 20.0 + 8.0 + 38.0 + 10.0 + rows.min(SWATCH_ROWS) * SWATCH_STEP + 2.0 + 10.0
     }
 
-    /// The height of the palette block that heads the assistant's column.
-    pub(super) fn palette_block_h(&self) -> f32 {
-        if self.palette_compact() { 12.0 + 38.0 + 12.0 } else { self.palette_height() }
+    /// Where the panels anchored at the right of the view end: its edge, or on a touch screen
+    /// left of the palette's width, which the dock's palette may take.
+    pub(super) fn aside_right(&self, screen: Rect) -> f32 {
+        if self.touch { screen.right() - 12.0 - PALETTE_W - 8.0 } else { screen.right() - 12.0 }
     }
 
-    /// Where the panels that open beside the palette end on the right: left of the palette, or,
-    /// with the assistant docked (the palette heads its column), left of that column.
-    pub(super) fn aside_right(&self, screen: Rect) -> f32 {
-        if !self.touch && self.ai_width() > 0.0 {
-            screen.right() - 12.0
-        } else {
-            screen.right() - 12.0 - PALETTE_W - 8.0
+    /// Open or close the palette, from the rail's colour, the dock's or Cmd-K. Closing it closes
+    /// the colour editor beside it.
+    pub fn toggle_palette(&mut self) {
+        self.palette_open = !self.palette_open;
+        self.palette_for_edit = false;
+        if !self.palette_open {
+            self.color_edit = None;
+            self.slot_op = None;
         }
     }
 
+    // The palette: a flyout beside the rail from its colour, or over the dock from the dock's.
     fn palette_panel(&mut self, ctx: &Context, screen: Rect) {
+        if self.palette_for_edit && self.color_edit.is_none() && self.slot_op.is_none() {
+            (self.palette_open, self.palette_for_edit) = (false, false);
+        }
+        if !self.palette_open {
+            return;
+        }
         let (slots, all, used_count) = self.palette_slots();
-        let cols = self.palette_cols();
-        let rows = (slots.len() as f32 / cols as f32).ceil();
-        let h = self.palette_block_h();
+        let rows = (slots.len() as f32 / PALETTE_COLS as f32).ceil();
+        let h = self.palette_height();
         let view_h = rows.min(SWATCH_ROWS) * SWATCH_STEP + 2.0;
-        let docked = self.docked();
         let rect = if self.touch {
-            // Over the dock, from its colour button.
-            if !self.palette_open {
-                return;
-            }
             let at = self.hits.get("dock-color").map_or(screen.center().x, |r| r.center().x);
             let x = (at - PALETTE_W / 2.0).min(screen.right() - 12.0 - PALETTE_W).max(screen.left() + 12.0);
             Rect::from_min_size(pos2(x, (self.dock_top - 8.0 - h).max(TOP)), vec2(PALETTE_W, h))
         } else {
-            // Top right of the window; with the assistant docked, the top block of its column.
-            let right = screen.right() + self.ai_width();
-            let w = if docked { PANEL_W } else { PALETTE_W };
-            Rect::from_min_size(pos2(right - 12.0 - w, TOP), vec2(w, h))
+            // Level with the rail's colour, kept on screen.
+            let top = (self.color_y - 6.0).min(screen.bottom() - 12.0 - h).max(TOP);
+            Rect::from_min_size(pos2(self.flyout_x(), top), vec2(PALETTE_W, h))
         };
         self.hits.insert("palette".into(), rect);
         let mut set_all = None;
-        let mut fold = None;
-        if self.palette_compact() {
-            // One row: the colour, its hex and slot, the edit button and the chevron that opens it.
-            Self::bare(ctx, "palette", rect, rect, |ui, rect| {
-                let inner = rect.shrink(12.0);
-                let p = ui.painter().clone();
-                let cur = Rect::from_min_size(pos2(inner.left(), rect.top() + 12.0), vec2(inner.width(), 38.0));
-                let open = ui.interact(cur, Id::unique("palette-open"), Sense::click());
-                p.rect(
-                    cur,
-                    CornerRadius::same(8),
-                    if open.hovered() { th().hover } else { th().tint(9) },
-                    Stroke::new(1.0, th().line),
-                    StrokeKind::Inside,
-                );
-                let chip = Rect::from_min_size(cur.min + vec2(6.0, 6.0), vec2(26.0, 26.0));
-                p.rect(
-                    chip,
-                    CornerRadius::same(6),
-                    self.color(self.slot),
-                    Stroke::new(1.0, th().tint(38)),
-                    StrokeKind::Inside,
-                );
-                let c = self.palette[self.slot as usize];
-                let hex = format!("#{:02X}{:02X}{:02X}", c[0], c[1], c[2]);
-                let mx = chip.right() + 8.0;
-                p.text(pos2(mx, cur.center().y), Align2::LEFT_BOTTOM, hex, mono(12.0), th().text);
-                let sub = if self.used[self.slot as usize] {
-                    format!("Slot {} · in scene", self.slot)
-                } else {
-                    format!("Slot {}", self.slot)
-                };
-                p.text(pos2(mx, cur.center().y + 1.0), Align2::LEFT_TOP, sub, sans(10.5), th().faint);
-                let chev = Rect::from_center_size(pos2(cur.right() - 18.0, cur.center().y), vec2(26.0, 26.0));
-                p.text(chev.center(), Align2::CENTER_CENTER, icon::CHEVRON_DOWN, icon_font(14.0), th().muted);
-                let edit = Rect::from_center_size(pos2(chev.left() - 18.0, cur.center().y), vec2(26.0, 26.0));
-                let er = ui.interact(edit, Id::unique("edit-color"), Sense::click());
-                self.hits.insert("edit-color".into(), edit);
-                self.hits.insert("palette-open".into(), cur);
-                if er.hovered() {
-                    p.rect_filled(edit, CornerRadius::same(6), th().hover);
-                }
-                p.text(
-                    edit.center(),
-                    Align2::CENTER_CENTER,
-                    icon::PENCIL,
-                    icon_font(14.0),
-                    if er.hovered() { th().text } else { th().muted },
-                );
-                if er.clicked() {
-                    self.open_color_edit();
-                } else if open.clicked() {
-                    fold = Some(false);
-                }
-            });
-            if let Some(f) = fold {
-                self.palette_folded = f;
-            }
-            return;
-        }
-        let mut draw = |this: &mut Self, ui: &mut Ui, rect: Rect| {
-            this.palette_contents(ui, rect, &slots, all, used_count, view_h, docked, &mut set_all, &mut fold)
-        };
-        if docked {
-            Self::bare(ctx, "palette", rect, rect, |ui, rect| draw(self, ui, rect));
-        } else {
-            Self::panel(ctx, "palette", rect, Order::Middle, |ui, rect| draw(self, ui, rect));
-        }
+        Self::panel(ctx, "palette", rect, Order::Middle, |ui, rect| {
+            self.palette_contents(ui, rect, &slots, all, used_count, view_h, &mut set_all)
+        });
         if let Some(all) = set_all {
             self.palette_all = all;
-        }
-        if let Some(f) = fold {
-            self.palette_folded = f;
         }
     }
 
@@ -3645,9 +3637,7 @@ impl Hybrid {
         all: bool,
         used_count: usize,
         view_h: f32,
-        docked: bool,
         set_all: &mut Option<bool>,
-        fold: &mut Option<bool>,
     ) {
         let ctx = ui.ctx().clone();
         let ctx = &ctx;
@@ -3657,27 +3647,7 @@ impl Hybrid {
             // .ph, with the Used / All toggle.
             let hy = inner.top() + 10.0;
             let g = ui.painter().layout_job(spaced("PALETTE", sans_semibold(10.5), th().muted, 0.84));
-            let label_w = g.size().x;
             p.galley(pos2(inner.left(), hy - g.size().y / 2.0), g, th().muted);
-            if docked {
-                // Folds the block to its one row.
-                let chev = Rect::from_center_size(pos2(inner.left() + label_w + 16.0, hy), vec2(24.0, 24.0));
-                let resp = ui.interact(chev, Id::unique("palette-fold"), Sense::click());
-                if resp.hovered() {
-                    p.rect_filled(chev, CornerRadius::same(6), th().hover);
-                }
-                p.text(
-                    chev.center(),
-                    Align2::CENTER_CENTER,
-                    icon::CHEVRON_UP,
-                    icon_font(14.0),
-                    if resp.hovered() { th().text } else { th().muted },
-                );
-                self.hits.insert("palette-fold".into(), chev);
-                if resp.clicked() {
-                    *fold = Some(true);
-                }
-            }
             let mut x = inner.right();
             for (id, label, on) in
                 [("palette-all", "All".to_string(), all), ("palette-used", format!("Used {used_count}"), !all)]
@@ -3751,7 +3721,7 @@ impl Hybrid {
 
     // #swatches, inside the scroll view: `slots` in order, 8 to a row.
     fn swatches(&mut self, ui: &mut Ui, width: f32, slots: &[u8]) {
-        let cols = self.palette_cols();
+        let cols = PALETTE_COLS;
         let rows = (slots.len() as f32 / cols as f32).ceil();
         let (area, _) = ui.allocate_exact_size(vec2(width, rows * SWATCH_STEP + 2.0), Sense::hover());
         let grid = area.min + vec2(2.0, 2.0);
@@ -3923,12 +3893,14 @@ impl Hybrid {
         } else {
             h
         };
-        let rect = match self.hits.get("palette").copied().filter(|_| self.touch) {
-            // Over the dock: beside the palette, level with its bottom, on whichever side fits.
+        let rect = match self.hits.get("palette").copied().filter(|_| self.palette_open) {
+            // Beside the palette, on whichever side fits: over the dock level with its bottom,
+            // beside the rail level with its top, kept on screen.
             Some(pal) => {
                 let x =
                     if pal.left() - 8.0 - w >= screen.left() + 12.0 { pal.left() - 8.0 - w } else { pal.right() + 8.0 };
-                Rect::from_min_size(pos2(x, (pal.bottom() - h).max(TOP)), vec2(w, h))
+                let top = if self.touch { pal.bottom() - h } else { pal.top().min(screen.bottom() - 12.0 - h) };
+                Rect::from_min_size(pos2(x, top.max(TOP)), vec2(w, h))
             }
             None => Rect::from_min_size(pos2(self.aside_right(screen) - w, TOP), vec2(w, h)),
         };
@@ -3945,6 +3917,7 @@ impl Hybrid {
             format!("{:.0}", ed.hsv.s * 100.0),
             format!("{:.0}", ed.hsv.v * 100.0),
         ];
+        self.hits.insert("color-edit".into(), rect);
         Self::panel(ctx, "color-edit", rect, Order::Middle, |ui, rect| {
             let inner = rect.shrink(12.0);
             let p = ui.painter().clone();
@@ -4814,11 +4787,9 @@ impl Hybrid {
                     pos2(screen.right() - 12.0, screen.bottom() - 12.0),
                 )
             });
-            let palette_bottom =
-                self.hits.get("palette").filter(|r| r.left() < screen.right()).map_or(screen.top(), |r| r.bottom());
             let gap = if self.render_dock.is_some() { 8.0 } else { 0.0 };
             let mut rect = Rect::from_min_size(pos2(dock.right() - w, dock.top() - gap - size.y), size);
-            if rect.top() < palette_bottom + 8.0 {
+            if rect.top() < TOP {
                 // A short window: beside the corner instead, level with its bottom.
                 rect = Rect::from_min_size(pos2(dock.left() - 8.0 - w, dock.bottom() - size.y), size);
             }
@@ -5082,11 +5053,36 @@ impl Hybrid {
 }
 
 // .rail-sep
-fn rail_sep(ui: &Ui, rail: Rect, y: &mut f32) {
+// The line between two sections of a rail column whose buttons start at `x`.
+fn rail_sep(ui: &Ui, x: f32, y: &mut f32) {
     let sy = *y + 2.5;
-    ui.painter()
-        .line_segment([pos2(rail.left() + 10.0, sy), pos2(rail.right() - 10.0, sy)], Stroke::new(1.0, th().line));
+    ui.painter().line_segment([pos2(x + 4.0, sy), pos2(x + TOOL - 4.0, sy)], Stroke::new(1.0, th().line));
     *y += 9.0;
+}
+
+/// Where the rail's sections (the tools, the brushes, then mirror, axis lock and the colour)
+/// start inside it, and its size: one column while it fits in `max_h`, else each section that
+/// would reach past it starts a column beside the last.
+fn rail_layout(max_h: f32) -> ([egui::Vec2; 3], egui::Vec2) {
+    let (pad, sep, col) = (6.0, 9.0, TOOL + 6.0);
+    let mut at = [egui::Vec2::ZERO; 3];
+    let (mut x, mut y, mut h) = (pad, pad, 0.0_f32);
+    for (i, n) in [5.0, 5.0, 3.0].into_iter().enumerate() {
+        let tall = n * TOOL_STEP - (TOOL_STEP - TOOL);
+        if i > 0 && y + sep + tall + pad > max_h {
+            (x, y) = (x + col, pad);
+            at[i] = vec2(x, y);
+        } else {
+            // Past the last section, where the separator above this one starts.
+            at[i] = vec2(x, y);
+            if i > 0 {
+                y += sep;
+            }
+        }
+        y += n * TOOL_STEP;
+        h = h.max(y - (TOOL_STEP - TOOL) + pad);
+    }
+    (at, vec2(x + TOOL + pad, h))
 }
 
 // A text button of the View flyout with its key in the corner, accent when on. Returns

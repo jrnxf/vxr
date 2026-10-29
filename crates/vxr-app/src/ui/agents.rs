@@ -188,7 +188,7 @@ impl Hybrid {
                 });
             });
         });
-        self.review_slot = slot_out.map(|r| (r, body));
+        self.review_slot = slot_out.map(|r| (r, body, None));
         self.agents_code = tab.code;
         self.agents_code_sent = tab.sent;
         self.agents_paired_code = tab.paired_code;

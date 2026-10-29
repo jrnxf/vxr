@@ -593,7 +593,7 @@ async () => {
   await key('Escape');
   if (st().agents.panel) await key('Escape');
   step('Escape leaves the Agents tab', !st().agents.panel);
-  // The panel is open on the chat: close it for what follows (the palette is a block of its column).
+  // The panel is open on the chat: close it for what follows.
   if (JSON.parse(window.vxr.ai()).open) await key('j', cmd);
   await frames(2);
   await key('?', { shiftKey: true });
@@ -611,7 +611,19 @@ async () => {
   while (st().slot > used) await key('[');
   while (st().slot < used) await key(']');
   await frames();
+  step('the palette is closed by default', !st().paletteOpen && !at('palette'));
+  await clickAt('rail-color');
+  {
+    const [cl, ct, cr] = window.vxr.hit_rect('rail-color');
+    const [pl, pt] = window.vxr.hit_rect('palette');
+    step("the rail's colour button opens the palette beside the rail", st().paletteOpen && pl > cr && pl - cr < 20 && pt <= ct, JSON.stringify([window.vxr.hit_rect('rail-color'), window.vxr.hit_rect('palette')]));
+  }
   step('the Edit button opens the color editor', (await clickAt('edit-color')) && st().colorEdit, JSON.stringify(st()));
+  {
+    const [, pt, pr] = window.vxr.hit_rect('palette');
+    const [el, et] = window.vxr.hit_rect('color-edit');
+    step('the color editor opens beside the palette', Math.abs(el - pr - 8) < 1 && et <= pt + 1, JSON.stringify([window.vxr.hit_rect('palette'), window.vxr.hit_rect('color-edit')]));
+  }
   const c0 = col(used);
   const sv = at('sv');
   await drag(sv[0] - 80, sv[1] - 50, sv[0] + 30, sv[1] + 10);
@@ -657,6 +669,14 @@ async () => {
   await key('Enter');
   step('Cmd-K "Edit color" opens it', st().colorEdit);
   await key('Escape');
+  await key('Escape');
+  step('Escape then closes the palette', !st().paletteOpen && !at('palette'));
+  await key('k', cmd);
+  for (const ch of 'show palette') await key(ch);
+  await key('Enter');
+  step('Cmd-K "Show palette" opens it', st().paletteOpen && !!at('palette'));
+  await clickAt('rail-color');
+  step("the rail's colour button closes it", !st().paletteOpen);
   step('undoing every palette edit gives back the file', same(bytes(), original));
   await key('v');
 
@@ -913,17 +933,16 @@ async () => {
     let r = st().review;
     step('a scripted request opens the review card', !!r && answers[0].length === 3 && answers[0].every((a) => a.ok) && !!at('review-apply'), JSON.stringify(answers));
     {
-      // The change under review opens the assistant, a full-height column whose top block is the
-      // palette (one row); the card sits in its thread, clear of the camera bar and the render corner.
+      // The change under review opens the assistant, a full-height column with nothing of the
+      // palette in it; the card sits in its thread, clear of the camera bar and the render corner.
       const rect = (n) => window.vxr.hit_rect(n);
       const clear = (a, b) => !b || !b.length || a[2] <= b[0] || b[2] <= a[0] || a[3] <= b[1] || b[3] <= a[1];
       const [al, at2, ar, ab] = rect('assistant');
-      const [pl, pt, pr, pb] = rect('palette');
       const card = rect('review');
       const [cl, ct, cr] = card;
       step('the change under review opens the assistant, full height at the right edge', !!al && Math.abs(at2 - 60) < 1 && Math.abs(ar - (innerWidth - 12)) < 1 && ab <= innerHeight, JSON.stringify(rect('assistant')));
-      step('the palette is the top block of the column, one row', pl === al && pt === at2 && pr === ar && pb - pt < 70, JSON.stringify([rect('palette'), rect('assistant')]));
-      step('the card sits in the thread, under the palette block', cl >= al && cr <= ar && ct >= pb, JSON.stringify([card, rect('assistant')]));
+      step('the palette is not in the column', clear(rect('assistant'), rect('palette')), JSON.stringify([rect('palette'), rect('assistant')]));
+      step('the card sits in the thread', cl >= al && cr <= ar && ct >= at2, JSON.stringify([card, rect('assistant')]));
       step('the camera bar and the render corner stay left of the column', ['nav', 'render'].every((n) => clear(rect('assistant'), rect(n))), JSON.stringify([rect('nav'), rect('render')]));
     }
     step('the card counts the box and lists slot 3',r && r.counts[0] + r.counts[2] === 48 && r.counts[0] > 0 && r.slots.join() === '3' && r.steps.length === 2 && r.summary === 'a red block', JSON.stringify(r));
@@ -1027,7 +1046,7 @@ async () => {
     step('Cmd-V, Cmd-X and Cmd-C in a field leave the browser\'s clipboard events, Cmd-C and Cmd-X with a selection to act on', clipKeys);
     let a = ai();
     step('the compatible endpoint takes its URL and model', a.kind === 'compatible' && a.base === `${location.origin}/__fake/v1` && a.model === 'stand-in', JSON.stringify(a));
-    // Under a tall palette the assistant's column is short: scroll its settings to the row.
+    // On a short window the assistant's column is short: scroll its settings to the row.
     for (let i = 0; i < 20 && window.vxr.hit_rect('ai-remember')[3] > window.vxr.hit_rect('assistant')[3] - 8; i++) {
       const [al, , ar, ab] = window.vxr.hit_rect('assistant');
       ptr('pointermove', (al + ar) / 2, ab - 40);

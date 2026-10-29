@@ -474,12 +474,12 @@ fn touch(dir: &Path, load: &dyn Fn() -> Result<(Scene, String), String>) -> Resu
     )?;
 
     // The finger that brings the touch layout lands on the mouse layout egui drew.
-    let pal = s.at("palette")?;
-    let pal = [pal.x * s.ed.ppp, pal.y * s.ed.ppp];
+    let rail = s.at("mirror")?;
+    let rail = [rail.x * s.ed.ppp, rail.y * s.ed.ppp];
     let v = s.voxels();
     s.ed.set_touch(true);
-    let on_ui = !at(&mut s, 8, Finger::Down, pal, 500.0);
-    at(&mut s, 8, Finger::Up, pal, 50.0);
+    let on_ui = !at(&mut s, 8, Finger::Down, rail, 500.0);
+    at(&mut s, 8, Finger::Up, rail, 50.0);
     s.frames(2);
     check(
         on_ui && s.voxels() == v,
@@ -2419,12 +2419,17 @@ fn camera(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     s.ui_click("nav-proj")?;
     check(!s.ed.cam.ortho, "and back to perspective".into())?;
     // Where the flyout opens: below the bar (over the render corner) if it ends on screen, else
-    // above the bar if it clears the palette, else left of the bar; never over the top bar or the
+    // above the bar if it clears the top bar, else left of the bar; never over the top bar or the
     // palette, always on screen.
     fn flyout_at(s: &mut Shot, corner: bool) -> Result<&'static str, String> {
         let points = (s.ed.width as f32 / s.ed.ppp, s.ed.height as f32 / s.ed.ppp);
         let hit = |s: &Shot, n: &str| s.ed.ui.hits.get(n).copied().ok_or(format!("no {n} at {points:?}"));
-        let (flyout, nav, palette, top) = (hit(s, "view-flyout")?, hit(s, "nav")?, hit(s, "palette")?, hit(s, "undo")?);
+        let (flyout, nav, palette, top) = (
+            hit(s, "view-flyout")?,
+            hit(s, "nav")?,
+            s.ed.ui.hits.get("palette").copied().unwrap_or(egui::Rect::NOTHING),
+            hit(s, "undo")?,
+        );
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(points.0, points.1));
         let at = if flyout.top() > nav.bottom() {
             "below"
@@ -2458,9 +2463,9 @@ fn camera(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     for (points, corner, want) in [
         ((1440, 1100), true, "above"),
         ((1280, 1000), false, "above"),
-        ((1024, 700), true, "beside"),
-        ((1024, 600), true, "beside"),
-        ((900, 520), true, "beside"),
+        ((1024, 700), true, "above"),
+        ((900, 520), true, "above"),
+        ((900, 420), true, "beside"),
     ] {
         let mut t = Shot::sized(Scene::new(NEW_SIZE), "Untitled", 1.0, points)?;
         t.ed.ui.coach = false;
@@ -2477,12 +2482,11 @@ fn camera(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     s.save_png(&dir.join("app-2x-camera.png"))?;
     press(&mut s, egui::Key::Escape, egui::Modifiers::NONE);
     check(!s.ed.ui.view_panel, "Escape closes it".into())?;
-    // Hover: a tooltip with the shortcut (shown in the screenshot), clear of the palette.
+    // Hover: a tooltip with the shortcut (shown in the screenshot), above the button.
     let at = s.at("nav-frame")?;
     s.frames_with(3, vec![egui::Event::PointerMoved(at)]);
     let tip = s.ed.ui.hits.get("nav-tip").copied().ok_or("no tooltip")?;
-    let palette = s.ed.ui.hits.get("palette").copied().ok_or("no palette")?;
-    check(!tip.intersects(palette), "the Frame scene tooltip keeps clear of the palette".into())?;
+    check(tip.bottom() < at.y, "the Frame scene tooltip shows above its button".into())?;
     s.save_png(&dir.join("app-2x-camera-tip.png"))?;
     s.frames_with(1, vec![egui::Event::PointerGone]);
     press(&mut s, egui::Key::Home, egui::Modifiers::NONE);
@@ -3159,10 +3163,11 @@ const HOUSE_SCRIPT: &str = r##"{"prompt": "make the roof red, add a flag and ope
     {"name": "done", "input": {"summary": "Painted the roof red, added a flag on a pole and opened a door"}}
 ]}"##;
 
-/// The palette and the assistant share one full-height column at the right: closed, the palette
-/// is its own card at the top right; open, it is the column's top block (one row until it is
-/// opened), the assistant fills the rest and the change under review sits in its thread, clear of
-/// the camera bar and the render corner. At 1280x800, also with a palette of eight swatch rows.
+/// The palette is a flyout from the rail's colour button and the assistant a column of its own:
+/// closed by default, the palette opens beside the rail level with its colour, its colour editor
+/// beside it; the assistant runs the right column's whole height with nothing of the palette in
+/// it, the change under review in its thread, clear of the camera bar and the render corner.
+/// Escape closes the editor, then the palette. At 1280x800.
 fn assistant_column(dir: &Path) -> Result<(), String> {
     let mut s = Shot::new(house(), "house.vox", 2.0)?;
     s.ed.ui.coach = false;
@@ -3172,12 +3177,43 @@ fn assistant_column(dir: &Path) -> Result<(), String> {
     s.frames(2);
     let window = s.ed.width as f32 / 2.0;
     let rect = |s: &Shot, name: &str| s.ed.ui.hits.get(name).copied().ok_or(format!("no {name} on screen"));
-    let palette0 = rect(&s, "palette")?;
+    let (lock, color) = (rect(&s, "lock")?, rect(&s, "rail-color")?);
     check(
-        (palette0.right() - (window - 12.0)).abs() < 0.5 && (palette0.top() - 60.0).abs() < 0.5,
-        format!("closed: the palette is its own card at the top right: {palette0:?}"),
+        !s.ed.ui.palette_open && !s.ed.ui.hits.contains_key("palette"),
+        "closed: the palette is not on screen by default".into(),
     )?;
+    check(
+        (color.left() - lock.left()).abs() < 0.5 && color.top() > lock.bottom(),
+        format!("the rail's colour button sits under the axis lock: {color:?}"),
+    )?;
+    s.ui_click("rail-color")?;
+    s.frames(2);
+    let pal = rect(&s, "palette")?;
+    check(
+        s.ed.ui.palette_open
+            && pal.left() > color.right()
+            && pal.left() - color.right() < 20.0
+            && pal.top() <= color.top(),
+        format!("the colour button opens the palette beside the rail: {pal:?}"),
+    )?;
+    let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    s.ui_click("edit-color")?;
+    s.frames(2);
+    let ed = rect(&s, "color-edit")?;
+    check(
+        (ed.left() - pal.right() - 8.0).abs() < 0.5
+            && ed.top() <= pal.top()
+            && ed.top() >= 60.0
+            && ed.bottom() <= s.ed.height as f32 / 2.0 - 12.0,
+        format!("the colour editor opens beside the palette, level with it as far as the window lets: {ed:?}"),
+    )?;
+    s.save_png(&dir.join("app-2x-palette-rail.png"))?;
+    s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+    check(s.ed.ui.color_edit.is_none() && s.ed.ui.palette_open, "Escape closes the editor first".into())?;
+    s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+    check(!s.ed.ui.palette_open && !s.ed.ui.hits.contains_key("palette"), "then the palette".into())?;
     s.ed.ui.ai_open = true;
+    s.ui_click("rail-color")?;
     s.frames(4);
     let (pal, ai) = (rect(&s, "palette")?, rect(&s, "assistant")?);
     s.save_png(&dir.join("app-2x-column.png"))?;
@@ -3188,12 +3224,8 @@ fn assistant_column(dir: &Path) -> Result<(), String> {
         format!("open: the assistant runs the column's whole height at the right edge: {ai:?}"),
     )?;
     check(
-        ai.contains_rect(pal) && (pal.top() - ai.top()).abs() < 0.5 && (pal.right() - ai.right()).abs() < 0.5,
-        format!("open: the palette is the column's top block: {pal:?} in {ai:?}"),
-    )?;
-    check(
-        pal.height() < 70.0 && s.ed.ui.hits.contains_key("edit-color"),
-        format!("open: it is one row ({:.0} tall) with Edit", pal.height()),
+        pal.right() < ai.left() - 100.0 && pal.left() < 120.0,
+        format!("the palette stays beside the rail, apart from the assistant: {pal:?}, {ai:?}"),
     )?;
     let (nav, render) = (rect(&s, "nav")?, rect(&s, "render")?);
     check(
@@ -3207,29 +3239,16 @@ fn assistant_column(dir: &Path) -> Result<(), String> {
     let (pal, ai, card) = (rect(&s, "palette")?, rect(&s, "assistant")?, rect(&s, "review")?);
     s.save_png(&dir.join("app-2x-column-review.png"))?;
     check(
-        ai.contains_rect(card)
-            || (card.left() >= ai.left() && card.right() <= ai.right() && card.top() >= pal.bottom()),
-        format!("the card sits in the assistant's thread, under the palette block: {card:?} in {ai:?}"),
+        ai.contains_rect(card) || (card.left() >= ai.left() && card.right() <= ai.right()),
+        format!("the card sits in the assistant's thread: {card:?} in {ai:?}"),
     )?;
     check(
         !card.intersects(pal) && s.ed.ui.hits.contains_key("review-apply"),
         "the card clears the palette and shows Apply".into(),
     )?;
-    // Opening the palette block keeps everything in the column.
-    s.ui_click("palette-open")?;
-    s.frames(40);
-    let (pal, ai, card) = (rect(&s, "palette")?, rect(&s, "assistant")?, rect(&s, "review")?);
-    s.save_png(&dir.join("app-2x-column-palette.png"))?;
-    check(
-        !s.ed.ui.palette_folded && pal.height() > 100.0 && ai.contains_rect(pal) && card.top() >= pal.bottom(),
-        format!("the palette block opens inside the column and the card stays under it: {pal:?}, {card:?}"),
-    )?;
-    s.ui_click("palette-fold")?;
-    s.frames(4);
-    check(
-        s.ed.ui.palette_folded && rect(&s, "palette")?.height() < 70.0,
-        "its chevron folds it to one row again".into(),
-    )?;
+    s.ui_click("rail-color")?;
+    s.frames(2);
+    check(!s.ed.ui.palette_open, "the colour button closes the palette again".into())?;
     Ok(())
 }
 
@@ -3345,16 +3364,17 @@ fn agents_states(dir: &Path) -> Result<(), String> {
 }
 
 /// A palette of eight swatch rows (over 104 colours), opened, in a 1280x800 window with the
-/// assistant open and a change under review: the column holds, clear of the camera bar and the
-/// render corner.
+/// assistant open and a change under review: the palette stays on screen beside the rail and the
+/// column holds, clear of the camera bar and the render corner. In a 1280x520 window the rail
+/// goes on in a second column above the stats, and the palette still opens on screen.
 fn column_short_window(dir: &Path) -> Result<(), String> {
     let mut scene = house();
     let cells: Vec<_> =
         (0..120u8).map(|i| (scene.to_map([i as i32 % 32 - 16, 0, -10 - i as i32 / 32]), 100 + i)).collect();
-    scene.edit(cells);
+    scene.edit(cells.clone());
     let mut s = Shot::new(scene, "house.vox", 2.0)?;
     s.ed.ui.coach = false;
-    s.ed.ui.palette_folded = false;
+    s.ed.ui.palette_open = true;
     s.ed.ui.ai_open = true;
     s.frames(2);
     let answers = s.ed.stage_json(HOUSE_SCRIPT)?;
@@ -3368,13 +3388,38 @@ fn column_short_window(dir: &Path) -> Result<(), String> {
     let screen =
         egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(s.ed.width as f32 / 2.0, s.ed.height as f32 / 2.0));
     check(
-        screen.contains_rect(ai) && ai.contains_rect(palette) && card.left() >= ai.left() && card.right() <= ai.right(),
-        format!("the palette and the card stay in the column: {palette:?}, {card:?} in {ai:?}"),
+        screen.contains_rect(ai)
+            && screen.contains_rect(palette)
+            && !ai.intersects(palette)
+            && card.left() >= ai.left()
+            && card.right() <= ai.right(),
+        format!(
+            "the palette stays on screen apart from the column and the card in it: {palette:?}, {card:?} in {ai:?}"
+        ),
     )?;
     check(
         [nav, render].iter().all(|r| !ai.intersects(*r)),
         "the camera bar and the render corner stay clear of the column".into(),
     )?;
+    let mut scene = house();
+    scene.edit(cells);
+    let mut s = Shot::sized(scene, "house.vox", 2.0, (1280, 520))?;
+    s.ed.ui.coach = false;
+    s.frames(2);
+    let (tool, lock, color) = (rect(&s, "select")?, rect(&s, "lock")?, rect(&s, "rail-color")?);
+    let stats_top = 520.0 - 12.0 - 28.0;
+    check(
+        color.bottom() < stats_top && lock.left() > tool.right() && (color.left() - lock.left()).abs() < 0.5,
+        format!("short: the rail's last section goes on in a column beside, above the stats: {lock:?} {color:?}"),
+    )?;
+    s.ui_click("rail-color")?;
+    s.frames(2);
+    let palette = rect(&s, "palette")?;
+    check(
+        palette.left() > color.right() && palette.top() >= 60.0 && palette.bottom() <= 520.0 - 12.0,
+        format!("short: the palette opens beside the wider rail, on screen: {palette:?}"),
+    )?;
+    s.save_png(&dir.join("app-2x-rail-short.png"))?;
     Ok(())
 }
 
@@ -3537,7 +3582,8 @@ fn review(dir: &Path) -> Result<(), String> {
 
 /// A change under review on a phone held upright (390x844, 3x): the assistant opens as a sheet
 /// over the lower half only, so the scene and the change's ghost show above it, with Before,
-/// Discard and Apply in the sheet. Closing the sheet sticks while the change waits, and the
+/// Discard and Apply pinned at the sheet's bottom and the card's top scrolling above them, open
+/// on its top under the tabs. Closing the sheet sticks while the change waits, and the
 /// sparkles button opens it again on the card. Writes `app-3x-phone-390x844-review.png`.
 fn review_phone(dir: &Path) -> Result<(), String> {
     let mut s = Shot::sized(house(), "house.vox", 3.0, (390, 844))?;
@@ -3581,6 +3627,16 @@ fn review_phone(dir: &Path) -> Result<(), String> {
             "upright phone review: the sheet ({sheet:?}) takes at most half the screen, {seen} pixels of the ghost show above it, Before, Discard and Apply are in it ({})",
             in_sheet(&s)
         ),
+    )?;
+    // The card opens on its top under the tabs, its footer pinned under the thread.
+    let (card, tabs, apply) = (
+        s.ed.ui.hits.get("review").copied().ok_or("no review card")?,
+        s.ed.ui.hits.get("ai-tab-chat").copied().ok_or("no tabs")?,
+        s.ed.ui.hits.get("review-apply").copied().ok_or("no Apply")?,
+    );
+    check(
+        card.top() >= tabs.bottom() && card.top() - tabs.bottom() < 20.0 && apply.bottom() <= sheet.bottom(),
+        format!("the card opens on its top under the tabs ({card:?}), Apply pinned in the sheet ({apply:?})"),
     )?;
     s.frames(40);
     s.save_png(&dir.join("app-3x-phone-390x844-review.png"))?;
@@ -3752,6 +3808,8 @@ fn palette(s: &mut Shot, dir: &Path) -> Result<(), String> {
     let used = (1..256).max_by_key(|&i| counts[i]).unwrap() as u8;
     s.ed.ui.slot = used;
     s.frames(2);
+    s.ui_click("rail-color")?;
+    check(s.ed.ui.palette_open, "the rail's colour button opens the palette".into())?;
     s.ui_click("edit-color")?;
     check(s.ed.ui.color_edit.is_some(), format!("Edit opens the color editor on slot {used}"))?;
     let before = s.ed.scene.palette[used as usize];
@@ -3849,6 +3907,8 @@ fn palette(s: &mut Shot, dir: &Path) -> Result<(), String> {
     };
     s.frames_with(2, vec![key(egui::Key::Escape)]);
     check(s.ed.ui.color_edit.is_none(), "Escape closes the color editor".into())?;
+    s.frames_with(2, vec![key(egui::Key::Escape)]);
+    check(!s.ed.ui.palette_open, "and again the palette".into())?;
     s.ed.undo();
     s.ed.undo();
     s.ed.undo();
