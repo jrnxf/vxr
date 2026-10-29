@@ -335,9 +335,10 @@ impl Hybrid {
             )
         };
         let blk = if self.docked() { self.palette_block_h() } else { 0.0 };
-        // The half sheet of a review on a phone gives the card the composer's room: the card
-        // has its own field to ask for changes.
-        let compact = self.sheet() && self.review.is_some();
+        // The half sheet of a review on a phone gives the card the composer's room (the card
+        // has its own field to ask for changes), except while a request runs or waits on Keep
+        // or Drop, which the composer holds.
+        let compact = self.sheet() && self.review.is_some() && !self.chat.running && !self.chat.stop_ask;
         let agents_tab = self.agents_panel;
         let (agents_tone, agents_n) = self.agents_status();
         // The review card sits at the end of the thread, as wide as the thread.

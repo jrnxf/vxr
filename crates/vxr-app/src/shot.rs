@@ -3594,6 +3594,14 @@ fn review_phone(dir: &Path) -> Result<(), String> {
     s.ui_click("ai-toggle")?;
     s.frames(3);
     check(s.ed.ui.ai_open && in_sheet(&s), "the sparkles button opens the sheet on the card again".into())?;
+    // A request still running keeps the composer's Stop in the sheet, to keep what it staged.
+    s.ed.ui.chat.running = true;
+    s.frames(2);
+    let stop =
+        s.ed.ui.hits.get("ai-stop").zip(s.ed.ui.hits.get("assistant")).is_some_and(|(r, sh)| sh.contains_rect(*r));
+    s.ed.ui.chat.running = false;
+    s.frames(2);
+    check(stop, "a running request shows Stop in the review sheet".into())?;
     s.ui_click("review-apply")?;
     check(
         s.ed.review.is_none() && s.ed.scene.history().position() == position + 1,
@@ -4442,10 +4450,10 @@ impl Shot {
     }
 }
 
-/// Live mode end to end through a real socket in a temporary folder: Cmd-K opens the Terminal
-/// agents panel, its switch opens the socket with a token only the user can read, an agent's
-/// calls apply at once as undo steps named after it, the chip and the Agent edits card show,
-/// the card's Undo takes back an earlier edit and the agent's `undo` its last, a call waits
+/// Live mode end to end through a real socket in a temporary folder: Cmd-K opens the
+/// assistant's Agents tab, its switch opens the socket with a token only the user can read, an
+/// agent's calls apply at once as undo steps named after it, the chip and the Agent edits list
+/// show, the list's Undo takes back an earlier edit and the agent's `undo` its last, a call waits
 /// while the user drags and is refused under review, Stop ends an agent for good, a new token
 /// turns old agents away, and the switch closes the socket.
 #[cfg(unix)]
@@ -4536,7 +4544,7 @@ fn agents_live(dir: &Path) -> Result<(), String> {
         s.live_frames(&mut live, 40);
         s.save_png(&dir.join("app-2x-agents.png"))?;
 
-        // The card's Undo on the first edit: reverted under the three after it.
+        // The list's Undo on the first edit: reverted under the three after it.
         s.ui_click("agent-undo-0")?;
         s.live_frames(&mut live, 2);
         check(
@@ -4544,7 +4552,7 @@ fn agents_live(dir: &Path) -> Result<(), String> {
                 && s.ed.scene.history().undo_label() == Some("Undo Claude Code: paint 392 voxels")
                 && !s.ed.ui.agents.edits[0].applied
                 && s.ed.ui.agents.edits[1..].iter().all(|e| e.applied),
-            "the card's Undo takes back the paint alone, as its own step".into(),
+            "the list's Undo takes back the paint alone, as its own step".into(),
         )?;
         check(!s.ed.ui.hits.contains_key("agent-undo-0"), "its row says Undone".into())?;
         // The agent's undo takes back its own last edit still in effect: the flag.
