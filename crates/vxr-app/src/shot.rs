@@ -341,7 +341,7 @@ fn touch(dir: &Path, load: &dyn Fn() -> Result<(Scene, String), String>) -> Resu
             let small =
                 targets.iter().find(|n| h.get(**n).is_none_or(|r| r.width().min(r.height()) * TOUCH_SCALE < 44.0));
             check(
-                s.ed.ui.docked && s.ed.ppp == 2.0 * TOUCH_SCALE && small.is_none() && !h.contains_key("hint"),
+                s.ed.ui.touch && s.ed.ppp == 2.0 * TOUCH_SCALE && small.is_none() && !h.contains_key("hint"),
                 format!(
                     "{tag}: the touch layout has the dock with 44-point targets and no hint bar (short: {small:?})"
                 ),
@@ -464,7 +464,7 @@ fn touch(dir: &Path, load: &dyn Fn() -> Result<(Scene, String), String>) -> Resu
     s.ed.set_touch(false);
     s.frames(2);
     check(
-        !s.ed.ui.docked && s.ed.ppp == 2.0 && s.ed.ui.hits.contains_key("hint"),
+        !s.ed.ui.touch && s.ed.ppp == 2.0 && s.ed.ui.hits.contains_key("hint"),
         "a mouse brings back the mouse layout".into(),
     )?;
 

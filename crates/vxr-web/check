@@ -64,11 +64,11 @@ for view in 1180x820 820x1180; do
   for theme in neutral paper; do
     axi emulate --viewport "${view}x2,mobile,touch" >/dev/null
     axi open "$url" >/dev/null
-    got="$(axi eval "async () => { for (let i = 0; i < 300 && !window.vxr; i++) await new Promise(r => setTimeout(r, 50)); window.vxr.set_theme('$theme'); await new Promise(r => setTimeout(r, 800)); const s = JSON.parse(window.vxr.state()); return JSON.stringify([s.touch, s.docked, window.vxr.hit('dock').length > 0, window.vxr.hit('render').length > 0]) }" | unwrap)"
+    got="$(axi eval "async () => { for (let i = 0; i < 300 && !window.vxr; i++) await new Promise(r => setTimeout(r, 50)); window.vxr.set_theme('$theme'); await new Promise(r => setTimeout(r, 800)); const s = JSON.parse(window.vxr.state()); return JSON.stringify([s.touch, window.vxr.hit('dock').length > 0, window.vxr.hit('render').length > 0]) }" | unwrap)"
     axi screenshot "$shots/web-touch-$view-$theme.png" >/dev/null
     echo "wrote $shots/web-touch-$view-$theme.png"
     corner=$([ "$view" = 1180x820 ] && echo true || echo false)
-    if [[ "$got" == "[true,true,true,$corner]" ]]; then
+    if [[ "$got" == "[true,true,$corner]" ]]; then
       touch_results+=$'\nok '"$view $theme: a touch screen starts in the touch layout with the dock"
     else
       touch_results+=$'\nFAIL '"$view $theme: a touch screen starts in the touch layout with the dock: $got"

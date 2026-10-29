@@ -1459,7 +1459,7 @@ async () => {
   let v = st().voxels;
   await tap(mx, my);
   s = st();
-  step('a finger switches to the touch layout and a tap adds one voxel', s.touch && s.docked && s.voxels === v + 1 && !!at('dock'), JSON.stringify([s.touch, s.docked, s.voxels - v]));
+  step('a finger switches to the touch layout and a tap adds one voxel', s.touch && s.voxels === v + 1 && !!at('dock'), JSON.stringify([s.touch, s.voxels - v]));
   touch('pointerdown', 0, mx, my); touch('pointerdown', 1, mx + 80, my); await frames(1);
   touch('pointerup', 0, mx, my); touch('pointerup', 1, mx + 80, my); await frames();
   step('a two-finger tap undoes', st().voxels === v, `${st().voxels - v}`);
@@ -1500,6 +1500,6 @@ async () => {
   await tapAt('dock-color');
   await click(mx, my);
   s = st();
-  step('a mouse press brings back the mouse layout', !s.touch && !s.docked && s.voxels === v + 1 && !at('dock'), JSON.stringify([s.touch, s.docked, s.voxels - v]));
+  step('a mouse press brings back the mouse layout', !s.touch && s.voxels === v + 1 && !at('dock'), JSON.stringify([s.touch, s.voxels - v]));
   return out.join('\n');
 }
