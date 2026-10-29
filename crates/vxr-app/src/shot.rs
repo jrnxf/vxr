@@ -190,6 +190,7 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
 
     themes(dir, &load)?;
     touch(dir, &load)?;
+    phone(dir, &load)?;
 
     // Every tool at 2x through the pointer path.
     let (scene, name) = load()?;
@@ -480,6 +481,113 @@ fn touch(dir: &Path, load: &dyn Fn() -> Result<(Scene, String), String>) -> Resu
         on_ui && s.voxels() == v,
         "the finger that brings the touch layout is the UI's where the mouse layout drew a panel".into(),
     )?;
+    Ok(())
+}
+
+/// The touch layout on phones (360, 390 and 430 CSS px wide upright, 844 and 932 sideways, 3x):
+/// every dock and top bar target, and every panel, stays on screen and reachable with the
+/// assistant, the palette, the selection flyout, the Export menu and the colour editor open,
+/// by pointer clicks on the drawn UI. Writes `app-3x-phone-<width>-<state>.png`.
+fn phone(dir: &Path, load: &dyn Fn() -> Result<(Scene, String), String>) -> Result<(), String> {
+    use vxr_app::editor::TOUCH_SCALE;
+    let targets = [
+        "tool-add",
+        "tool-erase",
+        "tool-paint",
+        "tool-pick",
+        "select",
+        "dock-color",
+        "undo",
+        "redo",
+        "voxel",
+        "brush-box",
+        "brush-face",
+        "brush-line",
+        "center",
+        "mirror",
+        "lock",
+        "open",
+        "save",
+        "export",
+        "theme",
+        "ai-toggle",
+    ];
+    for css in [(360u32, 780u32), (390, 844), (430, 932), (844, 390), (932, 430)] {
+        let tag = format!("{}x{}", css.0, css.1);
+        let (scene, name) = load()?;
+        let mut s = Shot::sized(scene, &name, 3.0, css)?;
+        s.ed.set_touch(true);
+        s.frames(3);
+        let (w, h) = (s.ed.width as f32 / s.ed.ppp, s.ed.height as f32 / s.ed.ppp);
+        // Every hit of the UI on screen, and the dock and top bar targets finger-sized.
+        let fits = |s: &Shot, what: &str| -> Result<(), String> {
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h)).expand(0.5);
+            let off: Vec<_> = s
+                .ed
+                .ui
+                .hits
+                .iter()
+                .filter(|(n, r)| !(n.starts_with("ai-") && !n.starts_with("ai-toggle")) && !screen.contains_rect(**r))
+                .map(|(n, r)| format!("{n} {r:?}"))
+                .collect();
+            let small: Vec<_> = targets[..15]
+                .iter()
+                .filter(|n| s.ed.ui.hits.get(**n).is_none_or(|r| r.width().min(r.height()) * TOUCH_SCALE < 44.0))
+                .collect();
+            check(
+                off.is_empty() && small.is_empty(),
+                format!(
+                    "{tag} {what}: the UI is on screen (off: {off:?}) and the targets are there (missing: {small:?})"
+                ),
+            )
+        };
+        fits(&s, "plain")?;
+        s.save_png(&dir.join(format!("app-3x-phone-{tag}.png")))?;
+        s.ed.ui.coach = false;
+
+        // The assistant open: the dock stays reachable, so the colour button still opens the
+        // palette over the assistant.
+        s.ui_click("ai-toggle")?;
+        s.frames(2);
+        fits(&s, "assistant open")?;
+        s.save_png(&dir.join(format!("app-3x-phone-{tag}-assistant.png")))?;
+        s.ui_click("dock-color")?;
+        s.frames(2);
+        check(s.ed.ui.palette_open, format!("{tag}: the colour button opens the palette with the assistant open"))?;
+        fits(&s, "assistant and palette open")?;
+        s.save_png(&dir.join(format!("app-3x-phone-{tag}-palette.png")))?;
+        s.ui_click("dock-color")?;
+        s.ui_click("ai-toggle")?;
+        s.frames(2);
+        check(!s.ed.ui.palette_open && !s.ed.ui.ai_open, format!("{tag}: the palette and the assistant close"))?;
+
+        // The select button opens its flyout beside or over the dock, fully on screen, and the
+        // buttons on it work.
+        s.ui_click("select")?;
+        s.frames(2);
+        check(s.ed.ui.tool == Tool::Select, format!("{tag}: the select button picks Select"))?;
+        fits(&s, "selection flyout open")?;
+        s.save_png(&dir.join(format!("app-3x-phone-{tag}-select.png")))?;
+        s.ui_click("tool-add")?;
+
+        // The Export menu from the top bar.
+        s.ui_click("export")?;
+        s.frames(2);
+        check(s.ed.ui.export_menu, format!("{tag}: the export button opens the Export menu"))?;
+        fits(&s, "Export menu open")?;
+        s.save_png(&dir.join(format!("app-3x-phone-{tag}-export.png")))?;
+        s.ui_click("export")?;
+        s.frames(2);
+        check(!s.ed.ui.export_menu, format!("{tag}: the export button closes the Export menu"))?;
+
+        // The colour editor over the palette.
+        s.ui_click("dock-color")?;
+        s.ui_click("edit-color")?;
+        s.frames(2);
+        check(s.ed.ui.color_edit.is_some(), format!("{tag}: Edit opens the colour editor"))?;
+        fits(&s, "colour editor open")?;
+        s.save_png(&dir.join(format!("app-3x-phone-{tag}-colour.png")))?;
+    }
     Ok(())
 }
 

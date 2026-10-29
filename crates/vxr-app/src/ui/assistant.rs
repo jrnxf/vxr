@@ -241,7 +241,8 @@ pub(super) fn ai_field(
 impl Hybrid {
     /// The width the docked panel takes from the right of the view, with its gap.
     pub fn ai_width(&self) -> f32 {
-        if self.ai_open { PANEL_W + 8.0 } else { 0.0 }
+        // The sheet over a phone held upright takes none of the view.
+        if self.ai_open && !self.sheet() { PANEL_W + 8.0 } else { 0.0 }
     }
 
     /// Open the panel on its key settings, for `kind` (or the provider in use).
@@ -310,10 +311,16 @@ impl Hybrid {
             self.ai.menu = false;
             return;
         }
-        let rect = Rect::from_min_max(
-            pos2(screen.right() - 12.0 - PANEL_W, TOP),
-            pos2(screen.right() - 12.0, (screen.bottom() - 12.0).max(TOP + 240.0)),
-        );
+        let rect = if self.sheet() {
+            // A phone held upright: the width of the screen, down to the dock.
+            let bottom = self.dock_rows(screen).last().map_or(screen.bottom() - 12.0, |r| r.top() - 8.0);
+            Rect::from_min_max(pos2(screen.left() + 12.0, TOP), pos2(screen.right() - 12.0, bottom.max(TOP + 240.0)))
+        } else {
+            Rect::from_min_max(
+                pos2(screen.right() - 12.0 - PANEL_W, TOP),
+                pos2(screen.right() - 12.0, (screen.bottom() - 12.0).max(TOP + 240.0)),
+            )
+        };
         let setup = self.ai_setup || !self.chat.ready();
         let chat = &self.chat;
         let st = &mut self.ai;

@@ -75,6 +75,19 @@ for view in 1180x820 820x1180; do
     fi
   done
 done
+# The touch layout on phones, upright and sideways: the dock, the top bar and every panel stay
+# on screen and the dock stays reachable (check-phone.js, one stage per call so each can be
+# screenshotted).
+for view in 390x844 844x390; do
+  axi emulate --viewport "${view}x3,mobile,touch" >/dev/null
+  axi open "$url" >/dev/null
+  for stage in plain assistant palette select export colour; do
+    got="$(axi eval --full "async () => ($(cat "$here/check-phone.js"))('$stage', '$view')" | unwrap)"
+    axi screenshot "$shots/web-phone-$view-$stage.png" >/dev/null
+    echo "wrote $shots/web-phone-$view-$stage.png"
+    touch_results+=$'\n'"$got"
+  done
+done
 axi emulate --viewport "1280x800x1" >/dev/null
 axi open "$url" >/dev/null
 # check.js outlasts one eval's 60 s request limit: start it, then poll for its lines.

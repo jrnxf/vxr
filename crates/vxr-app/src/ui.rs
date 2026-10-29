@@ -1,6 +1,7 @@
 //! The Hybrid UI (direction D) in egui, moved from the test 3 spike. Every size and colour below comes from the prototype's CSS
 //! (`prototype/src/editor.html`); the CSS selector each block copies is named in its comment.
 
+use egui::emath::TSTransform;
 use egui::text::{LayoutJob, TextFormat};
 use egui::{
     Align, Align2, Area, Color32, Context, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Id, Key,
@@ -31,6 +32,10 @@ const TOOL_STEP: f32 = 36.0;
 /// The dock's bars: 44-point buttons with 5 points of padding, 8 apart.
 const DOCK_H: f32 = 46.0;
 const DOCK_BTN: f32 = 36.0;
+/// A touch screen whose short side is under this many points is a phone; one narrower than
+/// `NARROW_W` is held upright.
+const PHONE_MIN: f32 = 400.0;
+const NARROW_W: f32 = 460.0;
 
 /// Font bytes, loaded by the caller (see `crate::fonts`).
 pub struct FontBytes {
@@ -558,6 +563,15 @@ pub struct Hybrid {
     /// The top of the dock's upper bar, where flyouts open above, and the view it is centred on.
     dock_top: f32,
     dock_view: Rect,
+    /// Everything the dock's bars cover.
+    dock_area: Rect,
+    /// A phone-sized touch screen (its short side under `PHONE_MIN` points): panels fit the
+    /// room the dock leaves, and the top bar and dock shrink to the width.
+    phone: bool,
+    /// A phone held upright (narrower than `NARROW_W`): the assistant is a sheet above the dock.
+    narrow: bool,
+    /// A phone held sideways: the dock stands at the left and flyouts open to its right.
+    short: bool,
     /// Top of the mirror button in the rail, where the axis flyout lines up.
     axes_y: f32,
     voxel_y: f32,
@@ -835,6 +849,10 @@ impl Hybrid {
             palette_open: false,
             dock_top: 0.0,
             dock_view: Rect::NOTHING,
+            dock_area: Rect::NOTHING,
+            phone: false,
+            narrow: false,
+            short: false,
             axes_y: 0.0,
             voxel_y: 0.0,
             select_y: 0.0,
@@ -1138,8 +1156,12 @@ impl Hybrid {
         self.keys(ctx);
         self.hits.clear();
         let screen = ctx.content_rect();
+        self.phone = self.touch && screen.width().min(screen.height()) < PHONE_MIN;
+        self.narrow = self.phone && screen.width() < NARROW_W;
+        self.short = self.phone && !self.narrow;
         self.top_bar(ctx, screen);
         // The docked assistant takes the right edge; the panels anchored there move left of it.
+        // Held upright on a phone it is a sheet above the dock instead.
         self.assistant_panel(ctx, screen);
         let full = screen;
         let screen = Rect::from_min_max(screen.min, pos2(screen.right() - self.ai_width(), screen.bottom()));
@@ -1148,41 +1170,59 @@ impl Hybrid {
         } else {
             self.rail(ctx);
         }
-        self.tree_panel(ctx);
-        self.axes(ctx);
-        self.size_flyout(ctx);
-        self.selection_panel(ctx);
-        self.bounds_panel(ctx);
-        self.new_confirm(ctx, screen);
-        self.export_menu(ctx);
-        self.theme_menu(ctx);
+        // On a phone every panel fits the room the dock leaves.
+        let region = self.phone.then(|| self.panel_region(full));
+        ctx.data_mut(|d| d.insert_temp(Id::unique("fit-region"), region));
+        // The assistant sheet covers the camera bar and its View flyout.
+        let sheet = self.sheet();
+        if self.phone {
+            // Under the flyouts, which open over the camera bar and the render corner.
+            self.render_corner(ctx, screen, stats);
+            if !sheet {
+                self.nav_bar(ctx, screen);
+            }
+        }
+        self.fitted(ctx, |s| s.tree_panel(ctx));
+        self.fitted(ctx, |s| s.axes(ctx));
+        self.fitted(ctx, |s| s.size_flyout(ctx));
+        self.fitted(ctx, |s| s.selection_panel(ctx));
+        self.fitted(ctx, |s| s.bounds_panel(ctx));
+        self.fitted(ctx, |s| s.new_confirm(ctx, screen));
+        self.fitted(ctx, |s| s.export_menu(ctx));
+        self.fitted(ctx, |s| s.theme_menu(ctx));
         self.marquee(ctx);
-        self.palette_panel(ctx, screen);
-        self.color_editor(ctx, screen);
-        self.review_card(ctx, screen);
-        self.agent_card(ctx, screen);
+        self.fitted(ctx, |s| s.palette_panel(ctx, screen));
+        self.fitted(ctx, |s| s.color_editor(ctx, screen));
+        self.fitted(ctx, |s| s.review_card(ctx, screen));
+        self.fitted(ctx, |s| s.agent_card(ctx, screen));
         if self.coach {
-            self.coach_card(ctx, screen);
+            self.fitted(ctx, |s| s.coach_card(ctx, screen));
         }
         if self.touch {
             self.stats_right = screen.left() + 4.0;
         } else {
             self.stats(ctx, screen, stats);
         }
-        self.render_corner(ctx, screen, stats);
-        self.render_panel(ctx, screen, stats);
-        self.nav_bar(ctx, screen);
-        self.view_panel(ctx, screen);
+        if !self.phone {
+            self.render_corner(ctx, screen, stats);
+        }
+        self.fitted(ctx, |s| s.render_panel(ctx, screen, stats));
+        if !self.phone {
+            self.nav_bar(ctx, screen);
+        }
+        if !sheet {
+            self.fitted(ctx, |s| s.view_panel(ctx, screen));
+        }
         if !self.touch {
             self.hint_bar(ctx, screen);
         } else {
             self.gesture_hints(ctx, screen);
         }
-        self.ask_bar(ctx, screen);
-        self.agents_panel(ctx, screen);
+        self.fitted(ctx, |s| s.ask_bar(ctx, screen));
+        self.fitted(ctx, |s| s.agents_panel(ctx, screen));
         self.toast_panel(ctx, screen);
         if self.cmdk.is_some() {
-            self.cmdk(ctx, full);
+            self.fitted(ctx, |s| s.cmdk(ctx, full));
         }
         if std::mem::take(&mut self.camera_tip) {
             self.toast(
@@ -1372,9 +1412,50 @@ impl Hybrid {
         });
     }
 
+    /// The bars that lay themselves out to the phone's width; every other panel fits the region.
+    const OWN_LAYOUT: [&str; 9] =
+        ["top", "top-right", "dock", "dock-brushes", "dock-more", "assistant", "nav", "toast", "stats"];
+
+    /// On a phone (the region is set), scale the panel `id` down about its corner until it fits
+    /// the region, and move it inside. The bars that lay themselves out keep their place.
+    fn fit_panel(ctx: &Context, id: &str, order: Order, rect: Rect) -> bool {
+        if Self::OWN_LAYOUT.contains(&id) {
+            return false;
+        }
+        let layer = egui::LayerId::new(order, Id::unique(id));
+        let Some(region) = ctx.data(|d| d.get_temp::<Option<Rect>>(Id::unique("fit-region"))).flatten() else {
+            ctx.set_transform_layer(layer, TSTransform::IDENTITY);
+            return false;
+        };
+        let k = (region.width() / rect.width()).min(region.height() / rect.height()).min(1.0);
+        let size = rect.size() * k;
+        let at = pos2(
+            rect.min.x.clamp(region.left(), (region.right() - size.x).max(region.left())),
+            rect.min.y.clamp(region.top(), (region.bottom() - size.y).max(region.top())),
+        );
+        if k >= 1.0 && at == rect.min {
+            ctx.set_transform_layer(layer, TSTransform::IDENTITY);
+            return false;
+        }
+        let t = TSTransform::new(at.to_vec2() - rect.min.to_vec2() * k, k);
+        ctx.set_transform_layer(layer, t);
+        let log = Id::unique("fit-log");
+        ctx.data_mut(|d| {
+            if let Some(v) = d.get_temp::<Vec<(Rect, TSTransform)>>(log) {
+                let mut v = v;
+                v.push((rect, t));
+                d.insert_temp(log, v);
+            }
+        });
+        true
+    }
+
     // .panel
     fn panel(ctx: &Context, id: &str, rect: Rect, order: Order, contents: impl FnOnce(&mut Ui, Rect)) {
-        Self::panel_filled(ctx, id, rect, order, th().panel, contents)
+        // On a phone the panels over the view are solid, so the camera bar behind one does not show.
+        let over_view = ctx.data(|d| d.get_temp::<Option<Rect>>(Id::unique("fit-region"))).flatten().is_some()
+            && !Self::OWN_LAYOUT.contains(&id);
+        Self::panel_filled(ctx, id, rect, order, if over_view { th().panel_solid } else { th().panel }, contents)
     }
 
     /// A panel with its own fill: the theme's `panel_solid` for a menu over other panels.
@@ -1386,7 +1467,12 @@ impl Hybrid {
         fill: Color32,
         contents: impl FnOnce(&mut Ui, Rect),
     ) {
+        let scaled = Self::fit_panel(ctx, id, order, rect);
         Area::new(Id::unique(id)).fade_in(false).order(order).fixed_pos(rect.min).constrain(false).show(ctx, |ui| {
+            if scaled {
+                // The screen clips the panel where it would be unscaled, not where it shows.
+                ui.set_clip_rect(rect.expand(64.0));
+            }
             let p = ui.painter();
             p.add(
                 Shadow { offset: [0, 10], blur: 30, spread: 0, color: th().shadow }
@@ -1406,48 +1492,58 @@ impl Hybrid {
         let sel_w = name.size().x + 34.0;
         // Over the dock, undo and redo are on it.
         let history = !self.touch;
-        let w = 12.0
-            + LOGO_STEP
-            + brand.size().x
-            + 10.0
-            + sel_w
-            + 13.0
-            + 4.0 * 36.0
-            + if history { 13.0 + 2.0 * 36.0 } else { 0.0 }
-            + 4.0;
+        // Held upright a phone has room for the file buttons, the assistant, the theme and
+        // Embed (as an icon) only: no name, no New (Cmd-K) and no keyboard button.
+        let slim = self.narrow;
+        let w = if slim {
+            4.0 + 3.0 * 36.0 + 4.0
+        } else {
+            12.0 + LOGO_STEP
+                + brand.size().x
+                + 10.0
+                + sel_w
+                + 13.0
+                + 4.0 * 36.0
+                + if history { 13.0 + 2.0 * 36.0 } else { 0.0 }
+                + 4.0
+        };
         let left = Rect::from_min_size(pos2(12.0, 12.0), vec2(w, 40.0));
         let mut tip: Option<(Rect, &'static str, &'static [&'static str])> = None;
         Self::panel(ctx, "top", left, Order::Middle, |ui, rect| {
             let cy = rect.center().y;
             let mut x = rect.left() + 12.0;
-            logo(ui, pos2(x, cy - 9.0), 18.0);
-            x += LOGO_STEP;
-            ui.painter().galley(pos2(x, cy - brand.size().y / 2.0), brand.clone(), th().text);
-            x += brand.size().x + 10.0;
-            // #scene-select
-            let sel = Rect::from_min_size(pos2(x, cy - 14.0), vec2(sel_w, 28.0));
-            let resp = ui.interact(sel, Id::unique("scene-select"), Sense::click());
-            let p = ui.painter();
-            p.rect(sel, CornerRadius::same(7), th().tint(10), Stroke::new(1.0, th().line), StrokeKind::Inside);
-            if resp.hovered() {
-                p.rect_filled(sel, CornerRadius::same(7), th().hover);
-            }
-            p.galley(pos2(sel.left() + 10.0, cy - name.size().y / 2.0), name, th().text);
-            p.text(
-                pos2(sel.right() - 13.0, cy),
-                Align2::CENTER_CENTER,
-                icon::CHEVRON_DOWN,
-                icon_font(12.0),
-                th().muted,
-            );
             let sep = |ui: &Ui, x: &mut f32| {
                 *x += 6.0;
                 ui.painter()
                     .line_segment([pos2(*x + 0.5, cy - 10.0), pos2(*x + 0.5, cy + 10.0)], Stroke::new(1.0, th().line));
                 *x += 7.0;
             };
-            x = sel.right();
-            sep(ui, &mut x);
+            if slim {
+                x = rect.left() + 4.0;
+            } else {
+                logo(ui, pos2(x, cy - 9.0), 18.0);
+                x += LOGO_STEP;
+                ui.painter().galley(pos2(x, cy - brand.size().y / 2.0), brand.clone(), th().text);
+                x += brand.size().x + 10.0;
+                // #scene-select
+                let sel = Rect::from_min_size(pos2(x, cy - 14.0), vec2(sel_w, 28.0));
+                let resp = ui.interact(sel, Id::unique("scene-select"), Sense::click());
+                let p = ui.painter();
+                p.rect(sel, CornerRadius::same(7), th().tint(10), Stroke::new(1.0, th().line), StrokeKind::Inside);
+                if resp.hovered() {
+                    p.rect_filled(sel, CornerRadius::same(7), th().hover);
+                }
+                p.galley(pos2(sel.left() + 10.0, cy - name.size().y / 2.0), name, th().text);
+                p.text(
+                    pos2(sel.right() - 13.0, cy),
+                    Align2::CENTER_CENTER,
+                    icon::CHEVRON_DOWN,
+                    icon_font(12.0),
+                    th().muted,
+                );
+                x = sel.right();
+                sep(ui, &mut x);
+            }
             let file: [(&str, char, &'static str, &'static [&'static str]); 4] = [
                 ("new", icon::FILE_PLUS, "New scene", &[]),
                 ("open", icon::FOLDER_OPEN, "Open .vox", &["⌘", "O"]),
@@ -1455,6 +1551,9 @@ impl Hybrid {
                 ("export", icon::FILE_OUTPUT, "Export", &[]),
             ];
             for (id, glyph, label, keys) in file {
+                if slim && id == "new" {
+                    continue;
+                }
                 if id == "export" {
                     self.export_x = x;
                 }
@@ -1497,8 +1596,12 @@ impl Hybrid {
         }
         // The right island, laid out from the right edge.
         let embed_label = ctx.fonts_mut(|f| f.layout_no_wrap("Embed".into(), sans_semibold(13.0), th().on_accent));
-        let ew = 10.0 + 16.0 + 6.0 + embed_label.size().x + 10.0;
-        let rw = 4.0 + 36.0 + 4.0 + 36.0 + 4.0 + 36.0 + 4.0 + ew + 4.0;
+        let ew = if slim { 36.0 } else { 10.0 + 16.0 + 6.0 + embed_label.size().x + 10.0 };
+        let rw = if slim {
+            4.0 + 36.0 + 4.0 + 36.0 + 4.0 + ew + 4.0
+        } else {
+            4.0 + 36.0 + 4.0 + 36.0 + 4.0 + 36.0 + 4.0 + ew + 4.0
+        };
         let right = Rect::from_min_size(pos2(screen.right() - 12.0 - rw, 12.0), vec2(rw, 40.0));
         let mut theme_tip = None;
         Self::panel(ctx, "top-right", right, Order::Middle, |ui, rect| {
@@ -1508,17 +1611,29 @@ impl Hybrid {
             let fill = if resp.hovered() { th().accent_hover } else { th().accent };
             let p = ui.painter();
             p.rect_filled(embed, CornerRadius::same(8), fill);
-            p.text(pos2(embed.left() + 18.0, cy), Align2::CENTER_CENTER, icon::CODE, icon_font(16.0), th().on_accent);
-            p.galley(pos2(embed.left() + 32.0, cy - embed_label.size().y / 2.0), embed_label, th().on_accent);
+            if slim {
+                p.text(embed.center(), Align2::CENTER_CENTER, icon::CODE, icon_font(16.0), th().on_accent);
+            } else {
+                p.text(
+                    pos2(embed.left() + 18.0, cy),
+                    Align2::CENTER_CENTER,
+                    icon::CODE,
+                    icon_font(16.0),
+                    th().on_accent,
+                );
+                p.galley(pos2(embed.left() + 32.0, cy - embed_label.size().y / 2.0), embed_label, th().on_accent);
+            }
             if resp.clicked() {
                 self.actions.push(Action::Embed);
             }
-            let mut kx = embed.left() - 4.0 - 36.0;
-            if tbtn(ui, &mut kx, cy, Some(icon::KEYBOARD), "", "keys", true).clicked() {
-                self.cmdk = Some(String::new());
+            if !slim {
+                let mut kx = embed.left() - 4.0 - 36.0;
+                if tbtn(ui, &mut kx, cy, Some(icon::KEYBOARD), "", "keys", true).clicked() {
+                    self.cmdk = Some(String::new());
+                }
             }
             // The assistant panel (Cmd-J).
-            let mut ax = embed.left() - 4.0 - 36.0 - 4.0 - 36.0;
+            let mut ax = embed.left() - 4.0 - 36.0 - if slim { 0.0 } else { 4.0 + 36.0 };
             let r = tbtn_on(ui, &mut ax, cy, Some(icon::SPARKLES), "", "assistant", true, self.ai_open);
             self.hits.insert("ai-toggle".into(), r.rect);
             if self.ai_open {
@@ -1706,121 +1821,225 @@ impl Hybrid {
 
     // The dock, in place of the rail on a touch screen: the tools, the colour (it opens the
     // palette above) and undo/redo along the bottom; the brushes, mirror and axis lock on a
-    // bar above. Flyouts open over both.
+    // bar above. Flyouts open over both. Where the view is too narrow for those two bars they
+    // become three: the tools, the brushes, then the colour, mirror, axis lock and undo/redo.
     fn dock(&mut self, ctx: &Context, screen: Rect) {
-        let step = DOCK_BTN + 2.0;
-        let sep = 11.0;
-        let bar = |n: f32, seps: f32| 5.0 + n * step - 2.0 + seps * sep + 5.0;
-        let cx = screen.center().x;
-        let lower = Rect::from_min_size(
-            pos2(cx - bar(8.0, 2.0) / 2.0, screen.bottom() - 12.0 - DOCK_H),
-            vec2(bar(8.0, 2.0), DOCK_H),
-        );
-        let upper = Rect::from_min_size(
-            pos2(cx - bar(7.0, 1.0) / 2.0, lower.top() - 8.0 - DOCK_H),
-            vec2(bar(7.0, 1.0), DOCK_H),
-        );
-        (self.dock_top, self.dock_view) = (upper.top(), screen);
-        self.hits.insert("dock".into(), lower);
-        self.hits.insert("dock-brushes".into(), upper);
+        let rows = self.dock_rows(screen);
+        let three = rows.len() == 3;
+        (self.dock_top, self.dock_view) = (rows[rows.len() - 1].top(), screen);
+        self.dock_area = rows.iter().fold(rows[0], |a, r| a.union(*r));
+        for (name, r) in ["dock", "dock-brushes", "dock-more"].into_iter().zip(&rows) {
+            self.hits.insert(name.into(), *r);
+        }
         let mut hits = Vec::new();
-        Self::panel(ctx, "dock", lower, Order::Middle, |ui, rect| {
+        Self::panel(ctx, "dock", rows[0], Order::Middle, |ui, rect| {
             let (mut x, y) = (rect.left() + 5.0, rect.top() + 5.0);
-            let tool = self.tool;
-            for (t, ic, id) in [
-                (Tool::Add, icon::BOX, "tool-add"),
-                (Tool::Erase, icon::ERASER, "tool-erase"),
-                (Tool::Paint, icon::PAINTBRUSH, "tool-paint"),
-                (Tool::Pick, icon::PIPETTE, "tool-pick"),
-                (Tool::Select, icon::SELECT, "select"),
-            ] {
-                let r = dock_button(ui, pos2(x, y), ic, id, tool == t, true);
-                hits.push((id, r.rect));
-                if r.clicked() {
-                    self.tool = t;
-                }
-                x += step;
-            }
-            dock_sep(ui, rect, &mut x);
-            // The current colour; the palette opens over the dock.
-            let c = Rect::from_min_size(pos2(x, y), vec2(DOCK_BTN, DOCK_BTN));
-            let resp = ui.interact(c, Id::unique("dock-color"), Sense::click());
-            let p = ui.painter();
-            if self.palette_open {
-                p.rect(c, CornerRadius::same(8), th().accent_bg, Stroke::new(1.0, th().ring), StrokeKind::Inside);
-            } else if resp.hovered() {
-                p.rect_filled(c, CornerRadius::same(8), th().hover);
-            }
-            let sw = Rect::from_center_size(c.center(), vec2(22.0, 22.0));
-            p.rect(sw, CornerRadius::same(6), self.color(self.slot), Stroke::new(1.0, th().line2), StrokeKind::Outside);
-            hits.push(("dock-color", c));
-            if resp.clicked() {
-                self.palette_open = !self.palette_open;
-            }
-            x += step;
-            dock_sep(ui, rect, &mut x);
-            for (id, ic, enabled, action) in
-                [("undo", icon::UNDO, self.can_undo, Action::Undo), ("redo", icon::REDO, self.can_redo, Action::Redo)]
-            {
-                let r = dock_button(ui, pos2(x, y), ic, id, false, enabled);
-                hits.push((id, r.rect));
-                if r.clicked() {
-                    self.actions.push(action);
-                }
-                x += step;
+            self.dock_tools(ui, &mut x, y, &mut hits);
+            if !three {
+                dock_sep(ui, rect, &mut x);
+                self.dock_color(ui, &mut x, y, &mut hits);
+                dock_sep(ui, rect, &mut x);
+                self.dock_history(ui, &mut x, y, &mut hits);
             }
         });
-        Self::panel(ctx, "dock-brushes", upper, Order::Middle, |ui, rect| {
+        Self::panel(ctx, "dock-brushes", rows[1], Order::Middle, |ui, rect| {
             let (mut x, y) = (rect.left() + 5.0, rect.top() + 5.0);
-            let shape = self.shape;
-            for (s, ic, id) in [
-                (Shape::Voxel, icon::POINTER, "voxel"),
-                (Shape::Box, icon::SQUARE_DASHED, "brush-box"),
-                (Shape::Face, icon::LAYERS, "brush-face"),
-                (Shape::Line, icon::SLASH, "brush-line"),
-            ] {
-                let r = dock_button(ui, pos2(x, y), ic, id, shape == s, true);
-                hits.push((id, r.rect));
-                if r.clicked() {
-                    if s == Shape::Voxel {
-                        self.voxel_brush();
-                    } else {
-                        self.shape = s;
-                    }
-                }
-                x += step;
-            }
-            let center = matches!(shape, Shape::Circle | Shape::Sphere);
-            let ic = if shape == Shape::Sphere { icon::GLOBE } else { icon::CIRCLE_DOT };
-            let r = dock_button(ui, pos2(x, y), ic, "center", center, true);
-            hits.push(("center", r.rect));
-            if r.clicked() {
-                self.center_brush();
-            }
-            x += step;
-            dock_sep(ui, rect, &mut x);
-            let r = dock_button(ui, pos2(x, y), icon::FLIP, "mirror", self.mirror, true);
-            hits.push(("mirror", r.rect));
-            if r.clicked() {
-                self.mirror = !self.mirror;
-            }
-            x += step;
-            let r = dock_button(ui, pos2(x, y), icon::LOCK, "lock", self.lock.is_some(), true);
-            hits.push(("lock", r.rect));
-            if r.clicked() {
-                self.cycle_lock();
+            self.dock_brushes(ui, &mut x, y, &mut hits);
+            if !three {
+                dock_sep(ui, rect, &mut x);
+                self.dock_axes(ui, &mut x, y, &mut hits);
             }
         });
+        if three {
+            Self::panel(ctx, "dock-more", rows[2], Order::Middle, |ui, rect| {
+                let (mut x, y) = (rect.left() + 5.0, rect.top() + 5.0);
+                self.dock_color(ui, &mut x, y, &mut hits);
+                dock_sep(ui, rect, &mut x);
+                self.dock_axes(ui, &mut x, y, &mut hits);
+                dock_sep(ui, rect, &mut x);
+                self.dock_history(ui, &mut x, y, &mut hits);
+            });
+        }
         self.hits.extend(hits.into_iter().map(|(n, r)| (n.to_string(), r)));
+    }
+
+    /// The dock's bars, bottom first, in a view of `view`: two where they fit, else three.
+    /// Centred, or at the left of a phone held sideways.
+    fn dock_rows(&self, view: Rect) -> Vec<Rect> {
+        let step = DOCK_BTN + 2.0;
+        let bar = |n: f32, seps: f32| 5.0 + n * step - 2.0 + seps * sep_w() + 5.0;
+        let widths: &[f32] = if view.width() < bar(8.0, 2.0) + 24.0 {
+            &[bar(5.0, 0.0), bar(5.0, 0.0), bar(5.0, 2.0)]
+        } else {
+            &[bar(8.0, 2.0), bar(7.0, 1.0)]
+        };
+        let mut top = view.bottom() - 12.0;
+        widths
+            .iter()
+            .map(|w| {
+                top -= DOCK_H;
+                let x = if self.short { view.left() + 12.0 } else { view.center().x - w / 2.0 };
+                let r = Rect::from_min_size(pos2(x, top), vec2(*w, DOCK_H));
+                top -= 8.0;
+                r
+            })
+            .collect()
+    }
+
+    /// The assistant is a sheet above the dock: a phone held upright, with the panel open.
+    fn sheet(&self) -> bool {
+        self.narrow && self.ai_open
+    }
+
+    /// The room a phone's panels fit in: above the dock, or beside it when the phone is held
+    /// sideways and the dock leaves no height.
+    fn panel_region(&self, full: Rect) -> Rect {
+        let view = Rect::from_min_max(full.min, pos2(full.right() - self.ai_width(), full.bottom()));
+        let rows = self.dock_rows(view);
+        if self.short {
+            let right = rows.iter().map(|r| r.right()).fold(f32::MIN, f32::max);
+            Rect::from_min_max(pos2(right + 8.0, TOP), pos2(full.right() - 12.0, full.bottom() - 12.0))
+        } else {
+            Rect::from_min_max(
+                pos2(full.left() + 12.0, TOP),
+                pos2(full.right() - 12.0, rows[rows.len() - 1].top() - 8.0),
+            )
+        }
+    }
+
+    /// Run `draw`, a panel that opens over the view: where it scaled itself to fit the phone's
+    /// panel region, its hits move with it.
+    fn fitted(&mut self, ctx: &Context, draw: impl FnOnce(&mut Self)) {
+        if !self.phone {
+            return draw(self);
+        }
+        let before = self.hits.clone();
+        let log = Id::unique("fit-log");
+        ctx.data_mut(|d| d.insert_temp(log, Vec::<(Rect, TSTransform)>::new()));
+        draw(self);
+        let fits = ctx.data_mut(|d| d.remove_temp::<Vec<(Rect, TSTransform)>>(log)).unwrap_or_default();
+        for (name, r) in &mut self.hits {
+            if before.get(name) == Some(r) {
+                continue;
+            }
+            if let Some((_, t)) = fits.iter().find(|(from, _)| from.expand(0.5).contains_rect(*r)) {
+                *r = Rect::from_min_max(*t * r.min, *t * r.max);
+            }
+        }
+    }
+
+    fn dock_tools(&mut self, ui: &mut Ui, x: &mut f32, y: f32, hits: &mut Vec<(&'static str, Rect)>) {
+        let tool = self.tool;
+        for (t, ic, id) in [
+            (Tool::Add, icon::BOX, "tool-add"),
+            (Tool::Erase, icon::ERASER, "tool-erase"),
+            (Tool::Paint, icon::PAINTBRUSH, "tool-paint"),
+            (Tool::Pick, icon::PIPETTE, "tool-pick"),
+            (Tool::Select, icon::SELECT, "select"),
+        ] {
+            let r = dock_button(ui, pos2(*x, y), ic, id, tool == t, true);
+            hits.push((id, r.rect));
+            if r.clicked() {
+                self.tool = t;
+            }
+            *x += DOCK_BTN + 2.0;
+        }
+    }
+
+    // The current colour; the palette opens over the dock.
+    fn dock_color(&mut self, ui: &mut Ui, x: &mut f32, y: f32, hits: &mut Vec<(&'static str, Rect)>) {
+        let c = Rect::from_min_size(pos2(*x, y), vec2(DOCK_BTN, DOCK_BTN));
+        let resp = ui.interact(c, Id::unique("dock-color"), Sense::click());
+        let p = ui.painter();
+        if self.palette_open {
+            p.rect(c, CornerRadius::same(8), th().accent_bg, Stroke::new(1.0, th().ring), StrokeKind::Inside);
+        } else if resp.hovered() {
+            p.rect_filled(c, CornerRadius::same(8), th().hover);
+        }
+        let sw = Rect::from_center_size(c.center(), vec2(22.0, 22.0));
+        p.rect(sw, CornerRadius::same(6), self.color(self.slot), Stroke::new(1.0, th().line2), StrokeKind::Outside);
+        hits.push(("dock-color", c));
+        if resp.clicked() {
+            self.palette_open = !self.palette_open;
+        }
+        *x += DOCK_BTN + 2.0;
+    }
+
+    fn dock_history(&mut self, ui: &mut Ui, x: &mut f32, y: f32, hits: &mut Vec<(&'static str, Rect)>) {
+        for (id, ic, enabled, action) in
+            [("undo", icon::UNDO, self.can_undo, Action::Undo), ("redo", icon::REDO, self.can_redo, Action::Redo)]
+        {
+            let r = dock_button(ui, pos2(*x, y), ic, id, false, enabled);
+            hits.push((id, r.rect));
+            if r.clicked() {
+                self.actions.push(action);
+            }
+            *x += DOCK_BTN + 2.0;
+        }
+    }
+
+    fn dock_brushes(&mut self, ui: &mut Ui, x: &mut f32, y: f32, hits: &mut Vec<(&'static str, Rect)>) {
+        let shape = self.shape;
+        for (s, ic, id) in [
+            (Shape::Voxel, icon::POINTER, "voxel"),
+            (Shape::Box, icon::SQUARE_DASHED, "brush-box"),
+            (Shape::Face, icon::LAYERS, "brush-face"),
+            (Shape::Line, icon::SLASH, "brush-line"),
+        ] {
+            let r = dock_button(ui, pos2(*x, y), ic, id, shape == s, true);
+            hits.push((id, r.rect));
+            if r.clicked() {
+                if s == Shape::Voxel {
+                    self.voxel_brush();
+                } else {
+                    self.shape = s;
+                }
+            }
+            *x += DOCK_BTN + 2.0;
+        }
+        let center = matches!(shape, Shape::Circle | Shape::Sphere);
+        let ic = if shape == Shape::Sphere { icon::GLOBE } else { icon::CIRCLE_DOT };
+        let r = dock_button(ui, pos2(*x, y), ic, "center", center, true);
+        hits.push(("center", r.rect));
+        if r.clicked() {
+            self.center_brush();
+        }
+        *x += DOCK_BTN + 2.0;
+    }
+
+    fn dock_axes(&mut self, ui: &mut Ui, x: &mut f32, y: f32, hits: &mut Vec<(&'static str, Rect)>) {
+        let r = dock_button(ui, pos2(*x, y), icon::FLIP, "mirror", self.mirror, true);
+        hits.push(("mirror", r.rect));
+        if r.clicked() {
+            self.mirror = !self.mirror;
+        }
+        *x += DOCK_BTN + 2.0;
+        let r = dock_button(ui, pos2(*x, y), icon::LOCK, "lock", self.lock.is_some(), true);
+        hits.push(("lock", r.rect));
+        if r.clicked() {
+            self.cycle_lock();
+        }
+        *x += DOCK_BTN + 2.0;
     }
 
     // The touch gestures on a scrim chip over the view (they stay on, so they must read over
     // any model): bottom left beside the dock, or centred over it when the screen is too
     // narrow. Under every panel, and never takes a finger.
     fn gesture_hints(&mut self, ctx: &Context, screen: Rect) {
+        // The assistant's sheet covers the view the chip hints at.
+        if self.sheet() {
+            return;
+        }
         let mut job = LayoutJob::default();
-        let lines: [&[(&str, &str)]; 2] =
+        let wide: [&[(&str, &str)]; 2] =
             [&[("Two fingers", "orbit"), ("Pinch", "zoom")], &[("Three fingers", "pan"), ("Two-finger tap", "undo")]];
+        let upright: [&[(&str, &str)]; 3] = [
+            &[("Two fingers", "orbit"), ("Pinch", "zoom")],
+            &[("Three fingers", "pan")],
+            &[("Two-finger tap", "undo")],
+        ];
+        // One line less wide where the wide chip does not fit the view.
+        let lines: &[&[(&str, &str)]] = if screen.width() < 360.0 { &upright } else { &wide };
         for (l, line) in lines.iter().enumerate() {
             for (i, (k, v)) in line.iter().enumerate() {
                 let lead = if i > 0 { 12.0 } else { 0.0 };
@@ -3869,6 +4088,10 @@ impl Hybrid {
         }
         let top = if self.touch { TOP } else { screen.bottom() - 12.0 - size.y };
         let corner = Rect::from_min_size(pos2(screen.right() - 12.0 - size.x, top), size);
+        // A phone held sideways with the assistant open has no room for it beside the dock.
+        if self.phone && !full && corner.intersects(self.dock_area.expand(8.0)) {
+            return;
+        }
         let rect = if full { screen } else { corner };
         self.render_rect = Some(rect);
         self.render_dock = Some(corner);
@@ -4301,10 +4524,31 @@ impl Hybrid {
         let rect = if vertical {
             let size = vec2(4.0 + pw + 4.0, len + 32.0 + 2.0);
             let below = self.render_dock.map_or(TOP, |r| r.bottom() + 8.0);
-            Rect::from_min_size(
-                pos2(screen.right() - 12.0 - size.x, (screen.center().y - size.y / 2.0).max(below)),
-                size,
-            )
+            let right = screen.right() - 12.0 - size.x;
+            let under = Rect::from_min_size(pos2(right, (screen.center().y - size.y / 2.0).max(below)), size);
+            if self.phone {
+                // On a phone: under the corner, else beside it, else at the top; where the dock
+                // or the screen's edge leaves no room the bar stays away.
+                let mut places = vec![under];
+                if let Some(c) = self.render_dock {
+                    places.push(Rect::from_min_size(pos2(c.left() - 8.0 - size.x, c.top()), size));
+                }
+                places.push(Rect::from_min_size(pos2(right, TOP), size));
+                let clear = |r: &Rect| {
+                    r.bottom() <= screen.bottom() - 12.0
+                        && r.left() >= screen.left() + 12.0
+                        && !r.intersects(self.dock_area.expand(8.0))
+                };
+                match places.into_iter().find(clear) {
+                    Some(r) => r,
+                    None => {
+                        self.nav_rect = None;
+                        return;
+                    }
+                }
+            } else {
+                under
+            }
         } else {
             let w = len + pw + 2.0;
             let size = vec2(w, 40.0);
@@ -4612,6 +4856,11 @@ fn view_chip(ui: &mut Ui, c: Rect, id: &str, label: &str, key: &str, on: bool) -
     let kc = if on { th().accent.gamma_multiply(0.8) } else { th().faint };
     p.text(pos2(c.right() - 4.0, c.bottom() - 2.0), Align2::RIGHT_BOTTOM, key, mono_medium(8.5), kc);
     resp.clicked()
+}
+
+/// A separator's width in the dock.
+fn sep_w() -> f32 {
+    11.0
 }
 
 fn dock_sep(ui: &Ui, bar: Rect, x: &mut f32) {
@@ -5087,26 +5336,107 @@ mod tests {
         assert!(!h.show_render && !h.full_render, "hiding the render leaves the full view");
     }
 
-    #[test]
-    fn the_touch_layout_fits_a_phone_with_the_assistant_open() {
+    /// Draw the touch layout on a screen of `points` with `open` applied, and list what is
+    /// wrong: a hit or a panel off the screen, and a dock or top bar button under another panel.
+    fn phone_problems(points: (f32, f32), open: impl Fn(&mut super::Hybrid)) -> Vec<String> {
         let ctx = egui::Context::default();
         super::install(&ctx, None);
         let mut h = super::Hybrid::new([[0; 4]; 256], [false; 256], "test");
-        (h.touch, h.ai_open, h.palette_open, h.tool) = (true, true, true, super::Tool::Select);
-        let stats = super::Stats::default();
-        for _ in 0..3 {
-            let input = egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(300.0, 650.0))),
-                ..Default::default()
-            };
+        h.touch = true;
+        open(&mut h);
+        // The render corner shows, as it does once the path tracer has a frame.
+        let stats = super::Stats { render: Some((1.0, true)), ..Default::default() };
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(points.0, points.1));
+        for _ in 0..4 {
+            let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
             let mut out = ctx.run_ui(input, |u| {
                 h.ui(u.ctx(), &stats);
             });
             out.textures_delta.clear();
         }
-        for name in ["selection", "palette"] {
-            let r = h.hits.get(name).copied();
-            assert!(r.is_some_and(|r| r.left() == 12.0), "{name} keeps to the left gutter: {r:?}");
+        let mut bad = Vec::new();
+        // What the assistant's scrolling content lays out past its edge is reached by scrolling.
+        let scrolled = |n: &str| n.starts_with("ai-") && !n.starts_with("ai-toggle");
+        let sane = screen.expand(0.5);
+        for (n, r) in &h.hits {
+            if !scrolled(n) && !sane.contains_rect(*r) {
+                bad.push(format!("hit {n} {r:?} leaves the screen"));
+            }
+        }
+        let areas: Vec<_> = ctx.memory(|m| m.areas().visible_layer_ids().into_iter().collect());
+        for id in areas {
+            if id.order == egui::Order::Tooltip {
+                continue;
+            }
+            let Some(r) = ctx.memory(|m| m.area_rect(id.id)) else { continue };
+            let r = ctx.layer_transform_to_global(id).map_or(r, |t| egui::Rect::from_min_max(t * r.min, t * r.max));
+            // A panel's shadow is not the panel: judge the rect it was asked for.
+            if !sane.contains_rect(r.shrink(0.0)) && r.width() < 2.0 * screen.width() {
+                bad.push(format!("panel {:?} {r:?} leaves the screen", id.id));
+            }
+        }
+        for n in [
+            "tool-add",
+            "tool-erase",
+            "tool-paint",
+            "tool-pick",
+            "select",
+            "dock-color",
+            "undo",
+            "redo",
+            "voxel",
+            "brush-box",
+            "brush-face",
+            "brush-line",
+            "center",
+            "mirror",
+            "lock",
+            "open",
+            "save",
+            "export",
+            "theme",
+            "ai-toggle",
+        ] {
+            let Some(r) = h.hits.get(n) else {
+                bad.push(format!("no {n} button"));
+                continue;
+            };
+            let top = ctx.layer_id_at(r.center());
+            // The confirm is a modal: the backdrop takes the touch until it is answered.
+            let own = ["dock", "dock-brushes", "dock-more", "top", "top-right", "new-backdrop"].map(egui::Id::unique);
+            if !top.is_some_and(|l| own.contains(&l.id)) {
+                bad.push(format!("{n} at {:?} is under {top:?}", r.center()));
+            }
+        }
+        bad
+    }
+
+    #[test]
+    fn the_touch_layout_fits_phones() {
+        type Open = fn(&mut super::Hybrid);
+        let scenarios: [(&str, Open); 15] = [
+            ("plain", |_| {}),
+            ("assistant", |h| h.ai_open = true),
+            ("assistant+palette", |h| (h.ai_open, h.palette_open) = (true, true)),
+            ("palette", |h| h.palette_open = true),
+            ("select", |h| h.tool = super::Tool::Select),
+            ("assistant+select", |h| (h.ai_open, h.tool) = (true, super::Tool::Select)),
+            ("size", |h| h.size_panel = true),
+            ("bounds", |h| h.bounds_panel = Some(["1".into(), "1".into(), "1".into()])),
+            ("export", |h| h.export_menu = true),
+            ("theme", |h| h.theme_menu = true),
+            ("view", |h| h.view_panel = true),
+            ("render", |h| h.render_panel = true),
+            ("commands", |h| h.cmdk = Some(String::new())),
+            ("colour editor", |h| h.open_color_edit()),
+            ("confirm", |h| h.confirm_new = true),
+        ];
+        // 360, 390 and 430 CSS px wide upright, then 844 and 932 wide sideways, at 1.3 points.
+        for pts in [(277.0, 649.0), (300.0, 649.0), (331.0, 685.0), (649.0, 300.0), (717.0, 331.0)] {
+            for (name, open) in &scenarios {
+                let bad = phone_problems(pts, open);
+                assert!(bad.is_empty(), "{pts:?} {name}: {bad:#?}");
+            }
         }
     }
 }

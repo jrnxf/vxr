@@ -652,6 +652,18 @@ impl App {
         self.editor.ui.hits.get(name).map(|r| vec![r.center().x * k, r.center().y * k]).unwrap_or_default()
     }
 
+    /// A named part of the UI as `[left, top, right, bottom]` in CSS pixels, or an empty array
+    /// if it is not on screen. For the browser check.
+    pub fn hit_rect(&self, name: &str) -> Vec<f32> {
+        let k = self.editor.ppp / self.editor.native_ppp;
+        self.editor
+            .ui
+            .hits
+            .get(name)
+            .map(|r| vec![r.min.x * k, r.min.y * k, r.max.x * k, r.max.y * k])
+            .unwrap_or_default()
+    }
+
     /// A key the page read back from the browser's encrypted store (`vxrKeys.load`) at start:
     /// `kind` is "anthropic", "openai" or "compatible".
     pub fn restore_key(&mut self, kind: &str, key: &str) {
