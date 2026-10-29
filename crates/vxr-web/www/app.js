@@ -146,7 +146,26 @@ const mods = (e) => app.set_modifiers(e.shiftKey, e.altKey, e.ctrlKey, e.metaKey
 
 function wire() {
   canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+  // Fingers go to the editor's touch gestures (app.touch); a mouse press brings back the
+  // mouse layout, and a pen draws like the mouse in whichever layout shows.
+  const fingers = new Set();
+  const finger = (e, phase) => {
+    if (e.pointerType !== 'touch') return false;
+    if (phase === 0) fingers.add(e.pointerId);
+    else if (!fingers.has(e.pointerId)) return true;
+    if (phase === 2) fingers.delete(e.pointerId);
+    app.touch(e.pointerId, phase, e.offsetX, e.offsetY);
+    e.preventDefault();
+    return true;
+  };
+  canvas.addEventListener('pointercancel', (e) => finger(e, 2));
   canvas.addEventListener('pointerdown', (e) => {
+    if (finger(e, 0)) {
+      canvas.setPointerCapture(e.pointerId);
+      canvas.focus();
+      return;
+    }
+    if (e.pointerType === 'mouse') app.set_touch(false);
     // A right click on the focused text field lands on the hidden field put under the pointer,
     // so the browser opens its own menu there and its Paste fires the paste event below.
     if (e.button === 2 && app.over_field(e.offsetX, e.offsetY)) {
@@ -164,13 +183,18 @@ function wire() {
     e.preventDefault();
   });
   canvas.addEventListener('pointermove', (e) => {
+    if (finger(e, 1)) return;
     mods(e);
     app.pointer_move(e.offsetX, e.offsetY);
     // A second button pressed or released during a drag (a chord) comes as a pointermove.
     if (e.button >= 0) app.pointer_button(e.offsetX, e.offsetY, e.button, (e.buttons & [1, 4, 2][e.button]) !== 0);
   });
-  canvas.addEventListener('pointerup', (e) => { mods(e); app.pointer_button(e.offsetX, e.offsetY, e.button, false); });
-  canvas.addEventListener('pointerleave', () => app.pointer_leave());
+  canvas.addEventListener('pointerup', (e) => {
+    if (finger(e, 2)) return;
+    mods(e);
+    app.pointer_button(e.offsetX, e.offsetY, e.button, false);
+  });
+  canvas.addEventListener('pointerleave', (e) => { if (e.pointerType !== 'touch') app.pointer_leave(); });
   canvas.addEventListener('wheel', (e) => {
     e.preventDefault();
     const k = e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? 400 : 1;
@@ -178,11 +202,13 @@ function wire() {
     if (e.ctrlKey && !e.metaKey) app.pinch(Math.exp(-e.deltaY * k * 0.01) - 1);
     else app.wheel(e.deltaX * k, e.deltaY * k);
   }, { passive: false });
-  // Safari sends a pinch as gesture events instead.
+  // Safari sends a trackpad pinch as gesture events instead. On a touch screen it sends them
+  // for fingers too, which the touch gestures already take.
   let pinchScale = 1;
   canvas.addEventListener('gesturestart', (e) => { e.preventDefault(); pinchScale = 1; });
   canvas.addEventListener('gesturechange', (e) => {
     e.preventDefault();
+    if (fingers.size) return;
     app.pinch(e.scale / pinchScale - 1);
     pinchScale = e.scale;
   });
@@ -304,6 +330,8 @@ async function main() {
   app.set_system_dark(dark.matches);
   dark.addEventListener('change', (e) => app.set_system_dark(e.matches));
   try { app.set_theme(localStorage.getItem(THEME_KEY) ?? 'system'); } catch {}
+  // A touch-first screen (a tablet) starts in the touch layout.
+  if (matchMedia('(pointer: coarse)').matches) app.set_touch(true);
   for (const [kind, key] of await window.vxrKeys.load().catch(() => [])) app.restore_key(kind, key);
   msg.hidden = true;
   wire();

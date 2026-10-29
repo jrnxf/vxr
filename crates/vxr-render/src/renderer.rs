@@ -79,8 +79,19 @@ impl ViewColors {
 
     fn uniform(&self) -> [[f32; 4]; 10] {
         let c = |c: [u8; 3]| [c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0, 1.0];
-        [self.sky[0], self.sky[1], self.tile, self.base, self.grid, self.frame, self.select, self.select_edge, self.added, self.removed]
-            .map(c)
+        [
+            self.sky[0],
+            self.sky[1],
+            self.tile,
+            self.base,
+            self.grid,
+            self.frame,
+            self.select,
+            self.select_edge,
+            self.added,
+            self.removed,
+        ]
+        .map(c)
     }
 }
 
