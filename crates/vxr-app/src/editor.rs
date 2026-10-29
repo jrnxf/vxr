@@ -132,6 +132,9 @@ pub struct Editor {
     pub path: Option<std::path::PathBuf>,
     /// The history position at the last open, new scene or save (see `History::position`).
     saved_at: u64,
+    /// What an agent's `save` or `new_scene` asks of the host, handed over with the next
+    /// frame's actions; agents wait until then ([`Editor::agent_busy`]).
+    agent_host: Vec<Action>,
     /// A PNG render export in progress (the corner pauses meanwhile).
     pub export: Option<Export>,
     /// The last finished export's PNG and size, for the host to save or download.
@@ -258,6 +261,7 @@ impl Editor {
             frames: Vec::new(),
             path: None,
             saved_at: 0,
+            agent_host: Vec::new(),
             export: None,
             exported: None,
             export_fits: [false; 4],
@@ -1435,7 +1439,7 @@ impl Editor {
             self.shift_left((dock - self.ai_dock) * self.ppp / 2.0);
             self.ai_dock = dock;
         }
-        let mut host = Vec::new();
+        let mut host = std::mem::take(&mut self.agent_host);
         actions.extend(std::iter::repeat_n(Action::ToggleWorld, tabs));
         if let Some(text) = self.ui.asked.take() {
             self.asks.push(text.clone());
@@ -1563,7 +1567,9 @@ impl Editor {
     /// Whether an agent's call has to wait: the user is in the middle of a drag, a box or a
     /// colour or material slider.
     pub fn agent_busy(&self) -> bool {
-        self.gesture.is_some()
+        // A save an agent asked for runs first, so it saves the scene as the agent left it.
+        !self.agent_host.is_empty()
+            || self.gesture.is_some()
             || self.moving.is_some()
             || self.marquee.is_some()
             || self.world_drag.is_some()
@@ -1592,6 +1598,9 @@ impl Editor {
         if self.review.is_some() && agents_review.is_none() {
             return Err(REVIEW_AGENT.into());
         }
+        if name == vxr_mcp::live::SAVE || name == vxr_mcp::live::NEW_SCENE {
+            return self.agent_file(conn, client, name, args);
+        }
         let notice = self.agents.take_notices(conn);
         let now = self.ctx.input(|i| i.time);
         self.agents.note_call(conn, now, name);
@@ -1619,6 +1628,45 @@ impl Editor {
             Some(n) => r.map(|t| format!("{n}\n{t}")).map_err(|e| format!("{n}\n{e}")),
             None => r,
         }
+    }
+
+    /// An agent's `save` or `new_scene`: the window's own Save (Cmd-S, through the host, so a
+    /// scene never saved opens the save dialog and the browser downloads) or New scene. Both
+    /// wait while edits wait for review, and New scene refuses unsaved edits unless the agent
+    /// passes `discard`.
+    fn agent_file(&mut self, conn: u64, client: &str, name: &str, args: &serde_json::Value) -> Result<String, String> {
+        if self.review.is_some() {
+            return Err(format!(
+                "edits wait for the user's review in vxr: {name} once they apply or discard them (review_status tells you)"
+            ));
+        }
+        let now = self.ctx.input(|i| i.time);
+        self.agents.note_call(conn, now, name);
+        self.place_box();
+        let scene = self.ui.scene_name.clone();
+        if name == vxr_mcp::live::SAVE {
+            self.agent_host.push(Action::Save);
+            return Ok(if self.agents.web {
+                format!("vxr saves {scene} as Cmd-S does: the browser downloads it")
+            } else if self.path.is_some() {
+                format!("vxr saves {scene} as Cmd-S does, replacing its file")
+            } else {
+                format!(
+                    "{scene} was never saved: vxr opens the save dialog for the user to choose where, as Cmd-S does"
+                )
+            });
+        }
+        let unsaved = self.scene.history().position() != self.saved_at;
+        if unsaved && args.get("discard").and_then(serde_json::Value::as_bool) != Some(true) {
+            return Err(format!(
+                "{scene} has unsaved edits: ask the user to save them first, or pass discard: true to drop them"
+            ));
+        }
+        self.new_scene();
+        self.agent_host.push(Action::New);
+        self.agents
+            .call(&mut self.scene, conn, client, "scene_summary", &serde_json::json!({}))
+            .map(|t| format!("new scene\n{t}"))
     }
 
     /// A resource a terminal agent reads, or None for a uri that names nothing. Under the

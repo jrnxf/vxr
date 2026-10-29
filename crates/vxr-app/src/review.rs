@@ -239,7 +239,7 @@ impl Review {
                 detail: if several { format!("{} · {}", who(st.lane), step_detail(st)) } else { step_detail(st) },
                 ok: st.ok,
                 dropped: st.dropped,
-                droppable: st.ok && st.tool != "undo",
+                droppable: st.ok && !matches!(st.tool, "undo" | "redo"),
             })
             .collect();
         ReviewCard {

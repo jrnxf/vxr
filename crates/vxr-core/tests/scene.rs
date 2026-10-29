@@ -28,8 +28,10 @@ fn undo_and_redo_restore_every_step() {
     assert!(s.undo());
     assert_eq!(s.map.voxels, 0);
     assert!(!s.undo() && !s.history().can_undo());
+    assert_eq!(s.history().redo_id(), Some(1), "the first step comes back first");
 
     while s.redo() {}
+    assert_eq!(s.history().redo_id(), None);
     assert_eq!((world_voxels(&s), s.palette), done);
 
     s.undo();

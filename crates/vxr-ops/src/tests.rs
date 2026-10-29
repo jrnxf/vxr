@@ -74,6 +74,8 @@ fn tool_schemas() {
             "box",
             "line",
             "sphere",
+            "circle",
+            "face",
             "fill",
             "paint",
             "select",
@@ -87,6 +89,8 @@ fn tool_schemas() {
             "resize",
             "crop",
             "palette_set",
+            "palette_swap",
+            "palette_copy",
             "material_set",
             "move_object",
             "duplicate",
@@ -94,7 +98,12 @@ fn tool_schemas() {
             "ungroup",
             "hide",
             "set_layer",
+            "delete_object",
+            "rename",
+            "new_layer",
+            "hide_layer",
             "undo",
+            "redo",
             "done"
         ]
     );
@@ -1213,7 +1222,11 @@ fn world_tools_move_copy_group_hide_and_layer_objects() {
     assert!(t.ends_with("; warning: nothing changed"), "{t}");
     let nodes = o.changes(&s).nodes;
     assert_eq!(nodes, 15, "7 new nodes; the slab, trees, its 3 children, tree c and both gems");
-    assert_eq!(o.changes(&s), crate::Changes { nodes, ..Default::default() }, "no cell changes");
+    assert_eq!(
+        o.changes(&s),
+        crate::Changes { nodes, layers: 1, ..Default::default() },
+        "no cell changes; the new layer"
+    );
 
     // Before shows the file's world, After the change again.
     let after = s.world_voxels(false);
@@ -1361,4 +1374,232 @@ fn dropping_a_world_step_never_retargets_the_nodes_and_layers_later_steps_made()
     }
     assert!(!s.undo());
     assert_eq!(s.to_vox(), bytes);
+}
+
+#[test]
+fn circle_and_face_brush_count_exactly() {
+    let mut s = empty();
+    let mut o = Session::new(&s, None);
+    // r^2 + r/2 = 10.5: rows of 7, 7, 7, 5, 5, 3 and 3 cells.
+    assert!(
+        call(&mut o, &mut s, "circle", json!({"center": [0, 5, 0], "radius": 3, "slot": 4})).starts_with("37 cells")
+    );
+    assert!(voxels(&s).iter().all(|(p, _)| p[1] == 5), "flat across y by default");
+    let t = call(&mut o, &mut s, "circle", json!({"center": [0, 10, 0], "radius": 3, "slot": 4, "axis": "x"}));
+    assert!(t.starts_with("37 cells"), "{t}");
+    assert!(voxels(&s).iter().filter(|(p, _)| p[1] != 5).all(|(p, _)| p[0] == 0), "flat across x");
+    let sphere =
+        call(&mut o, &mut s, "sphere", json!({"center": [8, 10, 8], "radius": 3, "slot": 4, "flat_axis": "y"}));
+    assert!(sphere.starts_with("37 cells"), "the sphere's disc is the same circle: {sphere}");
+    assert_eq!(
+        err(&mut o, &mut s, "circle", json!({"center": [0, 5, 0], "radius": 65, "slot": 4})).0,
+        ErrorKind::Invalid
+    );
+    let (_, e) = err(&mut o, &mut s, "circle", json!({"center": [0, 5, 0], "radius": 2}));
+    assert!(e.contains("slot is needed"), "{e}");
+
+    let mut s = small();
+    let bytes = s.to_vox();
+    let mut o = Session::with_limits(&s, None, Limits { calls_per_turn: 100, ..Limits::default() });
+    // The slab's top is open but under the column: 15 voxels.
+    let t = call(&mut o, &mut s, "face", json!({"cell": [0, 0, 0], "slot": 5, "name": "rug"}));
+    assert!(t.starts_with("15 cells changed") && t.contains("rug"), "{t}");
+    assert!((0..4).all(|x| (0..4).all(|z| get(&mut o, &mut s, [x, 1, z]) == if (x, z) == (1, 1) { 20 } else { 5 })));
+    let t = call(&mut o, &mut s, "face", json!({"cell": [3, 1, 3], "mode": "erase"}));
+    assert!(t.starts_with("15 cells changed"), "the rug's own voxels: {t}");
+    let t = call(&mut o, &mut s, "face", json!({"cell": [0, 0, 3], "side": "front", "mode": "paint", "slot": 7}));
+    assert!(t.starts_with("4 cells changed"), "{t}");
+    assert_eq!((0..4).map(|x| get(&mut o, &mut s, [x, 0, 3])).collect::<Vec<_>>(), [7, 7, 7, 7]);
+    // A staged removal opens the face below it.
+    call(&mut o, &mut s, "erase", json!({"cells": [[1, 3, 1]]}));
+    assert!(
+        call(&mut o, &mut s, "face", json!({"cell": [1, 2, 1], "mode": "paint", "slot": 9})).starts_with("1 cells")
+    );
+    let (_, e) = err(&mut o, &mut s, "face", json!({"cell": [1, 0, 1], "slot": 5}));
+    assert_eq!(e, "the top side of [1, 0, 1] is covered by the voxel at [1, 1, 1]: give a voxel whose side is open");
+    let (_, e) = err(&mut o, &mut s, "face", json!({"cell": [9, 9, 9], "slot": 5}));
+    assert!(e.contains("is empty"), "{e}");
+    let c = o.changes(&s);
+    assert_eq!((c.added.len(), c.removed.len(), c.repainted.len()), (0, 1, 5));
+    apply_and_undo(o, &mut s, &bytes);
+}
+
+#[test]
+fn select_face_volume_and_invert() {
+    let mut s = small();
+    s.edit([(s.to_map([9, 0, 9]), 30)]);
+    let mut o = Session::new(&s, None);
+    let n = |t: String| t.split(' ').next().unwrap().parse::<usize>().unwrap();
+    assert_eq!(n(call(&mut o, &mut s, "select", json!({"volume": [0, 0, 0]}))), 19, "the slab and its column");
+    assert_eq!(
+        n(call(&mut o, &mut s, "select", json!({"face": [0, 0, 0]}))),
+        15,
+        "the top under the column is covered"
+    );
+    assert_eq!(
+        n(call(&mut o, &mut s, "select", json!({"invert": true}))),
+        5,
+        "the column, the cell under it and the far voxel"
+    );
+    assert_eq!(n(call(&mut o, &mut s, "select", json!({"invert": true}))), 15);
+    let t = call(&mut o, &mut s, "select", json!({"face": [3, 0, 0], "side": "right", "mode": "subtract"}));
+    assert_eq!(n(t), 11, "the slab's right side, 4 voxels of its top");
+    assert_eq!(n(call(&mut o, &mut s, "select", json!({"volume": [9, 0, 9], "mode": "add"}))), 12);
+    assert_eq!(n(call(&mut o, &mut s, "select", json!({"none": true}))), 0);
+    assert_eq!(n(call(&mut o, &mut s, "select", json!({"invert": true}))), 20, "with nothing selected, every voxel");
+    // As the change has it: a staged removal splits the volume.
+    call(&mut o, &mut s, "erase", json!({"cells": [[1, 1, 1]]}));
+    assert_eq!(n(call(&mut o, &mut s, "select", json!({"volume": [1, 3, 1]}))), 2);
+    let (_, e) = err(&mut o, &mut s, "select", json!({"volume": [1, 1, 1]}));
+    assert_eq!(e, "volume: [1, 1, 1] is empty; give a filled cell");
+    let (_, e) = err(&mut o, &mut s, "select", json!({}));
+    assert!(e.contains("face, volume, all, none or invert"), "{e}");
+    // Selections are not edits: only the erase is staged.
+    assert_eq!(o.changes(&s).removed.len(), 1);
+}
+
+#[test]
+fn palette_swap_and_copy() {
+    let mut s = small();
+    let bytes = s.to_vox();
+    let (c10, c20) = (s.palette[10], s.palette[20]);
+    let mut o = Session::new(&s, None);
+    call(&mut o, &mut s, "material_set", json!({"slot": 20, "type": "metal", "roughness": 0.25}));
+    let t = call(&mut o, &mut s, "palette_swap", json!({"a": 10, "b": 20}));
+    assert!(
+        t.starts_with("swapped slots 10 and 20: slot 10 is now #d72323 (3 voxels), slot 20 is now #8c5528 (16 voxels)"),
+        "{t}"
+    );
+    assert_eq!((s.palette[10], s.palette[20]), (c20, c10));
+    assert_eq!(s.materials[10].kind, vxr_core::material::Kind::Metal, "the material goes with the colour");
+    assert_eq!(get(&mut o, &mut s, [1, 2, 1]), 10);
+    assert_eq!(get(&mut o, &mut s, [0, 0, 0]), 20);
+    let t = call(&mut o, &mut s, "palette_copy", json!({"from": 10, "to": 30}));
+    assert_eq!(
+        t,
+        "slot 30 now has slot 10's colour #d72323 and material Metal (roughness 0.25, metalness 1) (0 voxels use it)"
+    );
+    assert_eq!((s.palette[30], s.materials[30]), (s.palette[10], s.materials[10]));
+    assert!(err(&mut o, &mut s, "palette_swap", json!({"a": 4, "b": 4})).1.contains("both slot 4"));
+    assert!(err(&mut o, &mut s, "palette_copy", json!({"from": 0, "to": 4})).1.contains("slot 0"));
+    let c = o.changes(&s);
+    assert_eq!((c.repainted.len(), c.palette.len(), c.materials.len()), (19, 3, 2));
+    // Dropping the swap replays the copy from the scene as it was: slot 30 takes slot 10's
+    // own colour again.
+    assert!(o.set_dropped(&mut s, 1, true));
+    assert_eq!((s.palette[30], s.palette[10]), (c10, c10));
+    assert!(o.set_dropped(&mut s, 1, false));
+    apply_and_undo(o, &mut s, &bytes);
+}
+
+#[test]
+fn world_housekeeping_deletes_renames_and_layers() {
+    let bytes = world_file();
+    let mut s = Scene::from_vox(&bytes).unwrap();
+    let mut o = Session::new(&s, Some(&bytes));
+    let all = shown(&s);
+    let t = call(&mut o, &mut s, "delete_object", json!({"node": 1}));
+    assert!(t.starts_with("deleted object 1; 1 node changed in the world"), "{t}");
+    assert_eq!(shown(&s), all - 64);
+    assert!(!s.world().unwrap().in_tree(1));
+    assert!(
+        err(&mut o, &mut s, "move_object", json!({"node": 1, "offset": [1, 0, 0]}))
+            .1
+            .contains("not an object or group")
+    );
+    let t = call(&mut o, &mut s, "rename", json!({"node": 2, "name": "  forest  "}));
+    assert!(t.starts_with("group 2 (3 objects) is named \"forest\"; 1 node changed"), "{t}");
+    assert_eq!(s.world().unwrap().tree.nodes[2].name.as_deref(), Some(&b"forest"[..]));
+    let t = call(&mut o, &mut s, "rename", json!({"layer": 0, "name": "base"}));
+    assert!(t.starts_with("layer 0 is named \"base\"; 1 layer changed in the world"), "{t}");
+    let t = call(&mut o, &mut s, "rename", json!({"layer": 0, "name": "base"}));
+    assert!(t.ends_with("; warning: nothing changed"), "{t}");
+    let t = call(&mut o, &mut s, "new_layer", json!({}));
+    assert!(t.starts_with("added layer 3 \"layer 3\"; 1 layer changed"), "{t}");
+    assert!(call(&mut o, &mut s, "new_layer", json!({"name": "props"})).starts_with("added layer 4 \"props\""));
+    let on1: Vec<usize> = {
+        let w = s.world().unwrap();
+        w.objects().into_iter().filter(|&i| w.tree.nodes[i].layer == 1 && w.shown(i)).collect()
+    };
+    assert!(!on1.is_empty());
+    let before = shown(&s);
+    let t = call(&mut o, &mut s, "hide_layer", json!({"layer": 1}));
+    assert!(t.starts_with(&format!("layer 1 is hidden ({} object", on1.len())), "{t}");
+    assert!(shown(&s) < before && on1.iter().all(|&i| !s.world().unwrap().shown(i)));
+    call(&mut o, &mut s, "hide_layer", json!({"layer": 1, "hidden": false}));
+    assert_eq!(shown(&s), before);
+    // A rename of a new layer follows it when an earlier step is dropped.
+    call(&mut o, &mut s, "rename", json!({"layer": 4, "name": "props 2"}));
+    let after = s.to_vox();
+    let first = o.steps().iter().position(|st| st.tool == "new_layer").unwrap();
+    assert!(o.set_dropped(&mut s, first, true));
+    let w = s.world().unwrap();
+    assert_eq!(w.layers().iter().map(|l| (l.id, l.name.clone())).next_back(), Some((3, Some(b"props 2".to_vec()))));
+    assert!(o.set_dropped(&mut s, first, false));
+    assert_eq!(s.to_vox(), after);
+
+    let (_, e) = err(&mut o, &mut s, "rename", json!({"node": 2, "layer": 0, "name": "x"}));
+    assert!(e.contains("not both"), "{e}");
+    let (_, e) = err(&mut o, &mut s, "rename", json!({"node": 2, "name": "x".repeat(65)}));
+    assert!(e.contains("at most 64"), "{e}");
+    let (_, e) = err(&mut o, &mut s, "hide_layer", json!({"layer": 9}));
+    assert!(e.starts_with("layer 9: no such layer; the layers are [0, 1, 2, 3, 4]"), "{e}");
+    assert!(err(&mut o, &mut s, "delete_object", json!({"node": 0})).1.contains("root"));
+    let c = o.changes(&s);
+    assert_eq!((c.nodes, c.layers), (2, 3), "object 1 gone, group 2 named; layer 0 named, layers 3 and 4 added");
+    let position = s.history().position();
+    o.apply(&mut s);
+    assert_eq!(s.history().position(), position + 1, "one undo step");
+    assert!(s.undo());
+    assert_eq!(s.to_vox(), bytes, "undo gives the file's bytes back");
+}
+
+#[test]
+fn layer_tools_need_the_world() {
+    let bytes = world_file();
+    let mut s = Scene::from_vox(&bytes).unwrap();
+    assert!(s.edit_object(1));
+    let mut o = Session::new(&s, Some(&bytes));
+    for (tool, args) in [
+        ("new_layer", json!({})),
+        ("hide_layer", json!({"layer": 0})),
+        ("rename", json!({"layer": 0, "name": "x"})),
+        ("delete_object", json!({"node": 3})),
+    ] {
+        assert!(err(&mut o, &mut s, tool, args).1.contains("one object's model"), "{tool}");
+    }
+    let mut s = small();
+    let mut o = Session::new(&s, None);
+    assert!(err(&mut o, &mut s, "new_layer", json!({})).1.contains("not a world"));
+}
+
+#[test]
+fn redo_brings_back_what_undo_took() {
+    let mut s = small();
+    let bytes = s.to_vox();
+    let mut o = Session::new(&s, None);
+    call(&mut o, &mut s, "box", json!({"from": [0, 1, 0], "to": [1, 1, 0], "slot": 5}));
+    call(&mut o, &mut s, "place", json!({"cells": [[3, 1, 3]], "slot": 6}));
+    let after = voxels(&s);
+    call(&mut o, &mut s, "undo", json!({}));
+    call(&mut o, &mut s, "undo", json!({}));
+    assert_eq!(voxels(&s), voxels(&small()));
+    assert!(call(&mut o, &mut s, "redo", json!({})).starts_with("brought back step 1 (box)"));
+    assert!(call(&mut o, &mut s, "redo", json!({})).starts_with("brought back step 2 (place)"));
+    assert_eq!(voxels(&s), after);
+    assert!(err(&mut o, &mut s, "redo", json!({})).1.starts_with("nothing of yours to redo"));
+    // A new edit ends what redo can bring back.
+    call(&mut o, &mut s, "undo", json!({}));
+    call(&mut o, &mut s, "place", json!({"cells": [[0, 2, 0]], "slot": 6}));
+    assert!(err(&mut o, &mut s, "redo", json!({})).1.starts_with("nothing of yours to redo"));
+    // Another caller's undo is its own.
+    o.set_lane(7, []);
+    call(&mut o, &mut s, "place", json!({"cells": [[2, 2, 2]], "slot": 6}));
+    call(&mut o, &mut s, "undo", json!({}));
+    o.set_lane(0, []);
+    assert!(err(&mut o, &mut s, "redo", json!({})).1.starts_with("nothing of yours to redo"));
+    o.set_lane(7, []);
+    assert!(call(&mut o, &mut s, "redo", json!({})).starts_with("brought back step"));
+    assert_eq!(get(&mut o, &mut s, [2, 2, 2]), 6);
+    apply_and_undo(o, &mut s, &bytes);
 }

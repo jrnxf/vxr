@@ -4707,6 +4707,35 @@ fn agents_live(dir: &Path) -> Result<(), String> {
             s.agent_call(&mut live, &mut codex, "place", serde_json::json!({"cells": [[1, 12, 1]], "slot": 9}));
         check(!e && s.ed.scene.history().undo_label() == Some("Codex: place 1 voxel"), "another agent edits".into())?;
 
+        // The agent's redo brings back what its undo took; Save and New scene are the window's own.
+        let v = s.voxels();
+        let (t, e) = s.agent_call(&mut live, &mut codex, "undo", serde_json::json!({}));
+        check(!e && s.voxels() == v - 1, format!("the agent's undo: {t}"))?;
+        let (t, e) = s.agent_call(&mut live, &mut codex, "redo", serde_json::json!({}));
+        check(
+            !e && t == "brought back Codex: place 1 voxel" && s.voxels() == v,
+            format!("the agent's redo brings it back: {t}"),
+        )?;
+        s.host.clear();
+        let (t, e) = s.agent_call(&mut live, &mut codex, "save", serde_json::json!({}));
+        check(
+            !e && t.contains("as Cmd-S does") && s.host.contains(&Action::Save),
+            format!("the agent's save is the window's Cmd-S: {t}"),
+        )?;
+        let (t, e) = s.agent_call(&mut live, &mut codex, "new_scene", serde_json::json!({}));
+        check(e && t.contains("unsaved edits") && s.voxels() == v, format!("new_scene keeps unsaved edits: {t}"))?;
+        let (t, e) = s.agent_call(&mut live, &mut codex, "new_scene", serde_json::json!({"discard": true}));
+        check(
+            !e && t.starts_with("new scene")
+                && s.voxels() == 0
+                && s.host.contains(&Action::New)
+                && s.ed.ui.scene_name == "Untitled",
+            format!(
+                "new_scene with discard starts the window's New scene ({})",
+                t.chars().take(40).collect::<String>()
+            ),
+        )?;
+
         // A new token from the panel disconnects every agent and turns old ones away.
         s.ed.ui.open_agents();
         s.live_frames(&mut live, 2);
