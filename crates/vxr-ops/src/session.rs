@@ -36,6 +36,9 @@ pub struct Limits {
     pub changed_cells: usize,
     /// Over this many staged cells the user is asked before more are staged.
     pub ask_over: usize,
+    /// Count `changed_cells` and `ask_over` per call, in the cells each call changes, rather
+    /// than across everything staged.
+    pub per_call: bool,
 }
 
 impl Default for Limits {
@@ -47,6 +50,7 @@ impl Default for Limits {
             box_cells: 2_000_000,
             changed_cells: 200_000,
             ask_over: 10_000,
+            per_call: false,
         }
     }
 }
@@ -582,14 +586,14 @@ impl Session {
         }
     }
 
-    /// Apply each kept step as an undo step of its own, called `label(step, what it changed)`
-    /// ("Claude Code: box 8 voxels"): the change runs again from the scene as it was, one
-    /// step at a time, each with its own lane's selection. Returns each step that changed
+    /// Apply each kept step as an undo step of its own, called `label(index, step, what it
+    /// changed)` ("Claude Code: box 8 voxels"): the change runs again from the scene as it
+    /// was, one step at a time, each with its own lane's selection. Returns each step that changed
     /// something, by index, with the history position right after it.
     pub fn apply_steps(
         mut self,
         scene: &mut Scene,
-        mut label: impl FnMut(&Step, &Changes) -> String,
+        mut label: impl FnMut(usize, &Step, &Changes) -> String,
     ) -> Vec<(usize, u64)> {
         self.show_before(scene, false);
         if !self.open {
@@ -614,7 +618,7 @@ impl Session {
                 scene.put(p, 0);
             }
             let before = scene.history().position();
-            scene.commit_named(&label(&self.steps[i], &changes));
+            scene.commit_named(&label(i, &self.steps[i], &changes));
             if scene.history().position() != before {
                 out.push((i, scene.history().position()));
             }
@@ -785,11 +789,14 @@ impl Session {
                 plan.push((p, v));
             }
         }
-        let after = (self.staged as isize + delta).max(0) as usize;
-        if !self.replaying && delta > 0 {
+        let (after, grows, per) = match self.limits.per_call {
+            true => (plan.len(), !plan.is_empty(), "call"),
+            false => ((self.staged as isize + delta).max(0) as usize, delta > 0, "request"),
+        };
+        if !self.replaying && grows {
             if after > self.limits.changed_cells {
                 return Err(limit(format!(
-                    "this would stage {after} changed cells; the limit is {} per request",
+                    "this would stage {after} changed cells; the limit is {} per {per}",
                     self.limits.changed_cells
                 )));
             }

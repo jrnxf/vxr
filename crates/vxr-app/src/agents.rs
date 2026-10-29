@@ -68,9 +68,9 @@ pub struct Agents {
 pub const WAITING: &str = "waiting for the user's review in vxr: it is not in the scene until they apply it; review_status (or your next call) tells you whether they applied or discarded it";
 
 /// The limits of a terminal agent's call: it is not asked per 10,000 cells, the hard limit
-/// stays.
+/// stays, counted per call with review on as off.
 pub fn limits() -> Limits {
-    Limits { ask_over: Limits::default().changed_cells, ..Limits::default() }
+    Limits { ask_over: Limits::default().changed_cells, per_call: true, ..Limits::default() }
 }
 
 /// Whether a call changes the scene, so with review on it waits for the user: an edit or a
@@ -223,13 +223,14 @@ impl Agents {
         let name_of =
             |lane: u64| names.iter().find(|(c, _)| *c == lane).map_or("Agent".to_string(), |(_, n)| n.clone());
         let counts = Self::counts(&review);
-        let mut labels = Vec::new();
-        let landed = review.session.apply_steps(scene, |st, c| {
+        let mut labels = HashMap::new();
+        let landed = review.session.apply_steps(scene, |i, st, c| {
             let l = label(&name_of(st.lane), st.tool, c);
-            labels.push((st.lane, l.clone()));
+            labels.insert(i, (st.lane, l.clone()));
             l
         });
-        for ((_, step), (conn, label)) in landed.iter().zip(labels) {
+        for (i, step) in &landed {
+            let (conn, label) = labels.remove(i).expect("a landed step was labelled");
             self.edits.push(AgentEdit { conn, client: name_of(conn), label, step: *step, undone_by: None });
         }
         for (conn, kept, all) in counts {
@@ -619,6 +620,60 @@ mod tests {
         staged(&mut a, &mut s, &mut r, 1, "Claude Code", "place", json!({"cells": [[6, 0, 6]], "slot": 3})).unwrap();
         assert!(r.is_none());
         assert_eq!(s.history().undo_label(), Some("Claude Code: place 1 voxel"));
+    }
+
+    #[test]
+    fn apply_names_each_landed_edit_after_its_own_agent() {
+        let (mut a, mut s, mut r) = (Agents::default(), scene(), None);
+        a.review = true;
+        a.clients = vec![(1, "Claude Code".into()), (2, "Codex".into())];
+        let position = s.history().position();
+        staged(&mut a, &mut s, &mut r, 1, "Claude Code", "palette_set", json!({"slot": 5, "hex": "#ff0000"})).unwrap();
+        // The colour the slot already has with the change: it lands as nothing.
+        staged(&mut a, &mut s, &mut r, 2, "Codex", "palette_set", json!({"slot": 5, "hex": "#ff0000"})).unwrap();
+        staged(&mut a, &mut s, &mut r, 1, "Claude Code", "box", json!({"from": [0, 0, 0], "to": [1, 0, 0], "slot": 5}))
+            .unwrap();
+        staged(&mut a, &mut s, &mut r, 2, "Codex", "place", json!({"cells": [[5, 0, 5]], "slot": 7})).unwrap();
+        assert_eq!(a.apply_review(&mut s, r.take().unwrap()), 3);
+        let edits: Vec<(u64, &str)> = a.edits.iter().map(|e| (e.conn, e.label.as_str())).collect();
+        assert_eq!(
+            edits,
+            [(1, "Claude Code: palette_set slot 5"), (1, "Claude Code: box 2 voxels"), (2, "Codex: place 1 voxel")]
+        );
+        assert_eq!(s.history().position(), position + 3);
+        // Each agent's undo takes back its own edit.
+        assert_eq!(
+            staged(&mut a, &mut s, &mut r, 2, "Codex", "undo", json!({})).unwrap().lines().last(),
+            Some("took back Codex: place 1 voxel")
+        );
+        assert_eq!((at(&s, [5, 0, 5]), at(&s, [0, 0, 0])), (0, 5));
+        assert_eq!(
+            staged(&mut a, &mut s, &mut r, 1, "Claude Code", "undo", json!({})).unwrap().lines().last(),
+            Some("took back Claude Code: box 2 voxels")
+        );
+        assert_eq!(at(&s, [0, 0, 0]), 0);
+    }
+
+    #[test]
+    fn with_review_on_the_cell_limit_counts_each_call() {
+        let (mut a, mut s, mut r) = (Agents::default(), Scene::new([64, 64, 64]), None);
+        a.review = true;
+        let position = s.history().position();
+        let lo = s.bounds().lo;
+        let [x, z] = [lo[0], lo[2]];
+        let half = |y: i32| json!({"from": [x, lo[1] + y, z], "to": [x + 63, lo[1] + y + 31, z + 63], "slot": 3});
+        // Each call changes 131,072 cells: both fit, though together they pass 200,000.
+        staged(&mut a, &mut s, &mut r, 1, "Claude Code", "box", half(0)).unwrap();
+        staged(&mut a, &mut s, &mut r, 2, "Codex", "box", half(32)).unwrap();
+        assert_eq!(r.as_ref().unwrap().session.staged(), 262_144);
+        // One call over the limit is still refused.
+        let all = json!({"from": lo, "to": [x + 63, lo[1] + 63, z + 63], "mode": "erase"});
+        let e = staged(&mut a, &mut s, &mut r, 1, "Claude Code", "box", all).unwrap_err();
+        assert!(e.contains("the limit is 200000 per call"), "{e}");
+        assert_eq!(a.apply_review(&mut s, r.take().unwrap()), 2);
+        assert_eq!(s.history().position(), position + 2);
+        let labels: Vec<&str> = a.edits.iter().map(|e| e.label.as_str()).collect();
+        assert_eq!(labels, ["Claude Code: box 131,072 voxels", "Codex: box 131,072 voxels"]);
     }
 
     #[test]

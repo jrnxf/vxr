@@ -403,7 +403,7 @@ fn lanes_keep_their_own_selection_and_steps_apply_one_by_one() {
     let staged = o.changes(&s);
     // Apply: one undo step per kept edit, each named from what it changed.
     let mut seen = Vec::new();
-    let steps = o.apply_steps(&mut s, |st, c| {
+    let steps = o.apply_steps(&mut s, |_, st, c| {
         seen.push((st.lane, c.added.len() + c.repainted.len(), c.palette.len()));
         format!("{} {}", st.lane, st.tool)
     });
@@ -426,7 +426,7 @@ fn lanes_keep_their_own_selection_and_steps_apply_one_by_one() {
     let mut o = Session::new(&s, None);
     call(&mut o, &mut s, "place", json!({"cells": [[9, 0, 9]], "slot": 4}));
     assert!(o.set_dropped(&mut s, 0, true));
-    assert!(o.apply_steps(&mut s, |_, _| String::new()).is_empty());
+    assert!(o.apply_steps(&mut s, |_, _, _| String::new()).is_empty());
     assert_eq!(voxels(&s), before);
 }
 
