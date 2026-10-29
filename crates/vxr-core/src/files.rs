@@ -10,8 +10,14 @@ use crate::export::{TEXTURE_W, obj, slices};
 pub type File = (String, Vec<u8>);
 
 /// The OBJ export of what the view shows (the edited model, or every shown object in the
-/// world), named `<stem>.obj`, `<stem>.mtl` and `<stem>.png`, and its quad count.
+/// world), named `<stem>.obj`, `<stem>.mtl` and `<stem>.png`, and its quad count. The OBJ
+/// names its `.mtl` and the `.mtl` its texture, and both split names at whitespace and end
+/// them at `#`, so each run of those in `stem` becomes `-`.
 pub fn obj_files(scene: &Scene, stem: &str) -> Result<(Vec<File>, usize), String> {
+    let parts: Vec<&str> =
+        stem.split(|c: char| c.is_whitespace() || c.is_control() || c == '#').filter(|p| !p.is_empty()).collect();
+    let stem = if parts.is_empty() { "vxr".to_string() } else { parts.join("-") };
+    let stem = stem.as_str();
     let mut voxels = BTreeMap::new();
     scene.for_each_voxel(|p, c| {
         voxels.insert(scene.to_world(p), c);
@@ -174,6 +180,21 @@ mod tests {
         assert!(String::from_utf8_lossy(&files[0].1).contains("mtllib rock.mtl"));
         assert!(String::from_utf8_lossy(&files[1].1).contains("map_Kd rock.png"));
         assert_eq!(&files[2].1[1..4], b"PNG");
+    }
+
+    #[test]
+    fn obj_files_name_each_other_without_whitespace() {
+        let mut s = Scene::new([4, 4, 4]);
+        s.edit([([1, 1, 1], 3)]);
+        for (stem, want) in [(" my  house\t#2 ", "my-house-2"), ("#", "vxr")] {
+            let (files, _) = obj_files(&s, stem).unwrap();
+            let names: Vec<&str> = files.iter().map(|f| f.0.as_str()).collect();
+            assert_eq!(names, [format!("{want}.obj"), format!("{want}.mtl"), format!("{want}.png")]);
+            let line = |i: usize, key: &str| {
+                String::from_utf8_lossy(&files[i].1).lines().find_map(|l| l.strip_prefix(key)).unwrap().to_string()
+            };
+            assert_eq!([line(0, "mtllib "), line(1, "map_Kd ")], [names[1], names[2]]);
+        }
     }
 
     #[test]

@@ -230,13 +230,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_second_obj_export_names_files_without_spaces_that_name_each_other() {
+    fn a_second_obj_export_of_a_spaced_name_names_files_without_spaces_that_name_each_other() {
         let dir = std::env::temp_dir().join(format!("vxr-live-names-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let mut scene = vxr_core::Scene::new([4, 4, 4]);
         scene.edit([([1, 1, 1], 3)]);
-        let export = || crate::files::obj_files(&scene, "my-house").unwrap().0;
+        let export = || crate::files::obj_files(&scene, "my house").unwrap().0;
         for want in
             [["my-house.obj", "my-house.mtl", "my-house.png"], ["my-house-1.obj", "my-house-1.mtl", "my-house-1.png"]]
         {
