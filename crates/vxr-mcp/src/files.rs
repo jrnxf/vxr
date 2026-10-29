@@ -81,7 +81,7 @@ pub(crate) fn edit_object_tool() -> (&'static str, String, Value) {
 pub(crate) fn show_world_tool() -> (&'static str, String, Value) {
     (
         "show_world",
-        "In a file with several objects, show the world of every object again after edit_object, for the world tools (move_object, duplicate, group, ungroup, hide, set_layer). Voxels cannot be edited while it shows.".into(),
+        "In a file with several objects, show the world of every object again after edit_object, for the world tools (move_object, duplicate, group, ungroup, hide, set_layer, delete_object, rename, new_layer, hide_layer). Voxels cannot be edited while it shows.".into(),
         json!({"type": "object", "properties": {}, "additionalProperties": false}),
     )
 }
@@ -92,13 +92,14 @@ pub fn tools() -> Vec<Value> {
     tools_with(
         own_tools(),
         "Take back the last edit (every edit is one undo step). Call again to take back the one before.",
+        "Bring back the edit undo took back last. Call again for the one after; a new edit ends what can come back.",
         "Say you are finished, with a one-line summary. Save first if the file should keep the edits.",
     )
 }
 
-/// The `own` tools, then one per `vxr-ops` operation with its generated schema, `undo` and
-/// `done` described for edits that apply at once.
-pub(crate) fn tools_with(own: Vec<(&'static str, String, Value)>, undo: &str, done: &str) -> Vec<Value> {
+/// The `own` tools, then one per `vxr-ops` operation with its generated schema, `undo`, `redo`
+/// and `done` described for edits that apply at once.
+pub(crate) fn tools_with(own: Vec<(&'static str, String, Value)>, undo: &str, redo: &str, done: &str) -> Vec<Value> {
     let mut out = Vec::new();
     let mut add = |name: &str, description: &str, schema: Value| {
         let mut t = json!({"name": name, "description": description, "inputSchema": schema});
@@ -114,6 +115,7 @@ pub(crate) fn tools_with(own: Vec<(&'static str, String, Value)>, undo: &str, do
         match t.name {
             // The ops crate's undo takes back a staged step; here every edit is a step.
             "undo" => add("undo", undo, json!({"type": "object", "properties": {}, "additionalProperties": false})),
+            "redo" => add("redo", redo, json!({"type": "object", "properties": {}, "additionalProperties": false})),
             "done" => add("done", done, t.parameters),
             name => add(name, &t.description, t.parameters),
         }
@@ -504,6 +506,14 @@ impl Open {
                     Ok("took back the last edit".into())
                 } else {
                     Err("nothing to undo".into())
+                }
+            }
+            "redo" => {
+                if self.scene.redo() {
+                    self.unsaved = true;
+                    Ok("brought back the edit undo took back last".into())
+                } else {
+                    Err("nothing to redo: redo brings back what undo took back, until the next edit".into())
                 }
             }
             "edit_object" => {

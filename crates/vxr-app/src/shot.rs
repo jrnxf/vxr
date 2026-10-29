@@ -4448,6 +4448,37 @@ impl Shot {
         let r = &reply["result"];
         (r["content"][0]["text"].as_str().unwrap_or("").to_string(), r["isError"].as_bool().unwrap_or(true))
     }
+
+    /// An agent's tool call that opens the New scene confirm, answered by `answer` once it shows: its text, whether it was an error, and the voxels while the confirm waited.
+    fn agent_call_confirmed(
+        &mut self,
+        live: &mut vxr_app::live::Live,
+        agent: &mut LiveAgent,
+        name: &str,
+        args: serde_json::Value,
+        answer: impl FnOnce(&mut Shot) -> Result<(), String>,
+    ) -> Result<(String, bool, u64), String> {
+        let msg = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": name, "arguments": args}});
+        let mut waiting = None;
+        let mut answer = Some(answer);
+        let reply = std::thread::scope(|sc| {
+            let h = sc.spawn(|| agent.0.handle(&msg));
+            while !h.is_finished() {
+                self.live_frames(live, 1);
+                if waiting.is_none() && self.ed.ui.confirm_new {
+                    self.live_frames(live, 5);
+                    waiting = Some((h.is_finished(), self.voxels()));
+                    answer.take().map_or(Ok(()), |a| a(self))?;
+                }
+            }
+            Ok::<_, String>(h.join().unwrap().unwrap())
+        })?;
+        self.live_frames(live, 2);
+        let Some((false, voxels)) = waiting else { return Err(format!("{name} did not wait for the confirm")) };
+        let r = &reply["result"];
+        Ok((r["content"][0]["text"].as_str().unwrap_or("").to_string(), r["isError"].as_bool().unwrap_or(true), voxels))
+    }
 }
 
 /// Live mode end to end through a real socket in a temporary folder: Cmd-K opens the
@@ -4706,6 +4737,63 @@ fn agents_live(dir: &Path) -> Result<(), String> {
         let (_, e) =
             s.agent_call(&mut live, &mut codex, "place", serde_json::json!({"cells": [[1, 12, 1]], "slot": 9}));
         check(!e && s.ed.scene.history().undo_label() == Some("Codex: place 1 voxel"), "another agent edits".into())?;
+
+        // The agent's redo brings back what its undo took; Save and New scene are the window's own.
+        let v = s.voxels();
+        let (t, e) = s.agent_call(&mut live, &mut codex, "undo", serde_json::json!({}));
+        check(!e && s.voxels() == v - 1, format!("the agent's undo: {t}"))?;
+        let (t, e) = s.agent_call(&mut live, &mut codex, "redo", serde_json::json!({}));
+        check(
+            !e && t == "brought back Codex: place 1 voxel" && s.voxels() == v,
+            format!("the agent's redo brings it back: {t}"),
+        )?;
+        s.host.clear();
+        let (t, e) = s.agent_call(&mut live, &mut codex, "save", serde_json::json!({}));
+        check(
+            !e && t.contains("as Cmd-S does") && s.host.contains(&Action::Save),
+            format!("the agent's save is the window's Cmd-S: {t}"),
+        )?;
+        // With unsaved edits New scene asks the user first, as the UI's New does; no flag skips it.
+        s.host.clear();
+        let (t, e, waited) =
+            s.agent_call_confirmed(&mut live, &mut codex, "new_scene", serde_json::json!({"discard": true}), |s| {
+                s.ui_click("new-cancel")
+            })?;
+        check(
+            e && t.contains("kept") && waited == v && s.voxels() == v && !s.ed.ui.confirm_new && s.host.is_empty(),
+            format!("new_scene with unsaved edits asks first, and Cancel keeps the scene: {t}"),
+        )?;
+        let (t, e, waited) =
+            s.agent_call_confirmed(&mut live, &mut codex, "new_scene", serde_json::json!({}), |s| {
+                s.ui_click("new-discard")
+            })?;
+        check(
+            !e && t.starts_with("new scene")
+                && waited == v
+                && s.voxels() == 0
+                && s.host.contains(&Action::New)
+                && s.ed.ui.scene_name == "Untitled",
+            format!(
+                "Start new in the confirm starts the window's New scene ({})",
+                t.chars().take(40).collect::<String>()
+            ),
+        )?;
+        s.host.clear();
+        let (t, e) = s.agent_call(&mut live, &mut codex, "new_scene", serde_json::json!({}));
+        check(
+            !e && t.starts_with("new scene") && !s.ed.ui.confirm_new && s.host.contains(&Action::New),
+            format!("new_scene on a saved scene starts at once ({})", t.chars().take(40).collect::<String>()),
+        )?;
+        // A file opened while the confirm is up (the browser's picker answers late) replaces the scene.
+        s.agent_call(&mut live, &mut codex, "place", serde_json::json!({"cells": [[0, 0, 0]], "slot": 9}));
+        let (t, e, waited) =
+            s.agent_call_confirmed(&mut live, &mut codex, "new_scene", serde_json::json!({}), |s| {
+                s.ed.load(house(), "other.vox")
+            })?;
+        check(
+            e && t.contains("opened other.vox") && waited == 1 && s.voxels() > 1 && !s.ed.ui.confirm_new,
+            format!("a file opened behind the agent's confirm is reported as opened: {t}"),
+        )?;
 
         // A new token from the panel disconnects every agent and turns old ones away.
         s.ed.ui.open_agents();

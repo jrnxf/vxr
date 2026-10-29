@@ -191,6 +191,11 @@ impl History {
         self.undo.last().map_or(0, |(id, _)| *id)
     }
 
+    /// The id of the step redo would apply next, if any.
+    pub fn redo_id(&self) -> Option<u64> {
+        self.redo.last().map(|(id, _)| *id)
+    }
+
     /// Whether the step that got `id` is applied (on the undo stack).
     pub fn applied(&self, id: u64) -> bool {
         self.step(id).is_some()

@@ -123,11 +123,10 @@ impl Live {
         while !ed.agent_busy() {
             let Some(r) = self.pending.pop_front() else { break };
             match r.ask.clone() {
-                Ask::Call { name, args } => {
-                    let client = r.client.clone();
-                    let conn = r.conn;
-                    r.answer(ed.agent_call(conn, &client, &name, &args));
-                }
+                Ask::Call { name, args } => match ed.agent_call(r.conn, &r.client, &name, &args) {
+                    Some(answer) => r.answer(answer),
+                    None => self.pending.push_front(r),
+                },
                 Ask::Read(uri) => match ed.agent_read(&uri) {
                     Some(text) => r.answer(text),
                     None => r.missing(),

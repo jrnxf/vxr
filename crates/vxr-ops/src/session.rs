@@ -163,6 +163,8 @@ pub struct Changes {
     /// World nodes (objects and groups) the change adds, takes out, moves, hides or puts on
     /// another layer: a world change has no cells.
     pub nodes: usize,
+    /// Layers of the world the change adds, renames, hides or shows.
+    pub layers: usize,
 }
 
 pub struct Session {
@@ -198,6 +200,8 @@ pub struct Session {
     /// The file's `NOTE` palette row names, cleaned.
     pub(crate) notes: Vec<String>,
     steps: Vec<Step>,
+    /// Steps the model's `undo` dropped, last last, for its `redo`.
+    undone: Vec<usize>,
     calls: usize,
     turn_calls: usize,
     allowed: usize,
@@ -250,6 +254,7 @@ impl Session {
             parts,
             notes: file.map(notes_of).unwrap_or_default(),
             steps: Vec::new(),
+            undone: Vec::new(),
             calls: 0,
             turn_calls: 0,
             allowed: limits.ask_over,
@@ -363,6 +368,8 @@ impl Session {
                 | Op::Box(_)
                 | Op::Line(_)
                 | Op::Sphere(_)
+                | Op::Circle(_)
+                | Op::Face(_)
                 | Op::Fill(_)
                 | Op::Paint(_)
                 | Op::Select(_)
@@ -376,6 +383,8 @@ impl Session {
                 | Op::Resize(_)
                 | Op::Crop(_)
                 | Op::PaletteSet(_)
+                | Op::PaletteSwap(_)
+                | Op::PaletteCopy(_)
                 | Op::MaterialSet(_)
                 | Op::MoveObject(_)
                 | Op::Duplicate(_)
@@ -383,9 +392,14 @@ impl Session {
                 | Op::Ungroup(_)
                 | Op::Hide(_)
                 | Op::SetLayer(_)
+                | Op::DeleteObject(_)
+                | Op::Rename(_)
+                | Op::NewLayer(_)
+                | Op::HideLayer(_)
         );
         let query = op.is_query();
         self.show_before(scene, false);
+        let edit = !matches!(op, Op::Select(_) | Op::Copy(_));
         let refs = self.refer(&mut op.clone());
         let mark = Mark::of(scene);
         let r = self.run(scene, op.clone());
@@ -411,6 +425,11 @@ impl Session {
                 refs,
                 made: if replay && r.is_ok() { mark.made(scene) } else { Made::default() },
             });
+            // A new edit of this caller's: what its undo took back cannot come back.
+            if replay && edit && self.steps.last().is_some_and(|s| s.ok) {
+                let (steps, lane) = (&self.steps, self.lane);
+                self.undone.retain(|&j| steps[j].lane != lane);
+            }
         }
         r
     }
@@ -481,25 +500,22 @@ impl Session {
             }
             Op::Sphere(a) => {
                 let slot = shape_slot(a.mode, a.slot)?;
-                let r = a.radius;
-                if !(1..=MAX_RADIUS).contains(&r) {
-                    return Err(invalid(format!("radius {r}: 1 to {MAX_RADIUS}")));
-                }
-                let flat = a.flat_axis.map(Axis::index);
-                // As the center brush: cells within r^2 + r/2 of the centre.
-                let reach = (r * r) as f32 + r as f32 / 2.0;
-                let span = |k: usize| if flat == Some(k) { 0 } else { r };
-                let c = a.center;
-                let mut cells = Vec::new();
-                for z in -span(2)..=span(2) {
-                    for y in -span(1)..=span(1) {
-                        for x in -span(0)..=span(0) {
-                            if ((x * x + y * y + z * z) as f32) <= reach {
-                                cells.push([c[0] + x, c[1] + y, c[2] + z]);
-                            }
-                        }
-                    }
-                }
+                let cells = round(a.center, a.radius, a.flat_axis)?;
+                self.edit(scene, cells, a.mode, slot, a.name.as_deref())
+            }
+            Op::Circle(a) => {
+                let slot = shape_slot(a.mode, a.slot)?;
+                let cells = round(a.center, a.radius, Some(a.axis.unwrap_or(Axis::Y)))?;
+                self.edit(scene, cells, a.mode, slot, a.name.as_deref())
+            }
+            Op::Face(a) => {
+                let slot = shape_slot(a.mode, a.slot)?;
+                let side = a.side.unwrap_or(Side::Top);
+                let n = side.normal();
+                let face = self.face(scene, a.cell, side)?;
+                // Add builds on the open side; erase and paint work on the face's own voxels.
+                let d = if a.mode == Mode::Add { n } else { [0; 3] };
+                let cells = face.into_iter().map(|p| add(scene.to_world(p), d)).collect();
                 self.edit(scene, cells, a.mode, slot, a.name.as_deref())
             }
             Op::Fill(a) => {
@@ -659,6 +675,56 @@ impl Session {
                 Ok(s)
             }
             Op::SetLayer(a) => self.set_layer(scene, &a),
+            Op::DeleteObject(a) => {
+                let what = self.node(scene, a.node)?;
+                let t = self.world_edit(scene, |w| w.remove(a.node))?.1;
+                Ok(format!("deleted {what}; {t}"))
+            }
+            Op::Rename(a) => {
+                let name = a.name.chars().filter(|c| !c.is_control()).collect::<String>();
+                let name = name.trim();
+                if name.chars().count() > MAX_LAYER_NAME {
+                    return Err(invalid(format!("name: at most {MAX_LAYER_NAME} characters")));
+                }
+                let new = (!name.is_empty()).then_some(name);
+                let to = new.map_or("no name".to_string(), |n| Value::from(n).to_string());
+                match (a.node, a.layer) {
+                    (Some(n), None) => {
+                        let what = self.node(scene, n)?;
+                        let t = self.world_edit(scene, |w| w.set_name(n, new))?.1;
+                        Ok(format!("{what} is named {to}; {t}"))
+                    }
+                    (None, Some(id)) => {
+                        self.layer(scene, id)?;
+                        let t = self.world_edit(scene, |w| w.set_layer_name(id, new))?.1;
+                        Ok(format!("layer {id} is named {to}; {t}"))
+                    }
+                    _ => Err(invalid("give node (an object or group) or layer (a layer id), not both")),
+                }
+            }
+            Op::NewLayer(a) => {
+                self.world_here(scene)?;
+                let name = match a.name {
+                    Some(n) => n.chars().filter(|c| !c.is_control()).collect::<String>().trim().to_string(),
+                    None => {
+                        let w = scene.world().expect("a world");
+                        format!("layer {}", w.layers().iter().map(|l| l.id + 1).max().unwrap_or(0))
+                    }
+                };
+                if name.is_empty() || name.chars().count() > MAX_LAYER_NAME {
+                    return Err(invalid(format!("name: 1 to {MAX_LAYER_NAME} characters")));
+                }
+                let (id, t) = self.world_edit(scene, |w| w.add_layer(&name))?;
+                Ok(format!("added layer {id} {}; {t}", Value::from(name)))
+            }
+            Op::HideLayer(a) => {
+                self.layer(scene, a.layer)?;
+                let t = self.world_edit(scene, |w| w.set_layer_hidden(a.layer, a.hidden))?.1;
+                let w = scene.world().expect("a world");
+                let n = w.objects().into_iter().filter(|&i| w.tree.nodes[i].layer == a.layer).count();
+                let state = if a.hidden { "hidden" } else { "shown" };
+                Ok(format!("layer {} is {state} ({n} object{} on it); {t}", a.layer, if n == 1 { "" } else { "s" }))
+            }
             Op::PaletteSet(a) => {
                 let s = slot(a.slot)?;
                 let c = parse_hex(&a.hex).map_err(invalid)?;
@@ -666,6 +732,54 @@ impl Session {
                 let old = scene.palette[s as usize];
                 scene.put_color(s, c);
                 Ok(format!("slot {s}: {} -> {} ({} voxels use it)", hex(old), hex(c), self.slot_count(scene, s)))
+            }
+            Op::PaletteSwap(a) => {
+                let (x, y) = (slot(a.a)?, slot(a.b)?);
+                if x == y {
+                    return Err(invalid(format!("a and b are both slot {x}: give two slots")));
+                }
+                let cells = self.voxels_of(scene, |v| v == x || v == y);
+                let remap = cells.into_iter().map(|(w, v)| (w, if v == x { y } else { x })).collect();
+                let st = self.stage(scene, remap, true)?;
+                self.open(scene);
+                let (cx, cy) = (scene.palette[x as usize], scene.palette[y as usize]);
+                let (mx, my) = (scene.materials[x as usize], scene.materials[y as usize]);
+                scene.put_color(x, cy);
+                scene.put_color(y, cx);
+                scene.put_material(x, my);
+                scene.put_material(y, mx);
+                let mut t = format!(
+                    "swapped slots {x} and {y}: slot {x} is now {} ({} voxels), slot {y} is now {} ({} voxels); {}",
+                    hex(cy),
+                    self.slot_count(scene, x),
+                    hex(cx),
+                    self.slot_count(scene, y),
+                    self.staged_text(scene)
+                );
+                if st.outside > 0 {
+                    t += &self.warning(scene, &st);
+                }
+                if scene.world().is_some_and(|w| w.objects().len() > 1) {
+                    t += "; warning: only this model's voxels took the other slot: other objects' voxels of these slots now show the other colour";
+                }
+                Ok(t)
+            }
+            Op::PaletteCopy(a) => {
+                let (from, to) = (slot(a.from)?, slot(a.to)?);
+                if from == to {
+                    return Err(invalid(format!("from and to are both slot {from}: give two slots")));
+                }
+                self.open(scene);
+                let (c, m) = (scene.palette[from as usize], scene.materials[from as usize]);
+                scene.put_color(to, c);
+                scene.put_material(to, m);
+                Ok(format!(
+                    "slot {to} now has slot {from}'s colour {} and material {}{} ({} voxels use it)",
+                    hex(c),
+                    m.kind.name(),
+                    settings(&m),
+                    self.slot_count(scene, to)
+                ))
             }
             Op::Undo(_) => {
                 let Some(i) = self.steps.iter().rposition(|s| {
@@ -676,8 +790,21 @@ impl Session {
                     return Err(invalid("nothing of yours to undo"));
                 };
                 self.steps[i].dropped = true;
+                self.undone.push(i);
                 self.rebuild(scene);
                 Ok(format!("took back step {} ({}); {}", i + 1, self.steps[i].tool, self.staged_text(scene)))
+            }
+            Op::Redo(_) => {
+                let (steps, lane) = (&self.steps, self.lane);
+                let Some(k) = self.undone.iter().rposition(|&j| steps[j].lane == lane && steps[j].dropped) else {
+                    return Err(invalid(
+                        "nothing of yours to redo: redo brings back what your undo took back, until your next edit",
+                    ));
+                };
+                let i = self.undone.remove(k);
+                self.steps[i].dropped = false;
+                self.rebuild(scene);
+                Ok(format!("brought back step {} ({}); {}", i + 1, self.steps[i].tool, self.staged_text(scene)))
             }
             Op::Done(a) => {
                 let s: String = a.summary.chars().filter(|c| !c.is_control()).take(500).collect();
@@ -786,6 +913,7 @@ impl Session {
             .collect();
         if let (Some(old), Some(w)) = (&self.tree_before, scene.world()) {
             c.nodes = changed_nodes(old, &w.tree);
+            c.layers = changed_layers(old, &w.tree);
         }
         c
     }
@@ -1314,15 +1442,15 @@ impl Session {
         // The map holds the world again: what shows picked is what shows selected.
         self.selection = scene.selection().collect();
         let tree = &scene.world().expect("a world").tree;
-        let n = changed_nodes(&old, tree);
-        let all = self.tree_before.as_ref().map_or(0, |b| changed_nodes(b, tree));
+        let (n, l) = (changed_nodes(&old, tree), changed_layers(&old, tree));
+        let all = self.tree_before.as_ref().map_or((0, 0), |b| (changed_nodes(b, tree), changed_layers(b, tree)));
         let mut t = format!(
             "{} changed in the world, no voxel of any model; staged so far: {} in the world{}",
-            nodes_text(n),
-            nodes_text(all),
+            world_text(n, l),
+            world_text(all.0, all.1),
             if self.base.is_empty() { String::new() } else { format!(", {}", self.staged_text(scene)) }
         );
-        if n == 0 {
+        if n == 0 && l == 0 {
             t += "; warning: nothing changed";
         }
         Ok((r, t))
@@ -1341,18 +1469,12 @@ impl Session {
 
     fn set_layer(&mut self, scene: &mut Scene, a: &SetLayer) -> Result<String, Error> {
         let what = self.node(scene, a.node)?;
-        let w = scene.world().expect("a world");
         let name = a.new_layer.as_deref().map(|n| n.chars().filter(|c| !c.is_control()).collect::<String>());
         let id = match (a.layer, name) {
             (Some(_), Some(_)) => return Err(invalid("give layer or new_layer, not both")),
             (None, None) => return Err(invalid("give layer (an id from the summary's layers) or new_layer")),
             (Some(id), None) => {
-                if !w.layers().iter().any(|l| l.id == id) {
-                    let ids: Vec<i32> = w.layers().iter().map(|l| l.id).collect();
-                    return Err(invalid(format!(
-                        "layer {id}: no such layer; the layers are {ids:?}, or give new_layer"
-                    )));
-                }
+                self.layer(scene, id).map_err(|e| invalid(format!("{e}, or give new_layer")))?;
                 id
             }
             (None, Some(n)) => {
@@ -1373,9 +1495,66 @@ impl Session {
         Ok(s)
     }
 
+    /// The face at world cell `c` on `side`, as map cells: the voxels of its colour connected
+    /// to it in its layer whose side is open, as the change has them.
+    fn face(&self, scene: &Scene, c: Cell, side: Side) -> Result<Vec<Cell>, Error> {
+        let p = scene.to_map(c);
+        if self.get(scene, p) == 0 {
+            return Err(invalid(format!("{c:?} is empty: give a voxel of the face")));
+        }
+        let face = vxr_core::tools::face_cells(|q| self.get(scene, q), p, side.normal());
+        if face.is_empty() {
+            return Err(invalid(format!(
+                "the {} side of {c:?} is covered by the voxel at {:?}: give a voxel whose side is open",
+                side.name(),
+                add(c, side.normal())
+            )));
+        }
+        Ok(face)
+    }
+
+    /// Why the layer tools cannot work here, if they cannot: they work on the world.
+    fn world_here(&self, scene: &Scene) -> Result<(), Error> {
+        match scene.at() {
+            At::World => Ok(()),
+            At::Object(_) => Err(invalid(IN_MODEL)),
+            At::Map => Err(invalid(NO_WORLD)),
+        }
+    }
+
+    /// Layer `id` of the world the scene shows, or why a layer tool cannot work on it.
+    fn layer(&self, scene: &Scene, id: i32) -> Result<(), Error> {
+        self.world_here(scene)?;
+        let w = scene.world().expect("world mode has a world");
+        if !w.layers().iter().any(|l| l.id == id) {
+            let ids: Vec<i32> = w.layers().iter().map(|l| l.id).collect();
+            return Err(invalid(format!("layer {id}: no such layer; the layers are {ids:?}")));
+        }
+        Ok(())
+    }
+
+    /// World cells and slots of the voxels whose slot `keep` takes.
+    fn voxels_of(&self, scene: &Scene, keep: impl Fn(u8) -> bool) -> Vec<(Cell, u8)> {
+        let mut out = Vec::new();
+        self.for_each(scene, |p, v| {
+            if keep(v) {
+                out.push((scene.to_world(p), v));
+            }
+        });
+        out
+    }
+
     fn select(&mut self, scene: &Scene, a: &Select) -> Result<String, Error> {
         if a.none {
             self.selection.clear();
+        } else if a.invert {
+            let mut cells = HashSet::new();
+            self.for_each(scene, |p, _| {
+                if !self.selection.contains(&p) {
+                    cells.insert(p);
+                }
+            });
+            self.selection = cells;
         } else {
             let cells: Vec<Cell> = if a.all {
                 self.voxels_where(scene, |_, _| true)
@@ -1384,11 +1563,22 @@ impl Session {
                 self.voxels_where(scene, |_, v| v == c)
             } else if let Some(cells) = self.parts_cells(scene, &a.part, &a.parts)? {
                 cells
+            } else if let Some(c) = a.face {
+                self.face(scene, c, a.side.unwrap_or(Side::Top))?.into_iter().map(|p| scene.to_world(p)).collect()
+            } else if let Some(c) = a.volume {
+                let p = scene.to_map(c);
+                if self.get(scene, p) == 0 {
+                    return Err(invalid(format!("volume: {c:?} is empty; give a filled cell")));
+                }
+                vxr_core::select::connected(|q| self.get(scene, q) != 0, p)
+                    .into_iter()
+                    .map(|q| scene.to_world(q))
+                    .collect()
             } else if let (Some(f), Some(t)) = (a.from, a.to) {
                 let (lo, hi) = order(f, t);
                 self.voxels_where(scene, |q, _| inside(q, lo, hi))
             } else {
-                return Err(invalid("give from and to, color, part or parts, all or none"));
+                return Err(invalid("give from and to, color, part or parts, face, volume, all, none or invert"));
             };
             let cells = cells.into_iter().map(|w| scene.to_map(w));
             match a.mode {
@@ -1608,6 +1798,9 @@ fn world_args(op: &mut Op) -> (Vec<&mut usize>, Option<&mut i32>) {
         Op::Ungroup(a) => (vec![&mut a.node], None),
         Op::Hide(a) => (vec![&mut a.node], None),
         Op::SetLayer(a) => (vec![&mut a.node], a.layer.as_mut()),
+        Op::DeleteObject(a) => (vec![&mut a.node], None),
+        Op::Rename(a) => (a.node.iter_mut().collect(), a.layer.as_mut()),
+        Op::HideLayer(a) => (Vec::new(), Some(&mut a.layer)),
         _ => (Vec::new(), None),
     }
 }
@@ -1654,6 +1847,49 @@ fn node_text(w: &World, i: usize) -> String {
             format!("group {i} ({n} object{})", if n == 1 { "" } else { "s" })
         }
     }
+}
+
+/// The cells of a ball of radius `r` around `c`, or a disc flat across `flat`, as the center
+/// brush draws them: within r^2 + r/2 of the centre.
+fn round(c: Cell, r: i32, flat: Option<Axis>) -> Result<Vec<Cell>, Error> {
+    if !(1..=MAX_RADIUS).contains(&r) {
+        return Err(invalid(format!("radius {r}: 1 to {MAX_RADIUS}")));
+    }
+    let flat = flat.map(Axis::index);
+    let reach = (r * r) as f32 + r as f32 / 2.0;
+    let span = |k: usize| if flat == Some(k) { 0 } else { r };
+    let mut cells = Vec::new();
+    for z in -span(2)..=span(2) {
+        for y in -span(1)..=span(1) {
+            for x in -span(0)..=span(0) {
+                if ((x * x + y * y + z * z) as f32) <= reach {
+                    cells.push([c[0] + x, c[1] + y, c[2] + z]);
+                }
+            }
+        }
+    }
+    Ok(cells)
+}
+
+/// "1 node", "2 layers", "1 node and 1 layer".
+fn world_text(nodes: usize, layers: usize) -> String {
+    let l = format!("{layers} layer{}", if layers == 1 { "" } else { "s" });
+    match (nodes, layers) {
+        (_, 0) => nodes_text(nodes),
+        (0, _) => l,
+        _ => format!("{} and {l}", nodes_text(nodes)),
+    }
+}
+
+/// How many layers differ between `old` and `new` by name or hidden flag, a layer with no
+/// entry counting as unnamed and shown.
+fn changed_layers(old: &Tree, new: &Tree) -> usize {
+    let of =
+        |t: &Tree, id: i32| t.layers.iter().find(|l| l.id == id).map_or((None, false), |l| (l.name.clone(), l.hidden));
+    let mut ids: Vec<i32> = old.layers.iter().chain(&new.layers).map(|l| l.id).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids.into_iter().filter(|&id| of(old, id) != of(new, id)).count()
 }
 
 /// "1 node", "3 nodes".

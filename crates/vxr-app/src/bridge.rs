@@ -321,15 +321,19 @@ impl Page {
     pub fn tick(&mut self, ed: &mut Editor) {
         while self.link == Link::Paired && !self.regenerating && !ed.agent_busy() {
             let Some(r) = self.pending.pop_front() else { break };
-            let reply = match r.ask {
+            let reply = match &r.ask {
                 Ask::Call { name, args } => {
-                    let (text, is_error) = match ed.agent_call(r.conn, &r.client, &name, &args) {
-                        Ok(t) => (t, false),
-                        Err(e) => (e, true),
+                    let (text, is_error) = match ed.agent_call(r.conn, &r.client, name, args) {
+                        Some(Ok(t)) => (t, false),
+                        Some(Err(e)) => (e, true),
+                        None => {
+                            self.pending.push_front(r);
+                            continue;
+                        }
                     };
                     json!({"id": r.id, "text": text, "isError": is_error})
                 }
-                Ask::Read(uri) => match ed.agent_read(&uri) {
+                Ask::Read(uri) => match ed.agent_read(uri) {
                     Some(Ok(t)) => json!({"id": r.id, "text": t, "isError": false}),
                     Some(Err(e)) => json!({"id": r.id, "text": e, "isError": true}),
                     None => json!({"id": r.id, "missing": true}),

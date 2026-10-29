@@ -132,7 +132,9 @@ fn a_call_goes_over_the_socket_and_back() {
         assert!(names.contains(&op.name), "{} is a tool", op.name);
     }
     assert!(names.contains(&"edit_object") && names.contains(&"review_status"));
-    for files_only in ["list_files", "open", "save", "new_scene"] {
+    // Save and New scene are the window's own; opening a file is the user's, in its dialog.
+    assert!(names.contains(&"save") && names.contains(&"new_scene"));
+    for files_only in ["list_files", "open"] {
         assert!(!names.contains(&files_only), "{files_only} is files mode only");
     }
     assert!(host.clients().is_empty());
@@ -403,6 +405,9 @@ impl Window {
         if name == "undo" {
             return if self.scene.undo() { Ok("took back".into()) } else { Err("nothing to undo".into()) };
         }
+        if name == "redo" {
+            return if self.scene.redo() { Ok("brought back".into()) } else { Err("nothing to redo".into()) };
+        }
         if name == "show_world" {
             return crate::files::show_world(&mut self.scene).map(|_| "the world".into());
         }
@@ -565,5 +570,73 @@ fn the_world_tools_change_the_window_and_undo_gives_the_file_back() {
         assert!(w.scene.undo());
     }
     assert!(!w.scene.undo());
+    assert_eq!(w.scene.to_vox(), bytes);
+}
+
+#[test]
+fn the_housekeeping_select_and_palette_tools_change_the_window_and_undo_gives_the_file_back() {
+    // The generated 22-world: the slab (node 1, 64 voxels on layer 0), the trees group (2)
+    // of three linked 13-voxel trees on layer 1, the gem (7) on the hidden layer 2 and the
+    // hidden lost gem (8).
+    let f = vxr_vox::fixtures::all().into_iter().find(|f| f.name == "22-world").unwrap();
+    let bytes = vxr_vox::Document { raw: f.builder.build() }.write();
+    let mut w = Window { scene: vxr_core::Scene::from_vox(&bytes).unwrap(), selection: Vec::new(), clip: None };
+    let shown = |w: &Window| w.scene.world_voxels(true).len();
+    assert_eq!(shown(&w), 64 + 3 * 13);
+
+    let dir = Dir::new("house");
+    let host = Host::start(&dir.0).unwrap();
+    let mut a = Agent::new(&dir, "claude-code");
+    let call = |w: &mut Window, a: &mut Agent, name: &str, args: Value| {
+        let (t, e) = edit(&host, w, a, name, args);
+        assert!(!e, "{name}: {t}");
+        t
+    };
+    let t = call(&mut w, &mut a, "hide_layer", json!({"layer": 1}));
+    assert!(t.starts_with("layer 1 is hidden (3 objects on it); 1 layer changed in the world"), "{t}");
+    assert_eq!(shown(&w), 64);
+    let t = call(&mut w, &mut a, "new_layer", json!({}));
+    assert!(t.starts_with("added layer 3 \"layer 3\""), "{t}");
+    let t = call(&mut w, &mut a, "rename", json!({"layer": 3, "name": "props"}));
+    assert!(t.starts_with("layer 3 is named \"props\"; 1 layer changed"), "{t}");
+    let t = call(&mut w, &mut a, "rename", json!({"node": 2, "name": ""}));
+    assert!(t.starts_with("group 2 (3 objects) is named no name"), "{t}");
+    let t = call(&mut w, &mut a, "delete_object", json!({"node": 1}));
+    assert!(t.starts_with("deleted object 1; 1 node changed"), "{t}");
+    assert_eq!(shown(&w), 0);
+    // Undo and redo are the window's: the slab comes and goes.
+    call(&mut w, &mut a, "undo", json!({}));
+    assert_eq!(shown(&w), 64);
+    call(&mut w, &mut a, "redo", json!({}));
+    assert_eq!(shown(&w), 0);
+    call(&mut w, &mut a, "undo", json!({}));
+
+    // In the slab's model: its top face, its volume, the inverse, a circle and the palette.
+    call(&mut w, &mut a, "edit_object", json!({"node": 1}));
+    call(&mut w, &mut a, "resize", json!({"size": [8, 2, 8]}));
+    let t = call(&mut w, &mut a, "face", json!({"cell": [0, 0, 0], "side": "top", "slot": 9}));
+    assert!(t.starts_with("64 cells changed"), "{t}");
+    let t = call(&mut w, &mut a, "face", json!({"cell": [0, 1, 0], "mode": "paint", "slot": 12}));
+    assert!(t.starts_with("64 cells changed"), "{t}");
+    assert_eq!(
+        call(&mut w, &mut a, "select", json!({"face": [-4, 0, 0], "side": "left"})),
+        "8 voxels selected from [-4, 0, -3] to [-4, 0, 4]"
+    );
+    assert!(call(&mut w, &mut a, "select", json!({"invert": true})).starts_with("120 voxels selected"));
+    assert!(call(&mut w, &mut a, "select", json!({"volume": [0, 1, 0]})).starts_with("128 voxels selected"));
+    let t = call(&mut w, &mut a, "circle", json!({"center": [0, 1, 0], "radius": 1, "mode": "erase"}));
+    assert!(t.starts_with("5 cells changed"), "a plus of five: {t}");
+    let t = call(&mut w, &mut a, "palette_copy", json!({"from": 12, "to": 13}));
+    assert!(t.contains("(0 voxels use it)"), "{t}");
+    let t = call(&mut w, &mut a, "palette_swap", json!({"a": 12, "b": 13}));
+    assert!(t.contains("slot 13 is now") && t.contains("(59 voxels)"), "{t}");
+    call(&mut w, &mut a, "show_world", json!({}));
+    // Ten edits applied, one undo step each (the delete was undone): undone, the save is the
+    // file's bytes.
+    let mut steps = 0;
+    while w.scene.undo() {
+        steps += 1;
+    }
+    assert_eq!(steps, 10);
     assert_eq!(w.scene.to_vox(), bytes);
 }

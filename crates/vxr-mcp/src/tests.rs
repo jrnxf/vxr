@@ -233,10 +233,12 @@ fn builds_a_scene_from_an_empty_file() {
     c.ok("undo", json!({}));
     assert!(count(&mut c) < full - 2);
     c.err("save", json!({"path": "x.txt"}));
-    // Redo what was taken back, by repeating it.
-    c.ok("sphere", json!({"center": [0, 8, 0], "radius": 2, "slot": 3}));
-    c.ok("place", json!({"cells": [[3, 1, 3], [3, 2, 3]], "slot": 1}));
+    // Redo brings both back, one step each, and no more.
+    assert_eq!(c.ok("redo", json!({})), "brought back the edit undo took back last");
+    assert_eq!(count(&mut c), full - 2);
+    c.ok("redo", json!({}));
     assert_eq!(count(&mut c), full);
+    assert!(c.err("redo", json!({})).starts_with("nothing to redo"));
 
     // A scene the model has not saved is not dropped by open, unless it says so.
     assert!(c.err("open", json!({"path": "house/cottage.vox"})).contains("unsaved"));
@@ -462,4 +464,53 @@ fn a_failed_save_keeps_the_scene_s_file() {
     assert!(c.err("open", json!({"path": "mine.vox"})).contains("mine.vox has unsaved edits"));
     assert!(c.ok("save", json!({})).contains("saved mine.vox"));
     assert!(dir.0.join("mine.vox").is_file());
+}
+
+#[test]
+fn the_ui_s_other_actions_have_tools() {
+    // The generated 22-world, edited and saved through the tools for the UI's housekeeping,
+    // face, volume, invert, circle and palette actions; undone, the save is the file's bytes.
+    let dir = Dir::new("parity");
+    let f = vxr_vox::fixtures::all().into_iter().find(|f| f.name == "22-world").unwrap();
+    let bytes = vxr_vox::Document { raw: f.builder.build() }.write();
+    std::fs::write(dir.0.join("world.vox"), &bytes).unwrap();
+    let mut c = Client::new(&dir.0);
+    c.ok("open", json!({"path": "world.vox"}));
+    let t = c.ok("rename", json!({"node": 1, "name": "floor"}));
+    assert!(t.starts_with("object 1 is named \"floor\"; 1 node changed"), "{t}");
+    let t = c.ok("new_layer", json!({"name": "props"}));
+    assert!(t.starts_with("added layer 3 \"props\"; 1 layer changed"), "{t}");
+    c.ok("rename", json!({"layer": 3, "name": "props 2"}));
+    c.ok("hide_layer", json!({"layer": 0}));
+    c.ok("delete_object", json!({"node": 7}));
+    c.ok("palette_copy", json!({"from": 1, "to": 200}));
+    c.ok("edit_object", json!({"node": 1}));
+    c.ok("resize", json!({"size": [8, 3, 8]}));
+    let t = c.ok("face", json!({"cell": [0, 0, 0], "slot": 9}));
+    assert!(t.starts_with("64 cells changed"), "the slab's top: {t}");
+    let t = c.ok("select", json!({"volume": [0, 1, 0]}));
+    assert!(t.starts_with("128 voxels selected"), "the slab and its new top: {t}");
+    assert!(c.ok("select", json!({"invert": true})).starts_with("0 voxels selected"));
+    let t = c.ok("circle", json!({"center": [0, 2, 0], "radius": 2, "slot": 9}));
+    assert!(t.starts_with("21 cells changed"), "{t}");
+    let t = c.ok("palette_swap", json!({"a": 9, "b": 200}));
+    assert!(
+        t.starts_with("swapped slots 9 and 200: slot 9 is now #ffffff (0 voxels), slot 200 is now #fa8c1e (85 voxels)"),
+        "{t}"
+    );
+    c.ok("show_world", json!({}));
+    c.ok("save", json!({}));
+    let mut d = Client::new(&dir.0);
+    d.ok("open", json!({"path": "world.vox"}));
+    let w = summary(&mut d)["world"].clone();
+    assert_eq!(w["nodes"].as_array().unwrap().len(), 7, "the gem is gone: {w}");
+    assert!(w["layers"].as_array().unwrap().iter().any(|l| l["id"] == 0 && l["hidden"] == true), "{w}");
+    // Ten edits, ten undo steps, and the selections none.
+    let mut steps = 0;
+    while !c.tool("undo", json!({})).1 {
+        steps += 1;
+    }
+    assert_eq!(steps, 10);
+    c.ok("save", json!({"path": "undone.vox"}));
+    assert_eq!(std::fs::read(dir.0.join("undone.vox")).unwrap(), bytes);
 }

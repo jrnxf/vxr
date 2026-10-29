@@ -210,29 +210,7 @@ impl Scene {
     /// The face under a target: connected voxels of the same colour in its layer whose face
     /// along the normal is open, up to [`MAX_FACE`] cells.
     pub fn face_region(&self, t: &Target) -> Vec<[i32; 3]> {
-        let n = t.normal;
-        let a = axis_of(n);
-        let (u, v) = ((a + 1) % 3, (a + 2) % 3);
-        let get = |p: [i32; 3]| self.map.get(p[0], p[1], p[2]);
-        let open = |p: [i32; 3]| get(p) == t.value && get(add(p, n)) == 0;
-        let mut seen = std::collections::HashSet::new();
-        let (mut out, mut stack) = (Vec::new(), vec![t.voxel]);
-        while let Some(p) = stack.pop() {
-            if out.len() >= MAX_FACE {
-                break;
-            }
-            if !seen.insert(p) || !open(p) {
-                continue;
-            }
-            out.push(p);
-            for (du, dv) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                let mut q = p;
-                q[u] += du;
-                q[v] += dv;
-                stack.push(q);
-            }
-        }
-        out
+        face_cells(|p| self.map.get(p[0], p[1], p[2]), t.voxel, t.normal)
     }
 
     /// Press with a brush on a target.
@@ -442,6 +420,37 @@ impl Gesture {
     pub fn release(self, scene: &mut Scene) -> usize {
         scene.commit()
     }
+}
+
+/// The face at voxel `p` along unit normal `n`, with `get` reading a cell's slot: the
+/// connected voxels of `p`'s colour in its layer whose face along `n` is open, up to
+/// [`MAX_FACE`] cells ([`Scene::face_region`]). Empty when `p` is empty or that face is covered.
+pub fn face_cells(get: impl Fn([i32; 3]) -> u8, p: [i32; 3], n: [i32; 3]) -> Vec<[i32; 3]> {
+    let value = get(p);
+    if value == 0 {
+        return Vec::new();
+    }
+    let a = axis_of(n);
+    let (u, v) = ((a + 1) % 3, (a + 2) % 3);
+    let open = |p: [i32; 3]| get(p) == value && get(add(p, n)) == 0;
+    let mut seen = std::collections::HashSet::new();
+    let (mut out, mut stack) = (Vec::new(), vec![p]);
+    while let Some(p) = stack.pop() {
+        if out.len() >= MAX_FACE {
+            break;
+        }
+        if !seen.insert(p) || !open(p) {
+            continue;
+        }
+        out.push(p);
+        for (du, dv) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            let mut q = p;
+            q[u] += du;
+            q[v] += dv;
+            stack.push(q);
+        }
+    }
+    out
 }
 
 /// The cells from `a` to `b` in `steps` equal steps, rounded, both ends included.

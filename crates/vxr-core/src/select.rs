@@ -30,6 +30,27 @@ pub enum Region {
     Volume,
 }
 
+/// Every cell connected to `p` through faces for which `filled` holds, `p` first; empty when
+/// `p` is not filled ([`Scene::volume`]).
+pub fn connected(filled: impl Fn([i32; 3]) -> bool, p: [i32; 3]) -> Vec<[i32; 3]> {
+    let mut seen = HashSet::new();
+    let (mut out, mut stack) = (Vec::new(), vec![p]);
+    while let Some(p) = stack.pop() {
+        if !filled(p) || !seen.insert(p) {
+            continue;
+        }
+        out.push(p);
+        for a in 0..3 {
+            for d in [1, -1] {
+                let mut q = p;
+                q[a] += d;
+                stack.push(q);
+            }
+        }
+    }
+    out
+}
+
 /// A transform of the selection, or of the whole model when nothing is selected.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Transform {
@@ -187,23 +208,7 @@ impl Scene {
 
     /// Every voxel connected to `p` through faces, whatever its colour.
     pub fn volume(&self, p: [i32; 3]) -> Vec<[i32; 3]> {
-        let filled = |p: [i32; 3]| self.map.get(p[0], p[1], p[2]) != 0;
-        let mut seen = HashSet::new();
-        let (mut out, mut stack) = (Vec::new(), vec![p]);
-        while let Some(p) = stack.pop() {
-            if !filled(p) || !seen.insert(p) {
-                continue;
-            }
-            out.push(p);
-            for a in 0..3 {
-                for d in [1, -1] {
-                    let mut q = p;
-                    q[a] += d;
-                    stack.push(q);
-                }
-            }
-        }
-        out
+        connected(|p| self.map.get(p[0], p[1], p[2]) != 0, p)
     }
 
     pub fn select_all(&mut self) {

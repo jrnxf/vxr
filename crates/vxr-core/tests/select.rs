@@ -84,6 +84,30 @@ fn a_click_selects_the_colour_the_face_or_the_volume() {
 }
 
 #[test]
+fn face_and_volume_read_cells_through_a_getter() {
+    // The L as the scene has it, but with its corner read as empty (a staged removal): the
+    // face and the volume split there.
+    let s = scene();
+    let gone = [O, O, O];
+    let get = |p: [i32; 3]| if p == gone { 0 } else { s.map.get(p[0], p[1], p[2]) };
+    let mut face = vxr_core::tools::face_cells(get, [O + 1, O, O], [0, 1, 0]);
+    face.sort();
+    assert_eq!(face, vec![[O + 1, O, O], [O + 2, O, O]]);
+    assert_eq!(vxr_core::tools::face_cells(get, gone, [0, 1, 0]), Vec::<[i32; 3]>::new(), "an empty cell has no face");
+    assert_eq!(
+        vxr_core::tools::face_cells(get, [O + 1, O, O], [1, 0, 0]),
+        Vec::<[i32; 3]>::new(),
+        "a covered face is none"
+    );
+    let mut vol = vxr_core::select::connected(|p| get(p) != 0, [O + 2, O, O]);
+    vol.sort();
+    assert_eq!(vol, vec![[O + 1, O, O], [O + 2, O, O]], "the corner no longer joins the L");
+    let mut whole = s.volume([O + 2, O, O]);
+    whole.sort();
+    assert_eq!(whole, vec![[O, O, O], [O, O, O + 1], [O + 1, O, O], [O + 2, O, O]]);
+}
+
+#[test]
 fn erased_voxels_leave_the_selection() {
     let mut s = scene();
     s.select_color(3, Mode::Replace);

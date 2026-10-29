@@ -65,6 +65,9 @@ pub struct Agents {
     selections: HashMap<u64, (At, u64, Vec<Cell>)>,
     /// Each agent's own clipboard by connection (world cells), for its paste.
     clips: HashMap<u64, Clip>,
+    /// The edits each connection's `undo` took back, last last, for its `redo`: until its
+    /// next edit.
+    undone: HashMap<u64, Vec<usize>>,
     /// Bumped whenever the edits change.
     pub version: u64,
     /// "Review every agent change": edits wait in a change under review for the user to
@@ -107,16 +110,16 @@ pub fn limits() -> Limits {
 }
 
 /// Whether a call changes the scene, so with review on it waits for the user: an edit or a
-/// colour, not a query, a selection, a copy, `undo` or `done`.
+/// colour, not a query, a selection, a copy, `undo`, `redo` or `done`.
 pub fn edits(name: &str, args: &Value) -> bool {
     matches!(Op::parse(name, args.clone()),
-        Ok(op) if !op.is_query() && !matches!(op, Op::Select(_) | Op::Copy(_) | Op::Undo(_) | Op::Done(_)))
+        Ok(op) if !op.is_query() && !matches!(op, Op::Select(_) | Op::Copy(_) | Op::Undo(_) | Op::Redo(_) | Op::Done(_)))
 }
 
 /// Whether a step of a change under review is an edit (what Apply lands and the notices
-/// count), not a selection, a copy, an `undo`, `done` or a call that failed.
+/// count), not a selection, a copy, an `undo`, a `redo`, `done` or a call that failed.
 fn is_edit(st: &vxr_ops::Step) -> bool {
-    st.ok && !matches!(st.tool, "select" | "copy" | "undo" | "done")
+    st.ok && !matches!(st.tool, "select" | "copy" | "undo" | "redo" | "done")
 }
 
 /// "1 edit", "3 edits".
@@ -152,6 +155,7 @@ impl Agents {
         self.edits.clear();
         self.selections.clear();
         self.clips.clear();
+        self.undone.clear();
         self.version += 1;
     }
 
@@ -160,6 +164,7 @@ impl Agents {
     pub fn forget(&mut self, conn: u64) {
         self.selections.remove(&conn);
         self.clips.remove(&conn);
+        self.undone.remove(&conn);
         self.notices.remove(&conn);
         self.seen.remove(&conn);
         self.last.remove(&conn);
@@ -276,7 +281,7 @@ impl Agents {
             Some(c) => self.clips.insert(conn, c.clone()),
             None => self.clips.remove(&conn),
         };
-        if review.session.steps().len() != steps || name == "undo" {
+        if review.session.steps().len() != steps || name == "undo" || name == "redo" {
             let names = review.agents.get_or_insert_default();
             if !names.iter().any(|(c, _)| *c == conn) {
                 names.push((conn, client.to_string()));
@@ -284,7 +289,7 @@ impl Agents {
             review.changed(scene);
         }
         match r {
-            Ok(t) if edits(name, args) || name == "undo" => Ok(format!("{t}; {WAITING}")),
+            Ok(t) if edits(name, args) || name == "undo" || name == "redo" => Ok(format!("{t}; {WAITING}")),
             Ok(t) => Ok(t),
             Err(e) => Err(e.message),
         }
@@ -375,7 +380,15 @@ impl Agents {
                     .rev()
                     .find(|&i| self.edits[i].conn == conn && self.in_effect(scene, i))
                     .ok_or("nothing of yours to undo")?;
-                self.undo_edit(scene, i).map(|l| format!("took back {l}"))
+                let l = self.undo_edit(scene, i)?;
+                self.undone.entry(conn).or_default().push(i);
+                Ok(format!("took back {l}"))
+            }
+            "redo" => {
+                let i = self.undone.get_mut(&conn).and_then(Vec::pop).ok_or(
+                    "nothing of yours to redo: redo brings back what your undo took back, until your next edit",
+                )?;
+                self.redo_edit(scene, i).map(|l| format!("brought back {l}"))
             }
             "done" => {
                 let s: String = args
@@ -458,6 +471,7 @@ impl Agents {
                 let step = scene.history().position();
                 if step != before {
                     self.edits.push(AgentEdit { conn, client: client.to_string(), label, step, undone_by: None });
+                    self.undone.remove(&conn);
                     self.version += 1;
                 }
                 Ok(text)
@@ -467,6 +481,29 @@ impl Agents {
                 Err(e.message)
             }
         }
+    }
+
+    /// Bring edit `i` back after [`Agents::undo_edit`] took it back, while nothing was
+    /// edited or undone since: the step itself is redone, as Cmd-Shift-Z would, or the step
+    /// that took it back is undone. Returns the edit's label.
+    pub fn redo_edit(&mut self, scene: &mut Scene, i: usize) -> Result<String, String> {
+        if self.in_effect(scene, i) {
+            return Err(format!("{} is in the scene already", self.edits[i].label));
+        }
+        let e = &self.edits[i];
+        let ok = match e.undone_by {
+            Some(u) if scene.history().position() == u => scene.undo(),
+            None if scene.history().redo_id() == Some(e.step) => scene.redo(),
+            _ => false,
+        };
+        if !ok || !self.in_effect(scene, i) {
+            return Err(format!(
+                "{} cannot come back: the scene was edited or undone since your undo; make the edit again instead",
+                e.label
+            ));
+        }
+        self.version += 1;
+        Ok(self.edits[i].label.clone())
     }
 
     /// Take edit `i` back. The last step is undone as Cmd-Z would (so redo brings it back);
@@ -594,6 +631,41 @@ mod tests {
         let t = ok(&mut a, &mut s, 1, "Claude Code", "undo", json!({}));
         assert_eq!(t, "took back Claude Code: place 2 voxels");
         assert_eq!(at(&s, [0, 0, 0]), 0);
+    }
+
+    #[test]
+    fn redo_brings_back_what_the_agent_s_undo_took() {
+        let (mut a, mut s) = (Agents::default(), scene());
+        ok(&mut a, &mut s, 1, "Claude Code", "place", json!({"cells": [[0, 0, 0], [1, 0, 0]], "slot": 3}));
+        ok(&mut a, &mut s, 1, "Claude Code", "place", json!({"cells": [[5, 0, 5]], "slot": 4}));
+        let after = s.to_vox();
+        // The last step, undone as Cmd-Z does, comes back as Cmd-Shift-Z does.
+        ok(&mut a, &mut s, 1, "Claude Code", "undo", json!({}));
+        ok(&mut a, &mut s, 1, "Claude Code", "undo", json!({}));
+        assert_eq!(s.map.voxels, 0);
+        assert_eq!(ok(&mut a, &mut s, 1, "Claude Code", "redo", json!({})), "brought back Claude Code: place 2 voxels");
+        assert_eq!(ok(&mut a, &mut s, 1, "Claude Code", "redo", json!({})), "brought back Claude Code: place 1 voxel");
+        assert_eq!(s.to_vox(), after);
+        assert!(a.call(&mut s, 1, "Claude Code", "redo", &json!({})).unwrap_err().contains("nothing of yours to redo"));
+        // Another agent's redo is its own.
+        ok(&mut a, &mut s, 1, "Claude Code", "undo", json!({}));
+        assert!(a.call(&mut s, 2, "Codex", "redo", &json!({})).unwrap_err().contains("nothing of yours"));
+        // Taken back under a later edit, it is a step of its own: redo undoes that step.
+        by_hand(&mut s, &[([6, 0, 6], 6)]);
+        assert!(a.call(&mut s, 1, "Claude Code", "redo", &json!({})).unwrap_err().contains("edited or undone since"));
+        ok(&mut a, &mut s, 1, "Claude Code", "place", json!({"cells": [[7, 0, 7]], "slot": 4}));
+        ok(&mut a, &mut s, 1, "Claude Code", "undo", json!({}));
+        let t = ok(&mut a, &mut s, 1, "Claude Code", "undo", json!({}));
+        assert_eq!(t, "took back Claude Code: place 2 voxels");
+        assert_eq!(s.history().undo_label(), Some("Undo Claude Code: place 2 voxels"));
+        assert_eq!(ok(&mut a, &mut s, 1, "Claude Code", "redo", json!({})), "brought back Claude Code: place 2 voxels");
+        assert_eq!((at(&s, [0, 0, 0]), at(&s, [6, 0, 6]), at(&s, [7, 0, 7])), (3, 6, 0));
+        // The voxel at [7, 0, 7] was taken back before the revert step: it cannot come back.
+        assert!(a.call(&mut s, 1, "Claude Code", "redo", &json!({})).unwrap_err().contains("edited or undone since"));
+        // A new edit ends what redo can bring back.
+        ok(&mut a, &mut s, 1, "Claude Code", "undo", json!({}));
+        ok(&mut a, &mut s, 1, "Claude Code", "place", json!({"cells": [[2, 2, 2]], "slot": 4}));
+        assert!(a.call(&mut s, 1, "Claude Code", "redo", &json!({})).unwrap_err().contains("nothing of yours to redo"));
     }
 
     /// Agent calls as the editor runs them with "Review every agent change" on: an edit

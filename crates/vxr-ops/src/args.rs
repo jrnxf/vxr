@@ -43,6 +43,44 @@ impl Axis {
     }
 }
 
+/// A side of a voxel: top is +y, bottom -y, right +x, left -x, front +z (toward the viewer)
+/// and back -z.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum Side {
+    Top,
+    Bottom,
+    Left,
+    Right,
+    Front,
+    Back,
+}
+
+impl Side {
+    pub fn name(self) -> &'static str {
+        match self {
+            Side::Top => "top",
+            Side::Bottom => "bottom",
+            Side::Left => "left",
+            Side::Right => "right",
+            Side::Front => "front",
+            Side::Back => "back",
+        }
+    }
+
+    /// The unit normal out of this side.
+    pub fn normal(self) -> Cell {
+        match self {
+            Side::Top => [0, 1, 0],
+            Side::Bottom => [0, -1, 0],
+            Side::Right => [1, 0, 0],
+            Side::Left => [-1, 0, 0],
+            Side::Front => [0, 0, 1],
+            Side::Back => [0, 0, -1],
+        }
+    }
+}
+
 /// How a selection combines with the current one.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
@@ -170,6 +208,41 @@ pub struct Sphere {
     pub name: Option<String>,
 }
 
+/// A disc of radius 1 to 64 around a cell, flat across axis (default y: a horizontal disc), as the center brush's circle draws it.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Circle {
+    pub center: Cell,
+    #[schemars(range(min = 1, max = 64))]
+    pub radius: i32,
+    /// Needed unless mode is erase.
+    #[schemars(range(min = 1, max = 255))]
+    pub slot: Option<u8>,
+    #[serde(default)]
+    pub mode: Mode,
+    /// The axis the disc is flat across (default y).
+    pub axis: Option<Axis>,
+    /// Name the voxels this makes as a part.
+    pub name: Option<String>,
+}
+
+/// Work on one face, as the face brush does: the voxels of cell's colour connected to it in its layer whose side is open (up to 120,000). add puts a layer of slot on that side of them, erase clears them and paint recolours them.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FaceShape {
+    /// A voxel of the face.
+    pub cell: Cell,
+    /// Which side of it (default top).
+    pub side: Option<Side>,
+    /// Needed unless mode is erase.
+    #[schemars(range(min = 1, max = 255))]
+    pub slot: Option<u8>,
+    #[serde(default)]
+    pub mode: Mode,
+    /// Name the voxels this makes as a part.
+    pub name: Option<String>,
+}
+
 /// Recolour every selected voxel with a slot.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -200,7 +273,7 @@ pub struct Paint {
     pub to: Option<Cell>,
 }
 
-/// Select filled cells: in a box (from, to), of a palette slot (color), of one or more parts, all, or none. The selection is the assistant's own; fill paints it.
+/// Select filled cells: in a box (from, to), of a palette slot (color), of one or more parts, the face of a voxel (face, with side: the connected voxels of its colour in its layer whose side is open, as a select click with Face does), the volume of a voxel (volume: every voxel connected to it through faces, whatever its colour), all, none, or invert (every voxel not selected, and none of those that are). The selection is the assistant's own; fill paints it.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Select {
@@ -213,10 +286,19 @@ pub struct Select {
     /// Several part ids or names.
     #[serde(default)]
     pub parts: Vec<String>,
+    /// A voxel whose face to select.
+    pub face: Option<Cell>,
+    /// The side of face's voxel (default top).
+    pub side: Option<Side>,
+    /// A voxel whose connected volume to select.
+    pub volume: Option<Cell>,
     #[serde(default)]
     pub all: bool,
     #[serde(default)]
     pub none: bool,
+    /// Select every voxel that is not selected and drop those that are (with nothing selected, every voxel); mode is not used.
+    #[serde(default)]
+    pub invert: bool,
     #[serde(default)]
     pub mode: SelectMode,
 }
@@ -383,6 +465,40 @@ pub struct SetLayer {
     pub new_layer: Option<String>,
 }
 
+/// Delete an object or group of the world (and everything in it), as Backspace in world mode does. Its models stay in the file only while undo can bring it back.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DeleteObject {
+    pub node: usize,
+}
+
+/// Rename an object or group of the world (node) or a layer (layer, an id from the summary's layers), as a double-click in the scene tree or the layer list does. An empty name clears it.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Rename {
+    pub node: Option<usize>,
+    pub layer: Option<i32>,
+    /// At most 64 characters.
+    pub name: String,
+}
+
+/// Add a layer to the world, as the layer list's + does. The result gives its id, for set_layer.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NewLayer {
+    /// 1 to 64 characters (default "layer N", as the + names it).
+    pub name: Option<String>,
+}
+
+/// Hide a layer of the world (layer is an id from the summary's layers), or show it again with hidden false, as its eye in the layer list does. Objects on a hidden layer do not show.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HideLayer {
+    pub layer: i32,
+    #[serde(default = "yes")]
+    pub hidden: bool,
+}
+
 /// Set a palette slot's colour as #rrggbb. Every voxel of that slot changes colour. Pick an unused slot for a new colour.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -393,10 +509,35 @@ pub struct PaletteSet {
     pub hex: String,
 }
 
+/// Swap two palette slots, as Swap with… does: their colours and materials trade places and the voxels of each take the other slot, so the model looks the same and only the palette order changes.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PaletteSwap {
+    #[schemars(range(min = 1, max = 255))]
+    pub a: u8,
+    #[schemars(range(min = 1, max = 255))]
+    pub b: u8,
+}
+
+/// Give slot to the colour and material of slot from, as Copy to… does. Every voxel of slot to changes.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PaletteCopy {
+    #[schemars(range(min = 1, max = 255))]
+    pub from: u8,
+    #[schemars(range(min = 1, max = 255))]
+    pub to: u8,
+}
+
 /// Take back your own last edit (never the user's).
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Undo {}
+
+/// Bring back your own edit that undo took back last, as long as you made no edit since.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Redo {}
 
 /// Finish: the change goes to the user for review. Give a one-line summary of what you changed.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
@@ -460,6 +601,8 @@ ops! {
     "box" => Box(BoxShape),
     "line" => Line(Line),
     "sphere" => Sphere(Sphere),
+    "circle" => Circle(Circle),
+    "face" => Face(FaceShape),
     "fill" => Fill(Fill),
     "paint" => Paint(Paint),
     "select" => Select(Select),
@@ -473,6 +616,8 @@ ops! {
     "resize" => Resize(Resize),
     "crop" => Crop(Crop),
     "palette_set" => PaletteSet(PaletteSet),
+    "palette_swap" => PaletteSwap(PaletteSwap),
+    "palette_copy" => PaletteCopy(PaletteCopy),
     "material_set" => MaterialSet(MaterialSet),
     "move_object" => MoveObject(MoveObject),
     "duplicate" => Duplicate(Duplicate),
@@ -480,7 +625,12 @@ ops! {
     "ungroup" => Ungroup(Ungroup),
     "hide" => Hide(Hide),
     "set_layer" => SetLayer(SetLayer),
+    "delete_object" => DeleteObject(DeleteObject),
+    "rename" => Rename(Rename),
+    "new_layer" => NewLayer(NewLayer),
+    "hide_layer" => HideLayer(HideLayer),
     "undo" => Undo(Undo),
+    "redo" => Redo(Redo),
     "done" => Done(Done),
 }
 
