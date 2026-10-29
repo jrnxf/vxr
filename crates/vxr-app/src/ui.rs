@@ -277,6 +277,8 @@ pub enum Action {
     Resize([u32; 3]),
     /// Fit the model bounds to the voxels.
     Crop,
+    /// Take the selected voxels out of the model into a new object of their own, in place.
+    ToObject,
     /// Switch between editing a model and the world of every object (Tab).
     ToggleWorld,
     /// Copy the picked object beside itself in world mode: its own model, or a linked copy
@@ -446,6 +448,8 @@ pub enum Named {
 /// The scene tree's width, and how many rows it shows before scrolling.
 const TREE_W: f32 = 212.0;
 const TREE_ROWS: usize = 14;
+/// The selection flyout's height, in points.
+const SELECTION_H: f32 = 344.0;
 
 /// What the next swatch click does, armed from the colour editor or Cmd-K.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -612,6 +616,8 @@ pub struct Hybrid {
     /// How many voxels are selected, and whether Copy or Cut has filled the clipboard.
     pub selected: usize,
     pub has_clip: bool,
+    /// Selection to new object can run: some of the model's voxels are selected, not all.
+    pub can_split: bool,
     /// World mode is showing (set by the editor), and the name of the object picked there.
     pub world: bool,
     pub picked: Option<String>,
@@ -721,6 +727,7 @@ const COMMANDS: &[Command] = &[
     Command { label: "Fill inside", keys: &[], run: |h| h.actions.push(Action::FillInterior) },
     Command { label: "Resize bounds…", keys: &[], run: |h| h.toggle_bounds_panel() },
     Command { label: "Crop to content", keys: &[], run: |h| h.actions.push(Action::Crop) },
+    Command { label: "Selection to new object", keys: &[], run: |h| h.actions.push(Action::ToObject) },
     Command { label: "Copy", keys: &["⌘", "C"], run: |h| h.actions.push(Action::Copy) },
     Command { label: "Cut", keys: &["⌘", "X"], run: |h| h.actions.push(Action::Cut) },
     Command { label: "Paste", keys: &["⌘", "V"], run: |h| h.actions.push(Action::Paste) },
@@ -910,6 +917,7 @@ impl Hybrid {
             rail_w: RAIL_W,
             selected: 0,
             has_clip: false,
+            can_split: false,
             world: false,
             picked: None,
             tree: Vec::new(),
@@ -1124,6 +1132,22 @@ impl Hybrid {
         if self.world {
             self.renaming = Some((Named::Node(row.node), row.name.clone()));
             self.rename_focus = true;
+        }
+    }
+
+    /// Open the rename field on object `node` in any mode (a new object, named at once).
+    pub fn open_rename(&mut self, node: usize) {
+        if let Some(row) = self.tree.iter().find(|r| r.node == node) {
+            self.renaming = Some((Named::Node(row.node), row.name.clone()));
+            self.rename_focus = true;
+        }
+    }
+
+    /// The node whose rename field is open.
+    pub fn renaming_node(&self) -> Option<usize> {
+        match self.renaming {
+            Some((Named::Node(n), _)) => Some(n),
+            _ => None,
         }
     }
 
@@ -2692,7 +2716,9 @@ impl Hybrid {
         if !self.mirror && self.lock.is_none() {
             return;
         }
-        let rect = self.flyout_rect(self.axes_y, "mirror", vec2(150.0, 6.0 + 2.0 * 40.0 + 2.0 + 6.0));
+        // Under the selection flyout when it shows too, so neither covers the other.
+        let below = if self.selection_shown() && !self.touch { self.select_y + SELECTION_H + 8.0 } else { self.axes_y };
+        let rect = self.flyout_rect(self.axes_y.max(below), "mirror", vec2(150.0, 6.0 + 2.0 * 40.0 + 2.0 + 6.0));
         self.hits.insert("axes".into(), rect);
         let (mirror, lock) = (self.mirror_axes(), self.lock);
         let mut clicked = (None, None);
@@ -2745,6 +2771,11 @@ impl Hybrid {
         }
     }
 
+    /// Whether the selection flyout shows: with the select tool or a selection, in a model.
+    fn selection_shown(&self) -> bool {
+        !self.world && (self.tool == Tool::Select || self.selected > 0)
+    }
+
     /// Choose what a select click takes, and switch to the select tool.
     pub fn set_region(&mut self, region: Region) {
         self.region = region;
@@ -2754,15 +2785,15 @@ impl Hybrid {
     // The selection flyout beside the rail's select button, shown with the select tool or a
     // selection: the count, ROTATE / FLIP / LOOP X Y Z and hollow and fill inside (the
     // whole model when nothing is selected), crop and resize of the model bounds, select all
-    // and invert, what a click selects (colour, face or volume), and fill, copy, cut, paste
-    // and delete. Built like the axis flyout.
+    // and invert, selection to new object, what a click selects (colour, face or volume),
+    // and fill, copy, cut, paste and delete. Built like the axis flyout.
     fn selection_panel(&mut self, ctx: &Context) {
-        if self.world || (self.tool != Tool::Select && self.selected == 0) {
+        if !self.selection_shown() {
             return;
         }
-        let rect = self.flyout_rect(self.select_y, "select", vec2(162.0, 310.0));
+        let rect = self.flyout_rect(self.select_y, "select", vec2(162.0, SELECTION_H));
         self.hits.insert("selection".into(), rect);
-        let (selected, has_clip) = (self.selected, self.has_clip);
+        let (selected, has_clip, can_split) = (self.selected, self.has_clip, self.can_split);
         let mut region = self.region;
         let bounds_open = self.bounds_panel.is_some();
         let mut toggle_bounds = false;
@@ -2870,8 +2901,25 @@ impl Hybrid {
                     }
                 }
             }
+            // Selection to new object: some of the model's voxels selected, not all.
+            let c = Rect::from_min_size(pos2(rect.left() + 12.0, hy + 30.0 + 6.0 * 34.0 - 13.0), vec2(138.0, 26.0));
+            hits.push(("to-object".to_string(), c));
+            let p = ui.painter().clone();
+            if can_split {
+                let resp = ui.interact(c, Id::unique("to-object"), Sense::click());
+                let border = if resp.hovered() { th().tint(64) } else { th().line2 };
+                p.rect_stroke(c, CornerRadius::same(7), Stroke::new(1.0, border), StrokeKind::Inside);
+                let color = if resp.hovered() { th().text } else { th().muted };
+                p.text(c.center(), Align2::CENTER_CENTER, "To new object", sans(11.0), color);
+                if resp.clicked() {
+                    run.push(Action::ToObject);
+                }
+            } else {
+                p.rect_stroke(c, CornerRadius::same(7), Stroke::new(1.0, th().line), StrokeKind::Inside);
+                p.text(c.center(), Align2::CENTER_CENTER, "To new object", sans(11.0), th().faint);
+            }
             // What a click on a voxel selects.
-            let row = Rect::from_min_size(pos2(rect.left() + 12.0, hy + 30.0 + 6.0 * 34.0 - 13.0), vec2(138.0, 26.0));
+            let row = Rect::from_min_size(pos2(rect.left() + 12.0, hy + 30.0 + 7.0 * 34.0 - 13.0), vec2(138.0, 26.0));
             let mut seg = Vec::new();
             let labels = ["Color", "Face", "Volume"].map(String::from);
             let names = ["click-color", "click-face", "click-volume"];
@@ -2881,7 +2929,7 @@ impl Hybrid {
                 region = regions[k];
             }
             hits.extend(seg.into_iter().map(|(n, r)| (n.to_string(), r)));
-            let cy = hy + 30.0 + 7.0 * 34.0 + 4.0;
+            let cy = hy + 30.0 + 8.0 * 34.0 + 4.0;
             ui.painter().line_segment(
                 [pos2(rect.left() + 10.0, cy - 20.5), pos2(rect.right() - 10.0, cy - 20.5)],
                 Stroke::new(1.0, th().line),

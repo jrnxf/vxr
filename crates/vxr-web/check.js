@@ -1431,6 +1431,60 @@ async () => {
     step('in model mode a tree row click edits that object', s.mode === 'object' && s.treeOn === treeA, JSON.stringify(s));
     await key('Tab');
     step('the tree leaves the file as it was', same(bytes(), worldFile) && st().mode === 'world');
+
+    // Selection to new object on the generated 23-desk, one model: the cup selected by colour
+    // becomes an object of its own through the flyout's button (its row on, its rename field
+    // open, a typed name kept) and Cmd-K (Escape keeps the default name), Tab goes to the
+    // world and back, and undo and redo give the file's and the split's bytes.
+    const deskFile = new Uint8Array(await (await fetch('__fixtures/23-desk.vox')).arrayBuffer());
+    const ddt = new DataTransfer();
+    ddt.items.add(new File([deskFile], '23-desk.vox'));
+    input.files = ddt.files;
+    input.dispatchEvent(new Event('change'));
+    for (let i = 0; i < 60 && st().name !== '23-desk.vox'; i++) await frames(1);
+    await frames(6);
+    const d0 = st();
+    step('23-desk opens as one model, without a scene tree', d0.mode === 'object' && d0.objects === 1 && d0.voxels === 296 && d0.tree.length === 0, JSON.stringify(d0));
+    await chip('sw1');
+    await key('k', cmd);
+    for (const ch of 'select color') await key(ch);
+    await key('Enter');
+    s = st();
+    step('Cmd-K Select color selects the white cup', s.selected === 52 && s.tool === 'Select' && window.vxr.hit('to-object').length === 2, JSON.stringify(s));
+    await chip('to-object');
+    s = st();
+    const cupNode = s.treeOn;
+    step('the flyout\'s To new object makes the cup an object, picked in the tree with its rename field open', s.mode === 'object' && s.objects === 2 && s.voxels === 52 && s.selected === 52 && s.tree.length === 2 && s.renaming === cupNode && s.tree[1].node === cupNode && s.tree[1].name === 'object 2' && window.vxr.hit('tree-rename').length === 2, JSON.stringify(s));
+    await key('a', cmd);
+    for (const ch of 'mug') await key(ch);
+    await key('Enter');
+    s = st();
+    step('a typed name and Enter rename it', s.tree[1].name === 'mug' && s.renaming === null && s.undoLabel === null && s.undo, JSON.stringify(s));
+    await key('z', cmd);
+    await key('z', cmd);
+    s = st();
+    step('undo takes the name, then the object, back to the file', same(bytes(), deskFile) && s.objects === 1 && s.voxels === 296 && s.selected === 52, JSON.stringify(s));
+    await key('k', cmd);
+    for (const ch of 'selection to new object') await key(ch);
+    await key('Enter');
+    const viaCmdK = st().objects === 2 && st().renaming === cupNode;
+    await key('Escape');
+    s = st();
+    step("Cmd-K 'Selection to new object' does it too, and Escape keeps the default name", viaCmdK && s.renaming === null && s.tree[1].name === 'object 2' && s.selected === 52, JSON.stringify(s));
+    const deskSplit = bytes();
+    await key('Tab');
+    const inWorld = st().mode === 'world' && st().picked === 'object 2' && st().voxels === 296;
+    await key('Tab');
+    step('Tab goes to the world, the new object picked, and back into it', inWorld && st().mode === 'object' && st().treeOn === cupNode && st().voxels === 52, JSON.stringify(st()));
+    await key('a', cmd);
+    await chip('to-object');
+    step('with the whole model selected To new object does nothing', st().objects === 2 && same(bytes(), deskSplit), JSON.stringify(st()));
+    await key('z', cmd);
+    const deskUndone = same(bytes(), deskFile);
+    await key('z', { metaKey: true, shiftKey: true });
+    step('undo and redo give the file and the split back', deskUndone && same(bytes(), deskSplit) && st().objects === 2, JSON.stringify(st()));
+    await key('Escape');
+    await key('a');
   } finally {
     input.click = realClick;
     URL.createObjectURL = realUrl;

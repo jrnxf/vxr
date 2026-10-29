@@ -190,7 +190,13 @@ impl World {
     /// is moved to match, so nothing shifts in the world. Linked copies change with it.
     pub fn store(&mut self, i: usize, map: &BrickMap, lo: [i32; 3]) {
         let Some(m) = self.model_of(i) else { return };
-        let (w, s) = (self.world_transform(i), vox_size(&self.models[m]));
+        self.store_from(i, vox_size(&self.models[m]), map, lo);
+    }
+
+    /// [`World::store`] with object `i`'s model taken to be of file size `s` before it.
+    fn store_from(&mut self, i: usize, s: [i32; 3], map: &BrickMap, lo: [i32; 3]) {
+        let Some(m) = self.model_of(i) else { return };
+        let w = self.world_transform(i);
         let size = map.size_voxels();
         let hi: [i32; 3] = std::array::from_fn(|k| lo[k] + size[k] as i32 - 1);
         let (p, q) = (local_of(&w, s, world_to_vox(lo)), local_of(&w, s, world_to_vox(hi)));
@@ -233,6 +239,50 @@ impl World {
             let u = vox_to_local(size, l);
             map.get(u[0], u[1], u[2]) != 0
         })
+    }
+
+    /// The objects showing model `m`: more than one means linked copies.
+    pub fn users(&self, m: usize) -> usize {
+        self.objects().into_iter().filter(|&i| self.model_of(i) == Some(m)).count()
+    }
+
+    /// Put a new object right after object `i`, under the same group, on the same layer and
+    /// turned the same way, whose model holds `map`: a map in world axes whose cell (0, 0, 0)
+    /// is world cell `lo`, so every voxel shows where it is. It is shown and named the first
+    /// free `object N`. Returns it, or None if `i` is not an object under the root.
+    pub fn add_object_after(&mut self, i: usize, map: &BrickMap, lo: [i32; 3]) -> Option<usize> {
+        let p = self.tree.parents()[i]?;
+        let m = self.model_of(i)?;
+        let mut n = self.tree.nodes[i].clone();
+        n.ids = None;
+        n.name = None;
+        n.hidden = false;
+        n.kind = Kind::Object(self.models.len());
+        self.models.push(BrickMap::new([1, 1, 1]));
+        let k = self.tree.nodes.len();
+        self.tree.nodes.push(n);
+        if let Kind::Group(kids) = &mut self.tree.nodes[p].kind {
+            let at = kids.iter().position(|&c| c == i).map_or(kids.len(), |c| c + 1);
+            kids.insert(at, k);
+        }
+        // Same parent and transform as `i`: placed as if it showed `i`'s model, then fitted.
+        self.store_from(k, vox_size(&self.models[m]), map, lo);
+        let name = self.free_object_name(k);
+        self.set_name(k, Some(&name));
+        Some(k)
+    }
+
+    /// The first `object N` that no node is called and no other unnamed object shows as
+    /// (an unnamed object shows as `object` and its place among the objects).
+    pub fn free_object_name(&self, skip: usize) -> String {
+        let mut used: std::collections::HashSet<Vec<u8>> =
+            self.tree.order().into_iter().filter_map(|i| self.tree.nodes[i].name.clone()).collect();
+        for (k, i) in self.objects().into_iter().enumerate() {
+            if i != skip && self.tree.nodes[i].name.is_none() {
+                used.insert(format!("object {}", k + 1).into_bytes());
+            }
+        }
+        (1..).map(|k| format!("object {k}")).find(|n| !used.contains(n.as_bytes())).unwrap()
     }
 
     /// Take node `i` (and what it holds) out of the tree. Its models stay, so undo can put

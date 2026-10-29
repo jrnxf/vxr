@@ -271,6 +271,7 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     new_scene_save(dir)?;
     new_scene_command(dir)?;
     scene_tree(dir)?;
+    to_object(dir)?;
     render(&mut s, dir)?;
     materials(&mut s, dir)?;
     export(&mut s, dir)?;
@@ -1821,6 +1822,149 @@ fn scene_tree(dir: &Path) -> Result<(), String> {
     while s.ed.scene.undo() {}
     check(s.ed.scene.to_vox() == bytes, "every tree edit undone: byte-identical save".into())?;
     Ok(())
+}
+
+/// Selection to new object on the generated 23-desk, one model: the cup and the coffee are
+/// selected by colour (a click and a Shift-click from the top view), the flyout's To new
+/// object makes them an object in place with exact counts, the tree shows its row on with the
+/// rename field open and a typed name and Enter rename it, Cmd-K does it again and Escape
+/// keeps the default name, the brush settings carry over, Tab goes to the world and back,
+/// and undo and redo give byte-identical saves.
+fn to_object(dir: &Path) -> Result<(), String> {
+    use vxr_app::editor::node_name;
+    use vxr_core::history::At;
+    use vxr_vox::fixtures::{ORANGE, WHITE};
+    let bytes = vxr_vox::fixtures::all()
+        .into_iter()
+        .find(|f| f.name == "23-desk")
+        .ok_or("no 23-desk fixture")?
+        .builder
+        .build()
+        .write();
+    let mut s = Shot::new(Scene::from_vox(&bytes)?, "23-desk.vox", 2.0)?;
+    s.ed.ui.coach = false;
+    s.frames(3);
+    let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    let (none, cmd) = (egui::Modifiers::NONE, egui::Modifiers::COMMAND);
+    let total = s.voxels();
+    let src = match s.ed.scene.at() {
+        At::Object(i) => i,
+        at => return check(false, format!("23-desk opens in model mode ({at:?})")),
+    };
+    // The middle of the top face of the highest voxel of colour `c`, from the top view.
+    let top = |s: &Shot, c: u8| {
+        let mut best: Option<[i32; 3]> = None;
+        s.ed.scene.for_each_voxel(|p, v| {
+            if v == c && best.is_none_or(|b| p[1] > b[1]) {
+                best = Some(p);
+            }
+        });
+        best.map(|p| project(&s.ed, [p[0] as f32 + 0.5, p[1] as f32 + 0.99, p[2] as f32 + 0.5]))
+    };
+    s.frames_with(2, vec![key(egui::Key::Num5, none)]);
+    s.frames_with(2, vec![key(egui::Key::S, none)]);
+    s.ed.ui.set_region(Region::Color);
+    let (cup, coffee) = (top(&s, WHITE).ok_or("no cup")?, top(&s, ORANGE).ok_or("no coffee")?);
+    s.stroke(cup, &[]);
+    s.hold(egui::Modifiers::SHIFT);
+    s.stroke(coffee, &[]);
+    s.hold(none);
+    s.frames(2);
+    let (cup_n, coffee_n) = (s.ed.scene.map.counts[WHITE as usize], s.ed.scene.map.counts[ORANGE as usize]);
+    let picked = s.ed.scene.selected_count() as u64;
+    check(
+        picked == cup_n as u64 + coffee_n as u64 && picked == 60 && s.ed.ui.can_split,
+        format!("a click selects the cup ({cup_n}) and Shift adds the coffee ({coffee_n}): {picked} voxels"),
+    )?;
+    (s.ed.ui.lock, s.ed.ui.mirror, s.ed.ui.size) = (Some(1), true, 3);
+
+    s.ui_click("to-object")?;
+    s.frames(2);
+    let new = match s.ed.scene.at() {
+        At::Object(i) if i != src => i,
+        at => return check(false, format!("To new object edits the new object ({at:?})")),
+    };
+    let w = s.ed.scene.world().ok_or("no world")?;
+    let mut left = 0u64;
+    w.for_each_object_voxel(src, |_, _| left += 1);
+    check(
+        w.objects().len() == 2
+            && s.voxels() == picked
+            && left == total - picked
+            && s.ed.scene.selected_count() as u64 == picked
+            && s.ed.scene.world_voxels(false).len() as u64 == total,
+        format!("the flyout's To new object: {} voxels in object 2, {left} left in object 1", s.voxels()),
+    )?;
+    check(
+        s.ed.ui.tree.len() == 2
+            && s.ed.ui.tree_on == Some(new)
+            && s.ed.ui.renaming_node() == Some(new)
+            && s.ed.ui.hits.contains_key("tree-rename")
+            && node_name(w, new) == "object 2",
+        format!("the tree shows {} on with its rename field open", node_name(w, new)),
+    )?;
+    check(
+        (s.ed.ui.lock, s.ed.ui.mirror, s.ed.ui.size, s.ed.ui.tool) == (Some(1), true, 3, Tool::Select),
+        "the axis lock, mirror, brush size and tool carry over".into(),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::Num0, none)]);
+    s.frames(10);
+    s.save_png(&dir.join("app-2x-to-object.png"))?;
+
+    let name_of = |s: &Shot| node_name(s.ed.scene.world().unwrap(), new);
+    let steps = s.ed.scene.history().position();
+    s.frames_with(1, vec![key(egui::Key::A, cmd)]);
+    s.frames_with(1, vec![egui::Event::Text("mug".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, none)]);
+    check(
+        name_of(&s) == "mug" && s.ed.scene.history().position() == steps + 1 && s.ed.scene.at() == At::Object(new),
+        "typing a name and Enter renames it, as its own undo step".into(),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
+    let unnamed = name_of(&s) == "object 2";
+    s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
+    check(
+        unnamed
+            && s.ed.scene.at() == At::Object(src)
+            && s.voxels() == total
+            && s.ed.scene.selected_count() as u64 == picked
+            && s.ed.scene.to_vox() == bytes,
+        "undo takes the name, then the new object, back: byte-identical save, selection kept".into(),
+    )?;
+
+    s.frames_with(2, vec![key(egui::Key::K, cmd)]);
+    s.frames_with(1, vec![egui::Event::Text("selection to new object".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, none)]);
+    let made = s.ed.scene.at() == At::Object(new) && s.voxels() == picked && s.ed.ui.renaming_node() == Some(new);
+    s.frames_with(2, vec![key(egui::Key::Escape, none)]);
+    check(
+        made && s.ed.ui.renaming_node().is_none() && name_of(&s) == "object 2" && s.ed.scene.selected_count() > 0,
+        "Cmd-K 'Selection to new object' does it too, and Escape keeps the default name".into(),
+    )?;
+    let split = s.ed.scene.to_vox();
+    s.frames_with(2, vec![key(egui::Key::Tab, none)]);
+    let world = s.ed.scene.at() == At::World && s.ed.scene.picked() == Some(new);
+    s.frames_with(2, vec![key(egui::Key::Tab, none)]);
+    check(
+        world && s.ed.scene.at() == At::Object(new) && s.voxels() == picked && s.ed.scene.to_vox() == split,
+        "Tab to the world picks it, and Tab again edits it".into(),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::A, cmd)]);
+    check(!s.ed.ui.can_split, "the whole model selected: To new object is off".into())?;
+    s.ui_click("to-object")?;
+    check(s.ed.scene.to_vox() == split, "and a click on it does nothing".into())?;
+    s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
+    let undone = s.ed.scene.to_vox() == bytes;
+    s.frames_with(2, vec![key(egui::Key::Z, cmd | egui::Modifiers::SHIFT)]);
+    check(
+        undone && s.ed.scene.to_vox() == split && s.ed.scene.at() == At::Object(new),
+        "undo and redo: byte-identical saves".into(),
+    )?;
+    let again = Scene::from_vox(&split)?;
+    check(
+        again.world().is_some_and(|w| w.objects().len() == 2) && again.world_voxels(false).len() as u64 == total,
+        "saved and reopened: two objects, every voxel".into(),
+    )
 }
 
 /// Groups in world mode on 22-world: a group row picks the group, a drag on one of its
