@@ -318,6 +318,7 @@ impl Hybrid {
         self.ai_body = None;
         if !self.ai_open {
             self.ai.menu = false;
+            self.review_pinned = false;
             return;
         }
         let rect = if self.sheet() {
@@ -328,13 +329,12 @@ impl Hybrid {
             let top = if self.review.is_some() { ((TOP + bottom) / 2.0).min(bottom - 240.0) } else { TOP };
             Rect::from_min_max(pos2(screen.left() + 12.0, top), pos2(screen.right() - 12.0, bottom))
         } else {
-            // The right column, top to bottom: the palette is its top block (`palette_panel`).
+            // The right column, top to bottom.
             Rect::from_min_max(
                 pos2(screen.right() - 12.0 - PANEL_W, TOP),
                 pos2(screen.right() - 12.0, (screen.bottom() - 12.0).max(TOP + 240.0)),
             )
         };
-        let blk = if self.docked() { self.palette_block_h() } else { 0.0 };
         // The half sheet of a review on a phone gives the card the composer's room (the card
         // has its own field to ask for changes), except while a request runs or waits on Keep
         // or Drop, which the composer holds.
@@ -343,6 +343,11 @@ impl Hybrid {
         let (agents_tone, agents_n) = self.agents_status();
         // The review card sits at the end of the thread, as wide as the thread.
         let review_h = self.review_height(ctx, rect.width() - 24.0 - 6.0);
+        // On the half sheet its footer is pinned under the thread, and the thread, which then
+        // holds only the card, opens on its top.
+        let foot_h = self.review_foot_height(ctx, rect.width() - 24.0 - 6.0).filter(|_| compact && !self.agents_panel);
+        let open_top = foot_h.is_some() && !self.review_pinned;
+        self.review_pinned = foot_h.is_some();
         let (mut slot_out, mut body_out, mut tab_click) = (None, None, None);
         // The keys wait while a change is under review: its card is in the chat.
         let setup = (self.ai_setup || !self.chat.ready()) && review_h.is_none();
@@ -352,12 +357,7 @@ impl Hybrid {
         let mut hits: Vec<(String, Rect)> = Vec::new();
         let (mut close, mut toggle_setup, mut send, mut focus, mut setup_done) = (false, false, None, false, false);
         let mut menu_at = None;
-        Self::panel(ctx, "assistant", rect, Order::Middle, |ui, full| {
-            // Under the palette block, when the palette heads the column.
-            let rect = Rect::from_min_max(pos2(full.left(), full.top() + blk), full.max);
-            if blk > 0.0 {
-                ui.painter().hline(full.x_range(), rect.top(), Stroke::new(1.0, th().line));
-            }
+        Self::panel(ctx, "assistant", rect, Order::Middle, |ui, rect| {
             let inner = rect.shrink(12.0);
             let p = ui.painter().clone();
             // Header: ASSISTANT, then new conversation, keys and close on the right.
@@ -474,33 +474,41 @@ impl Hybrid {
                     out.push(AiAction::Keep);
                 }
             }
-            let body = Rect::from_min_max(pos2(inner.left(), top), pos2(inner.right(), bottom));
+            let w = inner.width() - 6.0;
+            let foot = foot_h
+                .map(|f| Rect::from_min_max(pos2(inner.left(), bottom - (f - 12.0)), pos2(inner.left() + w, bottom)));
+            let body =
+                Rect::from_min_max(pos2(inner.left(), top), pos2(inner.right(), foot.map_or(bottom, |f| f.top())));
             ui.scope_builder(UiBuilder::new().max_rect(body), |ui| {
-                ScrollArea::vertical().id_salt("ai-chat").auto_shrink([false; 2]).stick_to_bottom(true).show(
-                    ui,
-                    |ui| {
-                        ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
-                        let w = body.width() - 6.0;
-                        if chat.entries.is_empty()
-                            && review_h.is_none()
-                            && let Some(t) = Self::ai_welcome(ui, w, &mut hits)
-                        {
-                            st.draft = t.to_string();
-                        }
+                let mut area = ScrollArea::vertical().id_salt("ai-chat").auto_shrink([false; 2]);
+                area = if open_top { area.vertical_scroll_offset(0.0) } else { area.stick_to_bottom(foot.is_none()) };
+                area.show(ui, |ui| {
+                    ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+                    if chat.entries.is_empty()
+                        && review_h.is_none()
+                        && let Some(t) = Self::ai_welcome(ui, w, &mut hits)
+                    {
+                        st.draft = t.to_string();
+                    }
+                    if foot.is_none() {
                         for (i, e) in chat.entries.iter().enumerate() {
                             match e {
                                 Entry::User(t) => Self::ai_user(ui, w, t),
                                 Entry::Answer(a) => Self::ai_answer(ui, w, i, a, st, &mut hits),
                             }
                         }
-                        // The change under review, under the reply that made it.
-                        if let Some(h) = review_h {
+                    }
+                    // The change under review, under the reply that made it, or alone with its
+                    // footer pinned.
+                    if let Some(h) = review_h {
+                        if foot.is_none() {
                             ui.add_space(10.0);
-                            let (r, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
-                            slot_out = Some((r, body));
                         }
-                    },
-                );
+                        let shown = h - foot_h.map_or(0.0, |f| f - 12.0);
+                        let (r, _) = ui.allocate_exact_size(vec2(w, shown), Sense::hover());
+                        slot_out = Some((r, body, foot));
+                    }
+                });
             });
             if compact {
                 return;
@@ -1174,7 +1182,7 @@ impl Hybrid {
             return;
         }
         let right = view.right() - 12.0 - PALETTE_W - 8.0 - 304.0 - 8.0;
-        let (l, r) = (12.0 + RAIL_W + 12.0, right.max(12.0 + RAIL_W + 12.0 + 360.0));
+        let (l, r) = (12.0 + self.rail_w + 12.0, right.max(12.0 + self.rail_w + 12.0 + 360.0));
         let w = 560.0_f32.min(r - l - 16.0).max(320.0);
         let cx = (l + r) / 2.0;
         let result = (done && !self.chat.stop_ask).then_some(answer.as_ref()).flatten().map(|a| match &a.progress {
