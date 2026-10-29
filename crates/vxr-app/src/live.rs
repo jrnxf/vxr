@@ -37,11 +37,13 @@ impl Live {
                 Ok(h) => {
                     self.host = Some(h);
                     ed.agents.error = None;
+                    ed.agents.fail = None;
                     ed.ui.toast(&ctx, "Terminal agents can edit this window");
                 }
                 Err(e) => {
                     ed.ui.toast(&ctx, format!("Could not allow terminal agents: {e}"));
                     ed.agents.error = Some(e);
+                    ed.agents.fail = Some(crate::agents::Fail::Other);
                 }
             },
             Action::AllowAgents(false) => {
@@ -50,8 +52,13 @@ impl Live {
                 if self.host.take().is_some() {
                     ed.ui.toast(&ctx, "Terminal agents can no longer edit this window");
                 }
+                ed.agents.since = None;
             }
             Action::AllowAgents(true) => {}
+            Action::DismissAgentsError => {
+                ed.agents.error = None;
+                ed.agents.fail = None;
+            }
             Action::RegenerateToken => match self.host.as_ref().map(Host::regenerate) {
                 Some(Ok(())) => {
                     self.pending.clear();
@@ -91,12 +98,19 @@ impl Live {
     fn sync(&self, ed: &mut Editor) {
         ed.agents.available = true;
         ed.agents.allowed = self.host.is_some();
+        let now = ed.ctx.input(|i| i.time);
+        if ed.agents.allowed {
+            ed.agents.since.get_or_insert(now);
+        } else {
+            ed.agents.since = None;
+        }
         let clients = self.host.as_ref().map(Host::clients).unwrap_or_default();
         for (conn, _) in std::mem::replace(&mut ed.agents.clients, clients.clone()) {
             if !clients.iter().any(|(c, _)| *c == conn) {
                 ed.agents.forget(conn);
             }
         }
+        ed.agents.note_clients(now);
     }
 
     /// Run what agents asked since the last frame, unless the user is mid-drag.

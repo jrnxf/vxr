@@ -163,6 +163,7 @@ mod icon {
     pub const REDO: char = '\u{e2a0}';
     pub const SEARCH: char = '\u{e151}';
     pub const CHEVRON_DOWN: char = '\u{e06d}';
+    pub const CHEVRON_UP: char = '\u{e070}';
     pub const ARROW_LEFT_RIGHT: char = '\u{e24a}';
     pub const COPY: char = '\u{e09e}';
     pub const APERTURE: char = '\u{e040}';
@@ -204,8 +205,6 @@ mod icon {
     pub const CHEVRON_RIGHT: char = '\u{e06f}';
     pub const SHIELD_CHECK: char = '\u{e1ff}';
     pub const TERMINAL: char = '\u{e181}';
-    pub const SQUARE_TERMINAL: char = '\u{e20a}';
-    pub const REFRESH_CW: char = '\u{e145}';
 }
 
 pub use vxr_core::select::{Region, Transform};
@@ -330,6 +329,8 @@ pub enum Action {
     /// In the browser: pair this tab with `vxr bridge` with the code typed into the panel
     /// (`Hybrid::agents_code`), for the host.
     PairBridge,
+    /// Dismiss the Agents tab's error (Try again, or typing a new code), for the host.
+    DismissAgentsError,
     /// Make a new pairing token, disconnecting every agent (for the host).
     RegenerateToken,
     /// Disconnect one agent, or every agent (for the host).
@@ -339,6 +340,20 @@ pub enum Action {
     UndoAgentEdit(usize),
     /// The theme was picked (for the host to keep: `Hybrid::theme`).
     Theme,
+}
+
+/// The review card's text laid out for its width, and its height.
+struct ReviewMeasure {
+    inner_w: f32,
+    prompt: Arc<egui::Galley>,
+    summary: Option<Arc<egui::Galley>>,
+    held_text: Option<Arc<egui::Galley>>,
+    counts_text: Arc<egui::Galley>,
+    counts_h: f32,
+    rows: usize,
+    row_h: f32,
+    slot_h: f32,
+    h: f32,
 }
 
 /// The review card of an AI change (set by the editor while one is under review).
@@ -647,10 +662,26 @@ pub struct Hybrid {
     /// Terminal agents (set by the editor), the Terminal agents panel, and how many edits
     /// there were when the Agent edits card was closed (it shows again on the next).
     pub agents: AgentsView,
+    /// The assistant panel shows its Agents tab (the Terminal agents controls and the Agent
+    /// edits list) instead of the chat.
     pub agents_panel: bool,
-    pub agents_card_closed: usize,
+    /// The palette block at the top of the assistant's column is folded to one row.
+    pub palette_folded: bool,
+    /// A change was under review at the last frame: the panel opens on it when it appears.
+    review_seen: bool,
+    /// Where the review card sits in the assistant's thread this frame, and the thread's view
+    /// that clips it.
+    review_slot: Option<(Rect, Rect)>,
+    /// The assistant panel's body under its tabs, where the Agents tab draws.
+    ai_body: Option<Rect>,
     /// The pairing code typed into the panel, in the browser (kept for this tab only).
     pub agents_code: String,
+    /// The code was sent (its eighth character connects): kept until it is edited or fails.
+    agents_code_sent: bool,
+    /// The code this tab paired with, to show once the field is empty.
+    agents_paired_code: String,
+    /// A typed character no code has, and when.
+    agents_refused: Option<(char, f64)>,
 }
 
 struct Command {
@@ -793,7 +824,6 @@ const COMMANDS: &[Command] = &[
     Command { label: "Assistant panel", keys: &["⌘", "J"], run: |h| h.toggle_ai() },
     Command { label: "Assistant keys and model", keys: &[], run: |h| h.open_ai_setup(None) },
     Command { label: "Terminal agents (MCP)…", keys: &[], run: |h| h.open_agents() },
-    Command { label: "Agent edits", keys: &[], run: |h| h.show_agent_edits() },
     Command { label: "Theme: System", keys: &[], run: |h| h.set_theme(ThemeChoice::System) },
     Command { label: "Theme: Neutral", keys: &[], run: |h| h.set_theme(ThemeChoice::Neutral) },
     Command { label: "Theme: Paper", keys: &[], run: |h| h.set_theme(ThemeChoice::Paper) },
@@ -900,8 +930,14 @@ impl Hybrid {
             nav_rect: None,
             agents: AgentsView::default(),
             agents_panel: false,
-            agents_card_closed: 0,
+            palette_folded: true,
+            review_seen: false,
+            review_slot: None,
+            ai_body: None,
             agents_code: String::new(),
+            agents_code_sent: false,
+            agents_paired_code: String::new(),
+            agents_refused: None,
         }
     }
 
@@ -1165,6 +1201,16 @@ impl Hybrid {
         self.phone = self.touch && screen.width().min(screen.height()) < PHONE_MIN;
         self.narrow = self.phone && screen.width() < NARROW_W;
         self.short = self.phone && !self.narrow;
+        // A change under review needs its card: the panel opens on the chat (where it sits in the
+        // thread) when one appears, and stays open until it is applied or discarded.
+        let reviewing = self.review.is_some();
+        if reviewing {
+            if !self.review_seen {
+                self.agents_panel = false;
+            }
+            self.ai_open = true;
+        }
+        self.review_seen = reviewing;
         self.top_bar(ctx, screen);
         // The docked assistant takes the right edge; the panels anchored there move left of it.
         // Held upright on a phone it is a sheet above the dock instead.
@@ -1201,8 +1247,10 @@ impl Hybrid {
         self.marquee(ctx);
         self.fitted(ctx, |s| s.palette_panel(ctx, screen));
         self.fitted(ctx, |s| s.color_editor(ctx, screen));
-        self.fitted(ctx, |s| s.review_card(ctx, screen));
-        self.fitted(ctx, |s| s.agent_card(ctx, screen));
+        // The cards of the assistant panel draw over it: the change under review in its thread,
+        // and the Agents tab.
+        self.agents_tab(ctx);
+        self.review_card(ctx);
         // On a phone the assistant covers the tips card, which would show through it.
         if self.coach && !(self.phone && self.ai_open) {
             self.fitted(ctx, |s| s.coach_card(ctx, screen));
@@ -1228,7 +1276,6 @@ impl Hybrid {
             self.gesture_hints(ctx, screen);
         }
         self.fitted(ctx, |s| s.ask_bar(ctx, screen));
-        self.fitted(ctx, |s| s.agents_panel(ctx, screen));
         self.toast_panel(ctx, screen);
         if self.cmdk.is_some() {
             self.fitted(ctx, |s| s.cmdk(ctx, full));
@@ -1422,8 +1469,8 @@ impl Hybrid {
     }
 
     /// The bars that lay themselves out to the phone's width; every other panel fits the region.
-    const OWN_LAYOUT: [&str; 9] =
-        ["top", "top-right", "dock", "dock-brushes", "dock-more", "assistant", "nav", "toast", "stats"];
+    const OWN_LAYOUT: [&str; 10] =
+        ["top", "top-right", "dock", "dock-brushes", "dock-more", "assistant", "review", "nav", "toast", "stats"];
 
     /// On a phone (the region is set), scale the panel `id` down about its corner until it fits
     /// the region, and move it inside. The bars that lay themselves out keep their place.
@@ -1465,6 +1512,21 @@ impl Hybrid {
         let over_view = ctx.data(|d| d.get_temp::<Option<Rect>>(Id::unique("fit-region"))).flatten().is_some()
             && !Self::OWN_LAYOUT.contains(&id);
         Self::panel_filled(ctx, id, rect, order, if over_view { th().panel_solid } else { th().panel }, contents)
+    }
+
+    /// Contents drawn straight over what is behind them, clipped to `clip` (no fill, no shadow).
+    fn bare(ctx: &Context, id: &str, rect: Rect, clip: Rect, contents: impl FnOnce(&mut Ui, Rect)) {
+        let shown =
+            Area::new(Id::unique(id)).fade_in(false).order(Order::Middle).fixed_pos(rect.min).constrain(false).show(
+                ctx,
+                |ui| {
+                    ui.set_clip_rect(clip);
+                    ui.allocate_rect(rect, Sense::hover());
+                    contents(ui, rect);
+                },
+            );
+        // Over the panel it sits on, whichever was drawn first.
+        ctx.move_to_top(shown.response.layer_id);
     }
 
     /// A panel with its own fill: the theme's `panel_solid` for a menu over other panels.
@@ -2955,48 +3017,13 @@ impl Hybrid {
         }
     }
 
-    /// Where a card of width `w`, at least `min_h` tall, that sits by the palette goes: the right
-    /// edge of the view, in the column under the palette when it fits there above the render
-    /// corner and the camera bar, or at the top beside the assistant's column when that is docked.
-    /// Else (and on touch, over the dock) at the top left of the palette.
-    pub(super) fn card_origin(&self, screen: Rect, w: f32, min_h: f32) -> (f32, f32) {
-        let beside = ((screen.right() - 12.0 - PALETTE_W - 8.0 - w).max(12.0 + RAIL_W + 12.0), TOP);
-        if self.touch {
-            return beside;
-        }
-        let x = (screen.right() - 12.0 - w).max(12.0 + RAIL_W + 12.0);
-        if self.ai_width() > 0.0 {
-            return (x, TOP);
-        }
-        let top = TOP + self.palette_height() + 8.0;
-        if top + min_h <= self.card_floor(screen, x + w) { (x, top) } else { beside }
-    }
-
-    /// Where a card ending at `right` must end: above the render corner and the camera bar where
-    /// they share its columns, else above the window's bottom.
-    fn card_floor(&self, screen: Rect, right: f32) -> f32 {
-        let below = [self.render_dock.filter(|_| !self.full_render), self.nav_rect];
-        below
-            .into_iter()
-            .flatten()
-            .filter(|c| c.left() < right)
-            .map(|c| c.top() - 8.0)
-            .fold(screen.bottom() - 12.0, f32::min)
-    }
-
     // The review card of an AI change: not in the mockups' Hybrid set (docs/research/ai.md,
     // section 2, and its review mock). A .panel by the palette (see `card_origin`): the request,
     // what the change adds, removes and repaints, the palette slots it sets, the steps with a
     // checkbox each, Before and After, a field to ask for changes, and Discard and Apply. Over
     // 10,000 cells it asks before staging more.
-    fn review_card(&mut self, ctx: &Context, screen: Rect) {
-        let Some(card) = self.review.take() else {
-            self.ask_focus = false;
-            self.review_ask.clear();
-            self.review_scroll = 0;
-            return;
-        };
-        let w = 304.0;
+    /// The review card's text laid out for a card `w` wide, and how tall it is.
+    fn review_measure(ctx: &Context, card: &ReviewCard, w: f32) -> ReviewMeasure {
         let inner_w = w - 24.0;
         let wrapped = |text: &str, font: FontId, color: Color32, rows: usize| {
             let mut job = LayoutJob::single_section(
@@ -3067,7 +3094,7 @@ impl Hybrid {
         }
         let counts_text = ctx.fonts_mut(|f| f.layout_job(job));
         let counts_h = counts_text.size().y + 13.0;
-        let mut rows = card.steps.len().min(REVIEW_ROWS);
+        let rows = card.steps.len().min(REVIEW_ROWS);
         let (row_h, slot_h) = (26.0, 24.0);
         let mut h = 12.0 + 15.0 + 10.0 + prompt.size().y;
         if let Some(g) = &summary {
@@ -3090,15 +3117,32 @@ impl Hybrid {
         if !card.agents {
             h += 30.0 + 12.0;
         }
-        // The card ends above the render corner and the camera bar where they share columns:
-        // fewer steps show (the list scrolls), down to two.
-        let (x, top) = self.card_origin(screen, w, h - rows.saturating_sub(2) as f32 * row_h);
-        let floor = self.card_floor(screen, x + w);
-        while rows > 2 && top + h > floor {
-            rows -= 1;
-            h -= row_h;
-        }
-        let rect = Rect::from_min_size(pos2(x, top), vec2(w, h));
+        ReviewMeasure { inner_w, prompt, summary, held_text, counts_text, counts_h, rows, row_h, slot_h, h }
+    }
+
+    /// The height the review card takes in the assistant's thread, with none when no change is
+    /// under review.
+    pub(super) fn review_height(&self, ctx: &Context, w: f32) -> Option<f32> {
+        self.review.as_ref().map(|c| Self::review_measure(ctx, c, w).h)
+    }
+
+    fn review_card(&mut self, ctx: &Context) {
+        let Some(card) = self.review.take() else {
+            self.ask_focus = false;
+            self.review_ask.clear();
+            self.review_scroll = 0;
+            return;
+        };
+        // The card sits in the assistant's thread (`review_slot`); with no slot (the panel shows
+        // its Agents tab or its keys) nothing is drawn.
+        let Some((slot, clip)) = self.review_slot else {
+            self.review = Some(card);
+            return;
+        };
+        let w = slot.width();
+        let ReviewMeasure { inner_w, prompt, summary, held_text, counts_text, counts_h, rows, row_h, slot_h, h } =
+            Self::review_measure(ctx, &card, w);
+        let rect = Rect::from_min_size(slot.min, vec2(w, h));
         let mut hits: Vec<(String, Rect)> = Vec::new();
         let mut actions = Vec::new();
         let mut scroll = self.review_scroll.min(card.steps.len().saturating_sub(rows));
@@ -3106,9 +3150,10 @@ impl Hybrid {
         let mut ask = std::mem::take(&mut self.review_ask);
         let mut ask_focus = false;
         let mut sent = None;
-        Self::panel(ctx, "review", rect, Order::Middle, |ui, rect| {
+        Self::bare(ctx, "review", rect, clip, |ui, rect| {
             let inner = rect.shrink(12.0);
             let p = ui.painter().clone();
+            p.rect(rect, CornerRadius::same(10), th().tint(9), Stroke::new(1.0, th().line), StrokeKind::Inside);
             // Header: AI CHANGE (or AGENT CHANGE), and how many steps.
             let hy = inner.top() + 7.5;
             let (glyph, title) =
@@ -3444,10 +3489,32 @@ impl Hybrid {
         (slots, all, used_count)
     }
 
+    /// The assistant is docked at the right and the palette is the top block of its column.
+    pub(super) fn docked(&self) -> bool {
+        !self.touch && self.ai_width() > 0.0
+    }
+
+    /// Swatches to a row: eight in the palette's own panel, as many as the assistant's column
+    /// holds when the palette heads it.
+    fn palette_cols(&self) -> usize {
+        if self.docked() { ((PANEL_W - 24.0 - 4.0) / SWATCH_STEP) as usize } else { 8 }
+    }
+
+    /// The palette's block in the assistant's column is folded to one row: the current colour,
+    /// its edit button and a chevron. It opens while a colour is edited or a swap waits.
+    pub(super) fn palette_compact(&self) -> bool {
+        self.docked() && self.palette_folded && self.color_edit.is_none() && self.slot_op.is_none()
+    }
+
     /// The palette panel's height.
     pub(super) fn palette_height(&self) -> f32 {
-        let rows = (self.palette_slots().0.len() as f32 / 8.0).ceil();
+        let rows = (self.palette_slots().0.len() as f32 / self.palette_cols() as f32).ceil();
         12.0 + 20.0 + 8.0 + 38.0 + 10.0 + rows.min(SWATCH_ROWS) * SWATCH_STEP + 2.0 + 10.0
+    }
+
+    /// The height of the palette block that heads the assistant's column.
+    pub(super) fn palette_block_h(&self) -> f32 {
+        if self.palette_compact() { 12.0 + 38.0 + 12.0 } else { self.palette_height() }
     }
 
     /// Where the panels that open beside the palette end on the right: left of the palette, or,
@@ -3462,9 +3529,11 @@ impl Hybrid {
 
     fn palette_panel(&mut self, ctx: &Context, screen: Rect) {
         let (slots, all, used_count) = self.palette_slots();
-        let rows = (slots.len() as f32 / 8.0).ceil();
-        let h = self.palette_height();
+        let cols = self.palette_cols();
+        let rows = (slots.len() as f32 / cols as f32).ceil();
+        let h = self.palette_block_h();
         let view_h = rows.min(SWATCH_ROWS) * SWATCH_STEP + 2.0;
+        let docked = self.docked();
         let rect = if self.touch {
             // Over the dock, from its colour button.
             if !self.palette_open {
@@ -3474,19 +3543,131 @@ impl Hybrid {
             let x = (at - PALETTE_W / 2.0).min(screen.right() - 12.0 - PALETTE_W).max(screen.left() + 12.0);
             Rect::from_min_size(pos2(x, (self.dock_top - 8.0 - h).max(TOP)), vec2(PALETTE_W, h))
         } else {
-            // Top right of the window, over the assistant's column when it is docked.
+            // Top right of the window; with the assistant docked, the top block of its column.
             let right = screen.right() + self.ai_width();
-            Rect::from_min_size(pos2(right - 12.0 - PALETTE_W, TOP), vec2(PALETTE_W, h))
+            let w = if docked { PANEL_W } else { PALETTE_W };
+            Rect::from_min_size(pos2(right - 12.0 - w, TOP), vec2(w, h))
         };
         self.hits.insert("palette".into(), rect);
         let mut set_all = None;
-        Self::panel(ctx, "palette", rect, Order::Middle, |ui, rect| {
+        let mut fold = None;
+        if self.palette_compact() {
+            // One row: the colour, its hex and slot, the edit button and the chevron that opens it.
+            Self::bare(ctx, "palette", rect, rect, |ui, rect| {
+                let inner = rect.shrink(12.0);
+                let p = ui.painter().clone();
+                let cur = Rect::from_min_size(pos2(inner.left(), rect.top() + 12.0), vec2(inner.width(), 38.0));
+                let open = ui.interact(cur, Id::unique("palette-open"), Sense::click());
+                p.rect(
+                    cur,
+                    CornerRadius::same(8),
+                    if open.hovered() { th().hover } else { th().tint(9) },
+                    Stroke::new(1.0, th().line),
+                    StrokeKind::Inside,
+                );
+                let chip = Rect::from_min_size(cur.min + vec2(6.0, 6.0), vec2(26.0, 26.0));
+                p.rect(
+                    chip,
+                    CornerRadius::same(6),
+                    self.color(self.slot),
+                    Stroke::new(1.0, th().tint(38)),
+                    StrokeKind::Inside,
+                );
+                let c = self.palette[self.slot as usize];
+                let hex = format!("#{:02X}{:02X}{:02X}", c[0], c[1], c[2]);
+                let mx = chip.right() + 8.0;
+                p.text(pos2(mx, cur.center().y), Align2::LEFT_BOTTOM, hex, mono(12.0), th().text);
+                let sub = if self.used[self.slot as usize] {
+                    format!("Slot {} · in scene", self.slot)
+                } else {
+                    format!("Slot {}", self.slot)
+                };
+                p.text(pos2(mx, cur.center().y + 1.0), Align2::LEFT_TOP, sub, sans(10.5), th().faint);
+                let chev = Rect::from_center_size(pos2(cur.right() - 18.0, cur.center().y), vec2(26.0, 26.0));
+                p.text(chev.center(), Align2::CENTER_CENTER, icon::CHEVRON_DOWN, icon_font(14.0), th().muted);
+                let edit = Rect::from_center_size(pos2(chev.left() - 18.0, cur.center().y), vec2(26.0, 26.0));
+                let er = ui.interact(edit, Id::unique("edit-color"), Sense::click());
+                self.hits.insert("edit-color".into(), edit);
+                self.hits.insert("palette-open".into(), cur);
+                if er.hovered() {
+                    p.rect_filled(edit, CornerRadius::same(6), th().hover);
+                }
+                p.text(
+                    edit.center(),
+                    Align2::CENTER_CENTER,
+                    icon::PENCIL,
+                    icon_font(14.0),
+                    if er.hovered() { th().text } else { th().muted },
+                );
+                if er.clicked() {
+                    self.open_color_edit();
+                } else if open.clicked() {
+                    fold = Some(false);
+                }
+            });
+            if let Some(f) = fold {
+                self.palette_folded = f;
+            }
+            return;
+        }
+        let mut draw = |this: &mut Self, ui: &mut Ui, rect: Rect| {
+            this.palette_contents(ui, rect, &slots, all, used_count, view_h, docked, &mut set_all, &mut fold)
+        };
+        if docked {
+            Self::bare(ctx, "palette", rect, rect, |ui, rect| draw(self, ui, rect));
+        } else {
+            Self::panel(ctx, "palette", rect, Order::Middle, |ui, rect| draw(self, ui, rect));
+        }
+        if let Some(all) = set_all {
+            self.palette_all = all;
+        }
+        if let Some(f) = fold {
+            self.palette_folded = f;
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn palette_contents(
+        &mut self,
+        ui: &mut Ui,
+        rect: Rect,
+        slots: &[u8],
+        all: bool,
+        used_count: usize,
+        view_h: f32,
+        docked: bool,
+        set_all: &mut Option<bool>,
+        fold: &mut Option<bool>,
+    ) {
+        let ctx = ui.ctx().clone();
+        let ctx = &ctx;
+        {
             let inner = rect.shrink(12.0);
             let p = ui.painter().clone();
             // .ph, with the Used / All toggle.
             let hy = inner.top() + 10.0;
             let g = ui.painter().layout_job(spaced("PALETTE", sans_semibold(10.5), th().muted, 0.84));
+            let label_w = g.size().x;
             p.galley(pos2(inner.left(), hy - g.size().y / 2.0), g, th().muted);
+            if docked {
+                // Folds the block to its one row.
+                let chev = Rect::from_center_size(pos2(inner.left() + label_w + 16.0, hy), vec2(24.0, 24.0));
+                let resp = ui.interact(chev, Id::unique("palette-fold"), Sense::click());
+                if resp.hovered() {
+                    p.rect_filled(chev, CornerRadius::same(6), th().hover);
+                }
+                p.text(
+                    chev.center(),
+                    Align2::CENTER_CENTER,
+                    icon::CHEVRON_UP,
+                    icon_font(14.0),
+                    if resp.hovered() { th().text } else { th().muted },
+                );
+                self.hits.insert("palette-fold".into(), chev);
+                if resp.clicked() {
+                    *fold = Some(true);
+                }
+            }
             let mut x = inner.right();
             for (id, label, on) in
                 [("palette-all", "All".to_string(), all), ("palette-used", format!("Used {used_count}"), !all)]
@@ -3502,7 +3683,7 @@ impl Hybrid {
                 }
                 p.galley(r.center() - g.size() / 2.0, g, if on || resp.hovered() { th().text } else { th().faint });
                 if resp.clicked() {
-                    set_all = Some(id == "palette-all");
+                    *set_all = Some(id == "palette-all");
                 }
                 self.hits.insert(id.into(), r);
             }
@@ -3554,16 +3735,14 @@ impl Hybrid {
                 .id_salt("swatches")
                 .max_height(view_h)
                 .auto_shrink([false; 2])
-                .show(&mut child, |ui| self.swatches(ui, view.width(), &slots));
-        });
-        if let Some(all) = set_all {
-            self.palette_all = all;
+                .show(&mut child, |ui| self.swatches(ui, view.width(), slots));
         }
     }
 
     // #swatches, inside the scroll view: `slots` in order, 8 to a row.
     fn swatches(&mut self, ui: &mut Ui, width: f32, slots: &[u8]) {
-        let rows = (slots.len() as f32 / 8.0).ceil();
+        let cols = self.palette_cols();
+        let rows = (slots.len() as f32 / cols as f32).ceil();
         let (area, _) = ui.allocate_exact_size(vec2(width, rows * SWATCH_STEP + 2.0), Sense::hover());
         let grid = area.min + vec2(2.0, 2.0);
         let p = ui.painter().clone();
@@ -3572,7 +3751,7 @@ impl Hybrid {
         let visible = ui.clip_rect();
         let mut drop_on = None;
         for (i, &slot) in slots.iter().enumerate() {
-            let (col, row) = ((i % 8) as f32, (i / 8) as f32);
+            let (col, row) = ((i % cols) as f32, (i / cols) as f32);
             let r = Rect::from_min_size(grid + vec2(col * SWATCH_STEP, row * SWATCH_STEP), vec2(SWATCH, SWATCH));
             let resp = ui.interact(r, Id::unique(("sw", slot)), Sense::click_and_drag());
             if visible.contains_rect(r) {
@@ -4734,15 +4913,9 @@ impl Hybrid {
         ctx.request_repaint_after(std::time::Duration::from_secs_f64(until - now));
         let g = ctx.fonts_mut(|f| f.layout_no_wrap(msg.clone(), sans(12.5), th().text));
         let size = vec2(g.size().x + 28.0, g.size().y + 18.0);
-        // Centred on the view, or on the part of it left of the review card (or the Agent edits
-        // card) when that shows.
-        let card = self.hits.get("review").filter(|_| self.review.is_some()).or_else(|| self.hits.get("agent-card"));
-        let mut cx = card.map_or(screen.center().x, |c| (12.0 + RAIL_W + 12.0 + c.left()) / 2.0);
-        let mut top = self.ai.bar_bottom.map_or(TOP, |b| b + 8.0);
-        // Under the Terminal agents panel while it is open, whose own toasts it would cover.
-        if let Some(p) = self.hits.get("agents-panel").filter(|_| self.agents_panel) {
-            (cx, top) = (p.center().x, p.bottom() + 8.0);
-        }
+        // Centred on the view, which the docked assistant leaves.
+        let cx = screen.center().x;
+        let top = self.ai.bar_bottom.map_or(TOP, |b| b + 8.0);
         let rect = Rect::from_min_size(pos2((cx - size.x / 2.0).round(), top), size);
         Self::panel(ctx, "toast", rect, Order::Foreground, |ui, rect| {
             ui.painter().galley(pos2(rect.left() + 14.0, rect.top() + 9.0), g, th().text);

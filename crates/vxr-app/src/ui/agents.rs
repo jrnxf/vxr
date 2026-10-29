@@ -6,6 +6,9 @@
 //! says to run `vxr bridge` and takes the pairing code it prints ([`crate::bridge`]). Drawn
 //! in the panel style.
 
+pub use crate::agents::Fail;
+use egui::{ScrollArea, UiBuilder};
+
 use super::*;
 
 /// The setup lines the panel shows, for Claude Code: `vxr setup claude` registers files mode as
@@ -17,11 +20,9 @@ pub const FILES_SETUP: &str = "claude mcp add vxr -- vxr mcp --root <folder>";
 /// The browser's first step: the bridge between this tab and `vxr mcp --live`.
 pub const BRIDGE_SETUP: &str = "vxr bridge";
 
-/// Longest pairing code the field keeps: the code, a dash and room for spaces.
-const CODE_FIELD_MAX: usize = 12;
-
-/// Most Agent edits rows shown, newest first.
+/// Most Agent edits rows shown, newest first, and how tall each is.
 const CARD_ROWS: usize = 8;
+const EDIT_ROW: f32 = 30.0;
 
 /// Terminal agents as the UI shows them (set by the editor).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -42,6 +43,12 @@ pub struct AgentsView {
     pub clients: Vec<(u64, String)>,
     /// Every applied call, oldest first.
     pub edits: Vec<EditRow>,
+    /// What kind of failure `error` is.
+    pub fail: Option<Fail>,
+    /// When the link came up (egui time, seconds), while it is up.
+    pub since: Option<f64>,
+    /// For each of `clients`: when it was first listed, and when it last called.
+    pub times: Vec<(f64, Option<f64>)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -73,20 +80,6 @@ fn one_line(ui: &Ui, text: &str, font: FontId, color: Color32, width: f32) -> Ar
     ui.painter().layout_job(job)
 }
 
-/// A setup line in a box, with Copy.
-fn setup_line(ui: &mut Ui, r: Rect, text: &str, id: &str, hits: &mut Vec<(String, Rect)>, copied: &mut Option<String>) {
-    let p = ui.painter();
-    p.rect(r, CornerRadius::same(8), th().tint(9), Stroke::new(1.0, th().line), StrokeKind::Inside);
-    let b = Rect::from_min_size(pos2(r.right() - 6.0 - 64.0, r.top() + 6.0), vec2(64.0, 22.0));
-    let g = one_line(ui, text, mono(11.5), th().text, b.left() - 8.0 - (r.left() + 10.0));
-    ui.painter().galley(pos2(r.left() + 10.0, r.center().y - g.size().y / 2.0), g, th().text);
-    if small_button(ui, b, icon::COPY, "Copy", id, false).clicked() {
-        *copied = Some(text.to_string());
-    }
-    hits.push((id.to_string(), b));
-    hits.push((format!("{id}-line"), r));
-}
-
 /// An on and off switch, 30 by 18.
 fn switch(ui: &mut Ui, r: Rect, id: &str, on: bool) -> egui::Response {
     let resp = ui.interact(r, Id::unique(id), Sense::click());
@@ -100,16 +93,13 @@ fn switch(ui: &mut Ui, r: Rect, id: &str, on: bool) -> egui::Response {
 }
 
 impl Hybrid {
-    /// Open the Terminal agents panel (Cmd-K), closing what would sit over it.
+    /// Open the assistant panel on its Agents tab (Cmd-K), closing what would sit over it.
     pub fn open_agents(&mut self) {
         self.agents_panel = true;
+        self.ai_open = true;
+        self.ai_setup = false;
         self.export_menu = false;
         self.view_panel = false;
-    }
-
-    /// Show the Agent edits card again after it was closed.
-    pub fn show_agent_edits(&mut self) {
-        self.agents_card_closed = 0;
     }
 
     /// The agent chip at the left of the hint bar: who is editing, and Stop. Returns its
@@ -154,333 +144,887 @@ impl Hybrid {
             .line_segment([pos2(sx, rect.top() + 8.0), pos2(sx, rect.bottom() - 8.0)], Stroke::new(1.0, th().line));
     }
 
-    // The Agent edits card: where the review card goes, while no change is under review.
-    pub(super) fn agent_card(&mut self, ctx: &Context, screen: Rect) {
-        let n = self.agents.edits.len();
-        if n == 0 || n <= self.agents_card_closed || self.review.is_some() {
+    // The Agents tab of the assistant panel: a checklist that ends with the agents (docs/
+    // decisions.md). A banner says where the link stands, a bar counts the steps done, and each
+    // step ticks green and folds to one line, or turns red and holds its error. In the browser:
+    // run `vxr bridge`, type the code it prints (the eighth character connects), connect an
+    // agent; in the desktop app: allow the window, connect an agent. Then the review switch,
+    // the Agent edits list and the footer.
+    pub(super) fn agents_tab(&mut self, ctx: &Context) {
+        let Some(body) = self.ai_body.filter(|_| self.ai_open && self.agents_panel) else { return };
+        let w = body.width() - 6.0;
+        let now = ctx.input(|i| i.time);
+        // A change under review shows its card at the top, as it does in the chat.
+        let review_h = self.review_height(ctx, w - 24.0);
+        let mut slot_out = None;
+        let mut tab = Tab {
+            v: self.agents.clone(),
+            now,
+            w,
+            hits: Vec::new(),
+            actions: Vec::new(),
+            copied: None,
+            open_url: None,
+            code: std::mem::take(&mut self.agents_code),
+            sent: self.agents_code_sent,
+            paired_code: std::mem::take(&mut self.agents_paired_code),
+            refused: self.agents_refused,
+            focus: false,
+        };
+        Self::bare(ctx, "agents-tab", body, body, |ui, body| {
+            ui.scope_builder(UiBuilder::new().max_rect(body), |ui| {
+                ScrollArea::vertical().id_salt("agents-tab").auto_shrink([false; 2]).show(ui, |ui| {
+                    ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+                    ui.add_space(6.0);
+                    if let Some(h) = review_h {
+                        let (r, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+                        slot_out = Some(Rect::from_min_size(r.min + vec2(12.0, 0.0), vec2(w - 24.0, h)));
+                        ui.add_space(14.0);
+                    }
+                    tab.draw(ui);
+                    ui.add_space(12.0);
+                });
+            });
+        });
+        self.review_slot = slot_out.map(|r| (r, body));
+        self.agents_code = tab.code;
+        self.agents_code_sent = tab.sent;
+        self.agents_paired_code = tab.paired_code;
+        self.agents_refused = tab.refused;
+        self.ai.focus |= tab.focus;
+        if let Some(text) = tab.copied {
+            ctx.copy_text(text);
+            self.toast(ctx, "Copied the setup line");
+        }
+        if let Some(url) = tab.open_url {
+            ctx.open_url(egui::OpenUrl::new_tab(url));
+        }
+        self.hits.extend(tab.hits);
+        self.hits.insert("agents-panel".into(), body);
+        self.actions.extend(tab.actions);
+    }
+
+    /// What the Agents tab's label shows: a dot for the link's state and how many agents are
+    /// connected.
+    pub(super) fn agents_status(&self) -> (Option<Tone>, usize) {
+        let v = &self.agents;
+        let tone = if v.fail.is_some() {
+            Some(Tone::Bad)
+        } else if v.connecting {
+            Some(Tone::Busy)
+        } else if v.allowed {
+            Some(Tone::Ok)
+        } else {
+            None
+        };
+        (tone, v.clients.len())
+    }
+}
+
+/// How a banner, a dot or a bar segment reads.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Tone {
+    Plain,
+    Busy,
+    Ok,
+    Bad,
+}
+
+impl Tone {
+    pub(super) fn color(self) -> Color32 {
+        match self {
+            Tone::Plain => th().faint,
+            Tone::Busy => th().mid,
+            Tone::Ok => th().ok,
+            Tone::Bad => th().danger,
+        }
+    }
+}
+
+/// Where a checklist step stands.
+#[derive(Clone, Copy, PartialEq)]
+enum St {
+    Todo,
+    Active,
+    Busy,
+    Done,
+    Bad,
+}
+
+/// The browser's code field: eight characters in two groups of four.
+const CELL_W: f32 = 29.0;
+const CELL_H: f32 = 38.0;
+const CELL_GAP: f32 = 4.0;
+const DASH_W: f32 = 16.0;
+
+/// How long a refused character's word stays.
+const REFUSED_SECS: f64 = 4.0;
+
+/// An elapsed time, in a few words.
+fn ago(secs: f64) -> String {
+    let s = secs.max(0.0) as u64;
+    match s {
+        0..=4 => "just now".into(),
+        5..=59 => format!("{s} s"),
+        60..=3599 => format!("{} min", s / 60),
+        _ => format!("{} h", s / 3600),
+    }
+}
+
+/// An agent is editing while it called in the last seconds.
+fn editing(now: f64, last: Option<f64>) -> bool {
+    last.is_some_and(|t| now - t < 5.0)
+}
+
+/// What a failure says, and what the step offers.
+fn failure_words(f: Fail, error: &str) -> (String, String) {
+    match f {
+        Fail::Wrong => (
+            "vxr bridge refused that code".into(),
+            "Check the code in the terminal and type it again. After 5 wrong codes vxr bridge prints a new one.".into(),
+        ),
+        Fail::Denied => (
+            "This browser blocked access to this computer".into(),
+            "Click the icon left of the address, allow Apps on device (or Local network access), then try again.".into(),
+        ),
+        Fail::Blocked => (
+            "This browser cannot reach vxr bridge".into(),
+            "It does not let web pages reach apps on this computer. Use Chrome, Edge or Firefox, or the desktop app.".into(),
+        ),
+        Fail::Safari => (
+            "Safari cannot reach vxr bridge".into(),
+            "Safari does not let web pages reach apps on this computer. Use Chrome, Edge or Firefox, or the desktop app.".into(),
+        ),
+        Fail::Brave => (
+            "Brave blocks vxr bridge".into(),
+            "Allow Localhost access for this site in Brave's settings, then try again.".into(),
+        ),
+        Fail::Nothing => (
+            format!("Nothing answered on 127.0.0.1:{}", vxr_mcp::bridge::PORT),
+            "Run vxr bridge in a terminal, then try again. If the browser asks to let this page reach apps on this device, allow it.".into(),
+        ),
+        Fail::Lost => (
+            "vxr bridge stopped".into(),
+            "Agents can no longer edit this tab. Run vxr bridge again and type its new code.".into(),
+        ),
+        Fail::Hung => ("vxr bridge hung up".into(), "It closed before it took the code. Try again.".into()),
+        Fail::Other => ("Could not connect".into(), error.to_string()),
+    }
+}
+
+/// The desktop app's page, for a browser that cannot reach vxr bridge.
+const DESKTOP_URL: &str = "https://github.com/jrnxf/vxr#install";
+
+/// The Agents tab while it draws: the view, what it collects and the code being typed.
+struct Tab {
+    v: AgentsView,
+    now: f64,
+    w: f32,
+    hits: Vec<(String, Rect)>,
+    actions: Vec<Action>,
+    copied: Option<String>,
+    open_url: Option<&'static str>,
+    code: String,
+    sent: bool,
+    paired_code: String,
+    refused: Option<(char, f64)>,
+    /// The code field has the keyboard: Escape leaves it first.
+    focus: bool,
+}
+
+impl Tab {
+    /// A block `h` tall across the tab, inset by the panel's padding.
+    fn block(&self, ui: &mut Ui, h: f32) -> Rect {
+        let (r, _) = ui.allocate_exact_size(vec2(self.w, h), Sense::hover());
+        Rect::from_min_max(pos2(r.left() + 12.0, r.top()), pos2(r.right() - 12.0, r.bottom()))
+    }
+
+    fn text_h(ui: &Ui, text: &str, font: FontId, w: f32) -> Arc<egui::Galley> {
+        wrapped(ui.ctx(), text, font, th().muted, w)
+    }
+
+    fn banner(&self, ui: &mut Ui, tone: Tone, text: &str, right: &str) {
+        let r = self.block(ui, 34.0);
+        let p = ui.painter();
+        let (fill, line) = match tone {
+            Tone::Plain => (th().tint(9), th().line),
+            Tone::Busy => (th().mid_bg, th().mid_line),
+            Tone::Ok => (th().ok.gamma_multiply(0.12), th().ok.gamma_multiply(0.4)),
+            Tone::Bad => (th().danger_bg, th().danger_line),
+        };
+        p.rect(r, CornerRadius::same(9), fill, Stroke::new(1.0, line), StrokeKind::Inside);
+        let c = pos2(r.left() + 14.0, r.center().y);
+        if tone == Tone::Plain {
+            p.circle_stroke(c, 3.5, Stroke::new(1.2, th().faint));
+        } else {
+            p.circle_filled(c, 3.5, tone.color());
+        }
+        p.text(pos2(r.left() + 26.0, r.center().y), Align2::LEFT_CENTER, text, sans_medium(12.5), th().text);
+        p.text(pos2(r.right() - 12.0, r.center().y), Align2::RIGHT_CENTER, right, mono(11.0), th().faint);
+        ui.add_space(8.0);
+    }
+
+    /// The bar: one segment per step.
+    fn progress(&self, ui: &mut Ui, steps: &[St]) {
+        let r = self.block(ui, 3.0);
+        let n = steps.len() as f32;
+        let gap = 4.0;
+        let seg = (r.width() - gap * (n - 1.0)) / n;
+        for (i, st) in steps.iter().enumerate() {
+            let color = match st {
+                St::Done => th().ok,
+                St::Busy => th().mid,
+                St::Bad => th().danger,
+                St::Todo | St::Active => th().tint(28),
+            };
+            let x = r.left() + i as f32 * (seg + gap);
+            ui.painter().rect_filled(
+                Rect::from_min_size(pos2(x, r.top()), vec2(seg, 3.0)),
+                CornerRadius::same(2),
+                color,
+            );
+        }
+        ui.add_space(16.0);
+    }
+
+    /// A step's head: the mark, the title and the time at the right, then room for a body
+    /// `body_h` tall under it, which is returned. A line joins the marks of the steps.
+    #[allow(clippy::too_many_arguments)]
+    fn step(&self, ui: &mut Ui, st: St, n: usize, title: &str, right: Option<String>, last: bool, body_h: f32) -> Rect {
+        let h = 22.0 + if body_h > 0.0 { 8.0 + body_h } else { 0.0 } + if last { 0.0 } else { 14.0 };
+        let r = self.block(ui, h);
+        let p = ui.painter();
+        let c = pos2(r.left() + 10.0, r.top() + 11.0);
+        if !last {
+            p.line_segment([pos2(c.x, c.y + 11.0), pos2(c.x, r.bottom())], Stroke::new(1.0, th().line2));
+        }
+        match st {
+            St::Done => {
+                p.circle_filled(c, 10.0, th().ok);
+                p.text(c, Align2::CENTER_CENTER, icon::CHECK, icon_font(13.0), th().on_accent);
+            }
+            St::Bad => {
+                p.circle_filled(c, 10.0, th().danger);
+                p.text(c, Align2::CENTER_CENTER, icon::X, icon_font(13.0), th().on_accent);
+            }
+            St::Busy => {
+                let t = ui.input(|i| i.time);
+                let pulse = 0.55 + 0.45 * (t * 4.0).sin().abs() as f32;
+                p.circle_stroke(c, 9.5, Stroke::new(1.5, th().mid.gamma_multiply(pulse)));
+                ui.ctx().request_repaint();
+            }
+            St::Active => {
+                p.circle_stroke(c, 9.5, Stroke::new(1.2, th().text));
+                p.text(c, Align2::CENTER_CENTER, n.to_string(), mono_medium(10.5), th().text);
+            }
+            St::Todo => {
+                p.circle_stroke(c, 9.5, Stroke::new(1.0, th().line2));
+                p.text(c, Align2::CENTER_CENTER, n.to_string(), mono_medium(10.5), th().faint);
+            }
+        }
+        let color = if st == St::Todo { th().muted } else { th().text };
+        p.text(pos2(r.left() + 30.0, c.y), Align2::LEFT_CENTER, title, sans_semibold(12.5), color);
+        if let Some(t) = right {
+            p.text(pos2(r.right(), c.y), Align2::RIGHT_CENTER, t, mono(11.0), th().faint);
+        }
+        Rect::from_min_size(pos2(r.left() + 30.0, r.top() + 22.0 + 8.0), vec2(r.width() - 30.0, body_h))
+    }
+
+    /// A command with its Copy: `cmd` is what is copied, drawn after a `$`.
+    fn command(&mut self, ui: &mut Ui, r: Rect, cmd: &str, id: &str) {
+        let p = ui.painter();
+        p.rect(r, CornerRadius::same(8), th().tint(9), Stroke::new(1.0, th().line), StrokeKind::Inside);
+        p.text(pos2(r.left() + 10.0, r.center().y), Align2::LEFT_CENTER, "$", mono(11.5), th().faint);
+        let b = Rect::from_center_size(pos2(r.right() - 17.0, r.center().y), vec2(24.0, 24.0));
+        let g = one_line(ui, cmd, mono(11.5), th().text, b.left() - 6.0 - (r.left() + 24.0));
+        ui.painter().galley(pos2(r.left() + 24.0, r.center().y - g.size().y / 2.0), g, th().text);
+        let resp = ui.interact(b, Id::unique(id), Sense::click());
+        if resp.hovered() {
+            ui.painter().rect_filled(b, CornerRadius::same(6), th().hover);
+        }
+        ui.painter().text(
+            b.center(),
+            Align2::CENTER_CENTER,
+            icon::COPY,
+            icon_font(13.0),
+            if resp.hovered() { th().text } else { th().muted },
+        );
+        if resp.clicked() {
+            self.copied = Some(cmd.to_string());
+        }
+        self.hits.push((id.to_string(), b));
+        self.hits.push((format!("{id}-line"), r));
+    }
+
+    /// The error box: a title and what to do, tinted red.
+    fn error_box(&self, ui: &mut Ui, r: Rect, title: &str, text: &Arc<egui::Galley>) {
+        let p = ui.painter();
+        p.rect(r, CornerRadius::same(8), th().danger_bg, Stroke::new(1.0, th().danger_line), StrokeKind::Inside);
+        p.text(
+            pos2(r.left() + 16.0, r.top() + 16.0),
+            Align2::CENTER_CENTER,
+            icon::TRIANGLE_ALERT,
+            icon_font(13.0),
+            th().danger,
+        );
+        let g = ui.painter().layout(title.into(), sans_semibold(12.0), th().text, r.width() - 40.0);
+        let gh = g.size().y;
+        ui.painter().galley(pos2(r.left() + 30.0, r.top() + 9.0), g, th().text);
+        ui.painter().galley(pos2(r.left() + 30.0, r.top() + 9.0 + gh + 3.0), text.clone(), th().muted);
+    }
+
+    /// The code field: the cells, drawn from the text of a transparent field over them. Returns
+    /// whether the text changed.
+    fn cells(&mut self, ui: &mut Ui, r: Rect, bad: bool, live: bool) {
+        let id = Id::unique("agents-code");
+        let before = self.code.clone();
+        if live {
+            ui.scope(|ui| {
+                ui.visuals_mut().text_cursor.stroke = Stroke::NONE;
+                ui.visuals_mut().selection.bg_fill = Color32::TRANSPARENT;
+                ui.visuals_mut().selection.stroke = Stroke::NONE;
+                let edit = egui::TextEdit::singleline(&mut self.code)
+                    .id(id)
+                    .font(mono(17.0))
+                    .text_color(Color32::TRANSPARENT)
+                    .frame(egui::Frame::NONE)
+                    .margin(egui::Margin::ZERO)
+                    .desired_width(r.width());
+                ui.put(r, edit);
+            });
+            // As typed or pasted: upper case, O as 0, I and L as 1, no spaces or dashes, at most
+            // eight characters; a character no code has is refused, with a word.
+            let mut clean = String::new();
+            for c in self.code.chars() {
+                if vxr_mcp::bridge::code_char_skipped(c) {
+                    continue;
+                }
+                match vxr_mcp::bridge::code_char(c) {
+                    Some(c) if clean.len() < vxr_mcp::bridge::CODE_LEN => clean.push(c),
+                    Some(_) => {}
+                    None => self.refused = Some((c, self.now)),
+                }
+            }
+            if clean != self.code {
+                self.code = clean;
+            }
+            if self.code != before {
+                self.sent = false;
+                if self.v.fail.is_some() {
+                    self.actions.push(Action::DismissAgentsError);
+                }
+            }
+        }
+        let focused = ui.memory(|m| m.has_focus(id));
+        self.focus |= focused;
+        let n = self.code.chars().count();
+        let (line, ink) = if bad { (th().danger_line, th().danger) } else { (th().line2, th().text) };
+        let mut x = r.left();
+        for i in 0..vxr_mcp::bridge::CODE_LEN {
+            if i == 4 {
+                ui.painter().text(
+                    pos2(x + DASH_W / 2.0, r.center().y),
+                    Align2::CENTER_CENTER,
+                    "–",
+                    sans(14.0),
+                    th().faint,
+                );
+                x += DASH_W;
+            }
+            let cell = Rect::from_min_size(pos2(x, r.top()), vec2(CELL_W, CELL_H));
+            let on = focused && i == n.min(7);
+            ui.painter().rect(
+                cell,
+                CornerRadius::same(7),
+                if bad { th().danger_bg } else { th().tint(if live { 9 } else { 14 }) },
+                Stroke::new(1.0, if on { th().ring } else { line }),
+                StrokeKind::Inside,
+            );
+            match self.code.chars().nth(i) {
+                Some(c) => {
+                    ui.painter().text(cell.center(), Align2::CENTER_CENTER, c, mono_medium(17.0), ink);
+                }
+                None if live => {
+                    if on && (ui.input(|i| i.time) * 2.0) as i64 % 2 == 0 {
+                        ui.painter().line_segment(
+                            [pos2(cell.center().x, cell.top() + 9.0), pos2(cell.center().x, cell.bottom() - 9.0)],
+                            Stroke::new(1.0, th().text),
+                        );
+                    } else if !on {
+                        ui.painter().circle_filled(cell.center(), 1.2, th().faint);
+                    }
+                }
+                None => {}
+            }
+            x += CELL_W + CELL_GAP;
+        }
+        if focused {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+        }
+        self.hits.push(("agents-code".into(), r));
+        // Eight characters connect.
+        if live && n == vxr_mcp::bridge::CODE_LEN && !self.sent && self.v.fail.is_none() && !self.v.connecting {
+            self.sent = true;
+            self.actions.push(Action::PairBridge);
+        }
+    }
+
+    /// A full-width button under an error: Try again, or the desktop app.
+    fn error_button(&mut self, ui: &mut Ui, r: Rect, label: &str, id: &str) -> bool {
+        super::assistant::accent_button(ui, r, None, label, id, true);
+        self.hits.push((id.to_string(), r));
+        ui.interact(r, Id::unique(("agents-btn", id)), Sense::click()).clicked()
+    }
+
+    /// An agent row: the name and what it is doing, Stop, and when it came and what it did.
+    fn agent(&mut self, ui: &mut Ui, i: usize) {
+        let (conn, name) = self.v.clients[i].clone();
+        let (since, last) = self.v.times.get(i).copied().unwrap_or((self.now, None));
+        let is_editing = editing(self.now, last);
+        let n = self.v.edits.iter().filter(|e| e.label.starts_with(&format!("{name}: "))).count();
+        let what = self
+            .v
+            .edits
+            .iter()
+            .rev()
+            .find_map(|e| e.label.strip_prefix(&format!("{name}: ")))
+            .map(str::to_string)
+            .unwrap_or_default();
+        let r = self.block(ui, 44.0);
+        let r = Rect::from_min_max(pos2(r.left() + 30.0, r.top()), r.max);
+        let p = ui.painter().clone();
+        let c = pos2(r.left() + 4.0, r.top() + 11.0);
+        if is_editing {
+            p.circle_filled(c, 3.5, th().ok);
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(1000));
+        } else {
+            p.circle_stroke(c, 3.5, Stroke::new(1.2, th().faint));
+        }
+        let g = p.layout_no_wrap(name.clone(), sans_semibold(12.5), th().text);
+        let gw = g.size().x;
+        p.galley(pos2(r.left() + 16.0, c.y - g.size().y / 2.0), g, th().text);
+        let (state, color) = if is_editing {
+            ("editing now".to_string(), th().ok)
+        } else {
+            (format!("idle {}", last.map_or(ago(self.now - since), |t| ago(self.now - t))), th().faint)
+        };
+        p.text(pos2(r.left() + 16.0 + gw + 8.0, c.y), Align2::LEFT_CENTER, state, sans(11.5), color);
+        let b = Rect::from_min_size(pos2(r.right() - 58.0, r.top()), vec2(58.0, 22.0));
+        let id = format!("agents-stop-{conn}");
+        if small_button(ui, b, icon::SQUARE, "Stop", &id, false).clicked() {
+            self.actions.push(Action::StopAgent(conn));
+        }
+        self.hits.push((id, b));
+        let mut meta = format!("since {}", ago(self.now - since));
+        if n > 0 {
+            meta += &format!(" · {n} edit{}", if n == 1 { "" } else { "s" });
+        }
+        if !what.is_empty() {
+            meta += &format!(" · {what}");
+        }
+        let g = one_line(ui, &meta, sans(11.0), th().faint, r.width() - 16.0);
+        ui.painter().galley(pos2(r.left() + 16.0, r.top() + 25.0), g, th().faint);
+    }
+
+    /// A switch row: the title, what it says now and the switch.
+    fn switch_row(&mut self, ui: &mut Ui, title: &str, sub: &str, id: &str, on: bool) -> bool {
+        let r = self.block(ui, 44.0);
+        let resp = ui.interact(r, Id::unique((id, "row")), Sense::click());
+        let p = ui.painter().clone();
+        p.text(pos2(r.left(), r.top() + 14.0), Align2::LEFT_CENTER, title, sans_semibold(12.5), th().text);
+        p.text(pos2(r.left(), r.top() + 31.0), Align2::LEFT_CENTER, sub, sans(11.0), th().muted);
+        let sw = Rect::from_min_size(pos2(r.right() - 30.0, r.top() + 5.0), vec2(30.0, 18.0));
+        let toggled = switch(ui, sw, id, on).clicked() || resp.clicked();
+        self.hits.push((id.to_string(), r));
+        toggled
+    }
+
+    fn draw(&mut self, ui: &mut Ui) {
+        let v = self.v.clone();
+        let now = self.now;
+        if !v.available {
+            let intro = Self::text_h(
+                ui,
+                "Live mode is not built for this system yet. Files mode edits .vox files on disk without a window:",
+                sans(12.0),
+                self.w - 24.0,
+            );
+            let r = self.block(ui, intro.size().y + 10.0 + 34.0);
+            ui.painter().galley(r.min, intro.clone(), th().muted);
+            let line = Rect::from_min_size(pos2(r.left(), r.top() + intro.size().y + 10.0), vec2(r.width(), 34.0));
+            self.command(ui, line, FILES_SETUP, "agents-copy-files");
             return;
         }
-        let w = 304.0;
-        let inner_w = w - 24.0;
-        let rows = n.min(CARD_ROWS);
-        let row_h = 30.0;
-        let more = n - rows;
-        let mut h = 12.0 + 15.0 + 8.0 + rows as f32 * row_h + 12.0;
-        if more > 0 {
-            h += 18.0;
-        }
-        let (x, top) = self.card_origin(screen, w, h);
-        let rect = Rect::from_min_size(pos2(x, top), vec2(w, h));
-        let mut hits: Vec<(String, Rect)> = Vec::new();
-        let mut actions = Vec::new();
-        let mut close = false;
-        let edits = self.agents.edits.clone();
-        Self::panel(ctx, "agent-card", rect, Order::Middle, |ui, rect| {
-            let inner = rect.shrink(12.0);
-            let p = ui.painter().clone();
-            let hy = inner.top() + 7.5;
-            p.text(pos2(inner.left() + 6.0, hy), Align2::CENTER_CENTER, icon::TERMINAL, icon_font(13.0), th().accent);
-            let g = p.layout_job(spaced("AGENT EDITS", sans_semibold(11.0), th().muted, 0.88));
-            p.galley(pos2(inner.left() + 18.0, hy - g.size().y / 2.0), g, th().muted);
-            let cr = Rect::from_center_size(pos2(inner.right() - 8.0, hy), vec2(22.0, 22.0));
-            let resp = ui.interact(cr, Id::unique("agent-card-close"), Sense::click());
-            if resp.hovered() {
-                p.rect_filled(cr, CornerRadius::same(6), th().hover);
+        let web = v.web;
+        let live = v.allowed;
+        let clients = v.clients.len();
+        let is_editing: Vec<bool> = (0..clients).map(|i| editing(now, v.times.get(i).and_then(|t| t.1))).collect();
+        let editing_n = is_editing.iter().filter(|e| **e).count();
+        // Where each step stands.
+        let (s1, s2, s3) = if web {
+            let s1 = match v.fail {
+                Some(Fail::Nothing | Fail::Lost) => St::Bad,
+                _ if v.connecting || live || v.fail.is_some() => St::Done,
+                _ => St::Active,
+            };
+            let s2 = if live {
+                St::Done
+            } else if v.connecting {
+                St::Busy
+            } else if v.fail.is_some() && !matches!(v.fail, Some(Fail::Nothing | Fail::Lost)) {
+                St::Bad
+            } else {
+                St::Active
+            };
+            (
+                s1,
+                s2,
+                if clients > 0 {
+                    St::Done
+                } else if live {
+                    St::Active
+                } else {
+                    St::Todo
+                },
+            )
+        } else {
+            let s1 = if v.fail.is_some() {
+                St::Bad
+            } else if live {
+                St::Done
+            } else {
+                St::Active
+            };
+            (
+                s1,
+                if clients > 0 {
+                    St::Done
+                } else if live {
+                    St::Active
+                } else {
+                    St::Todo
+                },
+                St::Todo,
+            )
+        };
+        let steps: Vec<St> = if web { vec![s1, s2, s3] } else { vec![s1, s2] };
+        let done = steps.iter().filter(|s| **s == St::Done).count();
+        // The banner.
+        let lead = match clients {
+            0 => String::new(),
+            1 => format!("{} {}", v.clients[0].1, if editing_n == 1 { "is editing" } else { "is connected" }),
+            n if editing_n == 0 => format!("{n} agents connected"),
+            n => format!("{n} agents, {editing_n} editing"),
+        };
+        let since = v.since.map(|t| ago(now - t));
+        let (tone, text, right) = if live && clients > 0 {
+            let right = since
+                .clone()
+                .map(|s| if web { format!("paired {s}") } else { format!("since {s}") })
+                .unwrap_or_default();
+            (Tone::Ok, format!("Live · {lead}"), right)
+        } else if live {
+            let t = if web { "Paired · waiting for an agent" } else { "Listening · waiting for an agent" };
+            (Tone::Ok, t.to_string(), format!("{done} of {}", steps.len()))
+        } else if v.connecting {
+            (Tone::Busy, "Connecting…".to_string(), format!("{done} of {}", steps.len()))
+        } else if v.fail.is_some() {
+            (Tone::Bad, "Not connected".to_string(), format!("{done} of {}", steps.len()))
+        } else {
+            (Tone::Plain, if web { "Not connected" } else { "Off" }.to_string(), format!("{done} of {}", steps.len()))
+        };
+        self.banner(ui, tone, &text, &right);
+        self.progress(ui, &steps);
+        let bw = self.w - 24.0 - 30.0;
+        let err_text = v.error.clone().unwrap_or_default();
+        let (err_title, err_body) = v.fail.map(|f| failure_words(f, &err_text)).unwrap_or_default();
+        let err_g = Self::text_h(ui, &err_body, sans(11.5), bw - 40.0);
+        let err_h =
+            9.0 + {
+                let t = ui.painter().layout(err_title.clone(), sans_semibold(12.0), th().text, bw - 40.0);
+                t.size().y
+            } + 3.0
+                + err_g.size().y
+                + 11.0;
+        if web {
+            // 1 · Start vxr bridge.
+            match s1 {
+                St::Done => {
+                    let b = self.step(ui, s1, 1, "Start vxr bridge", None, false, 16.0);
+                    ui.painter().text(
+                        b.left_center(),
+                        Align2::LEFT_CENTER,
+                        "In a terminal on this computer",
+                        sans(11.5),
+                        th().faint,
+                    );
+                }
+                _ => {
+                    let bad = s1 == St::Bad;
+                    let title = if v.fail == Some(Fail::Lost) { "vxr bridge stopped" } else { "Start vxr bridge" };
+                    let h = 30.0 + if bad { 8.0 + err_h + 8.0 + 30.0 } else { 8.0 + 16.0 };
+                    let b = self.step(ui, s1, 1, title, None, false, h);
+                    self.command(
+                        ui,
+                        Rect::from_min_size(b.min, vec2(b.width(), 30.0)),
+                        BRIDGE_SETUP,
+                        "agents-copy-bridge",
+                    );
+                    let mut y = b.top() + 30.0 + 8.0;
+                    if bad {
+                        let er = Rect::from_min_size(pos2(b.left(), y), vec2(b.width(), err_h));
+                        self.error_box(ui, er, &err_title, &err_g);
+                        y += err_h + 8.0;
+                        let br = Rect::from_min_size(pos2(b.left(), y), vec2(b.width(), 30.0));
+                        if self.error_button(ui, br, "Try again", "agents-retry") {
+                            self.actions.push(Action::DismissAgentsError);
+                            self.code.clear();
+                            self.sent = false;
+                        }
+                    } else {
+                        ui.painter().text(
+                            pos2(b.left(), y + 6.0),
+                            Align2::LEFT_CENTER,
+                            "Not installed? brew install jrnxf/tap/vxr",
+                            mono(10.5),
+                            th().faint,
+                        );
+                    }
+                }
             }
-            p.text(
-                cr.center(),
-                Align2::CENTER_CENTER,
-                icon::X,
-                icon_font(13.0),
-                if resp.hovered() { th().text } else { th().faint },
-            );
-            close = resp.clicked();
-            hits.push(("agent-card-close".into(), cr));
-            let applied = edits.iter().filter(|e| e.applied).count();
-            p.text(
-                pos2(cr.left() - 6.0, hy),
+            // 2 · Type the pairing code.
+            match s2 {
+                St::Done => {
+                    let right = since.clone();
+                    let b = self.step(ui, s2, 2, "Paired this tab", right, false, 16.0);
+                    let code = if self.paired_code.len() == vxr_mcp::bridge::CODE_LEN {
+                        format!("Code {} · this computer only", vxr_mcp::bridge::show_code(&self.paired_code))
+                    } else {
+                        "This computer only".to_string()
+                    };
+                    ui.painter().text(b.left_center(), Align2::LEFT_CENTER, code, sans(11.5), th().faint);
+                }
+                St::Busy => {
+                    let b =
+                        self.step(ui, s2, 2, "Type the pairing code", None, false, CELL_H + 8.0 + 18.0 + 8.0 + 24.0);
+                    self.cells(ui, Rect::from_min_size(b.min, vec2(b.width(), CELL_H)), false, false);
+                    let y = b.top() + CELL_H + 8.0;
+                    ui.painter().text(
+                        pos2(b.left(), y + 9.0),
+                        Align2::LEFT_CENTER,
+                        "Waiting for vxr bridge. Allow it if the browser asks.",
+                        sans(11.5),
+                        th().mid,
+                    );
+                    let cb = Rect::from_min_size(pos2(b.left(), y + 18.0 + 8.0), vec2(78.0, 24.0));
+                    if small_button(ui, cb, icon::X, "Cancel", "agents-cancel", false).clicked() {
+                        self.actions.push(Action::AllowAgents(false));
+                    }
+                    self.hits.push(("agents-cancel".into(), cb));
+                }
+                St::Bad => {
+                    let has_btn = true;
+                    let gh = CELL_H + 8.0 + err_h + 8.0 + if has_btn { 30.0 } else { 0.0 };
+                    let b = self.step(ui, s2, 2, "Type the pairing code", None, false, gh);
+                    let wrong = v.fail == Some(Fail::Wrong);
+                    self.cells(ui, Rect::from_min_size(b.min, vec2(b.width(), CELL_H)), wrong, true);
+                    let er = Rect::from_min_size(pos2(b.left(), b.top() + CELL_H + 8.0), vec2(b.width(), err_h));
+                    self.error_box(ui, er, &err_title, &err_g);
+                    let br = Rect::from_min_size(pos2(b.left(), er.bottom() + 8.0), vec2(b.width(), 30.0));
+                    let desktop = matches!(v.fail, Some(Fail::Safari | Fail::Blocked));
+                    if desktop {
+                        if self.error_button(ui, br, "Get the desktop app", "agents-desktop") {
+                            self.open_url = Some(DESKTOP_URL);
+                        }
+                    } else if self.error_button(ui, br, "Try again", "agents-retry") {
+                        self.actions.push(Action::DismissAgentsError);
+                        if wrong || self.code.is_empty() {
+                            self.code.clear();
+                        } else {
+                            self.actions.push(Action::PairBridge);
+                        }
+                        self.sent = !wrong && !self.code.is_empty();
+                    }
+                }
+                _ => {
+                    let hint = if v.fail == Some(Fail::Lost) {
+                        "Type the new code it prints."
+                    } else {
+                        "Paste works too. Connects on the 8th character."
+                    };
+                    let b = self.step(ui, s2, 2, "Type the pairing code", None, false, CELL_H + 8.0 + 16.0);
+                    self.cells(ui, Rect::from_min_size(b.min, vec2(b.width(), CELL_H)), false, true);
+                    let y = b.top() + CELL_H + 8.0;
+                    let refused = self.refused.filter(|(_, t)| now - t < REFUSED_SECS);
+                    match refused {
+                        Some((c, _)) => {
+                            ui.painter().text(
+                                pos2(b.left(), y + 8.0),
+                                Align2::LEFT_CENTER,
+                                format!("No \u{201c}{c}\u{201d} in a code: it has 0-9 and A-Z, without U."),
+                                sans(11.5),
+                                th().danger,
+                            );
+                            ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+                        }
+                        None => {
+                            ui.painter().text(
+                                pos2(b.left(), y + 8.0),
+                                Align2::LEFT_CENTER,
+                                hint,
+                                sans(11.5),
+                                th().faint,
+                            );
+                        }
+                    }
+                }
+            }
+            // The code the tab paired with is kept for the line above, and the field starts empty.
+            if live && self.code.len() == vxr_mcp::bridge::CODE_LEN {
+                self.paired_code = std::mem::take(&mut self.code);
+                self.sent = false;
+            }
+        } else {
+            // 1 · Allow agents to edit this window.
+            let sub = if live { "Listening on a local socket only you can open" } else { "Off: nothing listens" };
+            let h = if v.fail.is_some() { 44.0 + 8.0 + err_h } else { 44.0 };
+            let b = self.step(ui, s1, 1, "Allow agents to edit this window", None, false, h);
+            let row = Rect::from_min_size(b.min, vec2(b.width(), 44.0));
+            let (rect_block, _) = (row, ());
+            let resp = ui.interact(rect_block, Id::unique("agents-allow-row"), Sense::click());
+            ui.painter().text(pos2(row.left(), row.top() + 10.0), Align2::LEFT_CENTER, sub, sans(11.5), th().muted);
+            let sw = Rect::from_min_size(pos2(row.right() - 30.0, row.top()), vec2(30.0, 18.0));
+            let toggled = switch(ui, sw, "agents-allow", live).clicked() || resp.clicked();
+            self.hits.push(("agents-allow".into(), row));
+            if toggled {
+                self.actions.push(Action::AllowAgents(!live));
+            }
+            if v.fail.is_some() {
+                let er = Rect::from_min_size(pos2(b.left(), b.top() + 52.0), vec2(b.width(), err_h));
+                self.error_box(ui, er, &err_title, &err_g);
+            }
+        }
+        // Connect an agent.
+        let (sn, step_n) = if web { (s3, 3) } else { (s2, 2) };
+        let title = match clients {
+            0 => "Connect an agent".to_string(),
+            1 => "Agent connected".to_string(),
+            n => format!("{n} agents connected"),
+        };
+        let first = v.times.iter().map(|t| t.0).fold(f64::MAX, f64::min);
+        let right = (clients > 0).then(|| ago(now - first));
+        match sn {
+            St::Todo => {
+                self.step(ui, sn, step_n, &title, None, true, 0.0);
+            }
+            St::Active => {
+                let note =
+                    Self::text_h(ui, "Then start Claude Code. It shows up here when it connects.", sans(11.5), bw);
+                let h = 30.0 + 6.0 + 30.0 + 8.0 + note.size().y;
+                let b = self.step(ui, sn, step_n, &title, None, true, h);
+                self.command(ui, Rect::from_min_size(b.min, vec2(b.width(), 30.0)), SETUP, "agents-copy");
+                self.command(
+                    ui,
+                    Rect::from_min_size(pos2(b.left(), b.top() + 36.0), vec2(b.width(), 30.0)),
+                    LIVE_SETUP,
+                    "agents-copy-live",
+                );
+                ui.painter().galley(pos2(b.left(), b.top() + 74.0), note, th().faint);
+            }
+            _ => {
+                self.step(ui, sn, step_n, &title, right, true, 0.0);
+                for i in 0..clients {
+                    self.agent(ui, i);
+                }
+            }
+        }
+        if !live {
+            return;
+        }
+        // The review switch, the edits and the footer.
+        ui.add_space(6.0);
+        let r = self.block(ui, 1.0);
+        ui.painter().hline(r.x_range(), r.top(), Stroke::new(1.0, th().line));
+        ui.add_space(10.0);
+        if self.switch_row(
+            ui,
+            "Review every agent change",
+            if v.review { "Edits wait as a card in Chat until you apply them" } else { "Each edit applies at once" },
+            "agents-review",
+            v.review,
+        ) {
+            self.actions.push(Action::ReviewAgents(!v.review));
+        }
+        let n = v.edits.len();
+        if n > 0 {
+            ui.add_space(8.0);
+            let applied = v.edits.iter().filter(|e| e.applied).count();
+            let r = self.block(ui, 22.0);
+            let g = ui.painter().layout_job(spaced("AGENT EDITS", sans(9.0), th().faint, 0.72));
+            ui.painter().galley(pos2(r.left(), r.top() + 8.0 - g.size().y / 2.0), g, th().faint);
+            ui.painter().text(
+                pos2(r.right(), r.top() + 8.0),
                 Align2::RIGHT_CENTER,
                 format!("{applied} applied"),
                 mono(11.0),
                 th().faint,
             );
-            let mut y = inner.top() + 15.0 + 8.0;
+            let rows = n.min(CARD_ROWS);
             for i in (0..n).rev().take(rows) {
-                let e = &edits[i];
-                let r = Rect::from_min_size(pos2(inner.left() - 4.0, y), vec2(inner_w + 8.0, row_h));
+                let e = v.edits[i].clone();
+                let r = self.block(ui, EDIT_ROW);
                 let cy = r.center().y;
-                let dot = if e.applied { th().ok } else { th().faint };
-                p.circle_filled(pos2(r.left() + 9.0, cy), 3.0, dot);
-                let b = Rect::from_min_size(pos2(r.right() - 4.0 - 64.0, cy - 11.0), vec2(64.0, 22.0));
+                ui.painter().circle_filled(pos2(r.left() + 5.0, cy), 3.0, if e.applied { th().ok } else { th().faint });
+                let b = Rect::from_min_size(pos2(r.right() - 64.0, cy - 11.0), vec2(64.0, 22.0));
                 let color = if e.applied { th().text } else { th().faint };
-                let g = one_line(ui, &e.label, sans(12.0), color, b.left() - 8.0 - (r.left() + 20.0));
+                let g = one_line(ui, &e.label, sans(12.0), color, b.left() - 8.0 - (r.left() + 16.0));
                 let gw = g.size().x;
-                p.galley(pos2(r.left() + 20.0, cy - g.size().y / 2.0), g, color);
+                ui.painter().galley(pos2(r.left() + 16.0, cy - g.size().y / 2.0), g, color);
                 if e.applied {
                     let id = format!("agent-undo-{i}");
                     if small_button(ui, b, icon::UNDO, "Undo", &id, false).clicked() {
-                        actions.push(Action::UndoAgentEdit(i));
+                        self.actions.push(Action::UndoAgentEdit(i));
                     }
-                    hits.push((id, b));
+                    self.hits.push((id, b));
                 } else {
-                    p.line_segment(
-                        [pos2(r.left() + 20.0, cy), pos2(r.left() + 20.0 + gw, cy)],
+                    ui.painter().line_segment(
+                        [pos2(r.left() + 16.0, cy), pos2(r.left() + 16.0 + gw, cy)],
                         Stroke::new(1.0, th().faint),
                     );
-                    p.text(pos2(b.right() - 6.0, cy), Align2::RIGHT_CENTER, "Undone", sans(11.5), th().faint);
+                    ui.painter().text(
+                        pos2(b.right() - 6.0, cy),
+                        Align2::RIGHT_CENTER,
+                        "Undone",
+                        sans(11.5),
+                        th().faint,
+                    );
                 }
-                hits.push((format!("agent-edit-{i}"), r));
-                y += row_h;
+                self.hits.push((format!("agent-edit-{i}"), r));
             }
-            if more > 0 {
-                p.text(
-                    pos2(inner.left(), y + 9.0),
+            if n > rows {
+                let r = self.block(ui, 20.0);
+                ui.painter().text(
+                    r.left_center(),
                     Align2::LEFT_CENTER,
-                    format!("{more} earlier"),
+                    format!("{} earlier", n - rows),
                     sans(11.5),
                     th().faint,
                 );
             }
-        });
-        self.hits.extend(hits);
-        self.hits.insert("agent-card".into(), rect);
-        self.actions.extend(actions);
-        if close {
-            self.agents_card_closed = n;
         }
-    }
-
-    // The Terminal agents panel (Cmd-K): live mode's switch, setup, pairing and connections.
-    // In the browser it also says to run `vxr bridge` and takes the code it printed.
-    pub(super) fn agents_panel(&mut self, ctx: &Context, screen: Rect) {
-        if !self.agents_panel {
-            return;
+        ui.add_space(8.0);
+        let r = self.block(ui, 28.0);
+        let regen = Rect::from_min_size(r.min, vec2(130.0, 28.0));
+        if small_button(ui, regen, icon::KEY_ROUND, "Regenerate token", "agents-regenerate", false).clicked() {
+            self.actions.push(Action::RegenerateToken);
         }
-        let w = 400.0;
-        let inner_w = w - 32.0;
-        let v = self.agents.clone();
-        let intro = if v.web {
-            "Let an agent in your terminal, like Claude Code, edit this scene while you watch. vxr bridge, in the vxr app (brew install jrnxf/tap/vxr), links this tab to it on this computer only. Each call applies at once as one undo step, listed under Agent edits, or waits for your review."
-        } else if v.available {
-            "Let an agent in your terminal, like Claude Code, edit this scene while you watch. Each call applies at once as one undo step, listed under Agent edits, or waits for your review."
-        } else {
-            "Live mode is not built for this system yet. Files mode edits .vox files on disk without a window:"
-        };
-        let intro = wrapped(ctx, intro, sans(12.0), th().muted, inner_w);
-        let error = v.error.as_deref().map(|e| wrapped(ctx, e, sans(12.0), th().danger, inner_w));
-        let pairing = if v.web {
-            "vxr mcp --live reads a token from a file only you can read, and vxr bridge passes its calls to this tab. A new token disconnects every agent; each must restart its MCP server to pair again."
-        } else {
-            "vxr mcp --live reads a token from a file only you can read. A new token disconnects every agent; each must restart its MCP server to pair again."
-        };
-        let pairing = wrapped(ctx, pairing, sans(11.5), th().faint, inner_w - 120.0);
-        let row_h = 32.0;
-        let mut h = 16.0 + 18.0 + 12.0 + intro.size().y + 14.0;
-        if v.available {
-            if v.web {
-                h += 16.0 + 6.0 + 34.0 + 14.0 + 16.0 + 6.0 + 34.0 + 10.0;
+        self.hits.push(("agents-regenerate".into(), regen));
+        if web {
+            let d = Rect::from_min_size(pos2(r.right() - 96.0, r.top()), vec2(96.0, 28.0));
+            if small_button(ui, d, icon::X, "Disconnect", "agents-disconnect", false).clicked() {
+                self.actions.push(Action::AllowAgents(false));
             }
-            h += 44.0 + 10.0 + 44.0 + 10.0;
-            if let Some(g) = &error {
-                h += g.size().y + 10.0;
-            }
-            h += 16.0 + 6.0 + 34.0 + 6.0 + 34.0 + 14.0;
-            h += pairing.size().y.max(28.0) + 14.0;
-            h += 16.0 + 6.0 + v.clients.len().max(1) as f32 * row_h + 4.0;
-        } else {
-            h += 34.0 + 4.0;
-        }
-        h += 16.0;
-        let rect = Rect::from_min_size(pos2((screen.center().x - w / 2.0).round(), TOP), vec2(w, h));
-        let mut hits: Vec<(String, Rect)> = Vec::new();
-        let mut actions = Vec::new();
-        let mut close = false;
-        let mut copied = None;
-        let mut code = std::mem::take(&mut self.agents_code);
-        Self::panel_filled(ctx, "agents-panel", rect, Order::Foreground, th().panel_solid, |ui, rect| {
-            let inner = rect.shrink(16.0);
-            let p = ui.painter().clone();
-            let hy = inner.top() + 9.0;
-            p.text(
-                pos2(inner.left() + 7.0, hy),
-                Align2::CENTER_CENTER,
-                icon::SQUARE_TERMINAL,
-                icon_font(14.0),
-                th().accent,
-            );
-            let g = p.layout_job(spaced("TERMINAL AGENTS", sans_semibold(11.0), th().muted, 0.88));
-            p.galley(pos2(inner.left() + 22.0, hy - g.size().y / 2.0), g, th().muted);
-            let cr = Rect::from_center_size(pos2(inner.right() - 9.0, hy), vec2(24.0, 24.0));
-            let resp = ui.interact(cr, Id::unique("agents-close"), Sense::click());
-            if resp.hovered() {
-                p.rect_filled(cr, CornerRadius::same(6), th().hover);
-            }
-            p.text(
-                cr.center(),
-                Align2::CENTER_CENTER,
-                icon::X,
-                icon_font(14.0),
-                if resp.hovered() { th().text } else { th().faint },
-            );
-            close = resp.clicked();
-            hits.push(("agents-close".into(), cr));
-            let mut y = inner.top() + 18.0 + 12.0;
-            let ih = intro.size().y;
-            p.galley(pos2(inner.left(), y), intro, th().muted);
-            y += ih + 14.0;
-            let line = Rect::from_min_size(pos2(inner.left(), y), vec2(inner_w, 34.0));
-            if !v.available {
-                setup_line(ui, line, FILES_SETUP, "agents-copy-files", &mut hits, &mut copied);
-                return;
-            }
-            let label = |ui: &Ui, y: f32, text: &str| {
-                let g = ui.painter().layout_job(spaced(text, sans(9.0), th().faint, 0.72));
-                ui.painter().galley(pos2(inner.left(), y + 8.0 - g.size().y / 2.0), g, th().faint);
-            };
-            // The browser: run vxr bridge, then type its code.
-            let on = v.allowed || v.connecting;
-            let mut pair = false;
-            if v.web {
-                label(ui, y, "1 · RUN IN A TERMINAL");
-                y += 16.0 + 6.0;
-                let line = Rect::from_min_size(pos2(inner.left(), y), vec2(inner_w, 34.0));
-                setup_line(ui, line, BRIDGE_SETUP, "agents-copy-bridge", &mut hits, &mut copied);
-                y += 34.0 + 14.0;
-                label(ui, y, "2 · TYPE THE PAIRING CODE IT PRINTS");
-                y += 16.0 + 6.0;
-                let r = Rect::from_min_size(pos2(inner.left(), y), vec2(inner_w, 34.0));
-                let resp =
-                    super::assistant::ai_field(ui, r, "CODE", Id::unique("agents-code"), &mut code, false, "K7QF-3MXP");
-                if code.chars().count() > CODE_FIELD_MAX {
-                    code = code.chars().take(CODE_FIELD_MAX).collect();
-                }
-                pair = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && !on;
-                hits.push(("agents-code".into(), r));
-                y += 34.0 + 10.0;
-            }
-            // Allow terminal agents to edit this window (or tab).
-            let r = Rect::from_min_size(pos2(inner.left(), y), vec2(inner_w, 44.0));
-            let resp = ui.interact(r, Id::unique("agents-allow-row"), Sense::click());
-            let p = ui.painter();
-            p.rect(
-                r,
-                CornerRadius::same(8),
-                if v.allowed { th().accent_bg } else { th().tint(9) },
-                Stroke::new(1.0, if v.allowed { th().ring } else { th().line }),
-                StrokeKind::Inside,
-            );
-            let title = if v.web {
-                "Allow terminal agents to edit this tab"
-            } else {
-                "Allow terminal agents to edit this window"
-            };
-            p.text(pos2(r.left() + 12.0, r.top() + 14.0), Align2::LEFT_CENTER, title, sans_medium(12.5), th().text);
-            let sub = match (v.web, v.allowed, v.connecting) {
-                (false, true, _) => "On: listening on a local socket only you can open",
-                (false, false, _) => "Off: nothing listens",
-                (true, true, _) => "On: paired with vxr bridge on this computer",
-                (true, false, true) => "Connecting… if the browser asks, allow apps on this device",
-                (true, false, false) => "Off: this tab connects to nothing",
-            };
-            p.text(pos2(r.left() + 12.0, r.top() + 31.0), Align2::LEFT_CENTER, sub, sans(11.0), th().muted);
-            let sw = Rect::from_min_size(pos2(r.right() - 12.0 - 30.0, r.center().y - 9.0), vec2(30.0, 18.0));
-            let toggled = switch(ui, sw, "agents-allow", on).clicked() || resp.clicked();
-            if v.web && (pair || (toggled && !on)) {
-                actions.push(Action::PairBridge);
-            } else if toggled {
-                actions.push(Action::AllowAgents(!on));
-            }
-            hits.push(("agents-allow".into(), r));
-            y += 44.0 + 10.0;
-            // Review every agent change.
-            let r = Rect::from_min_size(pos2(inner.left(), y), vec2(inner_w, 44.0));
-            let resp = ui.interact(r, Id::unique("agents-review-row"), Sense::click());
-            let p = ui.painter();
-            p.rect(
-                r,
-                CornerRadius::same(8),
-                if v.review { th().accent_bg } else { th().tint(9) },
-                Stroke::new(1.0, if v.review { th().ring } else { th().line }),
-                StrokeKind::Inside,
-            );
-            p.text(
-                pos2(r.left() + 12.0, r.top() + 14.0),
-                Align2::LEFT_CENTER,
-                "Review every agent change",
-                sans_medium(12.5),
-                th().text,
-            );
-            let sub = if v.review {
-                "On: edits wait for you to apply or discard them"
-            } else {
-                "Off: each edit applies at once"
-            };
-            p.text(pos2(r.left() + 12.0, r.top() + 31.0), Align2::LEFT_CENTER, sub, sans(11.0), th().muted);
-            let sw = Rect::from_min_size(pos2(r.right() - 12.0 - 30.0, r.center().y - 9.0), vec2(30.0, 18.0));
-            if switch(ui, sw, "agents-review", v.review).clicked() || resp.clicked() {
-                actions.push(Action::ReviewAgents(!v.review));
-            }
-            hits.push(("agents-review".into(), r));
-            y += 44.0 + 10.0;
-            if let Some(g) = error {
-                let gh = g.size().y;
-                ui.painter().galley(pos2(inner.left(), y), g, th().danger);
-                y += gh + 10.0;
-            }
-            label(ui, y, if v.web { "3 · ADD VXR TO CLAUDE CODE" } else { "ADD VXR TO CLAUDE CODE" });
-            y += 16.0 + 6.0;
-            let line = Rect::from_min_size(pos2(inner.left(), y), vec2(inner_w, 34.0));
-            setup_line(ui, line, SETUP, "agents-copy", &mut hits, &mut copied);
-            y += 34.0 + 6.0;
-            let line = Rect::from_min_size(pos2(inner.left(), y), vec2(inner_w, 34.0));
-            setup_line(ui, line, LIVE_SETUP, "agents-copy-live", &mut hits, &mut copied);
-            y += 34.0 + 14.0;
-            // Pairing: the token file, and Regenerate.
-            let ph = pairing.size().y.max(28.0);
-            ui.painter().galley(pos2(inner.left(), y), pairing, th().faint);
-            let b = Rect::from_min_size(pos2(inner.right() - 108.0, y + ph / 2.0 - 14.0), vec2(108.0, 28.0));
-            let resp = small_button(ui, b, icon::REFRESH_CW, "Regenerate", "agents-regenerate", false);
-            if resp.clicked() && v.allowed {
-                actions.push(Action::RegenerateToken);
-            }
-            hits.push(("agents-regenerate".into(), b));
-            y += ph + 14.0;
-            label(ui, y, "CONNECTED");
-            y += 16.0 + 6.0;
-            if v.clients.is_empty() {
-                let none = if v.allowed { "No agent connected yet" } else { "No agent can connect while this is off" };
-                ui.painter().text(
-                    pos2(inner.left(), y + row_h / 2.0),
-                    Align2::LEFT_CENTER,
-                    none,
-                    sans(12.0),
-                    th().faint,
-                );
-            }
-            for (conn, name) in &v.clients {
-                let r = Rect::from_min_size(pos2(inner.left(), y), vec2(inner_w, row_h));
-                let cy = r.center().y;
-                ui.painter().circle_filled(pos2(r.left() + 4.0, cy), 3.5, th().ok);
-                ui.painter().text(pos2(r.left() + 16.0, cy), Align2::LEFT_CENTER, name, sans(12.5), th().text);
-                let b = Rect::from_min_size(pos2(r.right() - 64.0, cy - 11.0), vec2(64.0, 22.0));
-                let id = format!("agents-stop-{conn}");
-                if small_button(ui, b, icon::SQUARE, "Stop", &id, false).clicked() {
-                    actions.push(Action::StopAgent(*conn));
-                }
-                hits.push((id, b));
-                y += row_h;
-            }
-        });
-        self.agents_code = code;
-        if let Some(text) = copied {
-            ctx.copy_text(text);
-            self.toast(ctx, "Copied the setup line");
-        }
-        self.hits.extend(hits);
-        self.hits.insert("agents-panel".into(), rect);
-        self.actions.extend(actions);
-        if close {
-            self.agents_panel = false;
+            self.hits.push(("agents-disconnect".into(), d));
         }
     }
 }

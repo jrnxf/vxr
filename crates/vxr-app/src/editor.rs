@@ -186,6 +186,7 @@ fn review_allows(a: &Action) -> bool {
             | Action::AllowAgents(_)
             | Action::ReviewAgents(_)
             | Action::PairBridge
+            | Action::DismissAgentsError
             | Action::RegenerateToken
             | Action::StopAgent(_)
             | Action::StopAgents
@@ -1399,9 +1400,6 @@ impl Editor {
         let key = (self.agents.version, self.scene.history().position());
         if self.agents_shown != Some(key) {
             self.agents_shown = Some(key);
-            if self.agents.edits.len() < self.ui.agents_card_closed {
-                self.ui.agents_card_closed = 0;
-            }
             self.ui.agents.edits = (0..self.agents.edits.len())
                 .map(|i| EditRow {
                     label: self.agents.edits[i].label.clone(),
@@ -1416,6 +1414,16 @@ impl Editor {
             v.clients = self.agents.clients.clone();
             v.error = self.agents.error.clone();
         }
+        (v.fail, v.since) = (self.agents.fail, self.agents.since);
+        v.times = self
+            .agents
+            .clients
+            .iter()
+            .map(|(c, _)| {
+                let (seen, last) = self.agents.times(*c);
+                (seen.unwrap_or(0.0), last)
+            })
+            .collect();
         let stats = self.stats();
         let mut actions = Vec::new();
         let ui = &mut self.ui;
@@ -1584,6 +1592,8 @@ impl Editor {
             return Err(REVIEW_AGENT.into());
         }
         let notice = self.agents.take_notices(conn);
+        let now = self.ctx.input(|i| i.time);
+        self.agents.note_call(conn, now, name);
         let r = if self.review.is_some() || (self.agents.review && crate::agents::edits(name, args)) {
             if self.review.is_none() {
                 self.open_review(None);

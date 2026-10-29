@@ -51,6 +51,23 @@ pub const WRONG_CODE: &str = "vxr bridge refused that pairing code: type the cod
 pub const BUSY: &str = "Another tab is already paired with vxr bridge: turn it off there first.";
 pub const NO_HELLO: &str = "vxr bridge expected a pairing code first.";
 
+/// One typed character as a code's: upper case, O read as 0 and I and L as 1. None for a space
+/// or a dash (which the field skips) and for a character no code has (which it refuses): see
+/// [`code_char_skipped`].
+pub fn code_char(c: char) -> Option<char> {
+    let c = match c.to_ascii_uppercase() {
+        'O' => '0',
+        'I' | 'L' => '1',
+        c => c,
+    };
+    (c.is_ascii() && ALPHABET.contains(&(c as u8))).then_some(c)
+}
+
+/// Whether the field skips `c` without a word: a space or a dash, as a code is written.
+pub fn code_char_skipped(c: char) -> bool {
+    c == ' ' || c == '-'
+}
+
 /// A code as the user typed it, in its canonical form (upper case, no dashes or spaces, O read
 /// as 0 and I and L as 1), or None if it cannot be one.
 pub fn normalize_code(s: &str) -> Option<String> {

@@ -143,13 +143,18 @@ else
     for (const ch of 'terminal agents') await key(ch);
     await key('Enter');
     await click(window.vxr.hit('agents-code'));
+    for (const ch of '00000000') await key(ch);
+    for (let i = 0; i < 200 && JSON.parse(window.vxr.state()).agents.fail !== 'Wrong'; i++) await frames(3);
+    const wrong = JSON.parse(window.vxr.state()).agents.fail;
+    await click(window.vxr.hit('agents-retry'));
+    await frames(3);
+    await click(window.vxr.hit('agents-code'));
     for (const ch of '$code') await key(ch);
-    await key('Enter');
     for (let i = 0; i < 200 && !JSON.parse(window.vxr.state()).agents.allowed; i++) await frames(3);
     const a = JSON.parse(window.vxr.state()).agents;
-    return JSON.stringify([a.allowed, a.error]);
+    return JSON.stringify([wrong, a.allowed, a.error]);
   }" | unwrap)"
-  expect "the page pairs with the code vxr bridge printed" "$paired" '[true,null]'
+  expect "a wrong code turns the step red, and the page pairs with the code vxr bridge printed" "$paired" '["Wrong",true,null]'
   [ -S "$VXR_LIVE_DIR/live.sock" ] && pass "vxr bridge opens the agents' socket once paired" || fail "vxr bridge opens the agents' socket once paired" "no socket"
   before="$(axi eval "() => JSON.stringify(JSON.parse(window.vxr.state()).voxels)" | unwrap)"
   # One agent: a box, then (after the page's Stop) another call that must be refused.
@@ -175,7 +180,7 @@ else
   rlog="$fixtures/review.log"
   rlines() { for _ in $(seq 150); do [ "$(wc -l <"$rlog" 2>/dev/null || echo 0)" -ge "$1" ] && break; sleep 0.1; done; }
   rtext() { sed -n "${1}p" "$rlog" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const r=JSON.parse(s||'{}');console.log((r.isError?'error: ':'')+(r.text||'').split('\n')[0])})"; }
-  review="$(axi eval "async () => { const off = JSON.parse(window.vxr.state()).agents.review; await window.__click(window.vxr.hit('agents-review')); await window.__frames(5); const on = JSON.parse(window.vxr.state()).agents.review; await window.__click(window.vxr.hit('agents-close')); await window.__frames(5); return JSON.stringify([off, on]) }" | unwrap)"
+  review="$(axi eval "async () => { const off = JSON.parse(window.vxr.state()).agents.review; await window.__click(window.vxr.hit('agents-review')); await window.__frames(5); const on = JSON.parse(window.vxr.state()).agents.review; await window.__click(window.vxr.hit('ai-tab-chat')); await window.__frames(5); return JSON.stringify([off, on]) }" | unwrap)"
   expect "the panel's review switch is off by default and turns on" "$review" '[false,true]'
   before="$(axi eval "() => JSON.stringify(JSON.parse(window.vxr.state()).voxels)" | unwrap)"
   box() { echo "[\"box\", {\"from\": [$1, 28, -63], \"to\": [$(($1 + 1)), 28, -62], \"slot\": 7}]"; }
@@ -228,8 +233,8 @@ else
   token="$(cat "$VXR_LIVE_DIR/live.token")"
   axi eval "async () => { await window.__click(window.vxr.hit('agents-regenerate')); await window.__frames(20); return 'ok' }" >/dev/null
   [ "$token" != "$(cat "$VXR_LIVE_DIR/live.token")" ] && pass "Regenerate in the panel writes a new token" || fail "Regenerate in the panel writes a new token" "same token"
-  off="$(axi eval "async () => { await window.__click(window.vxr.hit('agents-allow')); for (let i = 0; i < 100 && JSON.parse(window.vxr.state()).agents.allowed; i++) await window.__frames(3); await new Promise(r => setTimeout(r, 300)); return JSON.stringify(JSON.parse(window.vxr.state()).agents.allowed) }" | unwrap)"
-  [ "$off" = false ] && [ ! -e "$VXR_LIVE_DIR/live.sock" ] && pass "the switch unpairs the page and the socket closes" || fail "the switch unpairs the page and the socket closes" "$off"
+  off="$(axi eval "async () => { await window.__click(window.vxr.hit('agents-disconnect')); for (let i = 0; i < 100 && JSON.parse(window.vxr.state()).agents.allowed; i++) await window.__frames(3); await new Promise(r => setTimeout(r, 300)); return JSON.stringify(JSON.parse(window.vxr.state()).agents.allowed) }" | unwrap)"
+  [ "$off" = false ] && [ ! -e "$VXR_LIVE_DIR/live.sock" ] && pass "Disconnect unpairs the page and the socket closes" || fail "Disconnect unpairs the page and the socket closes" "$off"
   for line in "Paired with the page: terminal agents can edit its scene now" "Claude Code connected" "The page left: agents can no longer edit it"; do
     grep -qF "$line" "$fixtures/bridge.log" && pass "vxr bridge prints: $line" || fail "vxr bridge prints: $line" "$(cat "$fixtures/bridge.log")"
   done

@@ -13,7 +13,8 @@ use tungstenite::http::HeaderValue;
 use tungstenite::{Message, WebSocket};
 
 use crate::bridge::{
-    BUSY, Bridge, Config, MAX_FAILURES, NO_HELLO, ORIGIN, Running, WRONG_CODE, normalize_code, show_code,
+    BUSY, Bridge, Config, MAX_FAILURES, NO_HELLO, ORIGIN, Running, WRONG_CODE, code_char, code_char_skipped,
+    normalize_code, show_code,
 };
 use crate::live::{Live, NOT_LIVE, REFUSED, Remote, SOCKET, STOPPED, TOKEN};
 use crate::protocol::{Server, VERSION};
@@ -417,4 +418,17 @@ fn the_desktop_app_and_the_bridge_never_share_the_socket() {
     wait("the page slot frees", || !b.paired());
     drop(host);
     drop(paired(&b));
+}
+
+#[test]
+fn the_code_field_reads_one_character_as_normalize_code_reads_a_code() {
+    let typed = "k7-qf 3mxp o1l";
+    let field: String = typed.chars().filter(|c| !code_char_skipped(*c)).filter_map(code_char).collect();
+    assert_eq!(field, "K7QF3MXP011");
+    assert_eq!(normalize_code(&typed[..10]).as_deref(), Some(&field[..8]));
+    for c in ['u', 'U', 'é', '!', '/'] {
+        assert_eq!(code_char(c), None, "{c} is not a letter of the code");
+        assert!(!code_char_skipped(c));
+    }
+    assert!(code_char_skipped(' ') && code_char_skipped('-'));
 }

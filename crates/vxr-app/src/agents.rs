@@ -50,6 +50,14 @@ pub struct Agents {
     pub connecting: bool,
     /// Why turning it on failed.
     pub error: Option<String>,
+    /// What kind of failure `error` is, for the checklist's hint and button.
+    pub fail: Option<Fail>,
+    /// When the tab paired with `vxr bridge` (egui time, seconds), while it is paired; in the
+    /// desktop app, when the socket opened.
+    pub since: Option<f64>,
+    /// When each connection was first listed, and its last call: when and which.
+    seen: HashMap<u64, f64>,
+    last: HashMap<u64, (f64, String)>,
     /// Each agent's own selection (map cells) by connection, kept between its calls so it
     /// never changes the user's; it starts from the user's. Kept with the model and map it
     /// was made on, and dropped once either changes.
@@ -62,6 +70,28 @@ pub struct Agents {
     /// What each connection has not heard yet: the user applied or discarded edits of its
     /// that waited for review. Told with its next call, or by `review_status`.
     notices: HashMap<u64, Vec<String>>,
+}
+
+/// Why the link to the agents is not up, which the Agents tab answers with its own words
+/// and button.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fail {
+    /// `vxr bridge` refused the pairing code.
+    Wrong,
+    /// It hung up before it took the code.
+    Hung,
+    /// Nothing answered on its port.
+    Nothing,
+    /// The browser refuses the page access to apps on this computer.
+    Denied,
+    /// The browser cannot let a page reach them at all.
+    Blocked,
+    Safari,
+    Brave,
+    /// The bridge stopped while paired.
+    Lost,
+    /// Anything else, with the text in `error`.
+    Other,
 }
 
 /// Added to an edit's result while it waits for review.
@@ -124,6 +154,27 @@ impl Agents {
     pub fn forget(&mut self, conn: u64) {
         self.selections.remove(&conn);
         self.notices.remove(&conn);
+        self.seen.remove(&conn);
+        self.last.remove(&conn);
+    }
+
+    /// Note the connections listed at `now`: when each first appeared.
+    pub fn note_clients(&mut self, now: f64) {
+        for (conn, _) in &self.clients {
+            self.seen.entry(*conn).or_insert(now);
+        }
+        self.seen.retain(|c, _| self.clients.iter().any(|(n, _)| n == c));
+    }
+
+    /// Note that connection `conn` called `what` at `now`.
+    pub fn note_call(&mut self, conn: u64, now: f64, what: &str) {
+        self.seen.entry(conn).or_insert(now);
+        self.last.insert(conn, (now, what.to_string()));
+    }
+
+    /// When connection `conn` was first listed, and its last call.
+    pub fn times(&self, conn: u64) -> (Option<f64>, Option<f64>) {
+        (self.seen.get(&conn).copied(), self.last.get(&conn).map(|l| l.0))
     }
 
     /// What connection `conn` has not heard yet, taken: one line per applied or discarded
