@@ -4254,6 +4254,22 @@ fn agents_bridge(dir: &Path) -> Result<(), String> {
         // Stop in the panel: that agent is told so, for good.
         let conn = s.ed.ui.agents.clients[0].0;
         s.ui_click(&format!("agents-stop-{conn}"))?;
+        for a in std::mem::take(&mut s.host) {
+            if !page.act(&a, &mut s.ed) {
+                s.host.push(a);
+            }
+        }
+        // A listing and a request the bridge sent before it read the stop change nothing.
+        let label = s.ed.scene.history().undo_label().map(str::to_string);
+        let stale = serde_json::json!({"id": 1_000_000, "conn": conn, "client": "Claude Code", "call": "place",
+            "args": {"cells": [[2, 12, 2]], "slot": 9}});
+        page.message(&serde_json::json!({"clients": [[conn, "Claude Code"]]}).to_string(), &mut s.ed);
+        page.message(&stale.to_string(), &mut s.ed);
+        page.tick(&mut s.ed);
+        check(
+            s.ed.agents.clients.is_empty() && s.ed.scene.history().undo_label().map(str::to_string) == label,
+            "a stopped agent's request already on its way does not run".into(),
+        )?;
         s.bridge_until(&mut page, &mut script, |s| s.ed.ui.agents.clients.is_empty());
         let (t, e) = s.bridge_call(&mut page, &mut script, &mut claude, "scene_summary", serde_json::json!({}));
         check(e && t == STOPPED, "Stop in the panel ends that agent for good".into())?;
@@ -4270,8 +4286,25 @@ fn agents_bridge(dir: &Path) -> Result<(), String> {
         // Regenerate: a new token, every agent disconnected, old ones turned away.
         let old = std::fs::read_to_string(sock_dir.join(TOKEN)).map_err(|e| e.to_string())?;
         s.bridge_until(&mut page, &mut script, |s| !s.ed.ui.agents.clients.is_empty());
+        let conn = s.ed.ui.agents.clients[0].0;
         s.ui_click("agents-regenerate")?;
+        for a in std::mem::take(&mut s.host) {
+            if !page.act(&a, &mut s.ed) {
+                s.host.push(a);
+            }
+        }
+        // A request on its way when Regenerate was pressed waits for the answer, then is dropped.
+        let label = s.ed.scene.history().undo_label().map(str::to_string);
+        let stale = serde_json::json!({"id": 1_000_001, "conn": conn, "client": "Codex", "call": "place",
+            "args": {"cells": [[2, 12, 2]], "slot": 9}});
+        page.message(&stale.to_string(), &mut s.ed);
+        page.tick(&mut s.ed);
+        let held = s.ed.scene.history().undo_label().map(str::to_string) == label;
         s.bridge_until(&mut page, &mut script, |s| s.ed.ui.agents.clients.is_empty());
+        check(
+            held && s.ed.scene.history().undo_label().map(str::to_string) == label,
+            "a request on its way at Regenerate does not run".into(),
+        )?;
         let new = std::fs::read_to_string(sock_dir.join(TOKEN)).map_err(|e| e.to_string())?;
         let (t, e) = s.bridge_call(&mut page, &mut script, &mut codex, "scene_summary", serde_json::json!({}));
         check(old != new && e && t == REFUSED, "Regenerate makes a new token and turns old agents away".into())?;

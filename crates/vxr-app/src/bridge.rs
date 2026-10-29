@@ -7,7 +7,7 @@
 //! one on [`Out::Connect`], hands each message in ([`Page::message`]) and sends what
 //! [`Page::take_out`] gives it, so the same code runs natively against a real bridge in tests.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 use serde_json::{Value, json};
 use vxr_mcp::bridge::{PORT, normalize_code};
@@ -75,6 +75,10 @@ pub struct Page {
     link: Link,
     code: String,
     pending: VecDeque<Request>,
+    /// Agents the user stopped on this link: the bridge never lists them again.
+    stopped: HashSet<u64>,
+    /// Regenerate was asked and the bridge has not answered: requests wait.
+    regenerating: bool,
     out: Vec<Out>,
 }
 
@@ -86,7 +90,14 @@ impl Default for Page {
 
 impl Page {
     pub fn new() -> Page {
-        Page { link: Link::Off, code: String::new(), pending: VecDeque::new(), out: Vec::new() }
+        Page {
+            link: Link::Off,
+            code: String::new(),
+            pending: VecDeque::new(),
+            stopped: HashSet::new(),
+            regenerating: false,
+            out: Vec::new(),
+        }
     }
 
     pub fn link(&self) -> Link {
@@ -124,6 +135,7 @@ impl Page {
                 }
             }
             Action::RegenerateToken if self.link == Link::Paired => {
+                self.regenerating = true;
                 self.send(json!({"regenerate": true}));
             }
             Action::RegenerateToken => {}
@@ -147,8 +159,14 @@ impl Page {
             ed.agents.clients.iter().filter(|(c, _)| which.is_none_or(|w| w == *c)).map(|(_, n)| n.clone()).collect();
         self.pending.retain(|r| which.is_some_and(|w| w != r.conn));
         match which {
-            Some(c) => self.send(json!({"stop": c})),
-            None => self.send(json!({"stop": "all"})),
+            Some(c) => {
+                self.stopped.insert(c);
+                self.send(json!({"stop": c}));
+            }
+            None => {
+                self.stopped.extend(ed.agents.clients.iter().map(|(c, _)| *c));
+                self.send(json!({"stop": "all"}));
+            }
         }
         // The bridge's next clients message confirms it; until then the chip is gone.
         ed.agents.clients.retain(|(c, _)| which.is_some_and(|w| w != *c));
@@ -163,6 +181,8 @@ impl Page {
     /// Requests and agents go with the link.
     fn drop_all(&mut self, ed: &mut Editor) {
         self.pending.clear();
+        self.stopped.clear();
+        self.regenerating = false;
         for (conn, _) in std::mem::take(&mut ed.agents.clients) {
             ed.agents.forget(conn);
         }
@@ -237,8 +257,11 @@ impl Page {
                 self.pending.push_back(Request { id: id.clone(), conn, client, ask });
             }
         } else if let Some(list) = v.get("clients").and_then(Value::as_array) {
-            let clients: Vec<(u64, String)> =
-                list.iter().filter_map(|c| Some((c.get(0)?.as_u64()?, shown(c.get(1)?.as_str()?, 32)))).collect();
+            let clients: Vec<(u64, String)> = list
+                .iter()
+                .filter_map(|c| Some((c.get(0)?.as_u64()?, shown(c.get(1)?.as_str()?, 32))))
+                .filter(|(c, _)| !self.stopped.contains(c))
+                .collect();
             let gone: Vec<u64> =
                 ed.agents.clients.iter().map(|(c, _)| *c).filter(|c| !clients.iter().any(|(n, _)| n == c)).collect();
             for conn in gone {
@@ -248,6 +271,7 @@ impl Page {
             ed.agents.clients = clients;
         } else if let Some(ok) = v.get("regenerated").and_then(Value::as_bool) {
             let ctx = ed.ctx.clone();
+            self.regenerating = false;
             let msg = if ok {
                 self.pending.clear();
                 "New pairing token: every agent was disconnected".to_string()
@@ -263,7 +287,7 @@ impl Page {
 
     /// Run what agents asked since the last frame, unless the user is mid-drag.
     pub fn tick(&mut self, ed: &mut Editor) {
-        while self.link == Link::Paired && !ed.agent_busy() {
+        while self.link == Link::Paired && !self.regenerating && !ed.agent_busy() {
             let Some(r) = self.pending.pop_front() else { break };
             let reply = match r.ask {
                 Ask::Call { name, args } => {
