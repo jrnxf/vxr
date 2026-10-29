@@ -246,6 +246,8 @@ mod server {
             if self.paired.swap(true, Ordering::SeqCst) {
                 return Err(BUSY);
             }
+            // The user's own typos do not add up across pairings.
+            *self.failures.lock().unwrap() = 0;
             Ok(())
         }
     }
