@@ -160,7 +160,6 @@ impl Hybrid {
         }
         let w = 304.0;
         let inner_w = w - 24.0;
-        let (x, top) = self.card_origin(screen, w);
         let rows = n.min(CARD_ROWS);
         let row_h = 30.0;
         let more = n - rows;
@@ -168,6 +167,7 @@ impl Hybrid {
         if more > 0 {
             h += 18.0;
         }
+        let (x, top) = self.card_origin(screen, w, h);
         let rect = Rect::from_min_size(pos2(x, top), vec2(w, h));
         let mut hits: Vec<(String, Rect)> = Vec::new();
         let mut actions = Vec::new();

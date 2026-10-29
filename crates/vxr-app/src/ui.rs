@@ -2949,23 +2949,40 @@ impl Hybrid {
         }
     }
 
-    // The review card of an AI change: not in the mockups' Hybrid set (docs/research/ai.md,
-    // section 2, and its review mock). A .panel left of the palette: the request, what the
-    // change adds, removes and repaints, the palette slots it sets, the steps with a checkbox
-    // each, Before and After, a field to ask for changes, and Discard and Apply. Over 10,000
-    // cells it asks before staging more.
-    /// Where a card of width `w` that sits by the palette goes: the right edge of the view, in the
-    /// column under the palette, or at the top beside the assistant's column when that is docked.
-    /// On touch, left of the palette over the dock.
-    pub(super) fn card_origin(&self, screen: Rect, w: f32) -> (f32, f32) {
+    /// Where a card of width `w`, at least `min_h` tall, that sits by the palette goes: the right
+    /// edge of the view, in the column under the palette when it fits there above the render
+    /// corner and the camera bar, or at the top beside the assistant's column when that is docked.
+    /// Else (and on touch, over the dock) at the top left of the palette.
+    pub(super) fn card_origin(&self, screen: Rect, w: f32, min_h: f32) -> (f32, f32) {
+        let beside = ((screen.right() - 12.0 - PALETTE_W - 8.0 - w).max(12.0 + RAIL_W + 12.0), TOP);
         if self.touch {
-            return ((screen.right() - 12.0 - PALETTE_W - 8.0 - w).max(12.0 + RAIL_W + 12.0), TOP);
+            return beside;
         }
         let x = (screen.right() - 12.0 - w).max(12.0 + RAIL_W + 12.0);
-        let top = if self.ai_width() > 0.0 { TOP } else { TOP + self.palette_height() + 8.0 };
-        (x, top)
+        if self.ai_width() > 0.0 {
+            return (x, TOP);
+        }
+        let top = TOP + self.palette_height() + 8.0;
+        if top + min_h <= self.card_floor(screen, x + w) { (x, top) } else { beside }
     }
 
+    /// Where a card ending at `right` must end: above the render corner and the camera bar where
+    /// they share its columns, else above the window's bottom.
+    fn card_floor(&self, screen: Rect, right: f32) -> f32 {
+        let below = [self.render_dock.filter(|_| !self.full_render), self.nav_rect];
+        below
+            .into_iter()
+            .flatten()
+            .filter(|c| c.left() < right)
+            .map(|c| c.top() - 8.0)
+            .fold(screen.bottom() - 12.0, f32::min)
+    }
+
+    // The review card of an AI change: not in the mockups' Hybrid set (docs/research/ai.md,
+    // section 2, and its review mock). A .panel by the palette (see `card_origin`): the request,
+    // what the change adds, removes and repaints, the palette slots it sets, the steps with a
+    // checkbox each, Before and After, a field to ask for changes, and Discard and Apply. Over
+    // 10,000 cells it asks before staging more.
     fn review_card(&mut self, ctx: &Context, screen: Rect) {
         let Some(card) = self.review.take() else {
             self.ask_focus = false;
@@ -2975,7 +2992,6 @@ impl Hybrid {
         };
         let w = 304.0;
         let inner_w = w - 24.0;
-        let (x, top) = self.card_origin(screen, w);
         let wrapped = |text: &str, font: FontId, color: Color32, rows: usize| {
             let mut job = LayoutJob::single_section(
                 text.to_string(),
@@ -3067,17 +3083,13 @@ impl Hybrid {
         h += 12.0 + 28.0 + 8.0 + 30.0 + 12.0 + 32.0 + 12.0;
         // The card ends above the render corner and the camera bar where they share columns:
         // fewer steps show (the list scrolls), down to two.
-        let below = [self.render_dock.filter(|_| !self.full_render), self.nav_rect];
-        if let Some(below_top) =
-            below.into_iter().flatten().filter(|c| c.left() < x + w).map(|c| c.top()).reduce(f32::min)
-        {
-            while rows > 2 && top + h > below_top - 8.0 {
-                rows -= 1;
-                h -= row_h;
-            }
+        let (x, top) = self.card_origin(screen, w, h - rows.saturating_sub(2) as f32 * row_h);
+        let floor = self.card_floor(screen, x + w);
+        while rows > 2 && top + h > floor {
+            rows -= 1;
+            h -= row_h;
         }
         let rect = Rect::from_min_size(pos2(x, top), vec2(w, h));
-        self.hits.insert("review".into(), rect);
         let mut hits: Vec<(String, Rect)> = Vec::new();
         let mut actions = Vec::new();
         let mut scroll = self.review_scroll.min(card.steps.len().saturating_sub(rows));

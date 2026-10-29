@@ -276,6 +276,7 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     export(&mut s, dir)?;
     review(dir)?;
     assistant_layout(dir)?;
+    card_short_window(dir)?;
     assistant(dir)?;
     ai_refused()?;
     ai_new_chat()?;
@@ -3156,11 +3157,6 @@ const HOUSE_SCRIPT: &str = r##"{"prompt": "make the roof red, add a flag and ope
     {"name": "done", "input": {"summary": "Painted the roof red, added a flag on a pole and opened a door"}}
 ]}"##;
 
-/// The review step of an AI change, driven by scripted tool calls through the same session,
-/// card and ghost the assistant will use: exact counts, the ghost in the view and its
-/// removals hidden from the render corner, Before and After, a dropped step, every other edit
-/// kept out, Discard (button and Escape) leaving no step, Apply (Enter) as one undo step named
-/// after the request, a change over 10,000 cells held until Allow or Stop, and the ask field.
 /// The AI change card and the palette keep their places with the assistant docked: the palette at
 /// the top right of the window with the assistant's column under it, and the card in its own
 /// column, clear of both and of the scene's middle.
@@ -3209,6 +3205,39 @@ fn assistant_layout(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// With the assistant closed, a palette of eight swatch rows (over 56 colours) leaves no room under
+/// it in a 1280x800 window: the AI change card goes left of the palette instead, clear of the
+/// palette, the camera bar and the render corner.
+fn card_short_window(dir: &Path) -> Result<(), String> {
+    let mut scene = house();
+    let cells: Vec<_> =
+        (0..64u8).map(|i| (scene.to_map([i as i32 % 32 - 16, 0, -10 - i as i32 / 32]), 100 + i)).collect();
+    scene.edit(cells);
+    let mut s = Shot::new(scene, "house.vox", 2.0)?;
+    s.ed.ui.coach = false;
+    s.frames(2);
+    let answers = s.ed.stage_json(HOUSE_SCRIPT)?;
+    check(answers[0].len() == 6, "a scripted request stages the card for the short window check".into())?;
+    s.frames(40);
+    let rect = |s: &Shot, name: &str| s.ed.ui.hits.get(name).copied().ok_or(format!("no {name} on screen"));
+    let (palette, card, nav, render) =
+        (rect(&s, "palette")?, rect(&s, "review")?, rect(&s, "nav")?, rect(&s, "render")?);
+    s.save_png(&dir.join("app-2x-review-short.png"))?;
+    check(palette.height() > 270.0, format!("the palette shows eight swatch rows ({:.0} tall)", palette.height()))?;
+    let screen =
+        egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(s.ed.width as f32 / 2.0, s.ed.height as f32 / 2.0));
+    check(
+        [palette, nav, render].iter().all(|r| !card.intersects(*r)) && screen.contains_rect(card),
+        format!("the card clears the palette, the camera bar and the render corner: {card:?}"),
+    )?;
+    Ok(())
+}
+
+/// The review step of an AI change, driven by scripted tool calls through the same session,
+/// card and ghost the assistant will use: exact counts, the ghost in the view and its
+/// removals hidden from the render corner, Before and After, a dropped step, every other edit
+/// kept out, Discard (button and Escape) leaving no step, Apply (Enter) as one undo step named
+/// after the request, a change over 10,000 cells held until Allow or Stop, and the ask field.
 fn review(dir: &Path) -> Result<(), String> {
     let mut s = Shot::new(house(), "house.vox", 2.0)?;
     s.ed.ui.coach = false;
