@@ -11,6 +11,7 @@
 //! - [`fonts`]: loading the UI fonts.
 //! - [`render`]: the Render panel's settings and the PNG render export.
 //! - [`review`]: the review step of an AI change, and scripts that drive it.
+//! - [`theme`]: the UI themes' colour tokens and the editor view's colours.
 
 pub mod agents;
 pub mod assistant;
@@ -22,6 +23,7 @@ pub mod fonts;
 pub mod live;
 pub mod render;
 pub mod review;
+pub mod theme;
 pub mod ui;
 
 pub use editor::Editor;

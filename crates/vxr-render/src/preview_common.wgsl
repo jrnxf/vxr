@@ -20,6 +20,7 @@ struct Frame {
     cam_u: vec4<f32>,    // camera up, w = focus distance along the view direction
     cam_f: vec4<f32>,    // view direction, w = sky light intensity
     post: vec4<f32>,     // x = 2.2 / display gamma, y = vignette strength
+    backdrop: array<vec4<f32>, 2>, // the editor view's background gradient, inner and outer (sRGB)
 };
 
 const SKY_BACKDROP: u32 = 2u;

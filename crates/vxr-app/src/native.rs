@@ -7,6 +7,7 @@ use std::sync::Arc;
 use vxr_app::Editor;
 use vxr_app::editor::{Button, NEW_SIZE};
 use vxr_app::files::{obj_files, slices_png};
+use vxr_app::theme::ThemeChoice;
 use vxr_app::ui::Action;
 use vxr_core::Scene;
 use vxr_render::Gpu;
@@ -47,6 +48,38 @@ pub fn fonts() -> Option<vxr_app::ui::FontBytes> {
     vxr_app::fonts::load(&vxr_app::fonts::dir())
         .map_err(|e| eprintln!("vxr: no UI fonts ({e}); run crates/vxr-app/fetch-fonts. Using egui's fonts."))
         .ok()
+}
+
+/// Where the app keeps the user's preferences: `VXR_CONFIG_DIR`, else the platform's config
+/// folder (Application Support on macOS, `%APPDATA%` on Windows, `$XDG_CONFIG_HOME` or
+/// `~/.config` elsewhere), in `vxr`.
+fn config_dir() -> Option<PathBuf> {
+    let var = |k| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
+    if let Some(d) = var("VXR_CONFIG_DIR") {
+        return Some(d);
+    }
+    let base = if cfg!(target_os = "macos") {
+        var("HOME")?.join("Library/Application Support")
+    } else if cfg!(windows) {
+        var("APPDATA")?
+    } else {
+        var("XDG_CONFIG_HOME").or_else(|| Some(var("HOME")?.join(".config")))?
+    };
+    Some(base.join("vxr"))
+}
+
+/// The theme the user picked last time (System when none was saved).
+fn load_theme() -> ThemeChoice {
+    config_dir()
+        .and_then(|d| std::fs::read_to_string(d.join("theme")).ok())
+        .and_then(|id| ThemeChoice::from_id(&id))
+        .unwrap_or_default()
+}
+
+fn save_theme(theme: ThemeChoice) -> Result<(), String> {
+    let dir = config_dir().ok_or("no config folder")?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("theme"), format!("{}\n", theme.id())).map_err(|e| e.to_string())
 }
 
 struct App {
@@ -103,14 +136,21 @@ impl App {
         let ppp = window.scale_factor() as f32;
         let max_tex = gpu.device.limits().max_texture_dimension_2d as usize;
         let mut editor = Editor::new(gpu, scene, &name, format, (config.width, config.height), ppp, fonts())?;
+        editor.ui.theme = load_theme();
         // The assistant reaches its provider from here, with keys from the OS keychain.
         editor.assistant =
             vxr_app::assistant::Assistant::new(Box::new(crate::net::Net::new()), Box::new(crate::net::Keychain), false);
         if let Some(script) = self.stage.take() {
             editor.stage(script);
         }
-        let egui =
-            egui_winit::State::new(editor.ctx.clone(), egui::ViewportId::ROOT, &window, Some(ppp), None, Some(max_tex));
+        let egui = egui_winit::State::new(
+            editor.ctx.clone(),
+            egui::ViewportId::ROOT,
+            &window,
+            Some(ppp),
+            window.theme(),
+            Some(max_tex),
+        );
         Ok(State {
             window,
             surface,
@@ -154,6 +194,11 @@ impl State {
         let ctx = self.editor.ctx.clone();
         match a {
             Action::New => self.window.set_title("Untitled - vxr"),
+            Action::Theme => {
+                if let Err(e) = save_theme(self.editor.ui.theme) {
+                    self.editor.ui.toast(&ctx, format!("Could not keep the theme: {e}"));
+                }
+            }
             Action::Open => {
                 let Some(path) = rfd::FileDialog::new().add_filter("MagicaVoxel", &["vox"]).pick_file() else { return };
                 match open(&path).and_then(|(scene, name)| self.editor.load(scene, &name).map(|_| name)) {

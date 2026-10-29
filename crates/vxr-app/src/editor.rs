@@ -1383,6 +1383,9 @@ impl Editor {
         }
         self.preview.lighting = self.ui.render.lighting(self.cam.distance);
         self.preview.max_spp = self.ui.render.samples();
+        // The theme's own colours for the view: its background, guides and selection.
+        self.renderer.colors = self.ui.shown_theme(&self.ctx).view;
+        self.preview.set_backdrop(self.renderer.colors.sky);
         if let Some(done) = self.draw(out.shapes, out.pixels_per_point, out.textures_delta, view) {
             host.push(done);
         }
@@ -1606,6 +1609,7 @@ impl Editor {
             &self.scene.materials,
             self.cam,
             &self.ui.render,
+            self.renderer.colors.sky,
         );
         match r {
             Ok(x) => {
@@ -1660,6 +1664,7 @@ impl Editor {
         p.set_materials(queue, &self.materials);
         p.lighting = self.preview.lighting;
         p.max_spp = self.preview.max_spp;
+        p.set_backdrop(self.renderer.colors.sky);
         p.restarts = self.preview.restarts + 1;
         if let Some(r) = &self.review {
             p.set_hidden(dev, queue, &r.ghost_mask(&self.scene));

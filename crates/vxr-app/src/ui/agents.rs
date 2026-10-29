@@ -63,10 +63,10 @@ fn one_line(ui: &Ui, text: &str, font: FontId, color: Color32, width: f32) -> Ar
 /// A setup line in a box, with Copy.
 fn setup_line(ui: &mut Ui, r: Rect, text: &str, id: &str, hits: &mut Vec<(String, Rect)>, copied: &mut Option<String>) {
     let p = ui.painter();
-    p.rect(r, CornerRadius::same(8), Color32::from_white_alpha(9), Stroke::new(1.0, LINE), StrokeKind::Inside);
+    p.rect(r, CornerRadius::same(8), th().tint(9), Stroke::new(1.0, th().line), StrokeKind::Inside);
     let b = Rect::from_min_size(pos2(r.right() - 6.0 - 64.0, r.top() + 6.0), vec2(64.0, 22.0));
-    let g = one_line(ui, text, mono(11.5), TEXT, b.left() - 8.0 - (r.left() + 10.0));
-    ui.painter().galley(pos2(r.left() + 10.0, r.center().y - g.size().y / 2.0), g, TEXT);
+    let g = one_line(ui, text, mono(11.5), th().text, b.left() - 8.0 - (r.left() + 10.0));
+    ui.painter().galley(pos2(r.left() + 10.0, r.center().y - g.size().y / 2.0), g, th().text);
     if small_button(ui, b, icon::COPY, "Copy", id, false).clicked() {
         *copied = Some(text.to_string());
     }
@@ -78,10 +78,10 @@ fn setup_line(ui: &mut Ui, r: Rect, text: &str, id: &str, hits: &mut Vec<(String
 fn switch(ui: &mut Ui, r: Rect, id: &str, on: bool) -> egui::Response {
     let resp = ui.interact(r, Id::unique(id), Sense::click());
     let p = ui.painter();
-    let fill = if on { ACCENT } else { Color32::from_white_alpha(28) };
+    let fill = if on { th().accent } else { th().tint(28) };
     p.rect_filled(r, CornerRadius::same(9), fill);
     let x = if on { r.right() - 9.0 } else { r.left() + 9.0 };
-    let knob = if on { ON_ACCENT } else { MUTED };
+    let knob = if on { th().on_accent } else { th().muted };
     p.circle_filled(pos2(x, r.center().y), 6.5, knob);
     resp
 }
@@ -105,7 +105,7 @@ impl Hybrid {
         if self.agents.clients.is_empty() {
             return 0.0;
         }
-        let g = ctx.fonts_mut(|f| f.layout_no_wrap(self.agent_chip_text(), sans_medium(12.0), TEXT));
+        let g = ctx.fonts_mut(|f| f.layout_no_wrap(self.agent_chip_text(), sans_medium(12.0), th().text));
         14.0 + g.size().x + 10.0 + 58.0 + 14.0
     }
 
@@ -125,11 +125,11 @@ impl Hybrid {
         let x = rect.left() + 12.0;
         let t = ui.input(|i| i.time);
         let pulse = 0.55 + 0.45 * (t * 3.0).sin().abs() as f32;
-        ui.painter().circle_filled(pos2(x + 3.5, cy), 3.5, OK.gamma_multiply(pulse));
+        ui.painter().circle_filled(pos2(x + 3.5, cy), 3.5, th().ok.gamma_multiply(pulse));
         ui.ctx().request_repaint();
-        let g = ui.painter().layout_no_wrap(self.agent_chip_text(), sans_medium(12.0), TEXT);
+        let g = ui.painter().layout_no_wrap(self.agent_chip_text(), sans_medium(12.0), th().text);
         let gw = g.size().x;
-        ui.painter().galley(pos2(x + 13.0, cy - g.size().y / 2.0), g, TEXT);
+        ui.painter().galley(pos2(x + 13.0, cy - g.size().y / 2.0), g, th().text);
         let stop = Rect::from_min_size(pos2(x + 13.0 + gw + 10.0, cy - 11.0), vec2(56.0, 22.0));
         if small_button(ui, stop, icon::SQUARE, "Stop", "agent-stop", false).clicked() {
             self.actions.push(Action::StopAgents);
@@ -137,7 +137,8 @@ impl Hybrid {
         self.hits.insert("agent-stop".into(), stop);
         self.hits.insert("agent-chip".into(), Rect::from_min_max(rect.min, pos2(rect.left() + w, rect.bottom())));
         let sx = rect.left() + w - 0.5;
-        ui.painter().line_segment([pos2(sx, rect.top() + 8.0), pos2(sx, rect.bottom() - 8.0)], Stroke::new(1.0, LINE));
+        ui.painter()
+            .line_segment([pos2(sx, rect.top() + 8.0), pos2(sx, rect.bottom() - 8.0)], Stroke::new(1.0, th().line));
     }
 
     // The Agent edits card: where the review card goes, while no change is under review.
@@ -165,34 +166,40 @@ impl Hybrid {
             let inner = rect.shrink(12.0);
             let p = ui.painter().clone();
             let hy = inner.top() + 7.5;
-            p.text(pos2(inner.left() + 6.0, hy), Align2::CENTER_CENTER, icon::TERMINAL, icon_font(13.0), ACCENT);
-            let g = p.layout_job(spaced("AGENT EDITS", sans_semibold(11.0), MUTED, 0.88));
-            p.galley(pos2(inner.left() + 18.0, hy - g.size().y / 2.0), g, MUTED);
+            p.text(pos2(inner.left() + 6.0, hy), Align2::CENTER_CENTER, icon::TERMINAL, icon_font(13.0), th().accent);
+            let g = p.layout_job(spaced("AGENT EDITS", sans_semibold(11.0), th().muted, 0.88));
+            p.galley(pos2(inner.left() + 18.0, hy - g.size().y / 2.0), g, th().muted);
             let cr = Rect::from_center_size(pos2(inner.right() - 8.0, hy), vec2(22.0, 22.0));
             let resp = ui.interact(cr, Id::unique("agent-card-close"), Sense::click());
             if resp.hovered() {
-                p.rect_filled(cr, CornerRadius::same(6), HOVER);
+                p.rect_filled(cr, CornerRadius::same(6), th().hover);
             }
             p.text(
                 cr.center(),
                 Align2::CENTER_CENTER,
                 icon::X,
                 icon_font(13.0),
-                if resp.hovered() { TEXT } else { FAINT },
+                if resp.hovered() { th().text } else { th().faint },
             );
             close = resp.clicked();
             hits.push(("agent-card-close".into(), cr));
             let applied = edits.iter().filter(|e| e.applied).count();
-            p.text(pos2(cr.left() - 6.0, hy), Align2::RIGHT_CENTER, format!("{applied} applied"), mono(11.0), FAINT);
+            p.text(
+                pos2(cr.left() - 6.0, hy),
+                Align2::RIGHT_CENTER,
+                format!("{applied} applied"),
+                mono(11.0),
+                th().faint,
+            );
             let mut y = inner.top() + 15.0 + 8.0;
             for i in (0..n).rev().take(rows) {
                 let e = &edits[i];
                 let r = Rect::from_min_size(pos2(inner.left() - 4.0, y), vec2(inner_w + 8.0, row_h));
                 let cy = r.center().y;
-                let dot = if e.applied { OK } else { FAINT };
+                let dot = if e.applied { th().ok } else { th().faint };
                 p.circle_filled(pos2(r.left() + 9.0, cy), 3.0, dot);
                 let b = Rect::from_min_size(pos2(r.right() - 4.0 - 64.0, cy - 11.0), vec2(64.0, 22.0));
-                let color = if e.applied { TEXT } else { FAINT };
+                let color = if e.applied { th().text } else { th().faint };
                 let g = one_line(ui, &e.label, sans(12.0), color, b.left() - 8.0 - (r.left() + 20.0));
                 let gw = g.size().x;
                 p.galley(pos2(r.left() + 20.0, cy - g.size().y / 2.0), g, color);
@@ -205,15 +212,21 @@ impl Hybrid {
                 } else {
                     p.line_segment(
                         [pos2(r.left() + 20.0, cy), pos2(r.left() + 20.0 + gw, cy)],
-                        Stroke::new(1.0, FAINT),
+                        Stroke::new(1.0, th().faint),
                     );
-                    p.text(pos2(b.right() - 6.0, cy), Align2::RIGHT_CENTER, "Undone", sans(11.5), FAINT);
+                    p.text(pos2(b.right() - 6.0, cy), Align2::RIGHT_CENTER, "Undone", sans(11.5), th().faint);
                 }
                 hits.push((format!("agent-edit-{i}"), r));
                 y += row_h;
             }
             if more > 0 {
-                p.text(pos2(inner.left(), y + 9.0), Align2::LEFT_CENTER, format!("{more} earlier"), sans(11.5), FAINT);
+                p.text(
+                    pos2(inner.left(), y + 9.0),
+                    Align2::LEFT_CENTER,
+                    format!("{more} earlier"),
+                    sans(11.5),
+                    th().faint,
+                );
             }
         });
         self.hits.extend(hits);
@@ -239,13 +252,13 @@ impl Hybrid {
         } else {
             "Live mode is not built for this system yet. Files mode edits .vox files on disk without a window:"
         };
-        let intro = wrapped(ctx, intro, sans(12.0), MUTED, inner_w);
-        let error = v.error.as_deref().map(|e| wrapped(ctx, e, sans(12.0), DANGER, inner_w));
+        let intro = wrapped(ctx, intro, sans(12.0), th().muted, inner_w);
+        let error = v.error.as_deref().map(|e| wrapped(ctx, e, sans(12.0), th().danger, inner_w));
         let pairing = wrapped(
             ctx,
             "vxr mcp --live reads a token from a file only you can read. A new token disconnects every agent; each must restart its MCP server to pair again.",
             sans(11.5),
-            FAINT,
+            th().faint,
             inner_w - 120.0,
         );
         let row_h = 32.0;
@@ -267,30 +280,36 @@ impl Hybrid {
         let mut actions = Vec::new();
         let mut close = false;
         let mut copied = None;
-        Self::panel_filled(ctx, "agents-panel", rect, Order::Foreground, PANEL_SOLID, |ui, rect| {
+        Self::panel_filled(ctx, "agents-panel", rect, Order::Foreground, th().panel_solid, |ui, rect| {
             let inner = rect.shrink(16.0);
             let p = ui.painter().clone();
             let hy = inner.top() + 9.0;
-            p.text(pos2(inner.left() + 7.0, hy), Align2::CENTER_CENTER, icon::SQUARE_TERMINAL, icon_font(14.0), ACCENT);
-            let g = p.layout_job(spaced("TERMINAL AGENTS", sans_semibold(11.0), MUTED, 0.88));
-            p.galley(pos2(inner.left() + 22.0, hy - g.size().y / 2.0), g, MUTED);
+            p.text(
+                pos2(inner.left() + 7.0, hy),
+                Align2::CENTER_CENTER,
+                icon::SQUARE_TERMINAL,
+                icon_font(14.0),
+                th().accent,
+            );
+            let g = p.layout_job(spaced("TERMINAL AGENTS", sans_semibold(11.0), th().muted, 0.88));
+            p.galley(pos2(inner.left() + 22.0, hy - g.size().y / 2.0), g, th().muted);
             let cr = Rect::from_center_size(pos2(inner.right() - 9.0, hy), vec2(24.0, 24.0));
             let resp = ui.interact(cr, Id::unique("agents-close"), Sense::click());
             if resp.hovered() {
-                p.rect_filled(cr, CornerRadius::same(6), HOVER);
+                p.rect_filled(cr, CornerRadius::same(6), th().hover);
             }
             p.text(
                 cr.center(),
                 Align2::CENTER_CENTER,
                 icon::X,
                 icon_font(14.0),
-                if resp.hovered() { TEXT } else { FAINT },
+                if resp.hovered() { th().text } else { th().faint },
             );
             close = resp.clicked();
             hits.push(("agents-close".into(), cr));
             let mut y = inner.top() + 18.0 + 12.0;
             let ih = intro.size().y;
-            p.galley(pos2(inner.left(), y), intro, MUTED);
+            p.galley(pos2(inner.left(), y), intro, th().muted);
             y += ih + 14.0;
             let line = Rect::from_min_size(pos2(inner.left(), y), vec2(inner_w, 34.0));
             if !v.available {
@@ -304,8 +323,8 @@ impl Hybrid {
             p.rect(
                 r,
                 CornerRadius::same(8),
-                if v.allowed { ACCENT_BG } else { Color32::from_white_alpha(9) },
-                Stroke::new(1.0, if v.allowed { RING } else { LINE }),
+                if v.allowed { th().accent_bg } else { th().tint(9) },
+                Stroke::new(1.0, if v.allowed { th().ring } else { th().line }),
                 StrokeKind::Inside,
             );
             p.text(
@@ -313,11 +332,11 @@ impl Hybrid {
                 Align2::LEFT_CENTER,
                 "Allow terminal agents to edit this window",
                 sans_medium(12.5),
-                TEXT,
+                th().text,
             );
             let sub =
                 if v.allowed { "On: listening on a local socket only you can open" } else { "Off: nothing listens" };
-            p.text(pos2(r.left() + 12.0, r.top() + 31.0), Align2::LEFT_CENTER, sub, sans(11.0), MUTED);
+            p.text(pos2(r.left() + 12.0, r.top() + 31.0), Align2::LEFT_CENTER, sub, sans(11.0), th().muted);
             let sw = Rect::from_min_size(pos2(r.right() - 12.0 - 30.0, r.center().y - 9.0), vec2(30.0, 18.0));
             let toggled = switch(ui, sw, "agents-allow", v.allowed).clicked() || resp.clicked();
             if toggled {
@@ -327,12 +346,12 @@ impl Hybrid {
             y += 44.0 + 10.0;
             if let Some(g) = error {
                 let gh = g.size().y;
-                ui.painter().galley(pos2(inner.left(), y), g, DANGER);
+                ui.painter().galley(pos2(inner.left(), y), g, th().danger);
                 y += gh + 10.0;
             }
             let label = |ui: &Ui, y: f32, text: &str| {
-                let g = ui.painter().layout_job(spaced(text, sans(9.0), FAINT, 0.72));
-                ui.painter().galley(pos2(inner.left(), y + 8.0 - g.size().y / 2.0), g, FAINT);
+                let g = ui.painter().layout_job(spaced(text, sans(9.0), th().faint, 0.72));
+                ui.painter().galley(pos2(inner.left(), y + 8.0 - g.size().y / 2.0), g, th().faint);
             };
             label(ui, y, "ADD VXR TO CLAUDE CODE");
             y += 16.0 + 6.0;
@@ -344,7 +363,7 @@ impl Hybrid {
             y += 34.0 + 14.0;
             // Pairing: the token file, and Regenerate.
             let ph = pairing.size().y.max(28.0);
-            ui.painter().galley(pos2(inner.left(), y), pairing, FAINT);
+            ui.painter().galley(pos2(inner.left(), y), pairing, th().faint);
             let b = Rect::from_min_size(pos2(inner.right() - 108.0, y + ph / 2.0 - 14.0), vec2(108.0, 28.0));
             let resp = small_button(ui, b, icon::REFRESH_CW, "Regenerate", "agents-regenerate", false);
             if resp.clicked() && v.allowed {
@@ -356,13 +375,19 @@ impl Hybrid {
             y += 16.0 + 6.0;
             if v.clients.is_empty() {
                 let none = if v.allowed { "No agent connected yet" } else { "No agent can connect while this is off" };
-                ui.painter().text(pos2(inner.left(), y + row_h / 2.0), Align2::LEFT_CENTER, none, sans(12.0), FAINT);
+                ui.painter().text(
+                    pos2(inner.left(), y + row_h / 2.0),
+                    Align2::LEFT_CENTER,
+                    none,
+                    sans(12.0),
+                    th().faint,
+                );
             }
             for (conn, name) in &v.clients {
                 let r = Rect::from_min_size(pos2(inner.left(), y), vec2(inner_w, row_h));
                 let cy = r.center().y;
-                ui.painter().circle_filled(pos2(r.left() + 4.0, cy), 3.5, OK);
-                ui.painter().text(pos2(r.left() + 16.0, cy), Align2::LEFT_CENTER, name, sans(12.5), TEXT);
+                ui.painter().circle_filled(pos2(r.left() + 4.0, cy), 3.5, th().ok);
+                ui.painter().text(pos2(r.left() + 16.0, cy), Align2::LEFT_CENTER, name, sans(12.5), th().text);
                 let b = Rect::from_min_size(pos2(r.right() - 64.0, cy - 11.0), vec2(64.0, 22.0));
                 let id = format!("agents-stop-{conn}");
                 if small_button(ui, b, icon::SQUARE, "Stop", &id, false).clicked() {

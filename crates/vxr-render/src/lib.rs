@@ -4,7 +4,7 @@
 //! - [`map::GpuMap`]: the compacted brick map on the GPU (palette bytes for occupied voxels
 //!   only), bind group 1 of any ray pass. `upload_dirty` after edits, `set_palette` to recolor.
 //! - [`renderer::Renderer`]: the editor view. `march` traces one ray per pixel with `trace_h`
-//!   into its own textures, with the ground, grid and bounds frame (`Guides`) when asked; `blit`
+//!   into its own textures, with the ground, grid and bounds frame (`Guides`) when asked, in the theme's `ViewColors`; `blit`
 //!   draws the result onto any target.
 //! - [`preview::Preview`]: the live path-traced preview (640x360, progressive, denoised),
 //!   budgeted per frame and written into a corner of the editor image.
@@ -23,4 +23,4 @@ pub use camera::{OrbitCamera, View};
 pub use gpu::Gpu;
 pub use map::{GpuMap, brickmap_layout};
 pub use preview::{EditBox, Lighting, Preview};
-pub use renderer::{Guides, Renderer};
+pub use renderer::{Guides, Renderer, ViewColors};

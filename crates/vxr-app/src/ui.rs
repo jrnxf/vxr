@@ -13,40 +13,13 @@ use vxr_core::material::{Kind, Material};
 
 use crate::color::{Hsv, hex, parse_hex};
 use crate::render::{EXPORT_SIZES, RenderSettings, SPP_CHOICES};
+use crate::theme::{self, Theme, ThemeChoice, th};
 
 mod agents;
 mod assistant;
 pub use agents::{AgentsView, EditRow, FILES_SETUP, LIVE_SETUP, SETUP};
 pub use assistant::{AiAction, AskBar, ChatView, PANEL_W};
 
-// shadcn/ui's Neutral theme (.dark): every grey is oklch(L 0 0), so the chrome has no hue and the
-// voxels are the only colour on screen. Each constant names the shadcn variable it copies.
-pub const PANEL: Color32 = Color32::from_rgba_unmultiplied_const(23, 23, 23, 240); // --card, 94%
-pub const PANEL_SOLID: Color32 = Color32::from_rgb(0x17, 0x17, 0x17); // --card
-pub const LINE: Color32 = Color32::from_rgba_unmultiplied_const(255, 255, 255, 26); // --border
-pub const LINE2: Color32 = Color32::from_rgba_unmultiplied_const(255, 255, 255, 38); // --input
-pub const TEXT: Color32 = Color32::from_rgb(0xfa, 0xfa, 0xfa); // --foreground
-pub const MUTED: Color32 = Color32::from_rgb(0xa1, 0xa1, 0xa1); // --muted-foreground
-pub const FAINT: Color32 = Color32::from_rgb(0x73, 0x73, 0x73); // --ring
-pub const ACCENT: Color32 = Color32::from_rgb(0xe5, 0xe5, 0xe5); // --primary
-/// The primary button under the pointer (shadcn's `bg-primary/90`).
-pub const ACCENT_HOVER: Color32 = Color32::from_rgb(0xd4, 0xd4, 0xd4);
-/// Text and icons on [`ACCENT`]: --primary-foreground.
-pub const ON_ACCENT: Color32 = Color32::from_rgb(0x17, 0x17, 0x17);
-/// An on state's fill: --accent (#262626) over a panel.
-pub const ACCENT_BG: Color32 = Color32::from_rgba_unmultiplied_const(255, 255, 255, 18);
-/// A faint fill for a picked row or drop target.
-pub const ACCENT_TINT: Color32 = Color32::from_rgba_unmultiplied_const(255, 255, 255, 10);
-/// An on state's or a focused field's border: --ring.
-pub const RING: Color32 = Color32::from_rgb(0x73, 0x73, 0x73);
-pub const DANGER: Color32 = Color32::from_rgb(0xff, 0x64, 0x67); // --destructive
-pub const DANGER_BG: Color32 = Color32::from_rgba_unmultiplied_const(255, 100, 103, 18);
-pub const DANGER_LINE: Color32 = Color32::from_rgba_unmultiplied_const(255, 100, 103, 70);
-pub const OK: Color32 = Color32::from_rgb(0x6e, 0xe7, 0xa8);
-pub const MID: Color32 = Color32::from_rgb(0xff, 0xd1, 0x66);
-pub const MID_BG: Color32 = Color32::from_rgba_unmultiplied_const(255, 209, 102, 20);
-pub const MID_LINE: Color32 = Color32::from_rgba_unmultiplied_const(255, 209, 102, 90);
-const HOVER: Color32 = Color32::from_rgba_unmultiplied_const(255, 255, 255, 15);
 pub(crate) const R: u8 = 12;
 /// The top of the panels under the top bar's two 40 px islands.
 pub(crate) const TOP: f32 = 60.0;
@@ -133,13 +106,20 @@ fn font_definitions(fonts: FontBytes) -> FontDefinitions {
     defs
 }
 
+/// Style egui for the current theme. egui's own light or dark pick is pinned to it, so the
+/// system's setting reaches the UI only through [`ThemeChoice::System`].
 fn style(ctx: &Context) {
-    let mut visuals = egui::Visuals::dark();
-    visuals.selection.bg_fill = Color32::from_white_alpha(40);
-    visuals.text_cursor.stroke = Stroke::new(1.5, ACCENT);
+    let (theme, mut visuals) = if th().dark {
+        (egui::Theme::Dark, egui::Visuals::dark())
+    } else {
+        (egui::Theme::Light, egui::Visuals::light())
+    };
+    visuals.selection.bg_fill = th().tint(40);
+    visuals.text_cursor.stroke = Stroke::new(1.5, th().accent);
     visuals.extreme_bg_color = Color32::TRANSPARENT;
-    visuals.override_text_color = Some(TEXT);
-    ctx.set_visuals(visuals);
+    visuals.override_text_color = Some(th().text);
+    ctx.set_theme(theme);
+    ctx.set_visuals_of(theme, visuals);
 }
 
 // Lucide 1.61.0 codepoints.
@@ -198,6 +178,7 @@ mod icon {
     pub const CORNER_DOWN_LEFT: char = '\u{e0a1}';
     pub const KEY_ROUND: char = '\u{e4a3}';
     pub const SQUARE: char = '\u{e167}';
+    pub const PALETTE: char = '\u{e1dd}';
     pub const ARROW_UP: char = '\u{e04a}';
     pub const MESSAGE_SQUARE_PLUS: char = '\u{e40c}';
     pub const PANEL_RIGHT: char = '\u{e431}';
@@ -332,6 +313,8 @@ pub enum Action {
     StopAgents,
     /// Take back one agent edit (the Agent edits card's Undo).
     UndoAgentEdit(usize),
+    /// The theme was picked (for the host to keep: `Hybrid::theme`).
+    Theme,
 }
 
 /// The review card of an AI change (set by the editor while one is under review).
@@ -533,6 +516,12 @@ pub struct Hybrid {
     camera_tip: bool,
     /// The Export menu under the top bar's Export button is open.
     pub export_menu: bool,
+    /// The picked theme (System follows the system's light or dark setting), and the Theme
+    /// menu under the top bar's theme button.
+    pub theme: ThemeChoice,
+    pub theme_menu: bool,
+    /// The theme the UI was last styled for.
+    styled: Option<&'static str>,
     /// The New scene confirm is open: the scene has edits that starting a new one would drop.
     pub confirm_new: bool,
     /// Left edge of the top bar's Export button, where the Export menu lines up.
@@ -758,6 +747,13 @@ const COMMANDS: &[Command] = &[
     Command { label: "Assistant keys and model", keys: &[], run: |h| h.open_ai_setup(None) },
     Command { label: "Terminal agents (MCP)…", keys: &[], run: |h| h.open_agents() },
     Command { label: "Agent edits", keys: &[], run: |h| h.show_agent_edits() },
+    Command { label: "Theme: System", keys: &[], run: |h| h.set_theme(ThemeChoice::System) },
+    Command { label: "Theme: Neutral", keys: &[], run: |h| h.set_theme(ThemeChoice::Neutral) },
+    Command { label: "Theme: Paper", keys: &[], run: |h| h.set_theme(ThemeChoice::Paper) },
+    Command { label: "Theme: Gruvbox", keys: &[], run: |h| h.set_theme(ThemeChoice::Gruvbox) },
+    Command { label: "Theme: Tokyo Night", keys: &[], run: |h| h.set_theme(ThemeChoice::TokyoNight) },
+    Command { label: "Theme: Kanagawa", keys: &[], run: |h| h.set_theme(ThemeChoice::Kanagawa) },
+    Command { label: "Theme: Nord", keys: &[], run: |h| h.set_theme(ThemeChoice::Nord) },
 ];
 
 impl Hybrid {
@@ -799,6 +795,9 @@ impl Hybrid {
             camera_hints: false,
             camera_tip: false,
             export_menu: false,
+            theme: ThemeChoice::default(),
+            theme_menu: false,
+            styled: None,
             confirm_new: false,
             export_x: 0.0,
             grid: true,
@@ -1026,7 +1025,10 @@ impl Hybrid {
         if std::mem::take(&mut self.agents_panel) {
             return;
         }
-        if std::mem::take(&mut self.view_panel) || std::mem::take(&mut self.export_menu) {
+        if std::mem::take(&mut self.view_panel)
+            || std::mem::take(&mut self.export_menu)
+            || std::mem::take(&mut self.theme_menu)
+        {
             return;
         }
         if self.size_shown() && std::mem::take(&mut self.size_panel) {
@@ -1062,8 +1064,34 @@ impl Hybrid {
         Color32::from_rgb(c[0], c[1], c[2])
     }
 
+    /// Pick a theme; the host keeps it.
+    pub fn set_theme(&mut self, choice: ThemeChoice) {
+        if self.theme != choice {
+            self.theme = choice;
+            self.actions.push(Action::Theme);
+        }
+    }
+
+    /// The theme the picked one shows now: System follows the system's setting (dark when the
+    /// system does not say).
+    pub fn shown_theme(&self, ctx: &Context) -> &'static Theme {
+        self.theme.resolve(ctx.system_theme().is_none_or(|t| t == egui::Theme::Dark))
+    }
+
+    /// Draw with the shown theme, restyling egui when it changed.
+    fn apply_theme(&mut self, ctx: &Context) {
+        let t = self.shown_theme(ctx);
+        theme::set(t);
+        if self.styled != Some(t.name) {
+            self.styled = Some(t.name);
+            style(ctx);
+            ctx.request_repaint();
+        }
+    }
+
     /// Draw the whole UI and return what the app should do.
     pub fn ui(&mut self, ctx: &Context, stats: &Stats) -> Vec<Action> {
+        self.apply_theme(ctx);
         self.keys(ctx);
         self.hits.clear();
         let screen = ctx.content_rect();
@@ -1080,6 +1108,7 @@ impl Hybrid {
         self.bounds_panel(ctx);
         self.new_confirm(ctx, screen);
         self.export_menu(ctx);
+        self.theme_menu(ctx);
         self.marquee(ctx);
         self.palette_panel(ctx, screen);
         self.color_editor(ctx, screen);
@@ -1105,6 +1134,10 @@ impl Hybrid {
                 ctx,
                 "Right-drag orbits · Middle-drag or Space-drag pans · Scroll or pinch zooms · X-click orbits there",
             );
+        }
+        if self.shown_theme(ctx).name != self.styled.unwrap_or_default() {
+            // Picked this frame: draw the next one in it.
+            ctx.request_repaint();
         }
         std::mem::take(&mut self.actions)
     }
@@ -1286,10 +1319,10 @@ impl Hybrid {
 
     // .panel
     fn panel(ctx: &Context, id: &str, rect: Rect, order: Order, contents: impl FnOnce(&mut Ui, Rect)) {
-        Self::panel_filled(ctx, id, rect, order, PANEL, contents)
+        Self::panel_filled(ctx, id, rect, order, th().panel, contents)
     }
 
-    /// A panel with its own fill: [`PANEL_SOLID`] for a menu over other panels.
+    /// A panel with its own fill: the theme's `panel_solid` for a menu over other panels.
     fn panel_filled(
         ctx: &Context,
         id: &str,
@@ -1301,10 +1334,10 @@ impl Hybrid {
         Area::new(Id::unique(id)).fade_in(false).order(order).fixed_pos(rect.min).constrain(false).show(ctx, |ui| {
             let p = ui.painter();
             p.add(
-                Shadow { offset: [0, 10], blur: 30, spread: 0, color: Color32::from_black_alpha(89) }
+                Shadow { offset: [0, 10], blur: 30, spread: 0, color: th().shadow }
                     .as_shape(rect, CornerRadius::same(R)),
             );
-            p.rect(rect, CornerRadius::same(R), fill, Stroke::new(1.0, LINE), StrokeKind::Inside);
+            p.rect(rect, CornerRadius::same(R), fill, Stroke::new(1.0, th().line), StrokeKind::Inside);
             ui.allocate_rect(rect, Sense::hover());
             contents(ui, rect);
         });
@@ -1313,8 +1346,8 @@ impl Hybrid {
     // #top: two 40 px islands, so the scene shows between them. The left one has the scene,
     // the file actions as icons and undo/redo; the right one the assistant, the keys and Embed.
     fn top_bar(&mut self, ctx: &Context, screen: Rect) {
-        let name = ctx.fonts_mut(|f| f.layout_no_wrap(self.scene_name.clone(), sans(13.0), TEXT));
-        let brand = ctx.fonts_mut(|f| f.layout_no_wrap("vxr".into(), sans_semibold(13.0), TEXT));
+        let name = ctx.fonts_mut(|f| f.layout_no_wrap(self.scene_name.clone(), sans(13.0), th().text));
+        let brand = ctx.fonts_mut(|f| f.layout_no_wrap("vxr".into(), sans_semibold(13.0), th().text));
         let sel_w = name.size().x + 34.0;
         let w = 12.0 + 26.0 + brand.size().x + 10.0 + sel_w + 13.0 + 4.0 * 36.0 + 13.0 + 2.0 * 36.0 + 4.0;
         let left = Rect::from_min_size(pos2(12.0, 12.0), vec2(w, 40.0));
@@ -1324,28 +1357,28 @@ impl Hybrid {
             let mut x = rect.left() + 12.0;
             logo(ui, pos2(x, cy - 9.0), 18.0);
             x += 26.0;
-            ui.painter().galley(pos2(x, cy - brand.size().y / 2.0), brand.clone(), TEXT);
+            ui.painter().galley(pos2(x, cy - brand.size().y / 2.0), brand.clone(), th().text);
             x += brand.size().x + 10.0;
             // #scene-select
             let sel = Rect::from_min_size(pos2(x, cy - 14.0), vec2(sel_w, 28.0));
             let resp = ui.interact(sel, Id::unique("scene-select"), Sense::click());
             let p = ui.painter();
-            p.rect(
-                sel,
-                CornerRadius::same(7),
-                Color32::from_white_alpha(10),
-                Stroke::new(1.0, LINE),
-                StrokeKind::Inside,
-            );
+            p.rect(sel, CornerRadius::same(7), th().tint(10), Stroke::new(1.0, th().line), StrokeKind::Inside);
             if resp.hovered() {
-                p.rect_filled(sel, CornerRadius::same(7), HOVER);
+                p.rect_filled(sel, CornerRadius::same(7), th().hover);
             }
-            p.galley(pos2(sel.left() + 10.0, cy - name.size().y / 2.0), name, TEXT);
-            p.text(pos2(sel.right() - 13.0, cy), Align2::CENTER_CENTER, icon::CHEVRON_DOWN, icon_font(12.0), MUTED);
+            p.galley(pos2(sel.left() + 10.0, cy - name.size().y / 2.0), name, th().text);
+            p.text(
+                pos2(sel.right() - 13.0, cy),
+                Align2::CENTER_CENTER,
+                icon::CHEVRON_DOWN,
+                icon_font(12.0),
+                th().muted,
+            );
             let sep = |ui: &Ui, x: &mut f32| {
                 *x += 6.0;
                 ui.painter()
-                    .line_segment([pos2(*x + 0.5, cy - 10.0), pos2(*x + 0.5, cy + 10.0)], Stroke::new(1.0, LINE));
+                    .line_segment([pos2(*x + 0.5, cy - 10.0), pos2(*x + 0.5, cy + 10.0)], Stroke::new(1.0, th().line));
                 *x += 7.0;
             };
             x = sel.right();
@@ -1395,19 +1428,20 @@ impl Hybrid {
             tooltip(ctx, at, label, keys, Some((Rect::from_min_max(pos2(-1e6, -1e6), pos2(1e6, at.top())), true)));
         }
         // The right island, laid out from the right edge.
-        let embed_label = ctx.fonts_mut(|f| f.layout_no_wrap("Embed".into(), sans_semibold(13.0), ON_ACCENT));
+        let embed_label = ctx.fonts_mut(|f| f.layout_no_wrap("Embed".into(), sans_semibold(13.0), th().on_accent));
         let ew = 10.0 + 16.0 + 6.0 + embed_label.size().x + 10.0;
-        let rw = 4.0 + 36.0 + 4.0 + 36.0 + 4.0 + ew + 4.0;
+        let rw = 4.0 + 36.0 + 4.0 + 36.0 + 4.0 + 36.0 + 4.0 + ew + 4.0;
         let right = Rect::from_min_size(pos2(screen.right() - 12.0 - rw, 12.0), vec2(rw, 40.0));
+        let mut theme_tip = None;
         Self::panel(ctx, "top-right", right, Order::Middle, |ui, rect| {
             let cy = rect.center().y;
             let embed = Rect::from_min_size(pos2(rect.right() - 4.0 - ew, cy - 16.0), vec2(ew, 32.0));
             let resp = ui.interact(embed, Id::unique("embed"), Sense::click());
-            let fill = if resp.hovered() { ACCENT_HOVER } else { ACCENT };
+            let fill = if resp.hovered() { th().accent_hover } else { th().accent };
             let p = ui.painter();
             p.rect_filled(embed, CornerRadius::same(8), fill);
-            p.text(pos2(embed.left() + 18.0, cy), Align2::CENTER_CENTER, icon::CODE, icon_font(16.0), ON_ACCENT);
-            p.galley(pos2(embed.left() + 32.0, cy - embed_label.size().y / 2.0), embed_label, ON_ACCENT);
+            p.text(pos2(embed.left() + 18.0, cy), Align2::CENTER_CENTER, icon::CODE, icon_font(16.0), th().on_accent);
+            p.galley(pos2(embed.left() + 32.0, cy - embed_label.size().y / 2.0), embed_label, th().on_accent);
             if resp.clicked() {
                 self.actions.push(Action::Embed);
             }
@@ -1420,12 +1454,112 @@ impl Hybrid {
             let r = tbtn_on(ui, &mut ax, cy, Some(icon::SPARKLES), "", "assistant", true, self.ai_open);
             self.hits.insert("ai-toggle".into(), r.rect);
             if self.ai_open {
-                ui.painter().text(r.rect.center(), Align2::CENTER_CENTER, icon::SPARKLES, icon_font(16.0), ACCENT);
+                ui.painter().text(r.rect.center(), Align2::CENTER_CENTER, icon::SPARKLES, icon_font(16.0), th().accent);
             }
             if r.clicked() {
                 self.toggle_ai();
             }
+            // The Theme menu.
+            let mut tx = ax - 36.0 - 4.0 - 36.0;
+            let r = tbtn_on(ui, &mut tx, cy, Some(icon::PALETTE), "", "theme", true, self.theme_menu);
+            self.hits.insert("theme".into(), r.rect);
+            if r.hovered() && !self.theme_menu {
+                theme_tip = Some(r.rect);
+            }
+            if r.clicked() {
+                self.theme_menu = !self.theme_menu;
+            }
         });
+        if let Some(at) = theme_tip {
+            tooltip(ctx, at, "Theme", &[], Some((Rect::from_min_max(pos2(-1e6, -1e6), pos2(1e6, at.top())), true)));
+        }
+    }
+
+    // The Theme menu under the top bar's theme button: System (Neutral in dark mode, Paper in
+    // light), then each theme with its card, accent and text colours; a check on the picked one.
+    fn theme_menu(&mut self, ctx: &Context) {
+        if !self.theme_menu {
+            return;
+        }
+        let button = self.hits.get("theme").copied().unwrap_or(Rect::NOTHING);
+        let screen = ctx.content_rect();
+        let w = 236.0;
+        let rows = ThemeChoice::ALL;
+        let h = 36.0 + 34.0 * rows.len() as f32 + 6.0;
+        let x = (button.left()).min(screen.right() - 12.0 - w);
+        let rect = Rect::from_min_size(pos2(x, 12.0 + 44.0 + 6.0), vec2(w, h));
+        self.hits.insert("theme-menu".into(), rect);
+        let shown = self.shown_theme(ctx).name;
+        let picked = self.theme;
+        let mut run = None;
+        let mut hits = Vec::new();
+        Self::panel_filled(ctx, "theme-menu", rect, Order::Foreground, th().panel_solid, |ui, rect| {
+            ui.allocate_rect(rect, Sense::click());
+            let hy = rect.top() + 18.0;
+            let g = ui.painter().layout_job(spaced("THEME", sans(9.0), th().faint, 0.72));
+            ui.painter().galley(pos2(rect.left() + 12.0, hy - g.size().y / 2.0), g, th().faint);
+            for (k, choice) in rows.into_iter().enumerate() {
+                let r = Rect::from_min_size(
+                    pos2(rect.left() + 6.0, rect.top() + 36.0 + 34.0 * k as f32),
+                    vec2(rect.width() - 12.0, 32.0),
+                );
+                let id = format!("theme-{}", choice.id());
+                let resp = ui.interact(r, Id::unique(&id), Sense::click());
+                hits.push((id, r));
+                let p = ui.painter();
+                if choice == picked {
+                    p.rect_filled(r, CornerRadius::same(7), th().accent_bg);
+                } else if resp.hovered() {
+                    p.rect_filled(r, CornerRadius::same(7), th().hover);
+                }
+                let cy = r.center().y;
+                // A chip of the theme: its card, with its accent and text as dots. System shows
+                // its dark and light halves.
+                let chip = Rect::from_center_size(pos2(r.left() + 22.0, cy), vec2(28.0, 18.0));
+                let swatch = |p: &egui::Painter, t: &Theme, area: Rect| {
+                    p.rect_filled(area, CornerRadius::same(4), t.panel_solid);
+                    p.circle_filled(pos2(area.center().x - 3.5, cy), 3.0, t.accent);
+                    p.circle_filled(pos2(area.center().x + 4.0, cy), 3.0, t.text);
+                };
+                if choice == ThemeChoice::System {
+                    let (dark, light) = (choice.resolve(true), choice.resolve(false));
+                    let (a, b) = chip.split_left_right_at_fraction(0.5);
+                    p.rect_filled(a, CornerRadius { nw: 4, sw: 4, ne: 0, se: 0 }, dark.panel_solid);
+                    p.rect_filled(b, CornerRadius { nw: 0, sw: 0, ne: 4, se: 4 }, light.panel_solid);
+                    p.circle_filled(a.center(), 3.0, dark.text);
+                    p.circle_filled(b.center(), 3.0, light.text);
+                } else {
+                    swatch(p, choice.resolve(true), chip);
+                }
+                p.rect_stroke(chip, CornerRadius::same(4), Stroke::new(1.0, th().line2), StrokeKind::Inside);
+                let color = if choice == picked || resp.hovered() { th().text } else { th().muted };
+                p.text(pos2(r.left() + 46.0, cy), Align2::LEFT_CENTER, choice.name(), sans(13.0), color);
+                let mut right = r.right() - 10.0;
+                if choice == picked {
+                    p.text(pos2(right - 6.0, cy), Align2::CENTER_CENTER, icon::CHECK, icon_font(14.0), th().text);
+                    right -= 20.0;
+                }
+                if choice == ThemeChoice::System {
+                    p.text(pos2(right, cy), Align2::RIGHT_CENTER, "Light / dark", sans(11.0), th().faint);
+                } else if picked == ThemeChoice::System && choice.resolve(true).name == shown {
+                    p.text(pos2(right, cy), Align2::RIGHT_CENTER, "now", sans(11.0), th().faint);
+                }
+                if resp.clicked() {
+                    run = Some(choice);
+                }
+            }
+        });
+        self.hits.extend(hits);
+        let outside = ctx.input(|i| {
+            i.pointer.any_pressed()
+                && i.pointer.interact_pos().is_some_and(|p| !rect.contains(p) && !button.contains(p))
+        });
+        if let Some(choice) = run {
+            self.set_theme(choice);
+        }
+        if outside {
+            self.theme_menu = false;
+        }
     }
 
     // #rail
@@ -1533,8 +1667,8 @@ impl Hybrid {
         let mut wheel = 0.0;
         Self::panel(ctx, "tree", rect, Order::Middle, |ui, rect| {
             let header = |ui: &egui::Ui, y: f32, title: &str| {
-                let g = ui.painter().layout_job(spaced(title, sans(9.0), FAINT, 0.72));
-                ui.painter().galley(pos2(rect.left() + 12.0, y - g.size().y / 2.0), g, FAINT);
+                let g = ui.painter().layout_job(spaced(title, sans(9.0), th().faint, 0.72));
+                ui.painter().galley(pos2(rect.left() + 12.0, y - g.size().y / 2.0), g, th().faint);
             };
             let hy = rect.top() + 18.0;
             header(ui, hy, "SCENE");
@@ -1543,7 +1677,7 @@ impl Hybrid {
                 Align2::RIGHT_CENTER,
                 format!("{objects} objects"),
                 sans(11.0),
-                FAINT,
+                th().faint,
             );
             let body = Rect::from_min_size(
                 pos2(rect.left() + 6.0, rect.top() + 34.0),
@@ -1567,15 +1701,15 @@ impl Hybrid {
                 let is_on = on == Some(row.node);
                 let p = ui.painter();
                 if is_on {
-                    p.rect_filled(r, CornerRadius::same(7), ACCENT_BG);
+                    p.rect_filled(r, CornerRadius::same(7), th().accent_bg);
                 } else if hover {
-                    p.rect_filled(r, CornerRadius::same(7), HOVER);
+                    p.rect_filled(r, CornerRadius::same(7), th().hover);
                 }
                 let color = match (is_on, row.shown) {
-                    (true, _) => Color32::WHITE,
-                    (false, true) if hover => TEXT,
-                    (false, true) => MUTED,
-                    (false, false) => FAINT,
+                    (true, _) => th().text,
+                    (false, true) if hover => th().text,
+                    (false, true) => th().muted,
+                    (false, false) => th().faint,
                 };
                 let x = r.left() + 8.0 + row.depth as f32 * 14.0;
                 let glyph = match (row.group, row.linked > 1) {
@@ -1587,9 +1721,9 @@ impl Hybrid {
                 let mut right = eye.left() - 4.0;
                 if !row.group {
                     let s = row.size;
-                    let g = p.layout_no_wrap(format!("{}×{}×{}", s[0], s[1], s[2]), mono(10.0), FAINT);
+                    let g = p.layout_no_wrap(format!("{}×{}×{}", s[0], s[1], s[2]), mono(10.0), th().faint);
                     right -= g.size().x;
-                    p.galley(pos2(right, r.center().y - g.size().y / 2.0), g, FAINT);
+                    p.galley(pos2(right, r.center().y - g.size().y / 2.0), g, th().faint);
                     right -= 8.0;
                 }
                 let name_r = Rect::from_min_max(pos2(x + 20.0, r.top() + 4.0), pos2(right, r.bottom() - 4.0));
@@ -1621,16 +1755,16 @@ impl Hybrid {
             // LAYERS: a click puts the picked object or group on the layer (its row shows a
             // dot), the eye hides and shows the layer, a double-click renames, + adds one.
             let top = body.bottom() + 6.0;
-            ui.painter().hline(rect.left() + 12.0..=rect.right() - 12.0, top, Stroke::new(1.0, LINE));
+            ui.painter().hline(rect.left() + 12.0..=rect.right() - 12.0, top, Stroke::new(1.0, th().line));
             let hy = top + 16.0;
             header(ui, hy, "LAYERS");
             let add = Rect::from_center_size(pos2(rect.right() - 21.0, hy), vec2(22.0, 22.0));
             let add_resp = ui.interact(add, Id::unique("layer-add"), Sense::click());
             hits.push(("layer-add".to_string(), add));
             if add_resp.hovered() {
-                ui.painter().rect_filled(add, CornerRadius::same(6), HOVER);
+                ui.painter().rect_filled(add, CornerRadius::same(6), th().hover);
             }
-            let c = if add_resp.hovered() { TEXT } else { FAINT };
+            let c = if add_resp.hovered() { th().text } else { th().faint };
             ui.painter().text(add.center(), Align2::CENTER_CENTER, icon::PLUS, icon_font(13.0), c);
             if add_resp.clicked() {
                 run.push(Action::AddLayer);
@@ -1647,21 +1781,21 @@ impl Hybrid {
                 let hover = resp.hovered() || eye_resp.hovered();
                 let p = ui.painter();
                 if hover {
-                    p.rect_filled(r, CornerRadius::same(7), HOVER);
+                    p.rect_filled(r, CornerRadius::same(7), th().hover);
                 }
                 let color = match (l.hidden, hover) {
-                    (true, _) => FAINT,
-                    (false, true) => TEXT,
-                    (false, false) => MUTED,
+                    (true, _) => th().faint,
+                    (false, true) => th().text,
+                    (false, false) => th().muted,
                 };
                 let x = r.left() + 8.0;
                 p.text(pos2(x + 7.0, r.center().y), Align2::CENTER_CENTER, icon::LAYERS, icon_font(13.0), color);
                 if layer_on == Some(l.id) {
-                    p.circle_filled(pos2(r.left() + 3.0, r.center().y), 2.5, ACCENT);
+                    p.circle_filled(pos2(r.left() + 3.0, r.center().y), 2.5, th().accent);
                 }
-                let g = p.layout_no_wrap(l.objects.to_string(), mono(10.0), FAINT);
+                let g = p.layout_no_wrap(l.objects.to_string(), mono(10.0), th().faint);
                 let right = eye.left() - 4.0 - g.size().x;
-                p.galley(pos2(right, r.center().y - g.size().y / 2.0), g, FAINT);
+                p.galley(pos2(right, r.center().y - g.size().y / 2.0), g, th().faint);
                 let name_r = Rect::from_min_max(pos2(x + 20.0, r.top() + 4.0), pos2(right - 8.0, r.bottom() - 4.0));
                 let named = Named::Layer(l.id);
                 match renaming.as_mut() {
@@ -1723,10 +1857,10 @@ impl Hybrid {
             return;
         }
         if resp.hovered() {
-            ui.painter().rect_filled(eye, CornerRadius::same(6), HOVER);
+            ui.painter().rect_filled(eye, CornerRadius::same(6), th().hover);
         }
         let glyph = if hidden { icon::EYE_OFF } else { icon::EYE };
-        let c = if resp.hovered() { TEXT } else { FAINT };
+        let c = if resp.hovered() { th().text } else { th().faint };
         ui.painter().text(eye.center(), Align2::CENTER_CENTER, glyph, icon_font(13.0), c);
     }
 
@@ -1735,14 +1869,14 @@ impl Hybrid {
         ui.painter().rect(
             name_r.expand2(vec2(4.0, 0.0)),
             CornerRadius::same(6),
-            Color32::from_white_alpha(9),
-            Stroke::new(1.0, RING),
+            th().tint(9),
+            Stroke::new(1.0, th().ring),
             StrokeKind::Inside,
         );
         let edit = egui::TextEdit::singleline(text)
             .id(Id::unique("tree-rename"))
             .font(sans(12.0))
-            .text_color(TEXT)
+            .text_color(th().text)
             .frame(egui::Frame::NONE)
             .margin(egui::Margin::ZERO)
             .desired_width(name_r.width());
@@ -1776,8 +1910,8 @@ impl Hybrid {
         let mut hits = Vec::new();
         Self::panel(ctx, "export-menu", rect, Order::Foreground, |ui, rect| {
             let hy = rect.top() + 18.0;
-            let g = ui.painter().layout_job(spaced("EXPORT", sans(9.0), FAINT, 0.72));
-            ui.painter().galley(pos2(rect.left() + 12.0, hy - g.size().y / 2.0), g, FAINT);
+            let g = ui.painter().layout_job(spaced("EXPORT", sans(9.0), th().faint, 0.72));
+            ui.painter().galley(pos2(rect.left() + 12.0, hy - g.size().y / 2.0), g, th().faint);
             for (k, (id, glyph, label, hint)) in rows.into_iter().enumerate() {
                 let r = Rect::from_min_size(
                     pos2(rect.left() + 6.0, rect.top() + 36.0 + 34.0 * k as f32),
@@ -1787,18 +1921,18 @@ impl Hybrid {
                 hits.push((id.to_string(), r));
                 let p = ui.painter();
                 let color = if resp.hovered() {
-                    p.rect_filled(r, CornerRadius::same(7), HOVER);
-                    TEXT
+                    p.rect_filled(r, CornerRadius::same(7), th().hover);
+                    th().text
                 } else {
-                    MUTED
+                    th().muted
                 };
                 let cy = r.center().y;
                 p.text(pos2(r.left() + 16.0, cy), Align2::CENTER_CENTER, glyph, icon_font(15.0), color);
-                p.text(pos2(r.left() + 32.0, cy), Align2::LEFT_CENTER, label, sans(13.0), TEXT);
+                p.text(pos2(r.left() + 32.0, cy), Align2::LEFT_CENTER, label, sans(13.0), th().text);
                 if hint.len() == 1 {
                     kbd(ui, pos2(r.right() - 8.0, cy), hint, true);
                 } else {
-                    ui.painter().text(pos2(r.right() - 8.0, cy), Align2::RIGHT_CENTER, hint, mono(10.5), FAINT);
+                    ui.painter().text(pos2(r.right() - 8.0, cy), Align2::RIGHT_CENTER, hint, mono(10.5), th().faint);
                 }
                 if resp.clicked() {
                     run = Some(k);
@@ -1864,20 +1998,20 @@ impl Hybrid {
         let mut run = Vec::new();
         let mut hits = Vec::new();
         let mut close = false;
-        Self::panel_filled(ctx, "view", rect, Order::Foreground, PANEL_SOLID, |ui, rect| {
+        Self::panel_filled(ctx, "view", rect, Order::Foreground, th().panel_solid, |ui, rect| {
             // It can sit over the render corner (above it in layer order): its blank space takes the
             // click, not the corner.
             ui.allocate_rect(rect, Sense::click());
             let hy = rect.top() + 16.0;
-            let g = ui.painter().layout_job(spaced("VIEW", sans(9.0), FAINT, 0.72));
-            ui.painter().galley(pos2(rect.left() + 12.0, hy - g.size().y / 2.0), g, FAINT);
+            let g = ui.painter().layout_job(spaced("VIEW", sans(9.0), th().faint, 0.72));
+            ui.painter().galley(pos2(rect.left() + 12.0, hy - g.size().y / 2.0), g, th().faint);
             let x = Rect::from_center_size(pos2(rect.right() - 19.0, hy), vec2(22.0, 22.0));
             let resp = ui.interact(x, Id::unique("view-close"), Sense::click());
             hits.push(("view-close".to_string(), x));
             if resp.hovered() {
-                ui.painter().rect_filled(x, CornerRadius::same(6), HOVER);
+                ui.painter().rect_filled(x, CornerRadius::same(6), th().hover);
             }
-            let c = if resp.hovered() { TEXT } else { MUTED };
+            let c = if resp.hovered() { th().text } else { th().muted };
             ui.painter().text(x.center(), Align2::CENTER_CENTER, icon::X, icon_font(13.0), c);
             close = resp.clicked();
             ui.painter().text(
@@ -1885,7 +2019,7 @@ impl Hybrid {
                 Align2::RIGHT_CENTER,
                 view.map_or("Free", |v| v.name()),
                 sans(11.0),
-                FAINT,
+                th().faint,
             );
             let iso = view == Some(View::Iso);
             let sel = if iso { 2 } else { ortho as usize };
@@ -1902,7 +2036,7 @@ impl Hybrid {
             hits.extend(seg.into_iter().map(|(n, r)| (n.to_string(), r)));
             ui.painter().line_segment(
                 [pos2(rect.left() + 10.0, hy + 47.5), pos2(rect.right() - 10.0, hy + 47.5)],
-                Stroke::new(1.0, LINE),
+                Stroke::new(1.0, th().line),
             );
             let cw = (rect.width() - 24.0 - 8.0) / 3.0;
             let cell = |k: usize, cy: f32| {
@@ -1918,7 +2052,7 @@ impl Hybrid {
             }
             ui.painter().line_segment(
                 [pos2(rect.left() + 10.0, hy + 117.5), pos2(rect.right() - 10.0, hy + 117.5)],
-                Stroke::new(1.0, LINE),
+                Stroke::new(1.0, th().line),
             );
             for (k, (id, label, key)) in
                 [("view-grid", "Grid", "G"), ("view-ground", "Ground", ""), ("view-bounds", "Bounds", "")]
@@ -1952,8 +2086,8 @@ impl Hybrid {
         let mut hits = Vec::new();
         Self::panel(ctx, "size", rect, Order::Middle, |ui, rect| {
             let cy = rect.center().y;
-            let g = ui.painter().layout_job(spaced("SIZE", sans(9.0), FAINT, 0.72));
-            ui.painter().galley(pos2(rect.left() + 12.0, cy - g.size().y / 2.0), g, FAINT);
+            let g = ui.painter().layout_job(spaced("SIZE", sans(9.0), th().faint, 0.72));
+            ui.painter().galley(pos2(rect.left() + 12.0, cy - g.size().y / 2.0), g, th().faint);
             for (k, (id, glyph, d)) in
                 [("size-minus", icon::MINUS, -1), ("size-plus", icon::PLUS, 1)].into_iter().enumerate()
             {
@@ -1962,15 +2096,15 @@ impl Hybrid {
                 let resp = ui.interact(c, Id::unique(id), if off { Sense::hover() } else { Sense::click() });
                 hits.push((id.to_string(), c));
                 let hover = resp.hovered() && !off;
-                let border = if hover { Color32::from_white_alpha(64) } else { LINE2 };
+                let border = if hover { th().tint(64) } else { th().line2 };
                 let p = ui.painter();
                 p.rect_stroke(c, CornerRadius::same(7), Stroke::new(1.0, border), StrokeKind::Inside);
                 let color = if off {
-                    FAINT
+                    th().faint
                 } else if hover {
-                    TEXT
+                    th().text
                 } else {
-                    MUTED
+                    th().muted
                 };
                 p.text(c.center(), Align2::CENTER_CENTER, glyph, icon_font(13.0), color);
                 if resp.clicked() {
@@ -1982,7 +2116,7 @@ impl Hybrid {
                 Align2::CENTER_CENTER,
                 size.to_string(),
                 mono_medium(12.0),
-                TEXT,
+                th().text,
             );
         });
         self.hits.extend(hits);
@@ -2003,8 +2137,8 @@ impl Hybrid {
         Self::panel(ctx, "axes", rect, Order::Middle, |ui, rect| {
             for (row, label) in ["MIRROR", "LOCK"].into_iter().enumerate() {
                 let cy = rect.top() + 6.0 + 20.0 + row as f32 * 42.0;
-                let g = ui.painter().layout_job(spaced(label, sans(9.0), FAINT, 0.72));
-                ui.painter().galley(pos2(rect.left() + 12.0, cy - g.size().y / 2.0), g, FAINT);
+                let g = ui.painter().layout_job(spaced(label, sans(9.0), th().faint, 0.72));
+                ui.painter().galley(pos2(rect.left() + 12.0, cy - g.size().y / 2.0), g, th().faint);
                 for (a, name) in ["X", "Y", "Z"].into_iter().enumerate() {
                     let on = if row == 0 { mirror[a] } else { lock == Some(a) };
                     let c =
@@ -2014,13 +2148,19 @@ impl Hybrid {
                     hits.push((id, c));
                     let p = ui.painter();
                     let color = if on {
-                        p.rect(c, CornerRadius::same(7), ACCENT_BG, Stroke::new(1.0, RING), StrokeKind::Inside);
-                        ACCENT
+                        p.rect(
+                            c,
+                            CornerRadius::same(7),
+                            th().accent_bg,
+                            Stroke::new(1.0, th().ring),
+                            StrokeKind::Inside,
+                        );
+                        th().accent
                     } else {
                         let hover = resp.hovered();
-                        let border = if hover { Color32::from_white_alpha(64) } else { LINE2 };
+                        let border = if hover { th().tint(64) } else { th().line2 };
                         p.rect_stroke(c, CornerRadius::same(7), Stroke::new(1.0, border), StrokeKind::Inside);
-                        if hover { TEXT } else { MUTED }
+                        if hover { th().text } else { th().muted }
                     };
                     p.text(c.center(), Align2::CENTER_CENTER, name, mono_medium(11.5), color);
                     if resp.clicked() {
@@ -2066,23 +2206,23 @@ impl Hybrid {
         let mut hits = Vec::new();
         Self::panel(ctx, "selection", rect, Order::Middle, |ui, rect| {
             let hy = rect.top() + 18.0;
-            let g = ui.painter().layout_job(spaced("SELECTION", sans(9.0), FAINT, 0.72));
-            ui.painter().galley(pos2(rect.left() + 12.0, hy - g.size().y / 2.0), g, FAINT);
+            let g = ui.painter().layout_job(spaced("SELECTION", sans(9.0), th().faint, 0.72));
+            ui.painter().galley(pos2(rect.left() + 12.0, hy - g.size().y / 2.0), g, th().faint);
             if selected > 0 {
                 let x = Rect::from_center_size(pos2(rect.right() - 19.0, hy), vec2(22.0, 22.0));
                 let resp = ui.interact(x, Id::unique("deselect"), Sense::click());
                 hits.push(("deselect".to_string(), x));
                 if resp.hovered() {
-                    ui.painter().rect_filled(x, CornerRadius::same(6), HOVER);
+                    ui.painter().rect_filled(x, CornerRadius::same(6), th().hover);
                 }
-                let c = if resp.hovered() { TEXT } else { MUTED };
+                let c = if resp.hovered() { th().text } else { th().muted };
                 ui.painter().text(x.center(), Align2::CENTER_CENTER, icon::X, icon_font(13.0), c);
                 ui.painter().text(
                     pos2(x.left() - 4.0, hy),
                     Align2::RIGHT_CENTER,
                     group_thousands(selected as u64),
                     mono(11.0),
-                    ACCENT,
+                    th().accent,
                 );
                 if resp.clicked() {
                     run.push(Action::Deselect);
@@ -2093,13 +2233,13 @@ impl Hybrid {
                     Align2::RIGHT_CENTER,
                     "whole model",
                     sans(11.0),
-                    FAINT,
+                    th().faint,
                 );
             }
             for (row, label) in ["ROTATE", "FLIP", "LOOP"].into_iter().enumerate() {
                 let cy = hy + 30.0 + row as f32 * 34.0;
-                let g = ui.painter().layout_job(spaced(label, sans(9.0), FAINT, 0.72));
-                ui.painter().galley(pos2(rect.left() + 12.0, cy - g.size().y / 2.0), g, FAINT);
+                let g = ui.painter().layout_job(spaced(label, sans(9.0), th().faint, 0.72));
+                ui.painter().galley(pos2(rect.left() + 12.0, cy - g.size().y / 2.0), g, th().faint);
                 for (a, name) in ["X", "Y", "Z"].into_iter().enumerate() {
                     let c =
                         Rect::from_min_size(pos2(rect.left() + 70.0 + a as f32 * 28.0, cy - 13.0), vec2(26.0, 26.0));
@@ -2108,14 +2248,14 @@ impl Hybrid {
                     hits.push((id, c));
                     let hover = resp.hovered();
                     let p = ui.painter();
-                    let border = if hover { Color32::from_white_alpha(64) } else { LINE2 };
+                    let border = if hover { th().tint(64) } else { th().line2 };
                     p.rect_stroke(c, CornerRadius::same(7), Stroke::new(1.0, border), StrokeKind::Inside);
                     p.text(
                         c.center(),
                         Align2::CENTER_CENTER,
                         name,
                         mono_medium(11.5),
-                        if hover { TEXT } else { MUTED },
+                        if hover { th().text } else { th().muted },
                     );
                     if resp.clicked() {
                         run.push(Action::Transform(match row {
@@ -2147,17 +2287,17 @@ impl Hybrid {
                 let (hover, on) = (resp.hovered(), action.is_none() && bounds_open);
                 let p = ui.painter();
                 if on {
-                    p.rect_filled(c, CornerRadius::same(7), ACCENT_TINT);
+                    p.rect_filled(c, CornerRadius::same(7), th().accent_tint);
                 }
                 let border = if on {
-                    RING
+                    th().ring
                 } else if hover {
-                    Color32::from_white_alpha(64)
+                    th().tint(64)
                 } else {
-                    LINE2
+                    th().line2
                 };
                 p.rect_stroke(c, CornerRadius::same(7), Stroke::new(1.0, border), StrokeKind::Inside);
-                let color = if hover || on { TEXT } else { MUTED };
+                let color = if hover || on { th().text } else { th().muted };
                 p.text(c.center(), Align2::CENTER_CENTER, label, sans(11.0), color);
                 if resp.clicked() {
                     match action {
@@ -2180,7 +2320,7 @@ impl Hybrid {
             let cy = hy + 30.0 + 7.0 * 34.0 + 4.0;
             ui.painter().line_segment(
                 [pos2(rect.left() + 10.0, cy - 20.5), pos2(rect.right() - 10.0, cy - 20.5)],
-                Stroke::new(1.0, LINE),
+                Stroke::new(1.0, th().line),
             );
             for (k, (glyph, id, action, on)) in [
                 (icon::PAINT_BUCKET, "fill", Action::FillSelection, selected > 0),
@@ -2196,19 +2336,19 @@ impl Hybrid {
                 hits.push((id.to_string(), c));
                 let p = ui.painter().clone();
                 if !on {
-                    p.rect_stroke(c, CornerRadius::same(7), Stroke::new(1.0, LINE), StrokeKind::Inside);
-                    p.text(c.center(), Align2::CENTER_CENTER, glyph, icon_font(14.0), FAINT);
+                    p.rect_stroke(c, CornerRadius::same(7), Stroke::new(1.0, th().line), StrokeKind::Inside);
+                    p.text(c.center(), Align2::CENTER_CENTER, glyph, icon_font(14.0), th().faint);
                     continue;
                 }
                 let resp = ui.interact(c, Id::unique(id), Sense::click());
                 let hover = resp.hovered();
                 let danger = id == "delete";
-                let border = if hover { Color32::from_white_alpha(64) } else { LINE2 };
+                let border = if hover { th().tint(64) } else { th().line2 };
                 p.rect_stroke(c, CornerRadius::same(7), Stroke::new(1.0, border), StrokeKind::Inside);
                 let color = match (hover, danger) {
-                    (true, true) => DANGER,
-                    (true, false) => TEXT,
-                    _ => MUTED,
+                    (true, true) => th().danger,
+                    (true, false) => th().text,
+                    _ => th().muted,
                 };
                 p.text(c.center(), Align2::CENTER_CENTER, glyph, icon_font(14.0), color);
                 if resp.clicked() {
@@ -2245,35 +2385,35 @@ impl Hybrid {
         let mut hits = Vec::new();
         let (mut cancel, mut discard) = (false, false);
         Self::panel(ctx, "new-confirm", rect, Order::Foreground, |ui, rect| {
-            let title = ui.painter().layout_no_wrap("Start a new scene?".into(), sans_semibold(13.0), TEXT);
-            ui.painter().galley(pos2(rect.left() + 16.0, rect.top() + 16.0), title, TEXT);
+            let title = ui.painter().layout_no_wrap("Start a new scene?".into(), sans_semibold(13.0), th().text);
+            ui.painter().galley(pos2(rect.left() + 16.0, rect.top() + 16.0), title, th().text);
             let mut job = LayoutJob::default();
             job.append(
                 "The edits to this scene are not saved and will be lost.",
                 0.0,
-                TextFormat { font_id: sans(12.0), color: MUTED, line_height: Some(17.0), ..Default::default() },
+                TextFormat { font_id: sans(12.0), color: th().muted, line_height: Some(17.0), ..Default::default() },
             );
             job.wrap.max_width = w - 32.0;
             let note = ui.fonts_mut(|f| f.layout_job(job));
-            ui.painter().galley(pos2(rect.left() + 16.0, rect.top() + 40.0), note, MUTED);
+            ui.painter().galley(pos2(rect.left() + 16.0, rect.top() + 40.0), note, th().muted);
             let by = rect.bottom() - 16.0 - 32.0;
-            let ink = ON_ACCENT;
+            let ink = th().on_accent;
             let label = ui.painter().layout_no_wrap("Start new".into(), sans_semibold(13.0), ink);
             let dw = label.size().x + 28.0;
             let d = Rect::from_min_size(pos2(rect.right() - 16.0 - dw, by), vec2(dw, 32.0));
             let resp = ui.interact(d, Id::unique("new-discard"), Sense::click());
-            let fill = if resp.hovered() { ACCENT_HOVER } else { ACCENT };
+            let fill = if resp.hovered() { th().accent_hover } else { th().accent };
             ui.painter().rect_filled(d, CornerRadius::same(8), fill);
             ui.painter().galley(pos2(d.left() + 14.0, d.center().y - label.size().y / 2.0), label, ink);
             discard = resp.clicked();
             hits.push(("new-discard".to_string(), d));
-            let cl = ui.painter().layout_no_wrap("Cancel".into(), sans(13.0), MUTED);
+            let cl = ui.painter().layout_no_wrap("Cancel".into(), sans(13.0), th().muted);
             let cw = cl.size().x + 28.0;
             let c = Rect::from_min_size(pos2(d.left() - 6.0 - cw, by), vec2(cw, 32.0));
             let resp = ui.interact(c, Id::unique("new-cancel"), Sense::click());
-            let color = if resp.hovered() { TEXT } else { MUTED };
+            let color = if resp.hovered() { th().text } else { th().muted };
             if resp.hovered() {
-                ui.painter().rect_filled(c, CornerRadius::same(8), HOVER);
+                ui.painter().rect_filled(c, CornerRadius::same(8), th().hover);
             }
             ui.painter().galley(pos2(c.left() + 14.0, c.center().y - cl.size().y / 2.0), cl, color);
             cancel = resp.clicked();
@@ -2300,7 +2440,7 @@ impl Hybrid {
         job.append(
             "Keeps the bottom and the center. Erases the voxels outside.",
             0.0,
-            TextFormat { font_id: sans(11.0), color: FAINT, line_height: Some(15.95), ..Default::default() },
+            TextFormat { font_id: sans(11.0), color: th().faint, line_height: Some(15.95), ..Default::default() },
         );
         job.wrap.max_width = inner_w;
         let note = ctx.fonts_mut(|f| f.layout_job(job));
@@ -2313,22 +2453,22 @@ impl Hybrid {
         let mut hits = Vec::new();
         Self::panel(ctx, "bounds", rect, Order::Middle, |ui, rect| {
             let hy = rect.top() + 18.0;
-            let g = ui.painter().layout_job(spaced("BOUNDS", sans(9.0), FAINT, 0.72));
-            ui.painter().galley(pos2(rect.left() + 12.0, hy - g.size().y / 2.0), g, FAINT);
+            let g = ui.painter().layout_job(spaced("BOUNDS", sans(9.0), th().faint, 0.72));
+            ui.painter().galley(pos2(rect.left() + 12.0, hy - g.size().y / 2.0), g, th().faint);
             let x = Rect::from_center_size(pos2(rect.right() - 19.0, hy), vec2(22.0, 22.0));
             let resp = ui.interact(x, Id::unique("bounds-close"), Sense::click());
             hits.push(("bounds-close".to_string(), x));
             if resp.hovered() {
-                ui.painter().rect_filled(x, CornerRadius::same(6), HOVER);
+                ui.painter().rect_filled(x, CornerRadius::same(6), th().hover);
             }
-            let c = if resp.hovered() { TEXT } else { MUTED };
+            let c = if resp.hovered() { th().text } else { th().muted };
             ui.painter().text(x.center(), Align2::CENTER_CENTER, icon::X, icon_font(13.0), c);
             ui.painter().text(
                 pos2(x.left() - 4.0, hy),
                 Align2::RIGHT_CENTER,
                 format!("{}×{}×{}", size[0], size[1], size[2]),
                 mono(11.0),
-                MUTED,
+                th().muted,
             );
             close = resp.clicked();
             let third = (inner_w - 12.0) / 3.0;
@@ -2352,7 +2492,7 @@ impl Hybrid {
                     resize = Some(to);
                 }
             }
-            ui.painter().galley(pos2(rect.left() + 12.0, rect.top() + 36.0 + 28.0 + 12.0), note, FAINT);
+            ui.painter().galley(pos2(rect.left() + 12.0, rect.top() + 36.0 + 28.0 + 12.0), note, th().faint);
         });
         self.hits.extend(hits);
         if let Some(to) = resize {
@@ -2391,8 +2531,8 @@ impl Hybrid {
             };
             ctx.fonts_mut(|f| f.layout_job(job))
         };
-        let prompt = wrapped(&card.prompt, sans_semibold(13.0), TEXT, 3);
-        let summary = card.summary.as_deref().filter(|s| !s.is_empty()).map(|s| wrapped(s, sans(12.0), MUTED, 2));
+        let prompt = wrapped(&card.prompt, sans_semibold(13.0), th().text, 3);
+        let summary = card.summary.as_deref().filter(|s| !s.is_empty()).map(|s| wrapped(s, sans(12.0), th().muted, 2));
         let held_text = card.held.map(|(asked, most)| {
             let mut job = LayoutJob::default();
             job.append(
@@ -2402,7 +2542,7 @@ impl Hybrid {
                     group_thousands(most as u64)
                 ),
                 0.0,
-                TextFormat { font_id: sans(12.0), color: TEXT, line_height: Some(17.0), ..Default::default() },
+                TextFormat { font_id: sans(12.0), color: th().text, line_height: Some(17.0), ..Default::default() },
             );
             job.wrap.max_width = inner_w - 20.0 - 20.0;
             ctx.fonts_mut(|f| f.layout_job(job))
@@ -2410,36 +2550,36 @@ impl Hybrid {
         let [added, removed, repainted] = card.counts.map(|c| group_thousands(c as u64));
         let mut parts: Vec<(String, Color32)> = Vec::new();
         if card.counts[0] > 0 {
-            parts.push((format!("+{added} added"), OK));
+            parts.push((format!("+{added} added"), th().ok));
         }
         if card.counts[1] > 0 {
-            parts.push((format!("{removed} removed"), DANGER));
+            parts.push((format!("{removed} removed"), th().danger));
         }
         if card.counts[2] > 0 {
-            parts.push((format!("{repainted} repainted"), ACCENT));
+            parts.push((format!("{repainted} repainted"), th().accent));
         }
         match card.slots.len() {
             0 => {}
-            1 => parts.push((format!("slot {} changed", card.slots[0].slot), TEXT)),
-            k => parts.push((format!("{k} slots changed"), TEXT)),
+            1 => parts.push((format!("slot {} changed", card.slots[0].slot), th().text)),
+            k => parts.push((format!("{k} slots changed"), th().text)),
         }
         if parts.is_empty() {
-            parts.push(("No changes yet".into(), MUTED));
+            parts.push(("No changes yet".into(), th().muted));
         }
         // Lines break between the counts, never inside one, and no line starts or ends with
         // a separator.
         let fmt = |color| TextFormat { font_id: mono(11.5), color, line_height: Some(17.0), ..Default::default() };
-        let width = |t: &str| ctx.fonts_mut(|f| f.layout_no_wrap(t.into(), mono(11.5), TEXT)).size().x;
+        let width = |t: &str| ctx.fonts_mut(|f| f.layout_no_wrap(t.into(), mono(11.5), th().text)).size().x;
         let (sep, max) = (width(" · "), inner_w - 20.0);
         let mut job = LayoutJob::default();
         let mut line = 0.0;
         for (i, (t, c)) in parts.iter().enumerate() {
             let w = width(t);
             if i > 0 && line + sep + w > max {
-                job.append("\n", 0.0, fmt(FAINT));
+                job.append("\n", 0.0, fmt(th().faint));
                 line = 0.0;
             } else if i > 0 {
-                job.append(" · ", 0.0, fmt(FAINT));
+                job.append(" · ", 0.0, fmt(th().faint));
                 line += sep;
             }
             job.append(t, 0.0, fmt(*c));
@@ -2489,24 +2629,24 @@ impl Hybrid {
             let p = ui.painter().clone();
             // Header: AI CHANGE, and how many steps.
             let hy = inner.top() + 7.5;
-            p.text(pos2(inner.left() + 6.0, hy), Align2::CENTER_CENTER, icon::SPARKLES, icon_font(13.0), ACCENT);
-            let g = p.layout_job(spaced("AI CHANGE", sans_semibold(11.0), MUTED, 0.88));
-            p.galley(pos2(inner.left() + 18.0, hy - g.size().y / 2.0), g, MUTED);
+            p.text(pos2(inner.left() + 6.0, hy), Align2::CENTER_CENTER, icon::SPARKLES, icon_font(13.0), th().accent);
+            let g = p.layout_job(spaced("AI CHANGE", sans_semibold(11.0), th().muted, 0.88));
+            p.galley(pos2(inner.left() + 18.0, hy - g.size().y / 2.0), g, th().muted);
             let n = card.steps.len();
             let right = if card.before {
-                ("BEFORE".to_string(), MID)
+                ("BEFORE".to_string(), th().mid)
             } else {
-                (format!("{n} step{}", if n == 1 { "" } else { "s" }), FAINT)
+                (format!("{n} step{}", if n == 1 { "" } else { "s" }), th().faint)
             };
             p.text(pos2(inner.right(), hy), Align2::RIGHT_CENTER, right.0, mono(11.0), right.1);
             let mut y = inner.top() + 15.0 + 10.0;
             let ph = prompt.size().y;
-            p.galley(pos2(inner.left(), y), prompt, TEXT);
+            p.galley(pos2(inner.left(), y), prompt, th().text);
             y += ph;
             if let Some(g) = summary {
                 y += 4.0;
                 let gh = g.size().y;
-                p.galley(pos2(inner.left(), y), g, MUTED);
+                p.galley(pos2(inner.left(), y), g, th().muted);
                 y += gh;
             }
             // The assistant is still at it: a pulsing dot and what it is doing.
@@ -2514,14 +2654,14 @@ impl Hybrid {
                 y += 6.0;
                 let t = ui.input(|i| i.time);
                 let pulse = 0.55 + 0.45 * (t * 4.0).sin().abs() as f32;
-                p.circle_filled(pos2(inner.left() + 4.0, y + 8.5), 3.5, ACCENT.gamma_multiply(pulse));
+                p.circle_filled(pos2(inner.left() + 4.0, y + 8.5), 3.5, th().accent.gamma_multiply(pulse));
                 let dots = ".".repeat(1 + (t * 3.0) as usize % 3);
                 p.text(
                     pos2(inner.left() + 14.0, y + 8.5),
                     Align2::LEFT_CENTER,
                     format!("{w}{dots}"),
                     sans(12.0),
-                    MUTED,
+                    th().muted,
                 );
                 ui.ctx().request_repaint();
                 y += 17.0;
@@ -2529,15 +2669,9 @@ impl Hybrid {
             // The counts: +added · removed · repainted · slots changed.
             y += 10.0;
             let counts = Rect::from_min_size(pos2(inner.left(), y), vec2(inner_w, counts_h));
-            p.rect(
-                counts,
-                CornerRadius::same(8),
-                Color32::from_white_alpha(9),
-                Stroke::new(1.0, LINE),
-                StrokeKind::Inside,
-            );
+            p.rect(counts, CornerRadius::same(8), th().tint(9), Stroke::new(1.0, th().line), StrokeKind::Inside);
             let g = counts_text;
-            p.galley(pos2(counts.left() + 10.0, counts.center().y - g.size().y / 2.0), g, TEXT);
+            p.galley(pos2(counts.left() + 10.0, counts.center().y - g.size().y / 2.0), g, th().text);
             hits.push(("review-counts".into(), counts));
             y += counts_h;
             // Palette slots, by slot: old and new colour, the new hex, the material change.
@@ -2551,7 +2685,7 @@ impl Hybrid {
                         Align2::LEFT_CENTER,
                         format!("SLOT {}", c.slot),
                         mono(10.0),
-                        FAINT,
+                        th().faint,
                     );
                     let sw = |at: f32, rgba: [u8; 4]| {
                         let q = Rect::from_min_size(pos2(at, cy - 7.0), vec2(14.0, 14.0));
@@ -2559,20 +2693,20 @@ impl Hybrid {
                             q,
                             CornerRadius::same(4),
                             Color32::from_rgb(rgba[0], rgba[1], rgba[2]),
-                            Stroke::new(1.0, LINE2),
+                            Stroke::new(1.0, th().line2),
                             StrokeKind::Inside,
                         );
                     };
                     let sx = r.left() + 62.0;
                     sw(sx, c.old);
-                    p.text(pos2(sx + 23.0, cy), Align2::CENTER_CENTER, "→", sans(11.0), FAINT);
+                    p.text(pos2(sx + 23.0, cy), Align2::CENTER_CENTER, "→", sans(11.0), th().faint);
                     sw(sx + 32.0, c.new);
                     if c.old != c.new {
                         let hex = format!("#{:02X}{:02X}{:02X}", c.new[0], c.new[1], c.new[2]);
-                        p.text(pos2(sx + 54.0, cy), Align2::LEFT_CENTER, hex, mono(11.0), TEXT);
+                        p.text(pos2(sx + 54.0, cy), Align2::LEFT_CENTER, hex, mono(11.0), th().text);
                     }
                     if let Some(m) = &c.material {
-                        p.text(pos2(r.right(), cy), Align2::RIGHT_CENTER, m, sans(11.5), MUTED);
+                        p.text(pos2(r.right(), cy), Align2::RIGHT_CENTER, m, sans(11.5), th().muted);
                     }
                     hits.push((format!("review-slot-{}", c.slot), r));
                     y += slot_h;
@@ -2583,15 +2717,15 @@ impl Hybrid {
                 y += 10.0;
                 let gh = g.size().y;
                 let b = Rect::from_min_size(pos2(inner.left(), y), vec2(inner_w, 12.0 + gh + 10.0 + 26.0 + 12.0));
-                p.rect(b, CornerRadius::same(8), MID_BG, Stroke::new(1.0, MID_LINE), StrokeKind::Inside);
+                p.rect(b, CornerRadius::same(8), th().mid_bg, Stroke::new(1.0, th().mid_line), StrokeKind::Inside);
                 p.text(
                     pos2(b.left() + 10.0 + 7.0, b.top() + 12.0 + 8.5),
                     Align2::CENTER_CENTER,
                     icon::TRIANGLE_ALERT,
                     icon_font(13.0),
-                    MID,
+                    th().mid,
                 );
-                p.galley(pos2(b.left() + 30.0, b.top() + 12.0), g, TEXT);
+                p.galley(pos2(b.left() + 30.0, b.top() + 12.0), g, th().text);
                 let by = b.top() + 12.0 + gh + 10.0;
                 let allow = Rect::from_min_size(pos2(b.right() - 10.0 - 72.0, by), vec2(72.0, 26.0));
                 let stop = allow.translate(vec2(-72.0 - 6.0, 0.0));
@@ -2608,10 +2742,16 @@ impl Hybrid {
             // The steps, each with a checkbox that drops it from the change.
             if rows > 0 {
                 y += 14.0;
-                let g = p.layout_job(spaced("STEPS", sans(9.0), FAINT, 0.72));
-                p.galley(pos2(inner.left(), y + 6.0 - g.size().y / 2.0), g, FAINT);
+                let g = p.layout_job(spaced("STEPS", sans(9.0), th().faint, 0.72));
+                p.galley(pos2(inner.left(), y + 6.0 - g.size().y / 2.0), g, th().faint);
                 let kept = card.steps.iter().filter(|s| s.ok && !s.dropped).count();
-                p.text(pos2(inner.right(), y + 6.0), Align2::RIGHT_CENTER, format!("{kept} kept"), mono(10.0), FAINT);
+                p.text(
+                    pos2(inner.right(), y + 6.0),
+                    Align2::RIGHT_CENTER,
+                    format!("{kept} kept"),
+                    mono(10.0),
+                    th().faint,
+                );
                 y += 12.0 + 6.0;
                 let body = Rect::from_min_size(pos2(inner.left() - 4.0, y), vec2(inner_w + 8.0, rows as f32 * row_h));
                 if card.steps.len() > rows && ui.rect_contains_pointer(body) {
@@ -2628,30 +2768,30 @@ impl Hybrid {
                     hits.push((id, r));
                     let p = ui.painter();
                     if st.droppable && resp.hovered() {
-                        p.rect_filled(r, CornerRadius::same(7), HOVER);
+                        p.rect_filled(r, CornerRadius::same(7), th().hover);
                     }
                     let cb = Rect::from_center_size(pos2(r.left() + 4.0 + 7.0, r.center().y), vec2(14.0, 14.0));
                     if !st.ok {
-                        p.text(cb.center(), Align2::CENTER_CENTER, icon::X, icon_font(12.0), DANGER);
+                        p.text(cb.center(), Align2::CENTER_CENTER, icon::X, icon_font(12.0), th().danger);
                     } else if st.dropped {
-                        p.rect_stroke(cb, CornerRadius::same(4), Stroke::new(1.0, LINE2), StrokeKind::Inside);
+                        p.rect_stroke(cb, CornerRadius::same(4), Stroke::new(1.0, th().line2), StrokeKind::Inside);
                     } else {
-                        p.rect_filled(cb, CornerRadius::same(4), ACCENT);
-                        p.text(cb.center(), Align2::CENTER_CENTER, icon::CHECK, icon_font(11.0), ON_ACCENT);
+                        p.rect_filled(cb, CornerRadius::same(4), th().accent);
+                        p.text(cb.center(), Align2::CENTER_CENTER, icon::CHECK, icon_font(11.0), th().on_accent);
                     }
                     let kept = st.ok && !st.dropped;
-                    let tool_c = if kept { TEXT } else { FAINT };
+                    let tool_c = if kept { th().text } else { th().faint };
                     let tg = p.layout_no_wrap(st.tool.to_string(), mono(11.5), tool_c);
                     let tw = tg.size().x;
                     let tx = cb.right() + 9.0;
                     p.galley(pos2(tx, r.center().y - tg.size().y / 2.0), tg, tool_c);
                     let dx = tx + tw + 8.0;
                     let detail_c = if !st.ok {
-                        DANGER.gamma_multiply(0.8)
+                        th().danger.gamma_multiply(0.8)
                     } else if kept {
-                        MUTED
+                        th().muted
                     } else {
-                        FAINT
+                        th().faint
                     };
                     let mut job = LayoutJob::single_section(
                         st.detail.clone(),
@@ -2667,8 +2807,11 @@ impl Hybrid {
                     p.galley(pos2(dx, r.center().y - dg.size().y / 2.0), dg, detail_c);
                     if st.dropped {
                         let end = dx
-                            + p.layout_no_wrap(st.detail.clone(), sans(11.5), FAINT).size().x.min(r.right() - 6.0 - dx);
-                        p.line_segment([pos2(tx, r.center().y), pos2(end, r.center().y)], Stroke::new(1.0, FAINT));
+                            + p.layout_no_wrap(st.detail.clone(), sans(11.5), th().faint)
+                                .size()
+                                .x
+                                .min(r.right() - 6.0 - dx);
+                        p.line_segment([pos2(tx, r.center().y), pos2(end, r.center().y)], Stroke::new(1.0, th().faint));
                     }
                     if st.droppable && resp.clicked() {
                         actions.push(Action::DropStep(st.index, !st.dropped));
@@ -2698,20 +2841,14 @@ impl Hybrid {
             let fr = Rect::from_min_size(pos2(inner.left(), y), vec2(inner_w, 30.0));
             let id = Id::unique("review-ask");
             let focused = ui.memory(|m| m.has_focus(id));
-            let border = if focused { RING } else { LINE };
-            p.rect(
-                fr,
-                CornerRadius::same(7),
-                Color32::from_white_alpha(9),
-                Stroke::new(1.0, border),
-                StrokeKind::Inside,
-            );
+            let border = if focused { th().ring } else { th().line };
+            p.rect(fr, CornerRadius::same(7), th().tint(9), Stroke::new(1.0, border), StrokeKind::Inside);
             p.text(
                 pos2(fr.right() - 16.0, fr.center().y),
                 Align2::CENTER_CENTER,
                 icon::CORNER_DOWN_LEFT,
                 icon_font(13.0),
-                FAINT,
+                th().faint,
             );
             if ask.is_empty() && !focused {
                 p.text(
@@ -2719,7 +2856,7 @@ impl Hybrid {
                     Align2::LEFT_CENTER,
                     "Ask for changes…",
                     sans(12.0),
-                    FAINT,
+                    th().faint,
                 );
             }
             let tr =
@@ -2727,7 +2864,7 @@ impl Hybrid {
             let edit = egui::TextEdit::singleline(&mut ask)
                 .id(id)
                 .font(sans(12.0))
-                .text_color(TEXT)
+                .text_color(th().text)
                 .frame(egui::Frame::NONE)
                 .margin(egui::Margin::ZERO)
                 .desired_width(tr.width());
@@ -2739,13 +2876,13 @@ impl Hybrid {
             }
             y += 30.0 + 12.0;
             // Discard (Escape) and Apply (Enter).
-            let ink = ON_ACCENT;
+            let ink = th().on_accent;
             let label = p.layout_no_wrap("Apply".into(), sans_semibold(13.0), ink);
-            let kw = ui.painter().layout_no_wrap("↵".into(), mono_medium(10.5), MUTED).size().x.max(8.0) + 10.0;
+            let kw = ui.painter().layout_no_wrap("↵".into(), mono_medium(10.5), th().muted).size().x.max(8.0) + 10.0;
             let aw = label.size().x + 28.0 + kw + 8.0;
             let a = Rect::from_min_size(pos2(inner.right() - aw, y), vec2(aw, 32.0));
             let resp = ui.interact(a, Id::unique("review-apply"), Sense::click());
-            let fill = if resp.hovered() { ACCENT_HOVER } else { ACCENT };
+            let fill = if resp.hovered() { th().accent_hover } else { th().accent };
             p.rect_filled(a, CornerRadius::same(8), fill);
             p.galley(pos2(a.left() + 14.0, a.center().y - label.size().y / 2.0), label, ink);
             let kr = Rect::from_min_size(pos2(a.right() - 14.0 - kw, a.center().y - 9.5), vec2(kw, 19.0));
@@ -2755,16 +2892,16 @@ impl Hybrid {
                 actions.push(Action::ApplyReview);
             }
             hits.push(("review-apply".into(), a));
-            let dl = p.layout_no_wrap("Discard".into(), sans(13.0), MUTED);
-            let ew = p.layout_no_wrap("esc".into(), mono_medium(10.5), MUTED).size().x + 10.0;
+            let dl = p.layout_no_wrap("Discard".into(), sans(13.0), th().muted);
+            let ew = p.layout_no_wrap("esc".into(), mono_medium(10.5), th().muted).size().x + 10.0;
             let dw = dl.size().x + 28.0 + ew + 8.0;
             let d = Rect::from_min_size(pos2(a.left() - 6.0 - dw, y), vec2(dw, 32.0));
             let resp = ui.interact(d, Id::unique("review-discard"), Sense::click());
-            let color = if resp.hovered() { TEXT } else { MUTED };
+            let color = if resp.hovered() { th().text } else { th().muted };
             p.rect_stroke(
                 d,
                 CornerRadius::same(8),
-                Stroke::new(1.0, if resp.hovered() { Color32::from_white_alpha(64) } else { LINE2 }),
+                Stroke::new(1.0, if resp.hovered() { th().tint(64) } else { th().line2 }),
                 StrokeKind::Inside,
             );
             p.galley(pos2(d.left() + 14.0, d.center().y - dl.size().y / 2.0), dl, color);
@@ -2803,7 +2940,7 @@ impl Hybrid {
     fn marquee(&self, ctx: &Context) {
         if let Some(r) = self.marquee {
             let p = ctx.layer_painter(egui::LayerId::new(Order::Background, Id::unique("marquee")));
-            p.rect(r, CornerRadius::same(2), ACCENT_TINT, Stroke::new(1.0, ACCENT), StrokeKind::Inside);
+            p.rect(r, CornerRadius::same(2), th().accent_tint, Stroke::new(1.0, th().accent), StrokeKind::Inside);
         }
     }
 
@@ -2825,22 +2962,22 @@ impl Hybrid {
             let p = ui.painter().clone();
             // .ph, with the Used / All toggle.
             let hy = inner.top() + 10.0;
-            let g = ui.painter().layout_job(spaced("PALETTE", sans_semibold(10.5), MUTED, 0.84));
-            p.galley(pos2(inner.left(), hy - g.size().y / 2.0), g, MUTED);
+            let g = ui.painter().layout_job(spaced("PALETTE", sans_semibold(10.5), th().muted, 0.84));
+            p.galley(pos2(inner.left(), hy - g.size().y / 2.0), g, th().muted);
             let mut x = inner.right();
             for (id, label, on) in
                 [("palette-all", "All".to_string(), all), ("palette-used", format!("Used {used_count}"), !all)]
             {
-                let g = p.layout_no_wrap(label, sans_medium(10.5), if on { TEXT } else { FAINT });
+                let g = p.layout_no_wrap(label, sans_medium(10.5), if on { th().text } else { th().faint });
                 let r = Rect::from_min_size(pos2(x - g.size().x - 12.0, hy - 10.0), vec2(g.size().x + 12.0, 20.0));
                 x = r.left() - 2.0;
                 let resp = ui.interact(r, Id::unique(id), Sense::click());
                 if on {
-                    p.rect(r, CornerRadius::same(6), ACCENT_BG, Stroke::new(1.0, LINE2), StrokeKind::Inside);
+                    p.rect(r, CornerRadius::same(6), th().accent_bg, Stroke::new(1.0, th().line2), StrokeKind::Inside);
                 } else if resp.hovered() {
-                    p.rect_filled(r, CornerRadius::same(6), HOVER);
+                    p.rect_filled(r, CornerRadius::same(6), th().hover);
                 }
-                p.galley(r.center() - g.size() / 2.0, g, if on || resp.hovered() { TEXT } else { FAINT });
+                p.galley(r.center() - g.size() / 2.0, g, if on || resp.hovered() { th().text } else { th().faint });
                 if resp.clicked() {
                     set_all = Some(id == "palette-all");
                 }
@@ -2848,39 +2985,33 @@ impl Hybrid {
             }
             // #current: the slot's colour, hex and number on one row, and its edit button.
             let cur = Rect::from_min_size(pos2(inner.left(), inner.top() + 28.0), vec2(inner.width(), 38.0));
-            p.rect(
-                cur,
-                CornerRadius::same(8),
-                Color32::from_white_alpha(9),
-                Stroke::new(1.0, LINE),
-                StrokeKind::Inside,
-            );
+            p.rect(cur, CornerRadius::same(8), th().tint(9), Stroke::new(1.0, th().line), StrokeKind::Inside);
             let chip = Rect::from_min_size(cur.min + vec2(6.0, 6.0), vec2(26.0, 26.0));
             p.rect(
                 chip,
                 CornerRadius::same(6),
                 self.color(self.slot),
-                Stroke::new(1.0, Color32::from_white_alpha(38)),
+                Stroke::new(1.0, th().tint(38)),
                 StrokeKind::Inside,
             );
             let c = self.palette[self.slot as usize];
             let hex = format!("#{:02X}{:02X}{:02X}", c[0], c[1], c[2]);
             let mx = chip.right() + 8.0;
-            p.text(pos2(mx, cur.center().y), Align2::LEFT_BOTTOM, hex, mono(12.0), TEXT);
+            p.text(pos2(mx, cur.center().y), Align2::LEFT_BOTTOM, hex, mono(12.0), th().text);
             let sub = if self.used[self.slot as usize] {
                 format!("Slot {} · in scene", self.slot)
             } else {
                 format!("Slot {}", self.slot)
             };
-            p.text(pos2(mx, cur.center().y + 1.0), Align2::LEFT_TOP, sub, sans(10.5), FAINT);
+            p.text(pos2(mx, cur.center().y + 1.0), Align2::LEFT_TOP, sub, sans(10.5), th().faint);
             let edit = Rect::from_min_size(pos2(cur.right() - 6.0 - 26.0, cur.center().y - 13.0), vec2(26.0, 26.0));
             let er = ui.interact(edit, Id::unique("edit-color"), Sense::click());
             self.hits.insert("edit-color".into(), edit);
             let open = self.color_edit.is_some();
             if open || er.hovered() {
-                p.rect_filled(edit, CornerRadius::same(6), HOVER);
+                p.rect_filled(edit, CornerRadius::same(6), th().hover);
             }
-            let ec = if er.hovered() || open { TEXT } else { MUTED };
+            let ec = if er.hovered() || open { th().text } else { th().muted };
             p.text(edit.center(), Align2::CENTER_CENTER, icon::PENCIL, icon_font(14.0), ec);
             if er.hovered() {
                 tooltip(ctx, edit, "Edit color", &[], Some((Rect::NOTHING, true)));
@@ -2938,22 +3069,16 @@ impl Hybrid {
             };
             let r = Rect::from_center_size(r.center(), r.size() * scale);
             if on {
-                p.rect_filled(r.expand(3.0), CornerRadius::same(7), TEXT);
-                p.rect_filled(r.expand(1.5), CornerRadius::same(5), PANEL_SOLID);
+                p.rect_filled(r.expand(3.0), CornerRadius::same(7), th().text);
+                p.rect_filled(r.expand(1.5), CornerRadius::same(5), th().panel_solid);
             }
-            p.rect(
-                r,
-                CornerRadius::same(4),
-                self.color(slot),
-                Stroke::new(1.0, Color32::from_white_alpha(20)),
-                StrokeKind::Inside,
-            );
+            p.rect(r, CornerRadius::same(4), self.color(slot), Stroke::new(1.0, th().tint(20)), StrokeKind::Inside);
             if self.materials[slot as usize].kind != Kind::Diffuse {
                 // A material other than diffuse: a light corner, like a glint.
                 let c = r.right_top() + vec2(-1.5, 1.5);
                 p.add(egui::Shape::convex_polygon(
                     vec![c + vec2(-6.0, 0.0), c, c + vec2(0.0, 6.0)],
-                    Color32::from_white_alpha(200),
+                    th().tint(200),
                     Stroke::new(1.0, Color32::from_black_alpha(90)),
                 ));
             }
@@ -3020,13 +3145,13 @@ impl Hybrid {
                     SlotOp::Swap => format!("Click a slot to swap with slot {slot}. "),
                     SlotOp::Copy => "Click a slot to give it this color. ".to_string(),
                 };
-                job.append(&what, 0.0, fmt(TEXT));
-                job.append("Esc cancels.", 0.0, fmt(MUTED));
+                job.append(&what, 0.0, fmt(th().text));
+                job.append("Esc cancels.", 0.0, fmt(th().muted));
             }
             None => job.append(
                 "Swap trades places with the next slot you click and keeps the scene's look. Copy gives that slot this color.",
                 0.0,
-                fmt(FAINT),
+                fmt(th().faint),
             ),
         }
         job.wrap.max_width = inner_w;
@@ -3042,8 +3167,12 @@ impl Hybrid {
             Kind::Emit => "Glows in its color and lights what is near it.",
             Kind::Plastic => "Matte color under a clear glossy coat. Specular sets how much the coat reflects.",
         };
-        mjob.append(mat_note, 0.0, fmt(MUTED));
-        mjob.append(" Shows in the render corner and export, and saves to the file's MATL chunks.", 0.0, fmt(FAINT));
+        mjob.append(mat_note, 0.0, fmt(th().muted));
+        mjob.append(
+            " Shows in the render corner and export, and saves to the file's MATL chunks.",
+            0.0,
+            fmt(th().faint),
+        );
         mjob.wrap.max_width = inner_w;
         let mat_note = ctx.fonts_mut(|f| f.layout_job(mjob));
         let sv_h = 136.0;
@@ -3102,14 +3231,20 @@ impl Hybrid {
             // .ph
             let hy = inner.top() + 7.5;
             let title = if ed.tab == EditTab::Material { "EDIT MATERIAL" } else { "EDIT COLOR" };
-            let g = p.layout_job(spaced(title, sans_semibold(11.0), MUTED, 0.88));
-            p.galley(pos2(inner.left(), hy - g.size().y / 2.0), g, MUTED);
+            let g = p.layout_job(spaced(title, sans_semibold(11.0), th().muted, 0.88));
+            p.galley(pos2(inner.left(), hy - g.size().y / 2.0), g, th().muted);
             let x = Rect::from_center_size(pos2(inner.right() - 6.0, hy), vec2(16.0, 22.0));
             let xr = ui.interact(x, Id::unique("color-edit-x"), Sense::click());
             hits.push(("color-edit-x", x));
-            p.text(x.center(), Align2::CENTER_CENTER, "×", sans(18.0), if xr.hovered() { TEXT } else { FAINT });
+            p.text(
+                x.center(),
+                Align2::CENTER_CENTER,
+                "×",
+                sans(18.0),
+                if xr.hovered() { th().text } else { th().faint },
+            );
             close |= xr.clicked();
-            p.text(pos2(x.left() - 6.0, hy), Align2::RIGHT_CENTER, format!("Slot {slot}"), mono(11.0), FAINT);
+            p.text(pos2(x.left() - 6.0, hy), Align2::RIGHT_CENTER, format!("Slot {slot}"), mono(11.0), th().faint);
             // Color and Material tabs.
             let tr = Rect::from_min_size(pos2(inner.left(), inner.top() + 25.0), vec2(inner.width(), 28.0));
             let tabs = ["Color".to_string(), "Material".to_string()];
@@ -3172,7 +3307,11 @@ impl Hybrid {
                 if changed || done {
                     new_mat = Some((m, done));
                 }
-                p.galley(pos2(inner.left(), y + if mat.kind == Kind::Diffuse { 0.0 } else { 6.0 }), mat_note, FAINT);
+                p.galley(
+                    pos2(inner.left(), y + if mat.kind == Kind::Diffuse { 0.0 } else { 6.0 }),
+                    mat_note,
+                    th().faint,
+                );
                 return;
             }
             // Saturation (across) and value (down) at the current hue.
@@ -3182,7 +3321,7 @@ impl Hybrid {
                 let c = Hsv { h: hue, s: u, v: 1.0 - v }.to_rgb();
                 Color32::from_rgb(c[0], c[1], c[2])
             });
-            p.rect_stroke(sv, CornerRadius::ZERO, Stroke::new(1.0, LINE), StrokeKind::Inside);
+            p.rect_stroke(sv, CornerRadius::ZERO, Stroke::new(1.0, th().line), StrokeKind::Inside);
             let r = ui.interact(sv, Id::unique("sv"), Sense::click_and_drag());
             hits.push(("sv", sv));
             if r.is_pointer_button_down_on()
@@ -3204,7 +3343,7 @@ impl Hybrid {
                 let c = Hsv { h: u * 360.0, s: 1.0, v: 1.0 }.to_rgb();
                 Color32::from_rgb(c[0], c[1], c[2])
             });
-            p.rect_stroke(hb, CornerRadius::ZERO, Stroke::new(1.0, LINE), StrokeKind::Inside);
+            p.rect_stroke(hb, CornerRadius::ZERO, Stroke::new(1.0, th().line), StrokeKind::Inside);
             let r = ui.interact(hb.expand2(vec2(0.0, 4.0)), Id::unique("hue"), Sense::click_and_drag());
             hits.push(("hue", hb));
             if r.is_pointer_button_down_on()
@@ -3266,7 +3405,7 @@ impl Hybrid {
                     op = Some(if self.slot_op == Some(o) { None } else { Some(o) });
                 }
             }
-            p.galley(pos2(inner.left(), by + 28.0 + 10.0), note, FAINT);
+            p.galley(pos2(inner.left(), by + 28.0 + 10.0), note, th().faint);
         });
         for (k, r) in hits {
             self.hits.insert(k.into(), r);
@@ -3331,7 +3470,7 @@ impl Hybrid {
                         5.0,
                         TextFormat {
                             font_id: mono_medium(10.5),
-                            color: MUTED,
+                            color: th().muted,
                             line_height: Some(17.5),
                             ..Default::default()
                         },
@@ -3342,12 +3481,12 @@ impl Hybrid {
                 let f = if *b {
                     TextFormat {
                         font_id: sans_medium(12.5),
-                        color: TEXT,
+                        color: th().text,
                         line_height: Some(17.5),
                         ..Default::default()
                     }
                 } else {
-                    TextFormat { font_id: sans(12.5), color: MUTED, line_height: Some(17.5), ..Default::default() }
+                    TextFormat { font_id: sans(12.5), color: th().muted, line_height: Some(17.5), ..Default::default() }
                 };
                 job.append(t, lead, f);
             }
@@ -3366,20 +3505,32 @@ impl Hybrid {
                 Align2::LEFT_CENTER,
                 "Sculpt in under a minute",
                 sans_semibold(14.0),
-                TEXT,
+                th().text,
             );
             let mut y = rect.top() + 14.0 + 19.6 + 4.0 + 8.0;
             for (i, g) in galleys.into_iter().enumerate() {
                 y += 2.0;
-                p.text(pos2(left + 14.0, y + 8.75), Align2::RIGHT_CENTER, format!("{}.", i + 1), sans(12.5), MUTED);
+                p.text(
+                    pos2(left + 14.0, y + 8.75),
+                    Align2::RIGHT_CENTER,
+                    format!("{}.", i + 1),
+                    sans(12.5),
+                    th().muted,
+                );
                 let h = g.size().y;
                 kbd_frames(&p, pos2(left + 18.0, y), &g, &['?']);
-                p.galley(pos2(left + 18.0, y), g, MUTED);
+                p.galley(pos2(left + 18.0, y), g, th().muted);
                 y += h + 2.0;
             }
             let x = Rect::from_center_size(pos2(rect.right() - 16.0 - 8.0, rect.top() + 14.0 + 11.0), vec2(16.0, 22.0));
             let resp = ui.interact(x, Id::unique("welcome-x"), Sense::click());
-            p.text(x.center(), Align2::CENTER_CENTER, "×", sans(18.0), if resp.hovered() { TEXT } else { FAINT });
+            p.text(
+                x.center(),
+                Align2::CENTER_CENTER,
+                "×",
+                sans(18.0),
+                if resp.hovered() { th().text } else { th().faint },
+            );
             if resp.clicked() {
                 self.coach = false;
             }
@@ -3389,23 +3540,25 @@ impl Hybrid {
     // #stats
     fn stats(&mut self, ctx: &Context, screen: Rect, s: &Stats) {
         let fps_color = if s.fps >= 55.0 {
-            OK
+            th().ok
         } else if s.fps >= 30.0 {
-            MID
+            th().mid
         } else {
-            DANGER
+            th().danger
         };
         let cols = [
-            ("VOXELS", group_thousands(s.voxels), TEXT),
+            ("VOXELS", group_thousands(s.voxels), th().text),
             ("FPS", if s.fps > 0.0 { format!("{:.0}", s.fps) } else { "-".into() }, fps_color),
-            ("FRAME", format!("{:.1}ms", s.frame_ms), TEXT),
+            ("FRAME", format!("{:.1}ms", s.frame_ms), th().text),
             match &s.span {
-                _ if s.selected > 0 && s.span.is_none() => ("SELECTED", group_thousands(s.selected as u64), ACCENT),
-                Some((label, v)) => (*label, v.clone(), TEXT),
+                _ if s.selected > 0 && s.span.is_none() => {
+                    ("SELECTED", group_thousands(s.selected as u64), th().accent)
+                }
+                Some((label, v)) => (*label, v.clone(), th().text),
                 None => (
                     "CURSOR",
                     s.cursor.map(|c| format!("{},{},{}", c[0], c[1], c[2])).unwrap_or_else(|| "-".into()),
-                    TEXT,
+                    th().text,
                 ),
             },
         ];
@@ -3413,7 +3566,7 @@ impl Hybrid {
         let galleys: Vec<_> = cols
             .iter()
             .map(|(l, v, c)| {
-                let lg = ctx.fonts_mut(|f| f.layout_job(spaced(l, mono(9.0), FAINT, 0.72)));
+                let lg = ctx.fonts_mut(|f| f.layout_job(spaced(l, mono(9.0), th().faint, 0.72)));
                 let vg = ctx.fonts_mut(|f| f.layout_no_wrap(v.clone(), mono(11.5), *c));
                 (lg, vg)
             })
@@ -3430,9 +3583,9 @@ impl Hybrid {
             let cy = rect.center().y;
             let mut x = rect.left() + 10.0;
             for (lg, vg) in galleys {
-                p.galley(pos2(x, cy - lg.size().y / 2.0), lg.clone(), FAINT);
+                p.galley(pos2(x, cy - lg.size().y / 2.0), lg.clone(), th().faint);
                 x += lg.size().x + 5.0;
-                p.galley(pos2(x, cy - vg.size().y / 2.0), vg.clone(), TEXT);
+                p.galley(pos2(x, cy - vg.size().y / 2.0), vg.clone(), th().text);
                 x += vg.size().x + 12.0;
             }
         });
@@ -3461,7 +3614,7 @@ impl Hybrid {
             Some(((w, h), done, of)) => format!("Exporting {w}×{h} · {:.0}/{of} spp", done.floor()),
             None => format!("{:.0} spp{}", spp.floor(), if live { " · live" } else { "" }),
         };
-        let g = ctx.fonts_mut(|f| f.layout_no_wrap(label, sans_medium(10.5), TEXT));
+        let g = ctx.fonts_mut(|f| f.layout_no_wrap(label, sans_medium(10.5), th().text));
         let chip_size = g.size() + vec2(14.0, 6.0);
         // The chips' row: the corner's top, or its bottom edge in the full view.
         let top = if full { corner.bottom() - 6.0 - chip_size.y } else { corner.top() + 6.0 };
@@ -3483,14 +3636,14 @@ impl Hybrid {
                     ui.painter().rect_stroke(
                         corner,
                         CornerRadius::same(R),
-                        Stroke::new(1.0, LINE2),
+                        Stroke::new(1.0, th().line2),
                         StrokeKind::Inside,
                     );
                 }
                 let chip = Rect::from_min_size(pos2(corner.left() + 6.0, top), chip_size);
                 let p = ui.painter();
-                p.rect_filled(chip, CornerRadius::same(6), Color32::from_black_alpha(140));
-                p.galley(chip.min + vec2(7.0, 3.0), g, TEXT);
+                p.rect_filled(chip, CornerRadius::same(6), th().scrim(140));
+                p.galley(chip.min + vec2(7.0, 3.0), g, th().text);
                 // The Render panel's button and the swap button, chips at the other corner.
                 let b = Rect::from_min_size(pos2(corner.right() - 6.0 - 24.0, top), vec2(24.0, chip.height()));
                 let f = b.translate(vec2(-24.0 - 4.0, 0.0));
@@ -3499,19 +3652,18 @@ impl Hybrid {
                     [(f, "render-full", glyph, false), (b, "render-settings", icon::APERTURE, self.render_panel)]
                 {
                     let r = ui.interact(rect, Id::unique(id), Sense::click());
-                    let fill =
-                        if r.hovered() { Color32::from_black_alpha(190) } else { Color32::from_black_alpha(140) };
+                    let fill = if r.hovered() { th().scrim(190) } else { th().scrim(140) };
                     let p = ui.painter();
                     p.rect_filled(rect, CornerRadius::same(6), fill);
                     if on {
-                        p.rect_filled(rect, CornerRadius::same(6), ACCENT_BG);
+                        p.rect_filled(rect, CornerRadius::same(6), th().accent_bg);
                     }
                     let c = if on {
-                        ACCENT
+                        th().accent
                     } else if r.hovered() {
-                        TEXT
+                        th().text
                     } else {
-                        MUTED
+                        th().muted
                     };
                     p.text(rect.center(), Align2::CENTER_CENTER, glyph, icon_font(12.0), c);
                     if r.clicked() {
@@ -3554,14 +3706,20 @@ impl Hybrid {
             let inner = rect.shrink(12.0);
             let p = ui.painter().clone();
             let hy = inner.top() + 7.5;
-            let g = p.layout_job(spaced("RENDER", sans_semibold(11.0), MUTED, 0.88));
-            p.galley(pos2(inner.left(), hy - g.size().y / 2.0), g, MUTED);
+            let g = p.layout_job(spaced("RENDER", sans_semibold(11.0), th().muted, 0.88));
+            p.galley(pos2(inner.left(), hy - g.size().y / 2.0), g, th().muted);
             let x = Rect::from_center_size(pos2(inner.right() - 6.0, hy), vec2(16.0, 22.0));
             let xr = ui.interact(x, Id::unique("render-panel-x"), Sense::click());
             hits.push(("render-panel-x", x));
-            p.text(x.center(), Align2::CENTER_CENTER, "×", sans(18.0), if xr.hovered() { TEXT } else { FAINT });
+            p.text(
+                x.center(),
+                Align2::CENTER_CENTER,
+                "×",
+                sans(18.0),
+                if xr.hovered() { th().text } else { th().faint },
+            );
             close |= xr.clicked();
-            p.text(pos2(x.left() - 6.0, hy), Align2::RIGHT_CENTER, "Path trace", mono(11.0), FAINT);
+            p.text(pos2(x.left() - 6.0, hy), Align2::RIGHT_CENTER, "Path trace", mono(11.0), th().faint);
             let mut y = inner.top() + 25.0;
             let mut next = |hh: f32| {
                 let r = Rect::from_min_size(pos2(inner.left(), y), vec2(inner.width(), hh));
@@ -3596,7 +3754,7 @@ impl Hybrid {
                 chip,
                 CornerRadius::same(7),
                 Color32::from_rgb(c[0], c[1], c[2]),
-                Stroke::new(1.0, Color32::from_white_alpha(38)),
+                Stroke::new(1.0, th().tint(38)),
                 StrokeKind::Inside,
             );
             let fr = Rect::from_min_max(pos2(chip.right() + 6.0, r.top()), r.max);
@@ -3650,10 +3808,10 @@ impl Hybrid {
                 ),
             ] {
                 let lr = next(14.0);
-                p.text(lr.left_center(), Align2::LEFT_CENTER, label, sans(12.0), MUTED);
+                p.text(lr.left_center(), Align2::LEFT_CENTER, label, sans(12.0), th().muted);
                 if name == "rs-size" {
                     let (w, h) = EXPORT_SIZES[*sel];
-                    p.text(lr.right_center(), Align2::RIGHT_CENTER, format!("{w}×{h}"), mono(11.0), FAINT);
+                    p.text(lr.right_center(), Align2::RIGHT_CENTER, format!("{w}×{h}"), mono(11.0), th().faint);
                 }
                 let r = next(28.0);
                 if let Some(k) = segmented(ui, r, &names, labels, *sel, &ok, mono(11.5), &mut hits) {
@@ -3665,22 +3823,26 @@ impl Hybrid {
             let r = next(32.0);
             hits.push(("rs-export", r));
             let resp = ui.interact(r, Id::unique("rs-export"), Sense::click());
-            let ink = ON_ACCENT;
+            let ink = th().on_accent;
             let p = ui.painter();
             let label = match s.export {
                 Some((_, done, of)) => {
-                    p.rect(r, CornerRadius::same(8), ACCENT_BG, Stroke::new(1.0, LINE2), StrokeKind::Inside);
+                    p.rect(r, CornerRadius::same(8), th().accent_bg, Stroke::new(1.0, th().line2), StrokeKind::Inside);
                     let k = (done / of as f32).clamp(0.0, 1.0);
                     let fill = Rect::from_min_size(r.min, vec2(r.width() * k, r.height()));
-                    p.rect_filled(fill, CornerRadius::same(8), ACCENT.gamma_multiply(0.45));
+                    p.rect_filled(fill, CornerRadius::same(8), th().accent.gamma_multiply(0.45));
                     format!("Cancel export · {:.0}%", k * 100.0)
                 }
                 None => {
-                    p.rect_filled(r, CornerRadius::same(8), if resp.hovered() { ACCENT_HOVER } else { ACCENT });
+                    p.rect_filled(
+                        r,
+                        CornerRadius::same(8),
+                        if resp.hovered() { th().accent_hover } else { th().accent },
+                    );
                     "Export PNG".to_string()
                 }
             };
-            let color = if s.export.is_some() { TEXT } else { ink };
+            let color = if s.export.is_some() { th().text } else { ink };
             let g = p.layout_no_wrap(label, sans_semibold(13.0), color);
             let total = 16.0 + 6.0 + g.size().x;
             let x0 = r.center().x - total / 2.0;
@@ -3802,12 +3964,17 @@ impl Hybrid {
             job.append(
                 k,
                 lead,
-                TextFormat { font_id: sans_medium(12.0), color: TEXT, line_height: Some(16.8), ..Default::default() },
+                TextFormat {
+                    font_id: sans_medium(12.0),
+                    color: th().text,
+                    line_height: Some(16.8),
+                    ..Default::default()
+                },
             );
             job.append(
                 v,
                 5.0,
-                TextFormat { font_id: sans(12.0), color: MUTED, line_height: Some(16.8), ..Default::default() },
+                TextFormat { font_id: sans(12.0), color: th().muted, line_height: Some(16.8), ..Default::default() },
             );
         }
         let g = ctx.fonts_mut(|f| f.layout_job(job));
@@ -3838,7 +4005,7 @@ impl Hybrid {
         if chip > 0.0 {
             Self::panel(ctx, "hint", rect, Order::Middle, |ui, rect| {
                 self.agent_chip(ui, rect, chip);
-                ui.painter().galley(pos2(rect.left() + chip + 14.0, rect.top() + 8.0), g, MUTED);
+                ui.painter().galley(pos2(rect.left() + chip + 14.0, rect.top() + 8.0), g, th().muted);
             });
             return;
         }
@@ -3847,8 +4014,8 @@ impl Hybrid {
             |ui| {
                 let at = pos2(rect.left() + 14.0, rect.top() + 8.0);
                 let p = ui.painter();
-                p.galley_with_override_text_color(at + vec2(0.0, 1.0), g.clone(), Color32::from_black_alpha(200));
-                p.galley(at, g, MUTED);
+                p.galley_with_override_text_color(at + vec2(0.0, 1.0), g.clone(), th().text_shadow);
+                p.galley(at, g, th().muted);
             },
         );
     }
@@ -3862,7 +4029,7 @@ impl Hybrid {
             (true, _) => "Ortho",
             (false, _) => "Persp",
         };
-        let pg = ctx.fonts_mut(|f| f.layout_no_wrap(proj.into(), sans_medium(12.0), MUTED));
+        let pg = ctx.fonts_mut(|f| f.layout_no_wrap(proj.into(), sans_medium(12.0), th().muted));
         let pw = (pg.size().x + 20.0).max(52.0);
         let sel = self.selected > 0;
         let w = 4.0 + pw + 2.0 + 34.0 + 9.0 + (2.0 + f32::from(u8::from(sel))) * 34.0 - 2.0 + 4.0;
@@ -3893,7 +4060,7 @@ impl Hybrid {
             let sep = |ui: &Ui, x: &mut f32| {
                 *x += 4.0;
                 ui.painter()
-                    .line_segment([pos2(*x + 0.5, cy - 10.0), pos2(*x + 0.5, cy + 10.0)], Stroke::new(1.0, LINE));
+                    .line_segment([pos2(*x + 0.5, cy - 10.0), pos2(*x + 0.5, cy + 10.0)], Stroke::new(1.0, th().line));
                 *x += 5.0;
             };
             let ortho = proj != "Persp";
@@ -3965,7 +4132,7 @@ impl Hybrid {
             return;
         }
         ctx.request_repaint_after(std::time::Duration::from_secs_f64(until - now));
-        let g = ctx.fonts_mut(|f| f.layout_no_wrap(msg.clone(), sans(12.5), TEXT));
+        let g = ctx.fonts_mut(|f| f.layout_no_wrap(msg.clone(), sans(12.5), th().text));
         let size = vec2(g.size().x + 28.0, g.size().y + 18.0);
         // Centred on the view, or on the part of it left of the review card (or the Agent edits
         // card) when that shows.
@@ -3974,7 +4141,7 @@ impl Hybrid {
         let top = self.ai.bar_bottom.map_or(TOP, |b| b + 8.0);
         let rect = Rect::from_min_size(pos2((cx - size.x / 2.0).round(), top), size);
         Self::panel(ctx, "toast", rect, Order::Foreground, |ui, rect| {
-            ui.painter().galley(pos2(rect.left() + 14.0, rect.top() + 9.0), g, TEXT);
+            ui.painter().galley(pos2(rect.left() + 14.0, rect.top() + 9.0), g, th().text);
         });
     }
 
@@ -4015,13 +4182,13 @@ impl Hybrid {
                 Align2::CENTER_CENTER,
                 icon::SEARCH,
                 icon_font(16.0),
-                MUTED,
+                th().muted,
             );
             // Tab asks AI, from any row.
             let kx = field.right() - 10.0;
-            let ag = ui.painter().layout_no_wrap("Ask AI".into(), sans(12.0), FAINT);
+            let ag = ui.painter().layout_no_wrap("Ask AI".into(), sans(12.0), th().faint);
             let aw = ag.size().x;
-            ui.painter().galley(pos2(kx - aw, field.center().y - ag.size().y / 2.0), ag, FAINT);
+            ui.painter().galley(pos2(kx - aw, field.center().y - ag.size().y / 2.0), ag, th().faint);
             let tw = kbd(ui, pos2(kx - aw - 6.0, field.center().y), "Tab", true);
             let text_rect = Rect::from_min_max(
                 pos2(field.left() + 36.0, field.top() + 10.0),
@@ -4032,7 +4199,7 @@ impl Hybrid {
                 .id(Id::unique("cmdk-field"))
                 .font(sans(14.0))
                 .frame(egui::Frame::NONE)
-                .hint_text(egui::RichText::new("Type a command").color(FAINT).font(sans(14.0)))
+                .hint_text(egui::RichText::new("Type a command").color(th().faint).font(sans(14.0)))
                 .desired_width(text_rect.width());
             let resp = ui.put(text_rect, edit);
             resp.request_focus();
@@ -4043,7 +4210,7 @@ impl Hybrid {
             let sep_y = field.bottom() + 4.5;
             ui.painter().line_segment(
                 [pos2(rect.left() + 1.0, sep_y), pos2(rect.right() - 1.0, sep_y)],
-                Stroke::new(1.0, LINE),
+                Stroke::new(1.0, th().line),
             );
             let mut y = sep_y + 4.5;
             if hits.is_empty() {
@@ -4051,20 +4218,20 @@ impl Hybrid {
                 let row = Rect::from_min_size(pos2(rect.left() + 8.0, y), vec2(rect.width() - 16.0, 34.0));
                 let r = ui.interact(row, Id::unique("cmd-ask-ai"), Sense::click());
                 let p = ui.painter();
-                p.rect_filled(row, CornerRadius::same(7), HOVER);
+                p.rect_filled(row, CornerRadius::same(7), th().hover);
                 p.text(
                     pos2(row.left() + 18.0, row.center().y),
                     Align2::CENTER_CENTER,
                     icon::SPARKLES,
                     icon_font(14.0),
-                    ACCENT,
+                    th().accent,
                 );
-                let g = p.layout_no_wrap("Ask AI".into(), sans(13.0), TEXT);
+                let g = p.layout_no_wrap("Ask AI".into(), sans(13.0), th().text);
                 let gw = g.size().x;
-                p.galley(pos2(row.left() + 32.0, row.center().y - g.size().y / 2.0), g, TEXT);
+                p.galley(pos2(row.left() + 32.0, row.center().y - g.size().y / 2.0), g, th().text);
                 let mut job = LayoutJob::single_section(
                     format!("“{}”", self.cmdk.as_deref().unwrap_or("").trim()),
-                    TextFormat { font_id: sans(13.0), color: MUTED, ..Default::default() },
+                    TextFormat { font_id: sans(13.0), color: th().muted, ..Default::default() },
                 );
                 job.wrap = egui::text::TextWrapping {
                     max_width: (row.width() - 32.0 - gw - 8.0 - 70.0).max(1.0),
@@ -4073,7 +4240,7 @@ impl Hybrid {
                     overflow_character: Some('…'),
                 };
                 let q = p.layout_job(job);
-                p.galley(pos2(row.left() + 32.0 + gw + 8.0, row.center().y - q.size().y / 2.0), q, MUTED);
+                p.galley(pos2(row.left() + 32.0 + gw + 8.0, row.center().y - q.size().y / 2.0), q, th().muted);
                 kbd(ui, pos2(row.right() - 10.0, row.center().y), "↵", true);
                 self.hits.insert("cmd-ask-ai".into(), row);
                 if r.clicked() {
@@ -4090,14 +4257,14 @@ impl Hybrid {
                 }
                 let p = ui.painter();
                 if n == self.cmdk_sel {
-                    p.rect_filled(row, CornerRadius::same(7), HOVER);
+                    p.rect_filled(row, CornerRadius::same(7), th().hover);
                 }
                 p.text(
                     pos2(row.left() + 10.0, row.center().y),
                     Align2::LEFT_CENTER,
                     COMMANDS[i].label,
                     sans(13.0),
-                    TEXT,
+                    th().text,
                 );
                 let mut kx = row.right() - 10.0;
                 for k in COMMANDS[i].keys.iter().rev() {
@@ -4129,7 +4296,8 @@ impl Hybrid {
 // .rail-sep
 fn rail_sep(ui: &Ui, rail: Rect, y: &mut f32) {
     let sy = *y + 2.5;
-    ui.painter().line_segment([pos2(rail.left() + 10.0, sy), pos2(rail.right() - 10.0, sy)], Stroke::new(1.0, LINE));
+    ui.painter()
+        .line_segment([pos2(rail.left() + 10.0, sy), pos2(rail.right() - 10.0, sy)], Stroke::new(1.0, th().line));
     *y += 9.0;
 }
 
@@ -4140,16 +4308,16 @@ fn view_chip(ui: &mut Ui, c: Rect, id: &str, label: &str, key: &str, on: bool) -
     let hover = resp.hovered();
     let p = ui.painter();
     let color = if on {
-        p.rect(c, CornerRadius::same(7), ACCENT_BG, Stroke::new(1.0, RING), StrokeKind::Inside);
-        ACCENT
+        p.rect(c, CornerRadius::same(7), th().accent_bg, Stroke::new(1.0, th().ring), StrokeKind::Inside);
+        th().accent
     } else {
-        let border = if hover { Color32::from_white_alpha(64) } else { LINE2 };
+        let border = if hover { th().tint(64) } else { th().line2 };
         p.rect_stroke(c, CornerRadius::same(7), Stroke::new(1.0, border), StrokeKind::Inside);
-        if hover { TEXT } else { MUTED }
+        if hover { th().text } else { th().muted }
     };
     let shift = if key.is_empty() { 0.0 } else { 3.0 };
     p.text(pos2(c.center().x - shift, c.center().y), Align2::CENTER_CENTER, label, sans(11.0), color);
-    let kc = if on { ACCENT.gamma_multiply(0.8) } else { FAINT };
+    let kc = if on { th().accent.gamma_multiply(0.8) } else { th().faint };
     p.text(pos2(c.right() - 4.0, c.bottom() - 2.0), Align2::RIGHT_BOTTOM, key, mono_medium(8.5), kc);
     resp.clicked()
 }
@@ -4159,16 +4327,16 @@ fn tool_button(ui: &mut Ui, at: Pos2, glyph: char, key: &str, on: bool) -> egui:
     let r = Rect::from_min_size(at, vec2(TOOL, TOOL));
     let resp = ui.interact(r, Id::unique(("tool", key)), Sense::click());
     let p = ui.painter();
-    let mut color = MUTED;
+    let mut color = th().muted;
     if on {
-        p.rect(r, CornerRadius::same(8), ACCENT_BG, Stroke::new(1.0, RING), StrokeKind::Inside);
-        color = TEXT;
+        p.rect(r, CornerRadius::same(8), th().accent_bg, Stroke::new(1.0, th().ring), StrokeKind::Inside);
+        color = th().text;
     } else if resp.hovered() {
-        p.rect_filled(r, CornerRadius::same(8), HOVER);
-        color = TEXT;
+        p.rect_filled(r, CornerRadius::same(8), th().hover);
+        color = th().text;
     }
     p.text(r.center(), Align2::CENTER_CENTER, glyph, icon_font(17.0), color);
-    let kc = if on { MUTED } else { FAINT };
+    let kc = if on { th().muted } else { th().faint };
     p.text(pos2(r.right() - 2.5, r.bottom() - 1.5), Align2::RIGHT_BOTTOM, key, mono_medium(8.0), kc);
     resp
 }
@@ -4198,7 +4366,7 @@ fn tbtn_on(
     enabled: bool,
     on: bool,
 ) -> egui::Response {
-    let g = (!label.is_empty()).then(|| ui.painter().layout_no_wrap(label.into(), sans(13.0), MUTED));
+    let g = (!label.is_empty()).then(|| ui.painter().layout_no_wrap(label.into(), sans(13.0), th().muted));
     let w = 20.0
         + glyph.map_or(0.0, |_| 16.0)
         + g.as_ref().map_or(0.0, |g| g.size().x + if glyph.is_some() { 6.0 } else { 0.0 });
@@ -4207,10 +4375,10 @@ fn tbtn_on(
     let sense = if enabled { Sense::click() } else { Sense::hover() };
     let resp = ui.interact(r, Id::unique(("tbtn", id)), sense);
     let p = ui.painter();
-    let mut color = MUTED;
+    let mut color = th().muted;
     if enabled && (resp.hovered() || on) {
-        p.rect_filled(r, CornerRadius::same(8), HOVER);
-        color = TEXT;
+        p.rect_filled(r, CornerRadius::same(8), th().hover);
+        color = th().text;
     }
     if !enabled {
         color = color.gamma_multiply(0.35);
@@ -4239,13 +4407,13 @@ fn nav_button(
     let sense = if enabled { Sense::click() } else { Sense::hover() };
     let resp = ui.interact(r, Id::unique(("nav", id)), sense);
     let p = ui.painter();
-    let mut color = MUTED;
+    let mut color = th().muted;
     if on {
-        p.rect_filled(r, CornerRadius::same(8), ACCENT_BG);
-        color = ACCENT;
+        p.rect_filled(r, CornerRadius::same(8), th().accent_bg);
+        color = th().accent;
     } else if enabled && resp.hovered() {
-        p.rect_filled(r, CornerRadius::same(8), HOVER);
-        color = TEXT;
+        p.rect_filled(r, CornerRadius::same(8), th().hover);
+        color = th().text;
     }
     if !enabled {
         color = color.gamma_multiply(0.35);
@@ -4264,9 +4432,9 @@ fn nav_button(
 /// It keeps off `clear.0`: where above `at` would cross it, it goes below `at` if `clear.1`
 /// allows, else it is not shown.
 fn tooltip(ctx: &Context, at: Rect, label: &str, keys: &[&str], clear: Option<(Rect, bool)>) -> Option<Rect> {
-    let g = ctx.fonts_mut(|f| f.layout_no_wrap(label.into(), sans(12.0), TEXT));
+    let g = ctx.fonts_mut(|f| f.layout_no_wrap(label.into(), sans(12.0), th().text));
     let kg: Vec<_> =
-        keys.iter().map(|k| ctx.fonts_mut(|f| f.layout_no_wrap((*k).into(), mono_medium(10.5), MUTED))).collect();
+        keys.iter().map(|k| ctx.fonts_mut(|f| f.layout_no_wrap((*k).into(), mono_medium(10.5), th().muted))).collect();
     let kw: f32 = kg.iter().map(|k| (k.size().x + 10.0).max(18.0) + 3.0).sum();
     let w = 10.0 + g.size().x + if kg.is_empty() { 0.0 } else { 8.0 + kw - 3.0 } + 10.0;
     let size = vec2(w, 28.0);
@@ -4284,18 +4452,22 @@ fn tooltip(ctx: &Context, at: Rect, label: &str, keys: &[&str], clear: Option<(R
         |ui| {
             let p = ui.painter();
             p.add(
-                Shadow { offset: [0, 6], blur: 18, spread: 0, color: Color32::from_black_alpha(89) }
+                Shadow { offset: [0, 6], blur: 18, spread: 0, color: th().shadow }
                     .as_shape(rect, CornerRadius::same(8)),
             );
-            p.rect(rect, CornerRadius::same(8), PANEL, Stroke::new(1.0, LINE2), StrokeKind::Inside);
+            p.rect(rect, CornerRadius::same(8), th().panel, Stroke::new(1.0, th().line2), StrokeKind::Inside);
             let cy = rect.center().y;
-            p.galley(pos2(rect.left() + 10.0, cy - g.size().y / 2.0), g.clone(), TEXT);
+            p.galley(pos2(rect.left() + 10.0, cy - g.size().y / 2.0), g.clone(), th().text);
             let mut kx = rect.left() + 10.0 + g.size().x + 8.0;
             for k in kg {
                 let kw = (k.size().x + 10.0).max(18.0);
                 let r = Rect::from_min_size(pos2(kx, cy - 9.5), vec2(kw, 19.0));
                 kbd_frame(p, r);
-                p.galley(pos2(r.center().x - k.size().x / 2.0, r.top() + 1.0 + (16.0 - k.size().y) / 2.0), k, MUTED);
+                p.galley(
+                    pos2(r.center().x - k.size().x / 2.0, r.top() + 1.0 + (16.0 - k.size().y) / 2.0),
+                    k,
+                    th().muted,
+                );
                 kx += kw + 3.0;
             }
         },
@@ -4305,21 +4477,21 @@ fn tooltip(ctx: &Context, at: Rect, label: &str, keys: &[&str], clear: Option<(R
 
 /// kbd: 10.5 px mono, 1 px border with a 2 px bottom, right-aligned at `right_center`. Returns its width.
 fn kbd(ui: &Ui, right_center: Pos2, text: &str, _right: bool) -> f32 {
-    let g = ui.painter().layout_no_wrap(text.into(), mono_medium(10.5), MUTED);
+    let g = ui.painter().layout_no_wrap(text.into(), mono_medium(10.5), th().muted);
     let w = (g.size().x + 10.0).max(18.0);
     let r = Rect::from_min_size(pos2(right_center.x - w, right_center.y - 9.5), vec2(w, 19.0));
     let p = ui.painter();
     kbd_frame(p, r);
-    p.galley(pos2(r.center().x - g.size().x / 2.0, r.top() + 1.0 + (16.0 - g.size().y) / 2.0), g, MUTED);
+    p.galley(pos2(r.center().x - g.size().x / 2.0, r.top() + 1.0 + (16.0 - g.size().y) / 2.0), g, th().muted);
     w
 }
 
 /// The kbd border: 1 px, 2 px at the bottom, radius 5.
 fn kbd_frame(p: &egui::Painter, r: Rect) {
-    p.rect_stroke(r, CornerRadius::same(5), Stroke::new(1.0, LINE2), StrokeKind::Inside);
+    p.rect_stroke(r, CornerRadius::same(5), Stroke::new(1.0, th().line2), StrokeKind::Inside);
     p.line_segment(
         [pos2(r.left() + 2.5, r.bottom() - 1.5), pos2(r.right() - 2.5, r.bottom() - 1.5)],
-        Stroke::new(1.0, LINE2),
+        Stroke::new(1.0, th().line2),
     );
 }
 
@@ -4389,11 +4561,11 @@ fn handle(p: &egui::Painter, at: Pos2, c: [u8; 3]) {
 fn field(ui: &mut Ui, rect: Rect, label: &str, id: Id, text: &mut String) -> bool {
     let focused = ui.memory(|m| m.has_focus(id));
     let p = ui.painter().clone();
-    let border = if focused { RING } else { LINE };
-    p.rect(rect, CornerRadius::same(7), Color32::from_white_alpha(9), Stroke::new(1.0, border), StrokeKind::Inside);
-    let g = p.layout_no_wrap(label.into(), mono(10.0), FAINT);
+    let border = if focused { th().ring } else { th().line };
+    p.rect(rect, CornerRadius::same(7), th().tint(9), Stroke::new(1.0, border), StrokeKind::Inside);
+    let g = p.layout_no_wrap(label.into(), mono(10.0), th().faint);
     let lw = g.size().x;
-    p.galley(pos2(rect.left() + 9.0, rect.center().y - g.size().y / 2.0), g, FAINT);
+    p.galley(pos2(rect.left() + 9.0, rect.center().y - g.size().y / 2.0), g, th().faint);
     let tr = Rect::from_min_max(
         pos2(rect.left() + 9.0 + lw + 7.0, rect.top() + 6.0),
         pos2(rect.right() - 7.0, rect.bottom() - 6.0),
@@ -4401,7 +4573,7 @@ fn field(ui: &mut Ui, rect: Rect, label: &str, id: Id, text: &mut String) -> boo
     let edit = egui::TextEdit::singleline(text)
         .id(id)
         .font(mono(12.0))
-        .text_color(TEXT)
+        .text_color(th().text)
         .frame(egui::Frame::NONE)
         .margin(egui::Margin::ZERO)
         .desired_width(tr.width());
@@ -4438,13 +4610,19 @@ fn slider(
     }
     let p = ui.painter();
     let active = resp.hovered() || resp.dragged();
-    p.text(r.left_top() + vec2(0.0, 7.0), Align2::LEFT_CENTER, label, sans(12.0), if active { TEXT } else { MUTED });
-    p.text(r.right_top() + vec2(0.0, 7.0), Align2::RIGHT_CENTER, fmt(*v), mono(11.0), TEXT);
+    p.text(
+        r.left_top() + vec2(0.0, 7.0),
+        Align2::LEFT_CENTER,
+        label,
+        sans(12.0),
+        if active { th().text } else { th().muted },
+    );
+    p.text(r.right_top() + vec2(0.0, 7.0), Align2::RIGHT_CENTER, fmt(*v), mono(11.0), th().text);
     let k = ((*v - lo) / (hi - lo)).clamp(0.0, 1.0);
-    p.rect_filled(track, CornerRadius::same(2), LINE2);
-    p.rect_filled(Rect::from_min_size(track.min, vec2(track.width() * k, 4.0)), CornerRadius::same(2), ACCENT);
+    p.rect_filled(track, CornerRadius::same(2), th().line2);
+    p.rect_filled(Rect::from_min_size(track.min, vec2(track.width() * k, 4.0)), CornerRadius::same(2), th().accent);
     let at = pos2(track.left() + track.width() * k, track.center().y);
-    p.circle(at, 6.0, TEXT, Stroke::new(1.0, Color32::from_black_alpha(100)));
+    p.circle(at, 6.0, th().text, Stroke::new(1.0, Color32::from_black_alpha(100)));
     (changed, resp.drag_stopped() || resp.clicked())
 }
 
@@ -4465,8 +4643,10 @@ fn segmented(
     let free = r.width() - 4.0 * (n - 1) as f32;
     // Equal cells, unless a label would not keep 8 points either side: then each cell is its
     // label's width plus an equal share of what is left.
-    let text: Vec<f32> =
-        labels.iter().map(|l| ui.fonts_mut(|f| f.layout_no_wrap(l.clone(), font.clone(), TEXT)).size().x).collect();
+    let text: Vec<f32> = labels
+        .iter()
+        .map(|l| ui.fonts_mut(|f| f.layout_no_wrap(l.clone(), font.clone(), th().text)).size().x)
+        .collect();
     let widths: Vec<f32> = if text.iter().all(|&t| t + 16.0 <= free / n as f32) {
         vec![free / n as f32; n]
     } else {
@@ -4483,22 +4663,22 @@ fn segmented(
         let resp = ui.interact(c, Id::unique(names[k]), if enabled { Sense::click() } else { Sense::hover() });
         let p = ui.painter();
         let color = if k == sel {
-            p.rect(c, CornerRadius::same(7), ACCENT_BG, Stroke::new(1.0, RING), StrokeKind::Inside);
-            ACCENT
+            p.rect(c, CornerRadius::same(7), th().accent_bg, Stroke::new(1.0, th().ring), StrokeKind::Inside);
+            th().accent
         } else {
             let hover = enabled && resp.hovered();
             p.rect_stroke(
                 c,
                 CornerRadius::same(7),
-                Stroke::new(1.0, if hover { Color32::from_white_alpha(64) } else { LINE2 }),
+                Stroke::new(1.0, if hover { th().tint(64) } else { th().line2 }),
                 StrokeKind::Inside,
             );
             if !enabled {
-                FAINT.gamma_multiply(0.6)
+                th().faint.gamma_multiply(0.6)
             } else if hover {
-                TEXT
+                th().text
             } else {
-                MUTED
+                th().muted
             }
         };
         p.text(c.center(), Align2::CENTER_CENTER, label, font.clone(), color);
@@ -4514,12 +4694,12 @@ fn small_button(ui: &mut Ui, r: Rect, glyph: char, label: &str, id: &str, on: bo
     let resp = ui.interact(r, Id::unique(("sbtn", id)), Sense::click());
     let p = ui.painter();
     let (color, border) = if on {
-        p.rect_filled(r, CornerRadius::same(7), ACCENT_BG);
-        (ACCENT, RING)
+        p.rect_filled(r, CornerRadius::same(7), th().accent_bg);
+        (th().accent, th().ring)
     } else if resp.hovered() {
-        (TEXT, Color32::from_white_alpha(64))
+        (th().text, th().tint(64))
     } else {
-        (MUTED, LINE2)
+        (th().muted, th().line2)
     };
     p.rect_stroke(r, CornerRadius::same(7), Stroke::new(1.0, border), StrokeKind::Inside);
     let g = p.layout_no_wrap(label.into(), sans(12.0), color);
@@ -4536,8 +4716,8 @@ fn logo(ui: &Ui, at: Pos2, size: f32) {
     let pt = |x: f32, y: f32| at + vec2(x * s, y * s);
     let hex = vec![pt(12.0, 2.5), pt(20.5, 7.4), pt(20.5, 16.6), pt(12.0, 21.5), pt(3.5, 16.6), pt(3.5, 7.4)];
     let p = ui.painter();
-    p.add(egui::Shape::convex_polygon(hex.clone(), ACCENT.gamma_multiply(0.25), Stroke::NONE));
-    let st = Stroke::new(1.6 * s, ACCENT);
+    p.add(egui::Shape::convex_polygon(hex.clone(), th().accent.gamma_multiply(0.25), Stroke::NONE));
+    let st = Stroke::new(1.6 * s, th().accent);
     p.add(egui::Shape::closed_line(hex, st));
     let c = pt(12.0, 12.0);
     for e in [pt(20.5, 7.4), pt(12.0, 21.5), pt(3.5, 7.4)] {

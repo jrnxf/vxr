@@ -22,6 +22,8 @@ struct Shot {
     time: f64,
     /// What the editor asked its host to do (open, save, export), oldest first.
     host: Vec<Action>,
+    /// The system's light or dark setting, as a window reports it (none: unknown).
+    system: Option<egui::Theme>,
 }
 
 impl Shot {
@@ -44,7 +46,7 @@ impl Shot {
             view_formats: &[],
         });
         let ed = Editor::new(gpu, scene, name, FORMAT, (w, h), ppp, crate::native::fonts())?;
-        Ok(Self { ed, target, time: 0.0, host: Vec::new() })
+        Ok(Self { ed, target, time: 0.0, host: Vec::new(), system: None })
     }
 
     /// Draw `n` frames (egui needs a couple to lay out and upload fonts).
@@ -62,6 +64,7 @@ impl Shot {
                 screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
                 time: Some(self.time),
                 events: std::mem::take(&mut events),
+                system_theme: self.system,
                 ..Default::default()
             };
             input.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point = Some(self.ed.ppp);
@@ -184,6 +187,8 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
         s.save_png(&dir.join(format!("app-{tag}.png")))?;
     }
 
+    themes(dir, &load)?;
+
     // Every tool at 2x through the pointer path.
     let (scene, name) = load()?;
     let mut s = Shot::new(scene, &name, 2.0)?;
@@ -305,6 +310,120 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
         frame_times(p)?;
         review_times(p)?;
     }
+    Ok(())
+}
+
+/// The themes: the Theme menu in the top bar and Cmd-K pick one and ask the host to keep it,
+/// System follows the system's light or dark setting, and each theme recolours the UI and the
+/// view's background, ground, grid, bounds frame and selection while the voxels keep their
+/// colours. Writes `theme-<id>.png` for each theme at 1280x800 with a colour selected and the
+/// menu open.
+fn themes(dir: &Path, load: &dyn Fn() -> Result<(Scene, String), String>) -> Result<(), String> {
+    use vxr_app::theme::ThemeChoice;
+    let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    let (scene, name) = load()?;
+    let mut s = Shot::new(scene, &name, 1.0)?;
+    s.ed.ui.coach = false;
+    s.frames(3);
+    let neutral = vxr_render::ViewColors::NEUTRAL;
+    check(
+        s.ed.ui.theme == ThemeChoice::System && s.ed.renderer.colors == neutral,
+        "the theme starts on System, which is Neutral when the system does not say".into(),
+    )?;
+    // A pixel of the view's background, and of a panel's fill.
+    let corner = |s: &mut Shot| {
+        let px = view_pixels(s);
+        let at = (s.ed.width as usize * (s.ed.height as usize - 4) + s.ed.width as usize / 2) * 4;
+        [px[at], px[at + 1], px[at + 2]]
+    };
+    let dark_bg = corner(&mut s);
+
+    s.system = Some(egui::Theme::Light);
+    s.frames(3);
+    let light_bg = corner(&mut s);
+    check(
+        s.ed.ui.shown_theme(&s.ed.ctx).name == "Paper" && s.ed.renderer.colors == vxr_app::theme::PAPER.view,
+        "System is Paper while the system is light".into(),
+    )?;
+    check(
+        light_bg.iter().all(|&c| c > 200) && dark_bg.iter().all(|&c| c < 40),
+        format!("the view's background follows: {dark_bg:?} dark, {light_bg:?} light"),
+    )?;
+    s.system = Some(egui::Theme::Dark);
+    s.frames(3);
+    check(s.ed.ui.shown_theme(&s.ed.ctx).name == "Neutral", "and Neutral again once it is dark".into())?;
+
+    s.ui_click("theme")?;
+    s.frames(2);
+    let rows = ThemeChoice::ALL.iter().all(|c| s.ed.ui.hits.contains_key(&format!("theme-{}", c.id())));
+    check(s.ed.ui.theme_menu && rows, "the top bar's theme button opens the Theme menu with every theme".into())?;
+    s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+    let escaped = !s.ed.ui.theme_menu;
+    s.ui_click("theme")?;
+    let voxels = s.voxels();
+    let mid = egui::pos2(s.ed.width as f32 / s.ed.ppp / 2.0, s.ed.height as f32 / s.ed.ppp / 2.0);
+    s.ui_drag(mid, mid, egui::Modifiers::NONE);
+    check(
+        escaped && !s.ed.ui.theme_menu && s.voxels() == voxels,
+        "Escape closes it, and so does a click outside it, which edits nothing".into(),
+    )?;
+    if s.voxels() != voxels {
+        s.ed.undo();
+    }
+
+    // Each theme from the menu, with a colour selected, as the evidence screenshots.
+    s.tool(Tool::Select, Shape::Voxel);
+    let mid_px = [s.ed.width as f32 / 2.0, s.ed.height as f32 / 2.0];
+    if s.voxels() > 0 {
+        let p = s.top_face_pixel(mid_px)?;
+        s.stroke(p, &[]);
+    }
+    let palette = s.ed.scene.palette;
+    let mut seen = Vec::new();
+    for choice in ThemeChoice::ALL.into_iter().skip(1) {
+        s.host.clear();
+        if !s.ed.ui.theme_menu {
+            s.ui_click("theme")?;
+        }
+        s.ui_click(&format!("theme-{}", choice.id()))?;
+        s.frames(3);
+        let t = choice.resolve(true);
+        let bg = corner(&mut s);
+        check(
+            s.ed.ui.theme == choice
+                && s.host.contains(&Action::Theme)
+                && s.ed.ui.theme_menu
+                && s.ed.renderer.colors == t.view
+                && s.ed.scene.palette == palette
+                && !seen.contains(&bg),
+            format!("Theme menu: {} recolours the view ({bg:?} at its foot) and keeps the voxels' colours", t.name),
+        )?;
+        seen.push(bg);
+        s.ed.pointer_moved(None);
+        s.frames(2);
+        s.save_png(&dir.join(format!("theme-{}.png", choice.id())))?;
+    }
+    s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+
+    // Cmd-K picks one too, and System from there follows the system again.
+    s.host.clear();
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("theme: tokyo".into())]);
+    s.frames_with(3, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    check(
+        s.ed.ui.theme == ThemeChoice::TokyoNight && s.host.contains(&Action::Theme),
+        "Cmd-K Theme: Tokyo Night picks it and asks the host to keep it".into(),
+    )?;
+    s.system = Some(egui::Theme::Light);
+    s.frames(3);
+    check(s.ed.ui.shown_theme(&s.ed.ctx).name == "Tokyo Night", "a picked theme ignores the system's setting".into())?;
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("theme: system".into())]);
+    s.frames_with(3, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    check(
+        s.ed.ui.theme == ThemeChoice::System && s.ed.renderer.colors == vxr_app::theme::PAPER.view,
+        "Cmd-K Theme: System goes back to following it (Paper while light)".into(),
+    )?;
     Ok(())
 }
 

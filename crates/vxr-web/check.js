@@ -814,6 +814,34 @@ async () => {
     }
     step('the export steps leave the file as it was', same(bytes(), original));
 
+    // Themes: System follows the page's light or dark setting, the top bar's theme button
+    // opens the Theme menu, a row picks a theme and the page keeps it in localStorage, and
+    // Cmd-K picks one too.
+    const darkPage = matchMedia('(prefers-color-scheme: dark)').matches;
+    const kept = () => { try { return localStorage.getItem('vxr-theme'); } catch { return 'no storage'; } };
+    step('the theme is System, which follows the page', st().theme === 'system' && st().themeShown === (darkPage ? 'Neutral' : 'Paper'),
+      `${st().theme} ${st().themeShown} dark ${darkPage}`);
+    window.vxr.set_system_dark(!darkPage);
+    await frames();
+    step('and turns over when the system does', st().themeShown === (darkPage ? 'Paper' : 'Neutral'), st().themeShown);
+    window.vxr.set_system_dark(darkPage);
+    await click(...hit('theme'));
+    step('the theme button opens the Theme menu with every theme',
+      st().themeMenu && ['system', 'neutral', 'paper', 'gruvbox', 'tokyo-night', 'kanagawa', 'nord'].every((id) => !!hit('theme-' + id)));
+    await click(...hit('theme-nord'));
+    await frames();
+    step('its Nord row picks Nord and the page keeps it', st().theme === 'nord' && st().themeShown === 'Nord' && kept() === 'nord',
+      `${st().theme} ${kept()}`);
+    await key('Escape');
+    step('Escape closes the menu', !st().themeMenu);
+    await key('k', cmd);
+    for (const ch of 'theme: system') await key(ch);
+    await key('Enter');
+    await frames();
+    step('Cmd-K Theme: System goes back to following the page', st().theme === 'system' && kept() === 'system'
+      && st().themeShown === (darkPage ? 'Neutral' : 'Paper'), `${st().theme} ${kept()}`);
+    step('the theme steps leave the file as it was', same(bytes(), original));
+
     // Materials: Cmd-K "Edit material", the type buttons and sliders, the render restarts,
     // the download carries MATL chunks, and undo gives back the file.
     const mat = (slot) => Array.from(window.vxr.material(slot));

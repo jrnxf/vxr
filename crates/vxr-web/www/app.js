@@ -183,6 +183,8 @@ function save() {
   download(app.save(), /\.vox$/i.test(app.name()) ? app.name() : 'scene.vox', 'application/octet-stream');
 }
 
+const THEME_KEY = 'vxr-theme';
+
 let cursor = '';
 function step(now) {
   for (const a of app.frame(now / 1000)) {
@@ -198,6 +200,9 @@ function step(now) {
       if (png.length) download(png, app.slices_name(), 'image/png');
     }
     else if (a === 'exported') download(app.take_export(), app.export_name(), 'image/png');
+    else if (a === 'theme') {
+      try { localStorage.setItem(THEME_KEY, app.theme()); } catch {}
+    }
   }
 }
 
@@ -231,6 +236,11 @@ async function main() {
   ]);
   app = await start(canvas, vox, 'island.vox', dpr(), ...fonts);
   window.vxr = app; // for the console and crates/vxr-web/check
+  // The System theme follows the page's light or dark setting; a picked theme is kept here.
+  const dark = matchMedia('(prefers-color-scheme: dark)');
+  app.set_system_dark(dark.matches);
+  dark.addEventListener('change', (e) => app.set_system_dark(e.matches));
+  try { app.set_theme(localStorage.getItem(THEME_KEY) ?? 'system'); } catch {}
   for (const [kind, key] of await window.vxrKeys.load().catch(() => [])) app.restore_key(kind, key);
   msg.hidden = true;
   wire();
