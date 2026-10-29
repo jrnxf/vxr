@@ -1488,6 +1488,13 @@ async () => {
   const focused = document.activeElement === ime;
   await frames();
   step('a tap on a text field focuses the hidden field inside the tap, not before', st().colorEdit && unfocused && focused, JSON.stringify([st().colorEdit, unfocused, document.activeElement?.id]));
+  touch('pointerdown', 0, hx, hy);
+  const kept = document.activeElement === ime;
+  await frames(2);
+  const held = document.activeElement === ime;
+  touch('pointerup', 0, hx, hy);
+  await frames();
+  step('a finger on the focused text field keeps the hidden field focused', kept && held && document.activeElement === ime, JSON.stringify([kept, held, document.activeElement?.id]));
   for (let i = 0; i < 2 && st().colorEdit; i++) await key('Escape');
   step('Escape leaves the field and closes the colour editor', !st().colorEdit, JSON.stringify(st().colorEdit));
   await tapAt('dock-color');

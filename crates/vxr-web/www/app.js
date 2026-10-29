@@ -169,8 +169,8 @@ function wire() {
   canvas.addEventListener('touchend', focusIme);
   canvas.addEventListener('pointerdown', (e) => {
     if (finger(e, 0)) {
+      if (document.activeElement !== ime) canvas.focus();
       canvas.setPointerCapture(e.pointerId);
-      canvas.focus();
       return;
     }
     if (e.pointerType === 'mouse') app.set_touch(false);
