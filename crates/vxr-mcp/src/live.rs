@@ -66,10 +66,8 @@ fn own_tools() -> Vec<(&'static str, String, Value)> {
         ),
         (
             NEW_SCENE,
-            "Start a new empty scene in vxr, as New scene does: the default size, palette and camera. The open scene and its undo history are gone for good; with unsaved edits it refuses unless discard is true. Call it only when the user asks for a new scene.".into(),
-            json!({"type": "object", "properties": {
-                "discard": {"type": "boolean", "description": "drop the open scene's unsaved edits"},
-            }, "additionalProperties": false}),
+            "Start a new empty scene in vxr, as New scene does: the default size, palette and camera. The open scene and its undo history are gone for good; with unsaved edits vxr first asks the user, as New scene does, and the result says whether they started the new scene or kept theirs. Call it only when the user asks for a new scene.".into(),
+            json!({"type": "object", "properties": {}, "additionalProperties": false}),
         ),
     ]
 }

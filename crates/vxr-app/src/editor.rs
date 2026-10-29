@@ -135,6 +135,9 @@ pub struct Editor {
     /// What an agent's `save` or `new_scene` asks of the host, handed over with the next
     /// frame's actions; agents wait until then ([`Editor::agent_busy`]).
     agent_host: Vec<Action>,
+    /// An agent's `new_scene` that asked the user through the New scene confirm: the agent's
+    /// connection and, once the confirm closed, whether the user started the new scene.
+    agent_new: Option<(u64, Option<bool>)>,
     /// A PNG render export in progress (the corner pauses meanwhile).
     pub export: Option<Export>,
     /// The last finished export's PNG and size, for the host to save or download.
@@ -262,6 +265,7 @@ impl Editor {
             path: None,
             saved_at: 0,
             agent_host: Vec::new(),
+            agent_new: None,
             export: None,
             exported: None,
             export_fits: [false; 4],
@@ -1461,6 +1465,7 @@ impl Editor {
                 self.ui.toast(&self.ctx, REVIEW_FIRST);
             }
         }
+        let started = actions.contains(&Action::New);
         // Any other command places a box whose height is being set first.
         if actions.iter().any(|a| *a != Action::CancelBox) {
             self.place_box();
@@ -1544,6 +1549,11 @@ impl Editor {
                 other => host.push(other),
             }
         }
+        if let Some((_, answer @ None)) = &mut self.agent_new
+            && !self.ui.confirm_new
+        {
+            *answer = Some(started);
+        }
         match self.ui.renamed.take() {
             Some((Named::Node(i), name)) => self.rename(i, &name),
             Some((Named::Layer(id), name)) => self.rename_layer(id, &name),
@@ -1569,6 +1579,8 @@ impl Editor {
     pub fn agent_busy(&self) -> bool {
         // A save an agent asked for runs first, so it saves the scene as the agent left it.
         !self.agent_host.is_empty()
+            // An agent's New scene waits for the user's answer to its confirm.
+            || matches!(self.agent_new, Some((_, None)))
             || self.gesture.is_some()
             || self.moving.is_some()
             || self.marquee.is_some()
@@ -1583,23 +1595,24 @@ impl Editor {
     /// on, waits in the agents' change under review ([`Agents::stage`]), which every later
     /// call goes into until the user applies or discards it. Refused while an AI change is
     /// under review, since nothing else edits the scene then. What the agent has not heard
-    /// yet (the user applied or discarded its edits) comes first.
+    /// yet (the user applied or discarded its edits) comes first. None while the call waits
+    /// for the user's answer (a `new_scene` asking first): the host keeps it and calls again.
     pub fn agent_call(
         &mut self,
         conn: u64,
         client: &str,
         name: &str,
         args: &serde_json::Value,
-    ) -> Result<String, String> {
+    ) -> Option<Result<String, String>> {
         let agents_review = self.review.as_ref().filter(|r| r.agents.is_some());
         if name == vxr_mcp::live::REVIEW_STATUS {
-            return Ok(self.agents.status(conn, agents_review));
+            return Some(Ok(self.agents.status(conn, agents_review)));
         }
         if self.review.is_some() && agents_review.is_none() {
-            return Err(REVIEW_AGENT.into());
+            return Some(Err(REVIEW_AGENT.into()));
         }
         if name == vxr_mcp::live::SAVE || name == vxr_mcp::live::NEW_SCENE {
-            return self.agent_file(conn, client, name, args);
+            return self.agent_file(conn, client, name);
         }
         let notice = self.agents.take_notices(conn);
         let now = self.ctx.input(|i| i.time);
@@ -1624,21 +1637,21 @@ impl Editor {
         if let At::Object(i) = self.scene.at() {
             self.last_object = Some(i);
         }
-        match notice {
+        Some(match notice {
             Some(n) => r.map(|t| format!("{n}\n{t}")).map_err(|e| format!("{n}\n{e}")),
             None => r,
-        }
+        })
     }
 
     /// An agent's `save` or `new_scene`: the window's own Save (Cmd-S, through the host, so a
     /// scene never saved opens the save dialog and the browser downloads) or New scene. Both
-    /// wait while edits wait for review, and New scene refuses unsaved edits unless the agent
-    /// passes `discard`.
-    fn agent_file(&mut self, conn: u64, client: &str, name: &str, args: &serde_json::Value) -> Result<String, String> {
+    /// wait while edits wait for review, and New scene with unsaved edits asks the user through
+    /// the confirm the UI's New opens, answering once they started the new scene or kept this one.
+    fn agent_file(&mut self, conn: u64, client: &str, name: &str) -> Option<Result<String, String>> {
         if self.review.is_some() {
-            return Err(format!(
+            return Some(Err(format!(
                 "edits wait for the user's review in vxr: {name} once they apply or discard them (review_status tells you)"
-            ));
+            )));
         }
         let now = self.ctx.input(|i| i.time);
         self.agents.note_call(conn, now, name);
@@ -1646,7 +1659,7 @@ impl Editor {
         let scene = self.ui.scene_name.clone();
         if name == vxr_mcp::live::SAVE {
             self.agent_host.push(Action::Save);
-            return Ok(if self.agents.web {
+            return Some(Ok(if self.agents.web {
                 format!("vxr saves {scene} as Cmd-S does: the browser downloads it")
             } else if self.path.is_some() {
                 format!("vxr saves {scene} as Cmd-S does, replacing its file")
@@ -1654,19 +1667,30 @@ impl Editor {
                 format!(
                     "{scene} was never saved: vxr opens the save dialog for the user to choose where, as Cmd-S does"
                 )
-            });
+            }));
         }
-        let unsaved = self.scene.history().position() != self.saved_at;
-        if unsaved && args.get("discard").and_then(serde_json::Value::as_bool) != Some(true) {
-            return Err(format!(
-                "{scene} has unsaved edits: ask the user to save them first, or pass discard: true to drop them"
-            ));
+        match self.agent_new.take() {
+            Some((c, Some(false))) if c == conn => {
+                return Some(Err(format!("the user kept {scene}: they cancelled New scene, so nothing changed")));
+            }
+            // The user started it from the confirm, as the UI's New does.
+            Some((c, Some(true))) if c == conn => {}
+            _ if self.scene.history().position() != self.saved_at => {
+                self.ui.cmdk = None;
+                self.ui.confirm_new = true;
+                self.agent_new = Some((conn, None));
+                return None;
+            }
+            _ => {
+                self.new_scene();
+                self.agent_host.push(Action::New);
+            }
         }
-        self.new_scene();
-        self.agent_host.push(Action::New);
-        self.agents
-            .call(&mut self.scene, conn, client, "scene_summary", &serde_json::json!({}))
-            .map(|t| format!("new scene\n{t}"))
+        Some(
+            self.agents
+                .call(&mut self.scene, conn, client, "scene_summary", &serde_json::json!({}))
+                .map(|t| format!("new scene\n{t}")),
+        )
     }
 
     /// A resource a terminal agent reads, or None for a uri that names nothing. Under the
