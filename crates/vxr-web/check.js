@@ -623,6 +623,13 @@ async () => {
     const [, pt, pr] = window.vxr.hit_rect('palette');
     const [el, et] = window.vxr.hit_rect('color-edit');
     step('the color editor opens beside the palette', Math.abs(el - pr - 8) < 1 && et <= pt + 1, JSON.stringify([window.vxr.hit_rect('palette'), window.vxr.hit_rect('color-edit')]));
+    // Read the hint row once the editor is open and its layout has held still for a couple of frames.
+    for (let i = 0, last = '', same = 0; i < 60 && same < 2; i++) {
+      await frames(1);
+      const now = JSON.stringify([st().colorEdit, window.vxr.hit_rect('color-edit'), window.vxr.hit_rect('hint')]);
+      same = st().colorEdit && now === last ? same + 1 : 0;
+      last = now;
+    }
     const hint = window.vxr.hit_rect('hint');
     const clear = (a, b) => !b || !b.length || a[2] <= b[0] || b[2] <= a[0] || a[3] <= b[1] || b[3] <= a[1];
     step('the hint bar keeps clear of the palette and the color editor', clear(window.vxr.hit_rect('color-edit'), hint) && clear(window.vxr.hit_rect('palette'), hint), JSON.stringify(hint));
