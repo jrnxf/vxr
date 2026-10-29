@@ -1,4 +1,5 @@
-//! The app icon: a 2x2x2 voxel cube in the editor's indigo on a dark rounded square, drawn
+//! The app icon: the vxr logo, a 2x2x2 voxel cube with its top front voxel out, in neutral
+//! greys on a dark rounded square (`assets/logo/vxr-app-icon.svg` is the same drawing), drawn
 //! here so no image is kept in git. `cargo run --example icon -p vxr-app -- <dir.iconset>`
 //! writes the ten PNGs `iconutil -c icns` turns into `vxr.icns` (`crates/vxr-app/bundle`).
 
@@ -6,33 +7,29 @@ use glam::{Vec2, Vec3};
 
 /// A quad on the 1024 grid and its colour.
 type Quad = ([Vec2; 4], [u8; 3]);
-/// A face of the cube: two coordinates in [-0.5, 0.5] to a point on it.
-type Face = fn(f32, f32) -> Vec3;
 
-/// Each visible cell of the cube's faces, on the 1024 grid.
+/// The cube's visible faces on a unit-high box 0.866 wide, (tone, corners): tone 0 is the top,
+/// 1 the left and 2 the right side, as in the top bar's logo (`ui.rs`).
+const FACES: [(usize, [[f32; 2]; 4]); 9] = [
+    (0, [[0.433, 0.0], [0.866, 0.25], [0.6495, 0.375], [0.2165, 0.125]]),
+    (0, [[0.2165, 0.125], [0.433, 0.25], [0.2165, 0.375], [0.0, 0.25]]),
+    (1, [[0.0, 0.25], [0.2165, 0.375], [0.2165, 0.875], [0.0, 0.75]]),
+    (2, [[0.866, 0.25], [0.866, 0.75], [0.6495, 0.875], [0.6495, 0.375]]),
+    (1, [[0.433, 0.25], [0.6495, 0.375], [0.6495, 0.625], [0.433, 0.5]]),
+    (2, [[0.433, 0.25], [0.433, 0.5], [0.2165, 0.625], [0.2165, 0.375]]),
+    (0, [[0.433, 0.5], [0.6495, 0.625], [0.433, 0.75], [0.2165, 0.625]]),
+    (1, [[0.2165, 0.625], [0.433, 0.75], [0.433, 1.0], [0.2165, 0.875]]),
+    (2, [[0.6495, 0.625], [0.6495, 0.875], [0.433, 1.0], [0.433, 0.75]]),
+];
+/// shadcn Neutral's greys: the top, left and right faces, and the square behind them.
+const TONES: [[u8; 3]; 3] = [[0xfa, 0xfa, 0xfa], [0xa1, 0xa1, 0xa1], [0x52, 0x52, 0x52]];
+const BACKGROUND: [u8; 3] = [0x17, 0x17, 0x17];
+
+/// The cube's faces on the 1024 grid: 486 high, centred a little above the middle.
 fn shapes() -> Vec<Quad> {
-    let c = Vec2::new(512.0, 522.0);
-    let s = 330.0;
-    let (cos, sin) = (30f32.to_radians().cos(), 30f32.to_radians().sin());
-    let p = |v: Vec3| c + v.x * Vec2::new(cos, sin) * s + v.y * Vec2::new(-cos, sin) * s + v.z * Vec2::new(0.0, -s);
-    let mut quads = Vec::new();
-    // Top (z = 0.5), front left (y = 0.5) and front right (x = 0.5), lightest to darkest.
-    let faces: [(Face, [u8; 3]); 3] = [
-        (|a, b| Vec3::new(a, b, 0.5), [0xc7, 0xd2, 0xfe]),
-        (|a, b| Vec3::new(a, 0.5, b), [0x81, 0x8c, 0xf8]),
-        (|a, b| Vec3::new(0.5, a, b), [0x5b, 0x5f, 0xe0]),
-    ];
-    let gap = 0.035;
-    for (face, color) in faces {
-        for i in 0..2 {
-            for j in 0..2 {
-                let (a0, b0) = (-0.5 + 0.5 * i as f32 + gap, -0.5 + 0.5 * j as f32 + gap);
-                let (a1, b1) = (a0 + 0.5 - 2.0 * gap, b0 + 0.5 - 2.0 * gap);
-                quads.push(([p(face(a0, b0)), p(face(a1, b0)), p(face(a1, b1)), p(face(a0, b1))], color));
-            }
-        }
-    }
-    quads
+    let h = 486.0;
+    let origin = Vec2::new(512.0 - 0.433 * h, 506.0 - 0.5 * h);
+    FACES.iter().map(|(tone, q)| (q.map(|[x, y]| origin + Vec2::new(x, y) * h), TONES[*tone])).collect()
 }
 
 fn inside(q: &[Vec2; 4], pt: Vec2) -> bool {
@@ -45,10 +42,10 @@ fn inside(q: &[Vec2; 4], pt: Vec2) -> bool {
     !(pos && neg)
 }
 
-/// Inside the rounded square of macOS's icon grid: 824 wide, corner radius 185.
-fn in_background(pt: Vec2) -> bool {
+/// The signed distance to the rounded square of macOS's icon grid: 824 wide, corner radius 185.
+fn background_distance(pt: Vec2) -> f32 {
     let q = (pt - Vec2::splat(512.0)).abs() - Vec2::splat(412.0 - 185.0);
-    q.max(Vec2::ZERO).length() + q.x.max(q.y).min(0.0) <= 185.0
+    q.max(Vec2::ZERO).length() + q.x.max(q.y).min(0.0) - 185.0
 }
 
 fn render(size: u32, quads: &[Quad]) -> Vec<u8> {
@@ -62,12 +59,15 @@ fn render(size: u32, quads: &[Quad]) -> Vec<u8> {
                     let pt =
                         Vec2::new(x as f32 + (sx as f32 + 0.5) / N as f32, y as f32 + (sy as f32 + 0.5) / N as f32)
                             * (1024.0 / size as f32);
-                    if !in_background(pt) {
+                    let d = background_distance(pt);
+                    if d > 0.0 {
                         continue;
                     }
-                    // A dark vertical gradient behind the cube.
-                    let t = (pt.y - 100.0) / 824.0;
-                    let mut color = Vec3::new(30.0, 31.0, 46.0).lerp(Vec3::new(17.0, 18.0, 26.0), t);
+                    let mut color = Vec3::from(BACKGROUND.map(f32::from));
+                    // A white 10% rim, as on the dark theme's panels.
+                    if d > -2.0 {
+                        color = color.lerp(Vec3::splat(255.0), 0.1);
+                    }
                     if let Some((_, c)) = quads.iter().find(|(q, _)| inside(q, pt)) {
                         color = Vec3::new(c[0] as f32, c[1] as f32, c[2] as f32);
                     }

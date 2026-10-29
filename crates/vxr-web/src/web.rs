@@ -52,6 +52,7 @@ pub async fn start(
     sans_semibold: Vec<u8>,
     mono_regular: Vec<u8>,
     mono_medium: Vec<u8>,
+    mono_ultrablack: Vec<u8>,
     symbols: Vec<u8>,
     icons: Vec<u8>,
 ) -> Result<App, JsValue> {
@@ -76,10 +77,20 @@ pub async fn start(
         color_space: wgpu::SurfaceColorSpace::Auto,
     };
     surface.configure(&gpu.device, &config);
-    let fonts = [&sans_regular, &sans_medium, &sans_semibold, &mono_regular, &mono_medium, &symbols, &icons]
-        .iter()
-        .all(|f| !f.is_empty())
-        .then_some(FontBytes { sans_regular, sans_medium, sans_semibold, mono_regular, mono_medium, symbols, icons });
+    let fonts =
+        [&sans_regular, &sans_medium, &sans_semibold, &mono_regular, &mono_medium, &mono_ultrablack, &symbols, &icons]
+            .iter()
+            .all(|f| !f.is_empty())
+            .then_some(FontBytes {
+                sans_regular,
+                sans_medium,
+                sans_semibold,
+                mono_regular,
+                mono_medium,
+                mono_ultrablack,
+                symbols,
+                icons,
+            });
     let mut editor = Editor::new(gpu, scene, &name, format, (width, height), ppp, fonts)?;
     // The assistant calls its provider straight from this page, with keys in this tab.
     let keys = Rc::new(RefCell::new(KeyStore::default()));

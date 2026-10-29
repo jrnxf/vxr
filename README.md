@@ -1,4 +1,7 @@
-# vxr
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/logo/vxr-lockup-on-dark.svg">
+  <img alt="vxr" src="assets/logo/vxr-lockup-on-light.svg" height="64">
+</picture>
 
 fast voxel scenes
 

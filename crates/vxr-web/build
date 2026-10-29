@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build the browser editor as a static site in crates/vxr-web/dist/ (git-ignored):
-# the wasm (profile wasm, wasm-opt -O3), the page, the UI fonts with their licences, and the
+# the wasm (profile wasm, wasm-opt -O3), the page and its icons, the UI fonts with their licences, and the
 # prototype's island as scene.vox. Serve dist/ from any static host; deploy with ./deploy.
 # The tools come from the nix dev shell (../../dev); with VXR_TOOLS=path they come from the PATH
 # instead, as ./cloudflare-build sets up where there is no nix.
@@ -21,7 +21,8 @@ mkdir -p "$dist/pkg" "$dist/fonts"
 run wasm-bindgen --target web --no-typescript --out-dir "$dist/pkg" target/wasm32-unknown-unknown/wasm/vxr_web.wasm
 run wasm-opt -O3 --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext \
   --enable-mutable-globals --enable-reference-types -o "$dist/pkg/vxr_web_bg.wasm" "$dist/pkg/vxr_web_bg.wasm"
-cp "$here/www/index.html" "$here/www/app.js" "$here/www/style.css" "$here/www/_headers" "$dist/"
+cp "$here/www/index.html" "$here/www/app.js" "$here/www/style.css" "$here/www/_headers" \
+  "$here/www/favicon.svg" "$here/www/apple-touch-icon.png" "$dist/"
 cp "$fonts"/*.ttf "$fonts"/*.txt "$dist/fonts/"
 node --input-type=module -e "
 import fs from 'node:fs';
