@@ -277,6 +277,7 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     review(dir)?;
     review_phone(dir)?;
     assistant_column(dir)?;
+    palette_beside_flyouts()?;
     column_short_window(dir)?;
     agents_states(dir)?;
     assistant(dir)?;
@@ -3162,6 +3163,57 @@ const HOUSE_SCRIPT: &str = r##"{"prompt": "make the roof red, add a flag and ope
     {"name": "box", "input": {"from": [-1, 0, 5], "to": [0, 2, 5], "mode": "erase"}},
     {"name": "done", "input": {"summary": "Painted the roof red, added a flag on a pole and opened a door"}}
 ]}"##;
+
+/// The palette opens below the rail's flyouts showing beside it (the mirror and lock axes, the
+/// selection) and never over them, and its colour editor opens right of it, clear of the rail
+/// and the scene tree on 22-world. At 1280x800.
+fn palette_beside_flyouts() -> Result<(), String> {
+    let rect = |s: &Shot, name: &str| s.ed.ui.hits.get(name).copied().ok_or(format!("no {name} on screen"));
+    let on_screen = |s: &Shot, r: egui::Rect| r.top() >= 0.0 && r.bottom() <= s.ed.height as f32 / 2.0;
+    let mut s = Shot::new(house(), "house.vox", 2.0)?;
+    s.ed.ui.coach = false;
+    s.frames(2);
+    s.ui_click("mirror")?;
+    s.ui_click("rail-color")?;
+    s.frames(2);
+    let (axes, pal) = (rect(&s, "axes")?, rect(&s, "palette")?);
+    check(
+        s.ed.ui.mirror && !pal.intersects(axes) && on_screen(&s, pal),
+        format!("with mirror on the palette opens clear of the axes flyout: {pal:?}, {axes:?}"),
+    )?;
+    s.ui_click("mirror")?;
+    s.tool(Tool::Select, Shape::Voxel);
+    s.frames(2);
+    let (sel, pal) = (rect(&s, "selection")?, rect(&s, "palette")?);
+    check(
+        !pal.intersects(sel) && on_screen(&s, pal),
+        format!("with the Select tool the palette opens clear of the selection flyout: {pal:?}, {sel:?}"),
+    )?;
+    let bytes = vxr_vox::fixtures::all()
+        .into_iter()
+        .find(|f| f.name == "22-world")
+        .ok_or("no 22-world fixture")?
+        .builder
+        .build()
+        .write();
+    let mut s = Shot::new(Scene::from_vox(&bytes)?, "22-world.vox", 2.0)?;
+    s.ed.ui.coach = false;
+    s.frames(3);
+    s.ui_click("rail-color")?;
+    s.ui_click("edit-color")?;
+    s.frames(2);
+    let (pal, ed, color) = (rect(&s, "palette")?, rect(&s, "color-edit")?, rect(&s, "rail-color")?);
+    let tree: Vec<_> =
+        s.ed.ui.tree.iter().filter_map(|r| s.ed.ui.hits.get(&format!("tree-{}", r.node)).copied()).collect();
+    check(
+        !tree.is_empty()
+            && (ed.left() - pal.right() - 8.0).abs() < 0.5
+            && ed.left() > color.right()
+            && tree.iter().all(|r| !ed.intersects(*r) && !pal.intersects(*r)),
+        format!("with the scene tree the colour editor opens right of the palette, clear of the rail and tree: {ed:?}"),
+    )?;
+    Ok(())
+}
 
 /// The palette is a flyout from the rail's colour button and the assistant a column of its own:
 /// closed by default, the palette opens beside the rail level with its colour, its colour editor

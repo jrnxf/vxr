@@ -675,6 +675,18 @@ async () => {
   for (const ch of 'show palette') await key(ch);
   await key('Enter');
   step('Cmd-K "Show palette" opens it', st().paletteOpen && !!at('palette'));
+  {
+    const box = (n) => window.vxr.hit_rect(n);
+    const apart = (a, b) => a.length === 4 && b.length === 4 && (a[2] <= b[0] || b[2] <= a[0] || a[3] <= b[1] || b[3] <= a[1]);
+    const shown = (r) => r.length === 4 && r[1] >= 0 && r[3] <= window.innerHeight;
+    await key('m');
+    step('with mirror on the palette opens clear of the axes flyout', st().mirror && apart(box('palette'), box('axes')) && shown(box('palette')), JSON.stringify([box('palette'), box('axes')]));
+    await key('m');
+    const tool = st().tool;
+    await key('s');
+    step('with the Select tool the palette opens clear of the selection flyout', apart(box('palette'), box('selection')) && shown(box('palette')), JSON.stringify([box('palette'), box('selection')]));
+    await key({ Add: 'a', Erase: 'e', Paint: 'p', Pick: 'i', Select: 's' }[tool]);
+  }
   await clickAt('rail-color');
   step("the rail's colour button closes it", !st().paletteOpen);
   step('undoing every palette edit gives back the file', same(bytes(), original));
@@ -1275,6 +1287,18 @@ async () => {
     const node = (name) => (st().tree.find((r) => r.name === name) || {}).node;
     const treeC = rows.find((r) => r.name === 'tree c');
     step('the scene tree shows every object and group', rows.length === 8 && !!treeC && treeC.depth === 2 && treeC.linked === 3 && rows.some((r) => r.name === 'lost gem' && r.hidden), JSON.stringify(rows));
+    {
+      const box = (n) => window.vxr.hit_rect(n);
+      const apart = (a, b) => a.length === 4 && b.length === 4 && (a[2] <= b[0] || b[2] <= a[0] || a[3] <= b[1] || b[3] <= a[1]);
+      await clickAt('rail-color');
+      await clickAt('edit-color');
+      const [pal, ed] = [box('palette'), box('color-edit')];
+      const clearTree = rows.every((r) => apart(ed, box(`tree-${r.node}`)) && apart(pal, box(`tree-${r.node}`)));
+      step('with the scene tree the colour editor opens right of the palette, clear of the rail and tree', st().colorEdit && Math.abs(ed[0] - pal[2] - 8) < 1 && ed[0] > box('rail-color')[2] && clearTree, JSON.stringify([pal, ed]));
+      await key('Escape');
+      await key('Escape');
+      step('Escape closes the editor and the palette on the world', !st().colorEdit && !st().paletteOpen, JSON.stringify(st().paletteOpen));
+    }
     const slab = node('slab');
     await chip(`tree-${slab}`);
     step('a tree row click picks its object', st().picked === 'slab' && st().treeOn === slab, JSON.stringify(st()));

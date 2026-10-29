@@ -2693,6 +2693,7 @@ impl Hybrid {
             return;
         }
         let rect = self.flyout_rect(self.axes_y, "mirror", vec2(150.0, 6.0 + 2.0 * 40.0 + 2.0 + 6.0));
+        self.hits.insert("axes".into(), rect);
         let (mirror, lock) = (self.mirror_axes(), self.lock);
         let mut clicked = (None, None);
         let mut hits = Vec::new();
@@ -3017,6 +3018,7 @@ impl Hybrid {
                 Rect::from_min_size(pos2(self.flyout_x() + 162.0 + 8.0, top), vec2(w, h))
             }
         };
+        self.hits.insert("bounds-panel".into(), rect);
         let mut close = false;
         let mut resize = None;
         let mut hits = Vec::new();
@@ -3614,9 +3616,18 @@ impl Hybrid {
             let x = (at - PALETTE_W / 2.0).min(screen.right() - 12.0 - PALETTE_W).max(screen.left() + 12.0);
             Rect::from_min_size(pos2(x, (self.dock_top - 8.0 - h).max(TOP)), vec2(PALETTE_W, h))
         } else {
-            // Level with the rail's colour, kept on screen.
-            let top = (self.color_y - 6.0).min(screen.bottom() - 12.0 - h).max(TOP);
-            Rect::from_min_size(pos2(self.flyout_x(), top), vec2(PALETTE_W, h))
+            // Level with the rail's colour, below the rail's flyouts showing beside it, or right
+            // of them when it does not fit below; kept on screen.
+            let flyouts: Vec<Rect> =
+                ["axes", "selection", "bounds-panel"].iter().filter_map(|k| self.hits.get(*k).copied()).collect();
+            let top = self.color_y - 6.0;
+            let below = flyouts.iter().map(|r| r.bottom() + 8.0).fold(top, f32::max);
+            if below + h <= screen.bottom() - 12.0 {
+                Rect::from_min_size(pos2(self.flyout_x(), below), vec2(PALETTE_W, h))
+            } else {
+                let x = flyouts.iter().map(|r| r.right() + 8.0).fold(self.flyout_x(), f32::max);
+                Rect::from_min_size(pos2(x, top.min(screen.bottom() - 12.0 - h).max(TOP)), vec2(PALETTE_W, h))
+            }
         };
         self.hits.insert("palette".into(), rect);
         let mut set_all = None;
@@ -3894,13 +3905,16 @@ impl Hybrid {
             h
         };
         let rect = match self.hits.get("palette").copied().filter(|_| self.palette_open) {
-            // Beside the palette, on whichever side fits: over the dock level with its bottom,
-            // beside the rail level with its top, kept on screen.
-            Some(pal) => {
+            // Over the dock beside the palette on whichever side fits, level with its bottom;
+            // beside the rail right of it, level with its top, kept on screen.
+            Some(pal) if self.touch => {
                 let x =
                     if pal.left() - 8.0 - w >= screen.left() + 12.0 { pal.left() - 8.0 - w } else { pal.right() + 8.0 };
-                let top = if self.touch { pal.bottom() - h } else { pal.top().min(screen.bottom() - 12.0 - h) };
-                Rect::from_min_size(pos2(x, top.max(TOP)), vec2(w, h))
+                Rect::from_min_size(pos2(x, (pal.bottom() - h).max(TOP)), vec2(w, h))
+            }
+            Some(pal) => {
+                let top = pal.top().min(screen.bottom() - 12.0 - h);
+                Rect::from_min_size(pos2(pal.right() + 8.0, top.max(TOP)), vec2(w, h))
             }
             None => Rect::from_min_size(pos2(self.aside_right(screen) - w, TOP), vec2(w, h)),
         };
