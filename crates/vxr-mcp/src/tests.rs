@@ -122,6 +122,7 @@ fn tools_come_from_the_ops_schemas() {
     for own in ["list_files", "new_scene", "open", "edit_object", "save"] {
         assert!(names.contains(&own), "{own} is a tool");
     }
+    assert!(!names.contains(&"review_status"), "review_status is live mode only");
     // No tool reaches the network or a shell, and none renders.
     for n in &names {
         assert!(!["exec", "shell", "run", "fetch", "render_view"].contains(n), "{n}");

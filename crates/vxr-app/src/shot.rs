@@ -4285,6 +4285,98 @@ fn agents_live(dir: &Path) -> Result<(), String> {
         check(e && t.contains("reviewing"), "a call under review is refused".into())?;
         s.ed.discard_review();
 
+        // Review every agent change: the panel's second switch, off by default.
+        use vxr_app::agents::WAITING;
+        s.ed.ui.open_agents();
+        s.live_frames(&mut live, 2);
+        check(!s.ed.ui.agents.review && s.ed.ui.hits.contains_key("agents-review"), "review is off by default".into())?;
+        s.ui_click("agents-review")?;
+        s.live_frames(&mut live, 2);
+        check(s.ed.agents.review && s.ed.ui.agents.review, "its switch turns review on".into())?;
+        s.live_frames(&mut live, 40);
+        s.save_png(&dir.join("app-2x-agents-review-panel.png"))?;
+        s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+        s.live_frames(&mut live, 2);
+        // Edits wait as a preview: no undo step, drawn as the AI change is, one card for every agent.
+        let (voxels, label) = (s.voxels(), s.ed.scene.history().undo_label().map(str::to_string));
+        let undo_label = |s: &Shot| s.ed.scene.history().undo_label().map(str::to_string);
+        let (t, e) = s.agent_call(
+            &mut live,
+            &mut claude,
+            "box",
+            serde_json::json!({"from": [9, 10, 8], "to": [12, 11, 8], "slot": 50}),
+        );
+        check(
+            !e && t.ends_with(WAITING),
+            format!("with review on an edit waits ({})", t.chars().take(60).collect::<String>()),
+        )?;
+        let mut codex = LiveAgent::new(&sock_dir, "codex");
+        let (t, e) =
+            s.agent_call(&mut live, &mut codex, "place", serde_json::json!({"cells": [[8, 10, 8]], "slot": 9}));
+        check(!e && t.ends_with(WAITING), "another agent's edit joins the same change".into())?;
+        s.live_frames(&mut live, 2);
+        let card = s.ed.ui.review.clone();
+        check(
+            card.as_ref().is_some_and(|c| c.agents && c.prompt == "Claude Code and Codex" && c.counts == [9, 0, 0])
+                && s.ed.ui.hits.contains_key("review-apply")
+                && !s.ed.ui.hits.contains_key("review-ask"),
+            format!("the agent change card lists both agents' edits: {:?}", card.map(|c| (c.prompt, c.counts))),
+        )?;
+        check(
+            s.voxels() == voxels + 9 && undo_label(&s) == label,
+            "staged on the scene as a ghost, with no undo step yet".into(),
+        )?;
+        let (t, _) = s.agent_call(&mut live, &mut claude, "review_status", serde_json::json!({}));
+        check(t.starts_with("1 edit of yours wait"), format!("review_status says it waits: {t}"))?;
+        s.live_frames(&mut live, 40);
+        s.save_png(&dir.join("app-2x-agent-review.png"))?;
+        // Apply: one undo step per edit, named after its agent; each agent hears it.
+        s.ui_click("review-apply")?;
+        s.live_frames(&mut live, 2);
+        let n = s.ed.agents.edits.len();
+        let last: Vec<&str> = s.ed.agents.edits[n - 2..].iter().map(|e| e.label.as_str()).collect();
+        check(
+            s.ed.review.is_none()
+                && undo_label(&s).as_deref() == Some("Codex: place 1 voxel")
+                && last == ["Claude Code: box 8 voxels", "Codex: place 1 voxel"],
+            format!("Apply lands each edit as an undo step named after its agent: {last:?}"),
+        )?;
+        let (t, _) = s.agent_call(&mut live, &mut claude, "review_status", serde_json::json!({}));
+        check(t.starts_with("vxr: the user applied your 1 edit"), format!("review_status tells the agent: {t}"))?;
+        let (t, _) = s.agent_call(&mut live, &mut codex, "scene_summary", serde_json::json!({}));
+        check(t.starts_with("vxr: the user applied your 1 edit"), "the other hears it with its next call".into())?;
+        // Discard: the scene is as it was, and the agent hears it.
+        let (voxels, label) = (s.voxels(), undo_label(&s));
+        s.agent_call(&mut live, &mut claude, "erase", serde_json::json!({"cells": [[8, 10, 8]]}));
+        check(s.ed.ui.review.as_ref().is_some_and(|c| c.counts == [0, 1, 0]), "an erase waits too".into())?;
+        s.ui_click("review-discard")?;
+        s.live_frames(&mut live, 2);
+        check(
+            s.ed.review.is_none() && s.voxels() == voxels && undo_label(&s) == label,
+            "Discard leaves the scene and its undo steps as they were".into(),
+        )?;
+        let (t, _) = s.agent_call(&mut live, &mut claude, "scene_summary", serde_json::json!({}));
+        check(t.starts_with("vxr: the user discarded"), "the agent hears it was discarded".into())?;
+        // The assistant's request waits for the agents' change, and Stop leaves the change for the user.
+        s.agent_call(&mut live, &mut codex, "place", serde_json::json!({"cells": [[8, 12, 8]], "slot": 9}));
+        check(!s.ed.ask("make it red"), "the assistant waits for the agents' change".into())?;
+        let conn = s.ed.agents.clients.iter().find(|c| c.1 == "Codex").map(|c| c.0).unwrap_or(0);
+        s.ed.ui.open_agents();
+        s.live_frames(&mut live, 2);
+        s.ui_click(&format!("agents-stop-{conn}"))?;
+        s.live_frames(&mut live, 3);
+        let (t, e) = s.agent_call(&mut live, &mut codex, "scene_summary", serde_json::json!({}));
+        check(
+            e && t == STOPPED && s.ed.ui.review.as_ref().is_some_and(|c| c.counts == [1, 0, 0]),
+            "Stop during a review cuts the agent off; its edit waits for the user".into(),
+        )?;
+        s.ui_click("review-discard")?;
+        s.ui_click("agents-review")?;
+        s.live_frames(&mut live, 2);
+        check(s.ed.review.is_none() && !s.ed.agents.review, "review off again".into())?;
+        s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+        s.live_frames(&mut live, 2);
+
         // Stop on the chip ends the agent for good; another can still connect.
         s.live_frames(&mut live, 2);
         s.ui_click("agent-stop")?;

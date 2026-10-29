@@ -1,16 +1,21 @@
 //! Terminal agents editing the window through `vxr mcp --live` (`docs/research/ai.md`
 //! section 3, live mode): each edit call applies at once as one undo step named after the
 //! agent ("Claude Code: paint 412 voxels"), listed in the Agent edits card with an Undo of
-//! its own. The socket is the host's ([`crate::live`]); this is what a call does to the
-//! scene, with no GPU and no socket, so it is the same in tests.
+//! its own. With "Review every agent change" on, edits wait instead in one change under
+//! review that every agent adds to ([`Agents::stage`]), drawn as the assistant's is, until
+//! the user applies it (each edit then lands as the same undo step) or discards it; each
+//! agent hears which on its next call or from `review_status`. The socket is the host's
+//! ([`crate::live`]); this is what a call does to the scene, with no GPU and no socket, so it
+//! is the same in tests.
 
 use std::collections::HashMap;
 
 use serde_json::{Value, json};
 use vxr_core::Scene;
 use vxr_core::history::At;
-use vxr_ops::{Changes, Limits, Session, clean};
+use vxr_ops::{Changes, Limits, Op, Session, clean};
 
+use crate::review::Review;
 use crate::ui::group_thousands;
 
 type Cell = [i32; 3];
@@ -51,6 +56,39 @@ pub struct Agents {
     selections: HashMap<u64, (At, u64, Vec<Cell>)>,
     /// Bumped whenever the edits change.
     pub version: u64,
+    /// "Review every agent change": edits wait in a change under review for the user to
+    /// apply or discard, instead of applying at once. Off until the user turns it on.
+    pub review: bool,
+    /// What each connection has not heard yet: the user applied or discarded edits of its
+    /// that waited for review. Told with its next call, or by `review_status`.
+    notices: HashMap<u64, Vec<String>>,
+}
+
+/// Added to an edit's result while it waits for review.
+pub const WAITING: &str = "waiting for the user's review in vxr: it is not in the scene until they apply it; review_status (or your next call) tells you whether they applied or discarded it";
+
+/// The limits of a terminal agent's call: it is not asked per 10,000 cells, the hard limit
+/// stays.
+pub fn limits() -> Limits {
+    Limits { ask_over: Limits::default().changed_cells, ..Limits::default() }
+}
+
+/// Whether a call changes the scene, so with review on it waits for the user: an edit or a
+/// colour, not a query, a selection, `undo` or `done`.
+pub fn edits(name: &str, args: &Value) -> bool {
+    matches!(Op::parse(name, args.clone()),
+        Ok(op) if !op.is_query() && !matches!(op, Op::Select(_) | Op::Undo(_) | Op::Done(_)))
+}
+
+/// Whether a step of a change under review is an edit (what Apply lands and the notices
+/// count), not a selection, an `undo`, `done` or a call that failed.
+fn is_edit(st: &vxr_ops::Step) -> bool {
+    st.ok && !matches!(st.tool, "select" | "undo" | "done")
+}
+
+/// "1 edit", "3 edits".
+fn edits_text(n: usize) -> String {
+    format!("{n} edit{}", if n == 1 { "" } else { "s" })
 }
 
 /// What an edit's undo step is called: the agent, the tool and what it changed.
@@ -73,17 +111,173 @@ impl Agents {
         h.applied(e.step) && !e.undone_by.is_some_and(|u| h.applied(u))
     }
 
-    /// Forget every edit and selection: the scene they were made on is gone.
+    /// Forget every edit and selection: the scene they were made on is gone. What the
+    /// agents have not heard yet stays.
     pub fn clear(&mut self) {
         self.edits.clear();
         self.selections.clear();
         self.version += 1;
     }
 
-    /// A connection closed: its selection goes with it. Its edits stay listed, for the user
-    /// to take back.
+    /// A connection closed: its selection and what it had not heard go with it. Its edits
+    /// stay listed, for the user to take back.
     pub fn forget(&mut self, conn: u64) {
         self.selections.remove(&conn);
+        self.notices.remove(&conn);
+    }
+
+    /// What connection `conn` has not heard yet, taken: one line per applied or discarded
+    /// change, to put before its next call's answer.
+    pub fn take_notices(&mut self, conn: u64) -> Option<String> {
+        self.notices.remove(&conn).map(|n| n.join("\n"))
+    }
+
+    fn notify(&mut self, conn: u64, text: String) {
+        if self.clients.iter().any(|(c, _)| *c == conn) {
+            self.notices.entry(conn).or_default().push(text);
+        }
+    }
+
+    /// `review_status`: what the user did with the connection's edits that waited (not heard
+    /// yet), then whether any wait now and whether review is on. `review` is the agents'
+    /// change under review, if one is open.
+    pub fn status(&mut self, conn: u64, review: Option<&Review>) -> String {
+        let mut out: Vec<String> = self.take_notices(conn).into_iter().collect();
+        let mine = review
+            .map_or(0, |r| r.session.steps().iter().filter(|s| s.lane == conn && is_edit(s) && !s.dropped).count());
+        out.push(match (mine, review.is_some(), self.review) {
+            (0, true, _) => "Nothing of yours waits for review. The user is reviewing other agents' edits: your next edit joins that change and waits too.".into(),
+            (0, false, true) => "Nothing of yours waits for review. Review is on: each edit waits for the user to apply or discard it.".into(),
+            (0, false, false) => "Nothing of yours waits for review. Review is off: each edit applies at once as one undo step.".into(),
+            (n, _, _) => format!(
+                "{} of yours {} for the user's review in vxr: none is in the scene until they apply the change. Call review_status again later; do not build on them as if they were in.",
+                edits_text(n),
+                if n == 1 { "waits" } else { "wait" }
+            ),
+        });
+        out.join("\n")
+    }
+
+    /// The selection connection `conn` left on a model, or None when it has none, so it
+    /// starts from the user's. One made on another model or map is dropped: empty.
+    fn selection_of(&self, conn: u64, made_on: (At, u64)) -> Option<Vec<Cell>> {
+        let (at, reshapes, sel) = self.selections.get(&conn)?;
+        Some(if (*at, *reshapes) == made_on { sel.clone() } else { Vec::new() })
+    }
+
+    /// Run one tool call from connection `conn`, named `client`, into `review`, the agents'
+    /// change under review: an edit is staged there with the agent's own selection (its
+    /// lane), drawn as a ghost until the user applies or discards it; a query sees the scene
+    /// with the change; `undo` drops the agent's last edit from it.
+    pub fn stage(
+        &mut self,
+        scene: &mut Scene,
+        review: &mut Review,
+        conn: u64,
+        client: &str,
+        name: &str,
+        args: &Value,
+    ) -> Result<String, String> {
+        if !vxr_mcp::live::is_tool(name) {
+            return Err(format!("Unknown tool: {}", clean(name.as_bytes())));
+        }
+        if name == "edit_object" {
+            let node = args.get("node").and_then(Value::as_u64).unwrap_or(0) as usize;
+            if scene.at() != At::Object(node) {
+                return Err(format!(
+                    "node {node}: edits wait for the user's review in this object's model: another object can be edited once they apply or discard them (review_status tells you)"
+                ));
+            }
+            return self.stage(scene, review, conn, client, "scene_summary", &json!({}));
+        }
+        let mine = |r: &Review| r.session.steps().iter().any(|s| s.lane == conn && is_edit(s) && !s.dropped);
+        if name == "undo" && !mine(review) {
+            return Err("nothing of yours waits for review to take back; your applied edits can be taken back once the user applies or discards the change under review".into());
+        }
+        let made_on = (scene.at(), scene.reshapes());
+        let seed = self.selection_of(conn, made_on).unwrap_or_else(|| scene.selection().collect());
+        review.session.set_lane(conn, seed);
+        review.session.begin_request();
+        let steps = review.session.steps().len();
+        let r = review.session.call(scene, name, args.clone());
+        self.selections.insert(conn, (made_on.0, made_on.1, review.session.selection().collect()));
+        if review.session.steps().len() != steps || name == "undo" {
+            let names = review.agents.get_or_insert_default();
+            if !names.iter().any(|(c, _)| *c == conn) {
+                names.push((conn, client.to_string()));
+            }
+            review.changed(scene);
+        }
+        match r {
+            Ok(t) if edits(name, args) || name == "undo" => Ok(format!("{t}; {WAITING}")),
+            Ok(t) => Ok(t),
+            Err(e) => Err(e.message),
+        }
+    }
+
+    /// The user applied the agents' change under review: each edit kept lands as one undo
+    /// step named after its agent, as without review, listed in the Agent edits card, and
+    /// each agent hears what became of its edits. Returns how many steps landed.
+    pub fn apply_review(&mut self, scene: &mut Scene, review: Review) -> usize {
+        let names = review.agents.clone().unwrap_or_default();
+        let name_of =
+            |lane: u64| names.iter().find(|(c, _)| *c == lane).map_or("Agent".to_string(), |(_, n)| n.clone());
+        let counts = Self::counts(&review);
+        let mut labels = Vec::new();
+        let landed = review.session.apply_steps(scene, |st, c| {
+            let l = label(&name_of(st.lane), st.tool, c);
+            labels.push((st.lane, l.clone()));
+            l
+        });
+        for ((_, step), (conn, label)) in landed.iter().zip(labels) {
+            self.edits.push(AgentEdit { conn, client: name_of(conn), label, step: *step, undone_by: None });
+        }
+        for (conn, kept, all) in counts {
+            let text = match kept {
+                0 => format!(
+                    "vxr: the user applied the change under review without your {} (they dropped them): none of them is in the scene.",
+                    edits_text(all)
+                ),
+                k if k == all => format!(
+                    "vxr: the user applied your {} that waited for review: they are in the scene now, each an undo step named after you.",
+                    edits_text(all)
+                ),
+                k => format!(
+                    "vxr: the user applied {k} of your {} that waited for review and dropped the rest: those {k} are in the scene now.",
+                    edits_text(all)
+                ),
+            };
+            self.notify(conn, text);
+        }
+        self.version += 1;
+        landed.len()
+    }
+
+    /// The user discarded the agents' change under review: the scene is as it was, and each
+    /// agent hears that none of its edits that waited is in it.
+    pub fn discard_review(&mut self, scene: &mut Scene, review: Review) {
+        for (conn, _, all) in Self::counts(&review) {
+            self.notify(conn, format!("vxr: the user discarded the change under review: none of your {} that waited is in the scene. Look at the scene again before you go on.", edits_text(all)));
+        }
+        review.session.discard(scene);
+        self.version += 1;
+    }
+
+    /// Each agent's edits in the change under review: connection, kept, all.
+    fn counts(review: &Review) -> Vec<(u64, usize, usize)> {
+        let mut out: Vec<(u64, usize, usize)> = Vec::new();
+        for st in review.session.steps().iter().filter(|s| is_edit(s)) {
+            let i = match out.iter().position(|c| c.0 == st.lane) {
+                Some(i) => i,
+                None => {
+                    out.push((st.lane, 0, 0));
+                    out.len() - 1
+                }
+            };
+            out[i].1 += !st.dropped as usize;
+            out[i].2 += 1;
+        }
+        out
     }
 
     /// Run one tool call from connection `conn`, named `client`, on the scene, as `vxr mcp`
@@ -158,14 +352,11 @@ impl Agents {
         name: &str,
         args: &Value,
     ) -> Result<String, String> {
-        // A terminal agent is not asked per 10,000 cells: the hard limit stays.
-        let limits = Limits { ask_over: Limits::default().changed_cells, ..Limits::default() };
-        let mut session = Session::with_limits(scene, None, limits);
+        let mut session = Session::with_limits(scene, None, limits());
         let made_on = (scene.at(), scene.reshapes());
         let (conn, client) = agent.unwrap_or((0, ""));
-        if let Some((at, reshapes, sel)) = agent.and_then(|_| self.selections.get(&conn)) {
-            let fresh = (*at, *reshapes) == made_on;
-            session.set_selection(sel.iter().copied().filter(|_| fresh));
+        if let Some(sel) = agent.and_then(|_| self.selection_of(conn, made_on)) {
+            session.set_selection(sel);
         }
         match session.call(scene, name, args.clone()) {
             Ok(text) => {
@@ -314,6 +505,137 @@ mod tests {
         let t = ok(&mut a, &mut s, 1, "Claude Code", "undo", json!({}));
         assert_eq!(t, "took back Claude Code: place 2 voxels");
         assert_eq!(at(&s, [0, 0, 0]), 0);
+    }
+
+    /// Agent calls as the editor runs them with "Review every agent change" on: an edit
+    /// opens the agents' change under review, later calls go into it while it is open.
+    fn staged(
+        a: &mut Agents,
+        s: &mut Scene,
+        r: &mut Option<Review>,
+        conn: u64,
+        client: &str,
+        name: &str,
+        args: Value,
+    ) -> Result<String, String> {
+        let notice = a.take_notices(conn);
+        let out = if r.is_some() || (a.review && edits(name, &args)) {
+            let review = r.get_or_insert_with(|| Review::for_agents(s));
+            a.stage(s, review, conn, client, name, &args)
+        } else {
+            a.call(s, conn, client, name, &args)
+        };
+        match notice {
+            Some(n) => out.map(|t| format!("{n}\n{t}")),
+            None => out,
+        }
+    }
+
+    #[test]
+    fn with_review_on_edits_wait_until_applied_as_steps_named_after_the_agent() {
+        let (mut a, mut s, mut r) = (Agents::default(), scene(), None);
+        a.review = true;
+        a.clients = vec![(1, "Claude Code".into()), (2, "Codex".into())];
+        let position = s.history().position();
+        // A query and a selection open nothing.
+        staged(&mut a, &mut s, &mut r, 1, "Claude Code", "scene_summary", json!({})).unwrap();
+        staged(&mut a, &mut s, &mut r, 1, "Claude Code", "select", json!({"from": [0, 0, 0], "to": [1, 0, 0]}))
+            .unwrap();
+        assert!(r.is_none());
+        let t = staged(
+            &mut a,
+            &mut s,
+            &mut r,
+            1,
+            "Claude Code",
+            "box",
+            json!({"from": [0, 0, 0], "to": [3, 0, 3], "slot": 5}),
+        )
+        .unwrap();
+        assert!(t.ends_with(WAITING), "{t}");
+        assert_eq!(s.history().position(), position, "no undo step while it waits");
+        staged(&mut a, &mut s, &mut r, 1, "Claude Code", "select", json!({"from": [0, 0, 0], "to": [1, 0, 0]}))
+            .unwrap();
+        // Another agent adds to the same change, with its own selection.
+        staged(&mut a, &mut s, &mut r, 2, "Codex", "place", json!({"cells": [[0, 1, 0]], "slot": 7})).unwrap();
+        staged(&mut a, &mut s, &mut r, 1, "Claude Code", "paint", json!({"slot": 9, "selection": true})).unwrap();
+        staged(&mut a, &mut s, &mut r, 2, "Codex", "place", json!({"cells": [[5, 1, 5]], "slot": 7})).unwrap();
+        // An agent's undo drops its own last edit from the change.
+        let t = staged(&mut a, &mut s, &mut r, 2, "Codex", "undo", json!({})).unwrap();
+        assert!(t.starts_with("took back step") && t.ends_with(WAITING), "{t}");
+        // A query sees the change; status says what waits.
+        let review = r.as_ref().unwrap();
+        assert_eq!(review.card(&s).prompt, "Claude Code and Codex");
+        assert!(review.card(&s).agents);
+        assert_eq!(review.card(&s).counts, [17, 0, 0]);
+        assert!(review.card(&s).steps[0].detail.starts_with("Claude Code · "));
+        assert!(a.status(1, r.as_ref()).starts_with("2 edits of yours wait"));
+        // Edit another object, or undo without a step waiting: refused.
+        assert!(
+            staged(&mut a, &mut s, &mut r, 3, "Gemini CLI", "undo", json!({}))
+                .unwrap_err()
+                .contains("nothing of yours waits")
+        );
+        // Apply: one undo step per edit kept, named as without review.
+        let n = a.apply_review(&mut s, r.take().unwrap());
+        assert_eq!(n, 3);
+        let labels: Vec<&str> = a.edits.iter().map(|e| e.label.as_str()).collect();
+        assert_eq!(labels, ["Claude Code: box 16 voxels", "Codex: place 1 voxel", "Claude Code: paint 2 voxels"]);
+        assert_eq!(s.history().position(), position + 3);
+        assert_eq!(
+            (at(&s, [0, 0, 0]), at(&s, [1, 0, 0]), at(&s, [2, 0, 0]), at(&s, [0, 1, 0]), at(&s, [5, 1, 5])),
+            (9, 9, 5, 7, 0)
+        );
+        assert!((0..3).all(|i| a.in_effect(&s, i)));
+        // Each agent hears it on its next call, once; status after that has nothing new.
+        let t = staged(&mut a, &mut s, &mut r, 2, "Codex", "scene_summary", json!({})).unwrap();
+        assert!(t.starts_with("vxr: the user applied 1 of your 2 edits"), "{t}");
+        let t = a.status(1, None);
+        assert!(t.starts_with("vxr: the user applied your 2 edits that waited for review"), "{t}");
+        assert!(a.status(1, None).starts_with("Nothing of yours waits for review. Review is on"));
+        // The agent's undo after Apply takes back its own applied step, as without review.
+        assert_eq!(
+            staged(&mut a, &mut s, &mut r, 1, "Claude Code", "undo", json!({})).unwrap(),
+            "took back Claude Code: paint 2 voxels"
+        );
+
+        // Discard: nothing lands and the agent is told.
+        let before = s.history().position();
+        staged(&mut a, &mut s, &mut r, 1, "Claude Code", "erase", json!({"cells": [[0, 0, 0]]})).unwrap();
+        assert_eq!(at(&s, [0, 0, 0]), 5, "a staged removal still shows, as a ghost");
+        assert_eq!(r.as_ref().unwrap().card(&s).counts, [0, 1, 0]);
+        a.discard_review(&mut s, r.take().unwrap());
+        assert_eq!((at(&s, [0, 0, 0]), s.history().position()), (5, before));
+        let t = staged(&mut a, &mut s, &mut r, 1, "Claude Code", "scene_summary", json!({})).unwrap();
+        assert!(t.starts_with("vxr: the user discarded the change under review: none of your 1 edit"), "{t}");
+        // A closed connection is not told.
+        staged(&mut a, &mut s, &mut r, 2, "Codex", "place", json!({"cells": [[6, 0, 6]], "slot": 3})).unwrap();
+        a.forget(2);
+        a.clients.retain(|c| c.0 != 2);
+        a.discard_review(&mut s, r.take().unwrap());
+        assert!(a.take_notices(2).is_none());
+        // Off: edits apply at once again.
+        a.review = false;
+        staged(&mut a, &mut s, &mut r, 1, "Claude Code", "place", json!({"cells": [[6, 0, 6]], "slot": 3})).unwrap();
+        assert!(r.is_none());
+        assert_eq!(s.history().undo_label(), Some("Claude Code: place 1 voxel"));
+    }
+
+    #[test]
+    fn edit_object_waits_for_the_review() {
+        let f = vxr_vox::fixtures::all().into_iter().find(|f| f.name == "22-world").unwrap();
+        let mut s = Scene::from_vox(&f.builder.build().write()).unwrap();
+        let (mut a, mut r) = (Agents::default(), None);
+        a.review = true;
+        let objects = s.world().unwrap().objects();
+        let (first, second) = (objects[0], objects[1]);
+        staged(&mut a, &mut s, &mut r, 1, "Claude Code", "edit_object", json!({"node": first})).unwrap();
+        staged(&mut a, &mut s, &mut r, 1, "Claude Code", "place", json!({"cells": [[0, 0, 0]], "slot": 3})).unwrap();
+        assert!(r.is_some());
+        assert!(staged(&mut a, &mut s, &mut r, 1, "Claude Code", "edit_object", json!({"node": first})).is_ok());
+        let e = staged(&mut a, &mut s, &mut r, 1, "Claude Code", "edit_object", json!({"node": second})).unwrap_err();
+        assert!(e.contains("wait for the user's review"), "{e}");
+        assert_eq!(s.at(), At::Object(first));
     }
 
     #[test]

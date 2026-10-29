@@ -28,7 +28,7 @@ const MAX_PATH: usize = 200;
 const NO_SCENE: &str = "no scene open: call open or new_scene first";
 
 /// Tools that only read the scene.
-pub const READ_ONLY: [&str; 5] = ["list_files", "scene_summary", "get_voxels", "slice", "find_parts"];
+pub const READ_ONLY: [&str; 6] = ["list_files", "scene_summary", "get_voxels", "slice", "find_parts", "review_status"];
 
 /// The files tools, as `(name, description, input schema)`.
 fn own_tools() -> Vec<(&'static str, String, Value)> {

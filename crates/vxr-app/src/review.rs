@@ -4,6 +4,10 @@
 //! ghost and keeps every other edit out while a review is open; Apply makes it one undo step
 //! named after the request, Discard or Escape leaves none.
 //!
+//! Terminal agents' edits go through the same step when the user turns on "Review every
+//! agent change" ([`Review::for_agents`], [`crate::agents::Agents::stage`]): one change that
+//! every agent adds to, each step in its agent's lane, applied as one undo step per edit.
+//!
 //! Until the assistant exists, a [`Script`] drives it: a request and its tool calls, run
 //! through the same session, card and ghost as a model's would be.
 
@@ -77,6 +81,9 @@ pub struct Review {
     changes: Changes,
     /// Bumped on every change to the staged cells, the palette or the steps.
     pub version: u64,
+    /// Terminal agents' edits, not the assistant's: each agent that made a step, by
+    /// connection (its lane) and name, in the order they first did.
+    pub agents: Option<Vec<(u64, String)>>,
 }
 
 impl Review {
@@ -88,9 +95,30 @@ impl Review {
             materials: scene.materials,
             changes: Changes::default(),
             version: 0,
+            agents: None,
         }
     }
 
+    /// An empty change for terminal agents' edits, under their limits.
+    pub fn for_agents(scene: &Scene) -> Review {
+        Review {
+            session: Session::with_limits(scene, None, crate::agents::limits()),
+            agents: Some(Vec::new()),
+            ..Review::new(scene, "")
+        }
+    }
+
+    /// The agents whose edits are in the change, by name: "Claude Code", "Claude Code and
+    /// Codex", "3 agents".
+    fn agent_names(&self) -> String {
+        let names: Vec<&str> = self.agents.iter().flatten().map(|(_, n)| n.as_str()).collect();
+        match names.as_slice() {
+            [] => "Terminal agents".into(),
+            [one] => one.to_string(),
+            [a, b] => format!("{a} and {b}"),
+            many => format!("{} agents", many.len()),
+        }
+    }
     /// The undo step Apply makes: "AI: make the roof red", cut to 80 characters.
     pub fn label(&self) -> String {
         let p: String = self.prompt.chars().filter(|c| !c.is_control()).collect();
@@ -129,7 +157,7 @@ impl Review {
     }
 
     /// The change moved: count it again for the card.
-    fn changed(&mut self, scene: &Scene) {
+    pub fn changed(&mut self, scene: &Scene) {
         self.changes = self.session.changes(scene);
         self.version += 1;
     }
@@ -202,7 +230,11 @@ impl Review {
             }
         }
         slots.sort_by_key(|c| c.slot);
-        // `done` is not a change: its summary heads the card.
+        // `done` is not a change: its summary heads the card. With several agents each step
+        // says whose it is.
+        let several = self.agents.as_ref().is_some_and(|a| a.len() > 1);
+        let who =
+            |lane: u64| self.agents.iter().flatten().find(|(c, _)| *c == lane).map_or("Agent", |(_, n)| n.as_str());
         let steps = s
             .steps()
             .iter()
@@ -211,14 +243,15 @@ impl Review {
             .map(|(index, st)| StepRow {
                 index,
                 tool: st.tool,
-                detail: step_detail(st),
+                detail: if several { format!("{} · {}", who(st.lane), step_detail(st)) } else { step_detail(st) },
                 ok: st.ok,
                 dropped: st.dropped,
                 droppable: st.ok && st.tool != "undo",
             })
             .collect();
         ReviewCard {
-            prompt: self.prompt.clone(),
+            prompt: if self.agents.is_some() { self.agent_names() } else { self.prompt.clone() },
+            agents: self.agents.is_some(),
             summary: s.done().map(str::to_string),
             counts: [c.added.len(), c.removed.len(), c.repainted.len()],
             slots,

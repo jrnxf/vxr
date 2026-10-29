@@ -34,6 +34,8 @@ pub struct AgentsView {
     /// The browser is connecting to `vxr bridge`.
     pub connecting: bool,
     pub allowed: bool,
+    /// "Review every agent change" is on.
+    pub review: bool,
     /// Why turning it on failed.
     pub error: Option<String>,
     /// The connected agents: connection and name.
@@ -258,9 +260,9 @@ impl Hybrid {
         let inner_w = w - 32.0;
         let v = self.agents.clone();
         let intro = if v.web {
-            "Let an agent in your terminal, like Claude Code, edit this scene while you watch. vxr bridge, in the vxr app (brew install jrnxf/tap/vxr), links this tab to it on this computer only. Each call applies at once as one undo step, listed under Agent edits."
+            "Let an agent in your terminal, like Claude Code, edit this scene while you watch. vxr bridge, in the vxr app (brew install jrnxf/tap/vxr), links this tab to it on this computer only. Each call applies at once as one undo step, listed under Agent edits, or waits for your review."
         } else if v.available {
-            "Let an agent in your terminal, like Claude Code, edit this scene while you watch. Each call applies at once as one undo step, listed under Agent edits."
+            "Let an agent in your terminal, like Claude Code, edit this scene while you watch. Each call applies at once as one undo step, listed under Agent edits, or waits for your review."
         } else {
             "Live mode is not built for this system yet. Files mode edits .vox files on disk without a window:"
         };
@@ -278,7 +280,7 @@ impl Hybrid {
             if v.web {
                 h += 16.0 + 6.0 + 34.0 + 14.0 + 16.0 + 6.0 + 34.0 + 10.0;
             }
-            h += 44.0 + 10.0;
+            h += 44.0 + 10.0 + 44.0 + 10.0;
             if let Some(g) = &error {
                 h += g.size().y + 10.0;
             }
@@ -389,6 +391,36 @@ impl Hybrid {
                 actions.push(Action::AllowAgents(!on));
             }
             hits.push(("agents-allow".into(), r));
+            y += 44.0 + 10.0;
+            // Review every agent change.
+            let r = Rect::from_min_size(pos2(inner.left(), y), vec2(inner_w, 44.0));
+            let resp = ui.interact(r, Id::unique("agents-review-row"), Sense::click());
+            let p = ui.painter();
+            p.rect(
+                r,
+                CornerRadius::same(8),
+                if v.review { th().accent_bg } else { th().tint(9) },
+                Stroke::new(1.0, if v.review { th().ring } else { th().line }),
+                StrokeKind::Inside,
+            );
+            p.text(
+                pos2(r.left() + 12.0, r.top() + 14.0),
+                Align2::LEFT_CENTER,
+                "Review every agent change",
+                sans_medium(12.5),
+                th().text,
+            );
+            let sub = if v.review {
+                "On: edits wait for you to apply or discard them"
+            } else {
+                "Off: each edit applies at once"
+            };
+            p.text(pos2(r.left() + 12.0, r.top() + 31.0), Align2::LEFT_CENTER, sub, sans(11.0), th().muted);
+            let sw = Rect::from_min_size(pos2(r.right() - 12.0 - 30.0, r.center().y - 9.0), vec2(30.0, 18.0));
+            if switch(ui, sw, "agents-review", v.review).clicked() || resp.clicked() {
+                actions.push(Action::ReviewAgents(!v.review));
+            }
+            hits.push(("agents-review".into(), r));
             y += 44.0 + 10.0;
             if let Some(g) = error {
                 let gh = g.size().y;

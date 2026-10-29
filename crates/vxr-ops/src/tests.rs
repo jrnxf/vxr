@@ -374,6 +374,63 @@ fn undo_and_dropped_steps_replay() {
 }
 
 #[test]
+fn lanes_keep_their_own_selection_and_steps_apply_one_by_one() {
+    let mut s = small();
+    let before = voxels(&s);
+    let position = s.history().position();
+    let mut o = Session::new(&s, None);
+    let sel = |s: &Scene, cells: &[[i32; 3]]| cells.iter().map(|&w| s.to_map(w)).collect::<Vec<_>>();
+    // Two callers, each with a selection of its own, their steps interleaved.
+    o.set_lane(1, sel(&s, &[[0, 0, 0]]));
+    call(&mut o, &mut s, "box", json!({"from": [5, 0, 5], "to": [5, 0, 6], "slot": 4}));
+    o.set_lane(2, sel(&s, &[[3, 0, 3]]));
+    call(&mut o, &mut s, "select", json!({"from": [2, 0, 0], "to": [3, 0, 0]}));
+    o.set_lane(1, []);
+    assert!(call(&mut o, &mut s, "paint", json!({"slot": 7, "selection": true})).starts_with("1 cells changed"));
+    o.set_lane(2, []);
+    assert!(call(&mut o, &mut s, "paint", json!({"slot": 8, "selection": true})).starts_with("2 cells changed"));
+    call(&mut o, &mut s, "palette_set", json!({"slot": 8, "hex": "#102030"}));
+    // A caller's undo takes back its own last edit.
+    o.set_lane(1, []);
+    call(&mut o, &mut s, "place", json!({"cells": [[9, 0, 9]], "slot": 4}));
+    assert!(call(&mut o, &mut s, "undo", json!({})).starts_with("took back step 6 (place)"));
+    assert_eq!(o.steps().iter().map(|st| st.lane).collect::<Vec<_>>(), [1, 2, 1, 2, 2, 1, 1]);
+    // Dropping a step replays the rest, each in its own lane.
+    assert!(o.set_dropped(&mut s, 0, true));
+    assert_eq!((get(&mut o, &mut s, [0, 0, 0]), get(&mut o, &mut s, [2, 0, 0])), (7, 8));
+    assert!(o.set_dropped(&mut s, 0, false));
+    assert_eq!(o.lane(), 1);
+    let staged = o.changes(&s);
+    // Apply: one undo step per kept edit, each named from what it changed.
+    let mut seen = Vec::new();
+    let steps = o.apply_steps(&mut s, |st, c| {
+        seen.push((st.lane, c.added.len() + c.repainted.len(), c.palette.len()));
+        format!("{} {}", st.lane, st.tool)
+    });
+    assert_eq!(steps.iter().map(|x| x.0).collect::<Vec<_>>(), [0, 2, 3, 4]);
+    assert_eq!(seen, [(1, 2, 0), (1, 1, 0), (2, 2, 0), (2, 0, 1)]);
+    assert_eq!(s.history().position(), position + 4);
+    assert_eq!(steps.last().unwrap().1, s.history().position());
+    assert_eq!(s.history().undo_label(), Some("2 palette_set"));
+    assert_eq!(voxels(&s).len(), before.len() + 2);
+    assert_eq!(s.palette[8], [16, 32, 48, 255]);
+    let mut fresh = Session::new(&s, None);
+    let now = [[0, 0, 0], [2, 0, 0], [3, 0, 0], [9, 0, 9]].map(|w| get(&mut fresh, &mut s, w));
+    assert_eq!(now, [7, 8, 8, 0], "each paint with its own selection; the undone place not applied");
+    assert_eq!(staged.repainted.len(), 3);
+    for _ in 0..4 {
+        assert!(s.undo());
+    }
+    assert_eq!(voxels(&s), before);
+    // Nothing kept applies nothing.
+    let mut o = Session::new(&s, None);
+    call(&mut o, &mut s, "place", json!({"cells": [[9, 0, 9]], "slot": 4}));
+    assert!(o.set_dropped(&mut s, 0, true));
+    assert!(o.apply_steps(&mut s, |_, _| String::new()).is_empty());
+    assert_eq!(voxels(&s), before);
+}
+
+#[test]
 fn select_and_fill() {
     let mut s = small();
     let mut o = Session::new(&s, None);

@@ -96,6 +96,8 @@ pub struct Step {
     pub result: String,
     /// Dropped from the change by the user or by the model's `undo`.
     pub dropped: bool,
+    /// The lane that made it ([`Session::set_lane`]).
+    pub lane: u64,
     /// The call to replay, for steps that change the scene or the selection.
     op: Option<Op>,
 }
@@ -134,6 +136,10 @@ pub struct Session {
     /// The assistant's selection (map cells), seeded from the user's.
     pub(crate) selection: HashSet<Cell>,
     selection_before: HashSet<Cell>,
+    /// The caller whose selection `selection` is ([`Session::set_lane`]), and every other
+    /// caller's selection as it started and as it is now.
+    lane: u64,
+    lanes: HashMap<u64, (HashSet<Cell>, HashSet<Cell>)>,
     pub(crate) parts: Vec<Part>,
     /// How many of `parts` were found in the scene; the rest the model named.
     detected: usize,
@@ -188,6 +194,8 @@ impl Session {
             palette_before: scene.palette,
             selection_before: selection.clone(),
             selection,
+            lane: 0,
+            lanes: HashMap::new(),
             detected: parts.len(),
             names: Vec::new(),
             parts,
@@ -213,6 +221,36 @@ impl Session {
     pub fn set_selection(&mut self, cells: impl IntoIterator<Item = Cell>) {
         self.selection = cells.into_iter().collect();
         self.selection_before = self.selection.clone();
+    }
+
+    /// Run the next calls for caller `lane`, with a selection of its own: several callers
+    /// (terminal agents) stage one change, and each step keeps the lane that made it, so a
+    /// dropped step or Apply replays every step with its own caller's selection. A lane's
+    /// first call starts from `seed` (map cells); later ones from where it left off. The
+    /// session starts in lane 0 with the user's selection.
+    pub fn set_lane(&mut self, lane: u64, seed: impl IntoIterator<Item = Cell>) {
+        if lane == self.lane {
+            return;
+        }
+        let seed: HashSet<Cell> = seed.into_iter().collect();
+        self.lanes.entry(lane).or_insert_with(|| (seed.clone(), seed));
+        self.switch(lane);
+    }
+
+    /// Make `lane`'s selection the current one (it must be in `lanes` unless it is current).
+    fn switch(&mut self, lane: u64) {
+        if lane == self.lane {
+            return;
+        }
+        let (before, now) = self.lanes.remove(&lane).unwrap_or_default();
+        let old = (std::mem::replace(&mut self.selection_before, before), std::mem::replace(&mut self.selection, now));
+        self.lanes.insert(self.lane, old);
+        self.lane = lane;
+    }
+
+    /// The current lane ([`Session::set_lane`]).
+    pub fn lane(&self) -> u64 {
+        self.lane
     }
 
     /// A new model turn: the per-turn call count starts again.
@@ -279,6 +317,7 @@ impl Session {
                 ok: r.is_ok(),
                 result: text.chars().take(200).collect(),
                 dropped: false,
+                lane: self.lane,
                 op: (replay && r.is_ok()).then_some(op),
             });
         }
@@ -407,11 +446,9 @@ impl Session {
                 Ok(format!("slot {s}: {} -> {} ({} voxels use it)", hex(old), hex(c), self.slot_count(scene, s)))
             }
             Op::Undo(_) => {
-                let Some(i) = self
-                    .steps
-                    .iter()
-                    .rposition(|s| !s.dropped && s.op.as_ref().is_some_and(|o| !matches!(o, Op::Select(_))))
-                else {
+                let Some(i) = self.steps.iter().rposition(|s| {
+                    !s.dropped && s.lane == self.lane && s.op.as_ref().is_some_and(|o| !matches!(o, Op::Select(_)))
+                }) else {
                     return Err(invalid("nothing of yours to undo"));
                 };
                 self.steps[i].dropped = true;
@@ -543,6 +580,54 @@ impl Session {
             Some(l) => scene.commit_named(l),
             None => scene.commit(),
         }
+    }
+
+    /// Apply each kept step as an undo step of its own, called `label(step, what it changed)`
+    /// ("Claude Code: box 8 voxels"): the change runs again from the scene as it was, one
+    /// step at a time, each with its own lane's selection. Returns each step that changed
+    /// something, by index, with the history position right after it.
+    pub fn apply_steps(
+        mut self,
+        scene: &mut Scene,
+        mut label: impl FnMut(&Step, &Changes) -> String,
+    ) -> Vec<(usize, u64)> {
+        self.show_before(scene, false);
+        if !self.open {
+            return Vec::new();
+        }
+        self.revert(scene);
+        // Nothing is left in the open edit: closing it leaves no step.
+        scene.commit();
+        self.open = false;
+        self.replaying = true;
+        let me = self.lane;
+        let mut out = Vec::new();
+        for i in 0..self.steps.len() {
+            let Some(op) = self.steps[i].op.clone().filter(|_| !self.steps[i].dropped) else { continue };
+            self.switch(self.steps[i].lane);
+            let _ = self.run(scene, op);
+            if !self.open {
+                continue;
+            }
+            let changes = self.changes(scene);
+            for &p in &self.removed {
+                scene.put(p, 0);
+            }
+            let before = scene.history().position();
+            scene.commit_named(&label(&self.steps[i], &changes));
+            if scene.history().position() != before {
+                out.push((i, scene.history().position()));
+            }
+            // The next step is staged against the scene as this one left it.
+            self.open = false;
+            self.base.clear();
+            self.removed.clear();
+            self.staged = 0;
+            self.palette_before = scene.palette;
+        }
+        self.replaying = false;
+        self.switch(me);
+        out
     }
 
     /// Show the scene as it was before the change (true) or with it again (false), for the
@@ -879,6 +964,9 @@ impl Session {
         self.removed.clear();
         self.staged = 0;
         self.selection = self.selection_before.clone();
+        for (before, now) in self.lanes.values_mut() {
+            *now = before.clone();
+        }
         self.parts.truncate(self.detected);
     }
 
@@ -886,10 +974,14 @@ impl Session {
     fn rebuild(&mut self, scene: &mut Scene) {
         self.revert(scene);
         self.replaying = true;
-        let ops: Vec<Op> = self.steps.iter().filter(|s| !s.dropped).filter_map(|s| s.op.clone()).collect();
-        for op in ops {
+        let me = self.lane;
+        let ops: Vec<(u64, Op)> =
+            self.steps.iter().filter(|s| !s.dropped).filter_map(|s| Some((s.lane, s.op.clone()?))).collect();
+        for (lane, op) in ops {
+            self.switch(lane);
             let _ = self.run(scene, op);
         }
+        self.switch(me);
         self.replaying = false;
     }
 }
