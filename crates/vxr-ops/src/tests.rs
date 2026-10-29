@@ -69,6 +69,7 @@ fn tool_schemas() {
             "get_voxels",
             "slice",
             "find_parts",
+            "look",
             "place",
             "erase",
             "box",
@@ -1602,4 +1603,103 @@ fn redo_brings_back_what_undo_took() {
     assert!(call(&mut o, &mut s, "redo", json!({})).starts_with("brought back step"));
     assert_eq!(get(&mut o, &mut s, [2, 2, 2]), 6);
     apply_and_undo(o, &mut s, &bytes);
+}
+
+/// A PNG's size and RGB rows.
+fn decode_png(bytes: &[u8]) -> (u32, u32, Vec<u8>) {
+    let mut r = png::Decoder::new(std::io::Cursor::new(bytes)).read_info().unwrap();
+    let mut buf = vec![0; r.output_buffer_size().unwrap()];
+    let info = r.next_frame(&mut buf).unwrap();
+    assert_eq!(info.color_type, png::ColorType::Rgb);
+    buf.truncate(info.buffer_size());
+    (info.width, info.height, buf)
+}
+
+/// The pixel a front view's text puts at the middle of world cell column `x`, row `y`.
+fn front_pixel(t: &Value, img: &(u32, u32, Vec<u8>), x: i32, y: i32) -> [u8; 3] {
+    let ppv = t["pixels_per_voxel"].as_f64().unwrap();
+    let left = t["across"]["left_edge"].as_f64().unwrap();
+    let top = t["down"]["top_edge"].as_f64().unwrap();
+    let c = ((x as f64 + 0.5 - left) * ppv) as u32;
+    let r = ((top - (y as f64 + 0.5)) * ppv) as u32;
+    let i = ((r * img.0 + c) * 3) as usize;
+    [img.2[i], img.2[i + 1], img.2[i + 2]]
+}
+
+fn reddish(p: [u8; 3]) -> bool {
+    p[0] > 2 * p[1] && p[0] > 2 * p[2] && p[0] > 60
+}
+
+#[test]
+fn look_frames_the_voxels_and_says_which_cells_it_spans() {
+    let mut s = small();
+    let mut o = Session::new(&s, None);
+    let position = s.history().position();
+    let t = json(&call(&mut o, &mut s, "look", json!({"view": "front", "size": 256})));
+    let img = decode_png(&o.take_image().expect("a picture"));
+    assert!(o.take_image().is_none(), "taken once");
+    assert_eq!((t["view"].as_str(), t["projection"].as_str()), (Some("front"), Some("orthographic")));
+    assert_eq!((t["width"].as_u64(), t["height"].as_u64()), (Some(img.0 as u64), Some(img.1 as u64)));
+    assert_eq!(img.0.max(img.1), 256);
+    assert_eq!(t["voxels"], 19);
+    assert_eq!((t["across"]["axis"].as_str(), t["down"]["axis"].as_str()), (Some("x"), Some("y")));
+    // The slab spans x 0..3 and y 0, the column x 1 and y 1..3, all inside the picture.
+    let (l, r) = (t["across"]["left_edge"].as_f64().unwrap(), t["across"]["right_edge"].as_f64().unwrap());
+    assert!(l < 0.0 && r > 4.0, "{t}");
+    for y in 1..4 {
+        assert!(reddish(front_pixel(&t, &img, 1, y)), "the column at y {y}");
+        assert!(!reddish(front_pixel(&t, &img, 2, y)), "beside it at y {y}");
+    }
+    assert!(!reddish(front_pixel(&t, &img, 1, 0)), "the slab is brown");
+    // A query: no step and no undo step.
+    assert!(o.steps().is_empty());
+    assert_eq!(s.history().position(), position);
+    for view in ["back", "left", "right", "top", "bottom", "iso"] {
+        let t = json(&call(&mut o, &mut s, "look", json!({"view": view})));
+        let (w, h, _) = decode_png(&o.take_image().unwrap());
+        assert_eq!(w.max(h), 512, "{view}");
+        assert_eq!(t["across"].is_object(), view != "iso", "{view}");
+    }
+}
+
+#[test]
+fn look_shows_the_staged_change_and_the_selection() {
+    let mut s = small();
+    let mut o = Session::new(&s, None);
+    call(&mut o, &mut s, "erase", json!({"cells": [[1, 3, 1]]}));
+    let t = json(&call(&mut o, &mut s, "look", json!({"view": "front", "size": 256})));
+    let img = decode_png(&o.take_image().unwrap());
+    assert_eq!(t["voxels"], 18);
+    assert!(!reddish(front_pixel(&t, &img, 1, 3)), "the staged removal is empty");
+    assert!(reddish(front_pixel(&t, &img, 1, 2)));
+    let plain = front_pixel(&t, &img, 0, 0);
+    call(&mut o, &mut s, "select", json!({"color": 10}));
+    let t = json(&call(&mut o, &mut s, "look", json!({"view": "front", "size": 256})));
+    let img = decode_png(&o.take_image().unwrap());
+    let tinted = front_pixel(&t, &img, 0, 0);
+    assert!(tinted[0] > plain[0] && tinted != plain, "{plain:?} {tinted:?}");
+}
+
+#[test]
+fn look_checks_its_size_and_needs_a_camera_for_the_current_view() {
+    let mut s = small();
+    let mut o = Session::new(&s, None);
+    for size in [63, 1025] {
+        let (k, m) = err(&mut o, &mut s, "look", json!({"size": size}));
+        assert_eq!(k, ErrorKind::Invalid, "{m}");
+    }
+    let (_, m) = err(&mut o, &mut s, "look", json!({"view": "current"}));
+    assert!(m.contains("live mode"), "{m}");
+    let cam = crate::look::framing(crate::args::LookView::Front, [0.0; 3], [32.0; 3]);
+    o.set_camera(Some(crate::Camera { ortho: false, half: 0.4, aspect: 1.5, ..cam }));
+    let t = json(&call(&mut o, &mut s, "look", json!({"view": "current", "size": 300})));
+    assert_eq!(
+        (t["width"].as_u64(), t["height"].as_u64(), t["projection"].as_str()),
+        (Some(300), Some(200), Some("perspective"))
+    );
+    // An empty scene still draws (the ground under the bounds).
+    let mut e = empty();
+    let mut o = Session::new(&e, None);
+    assert_eq!(json(&call(&mut o, &mut e, "look", json!({})))["voxels"], 0);
+    assert!(o.take_image().is_some());
 }

@@ -229,6 +229,19 @@ else
     return JSON.stringify([s.review, s.voxels - $before, s.agents.panel, s.agents.review]);
   }" | unwrap)"
   expect "Discard, then review off again in the panel" "$reopened" '[null,4,true,false]'
+  # A real agent's look, render settings and exports through the bridge: the picture comes
+  # back as MCP image content, the settings reach the Render panel, and the PNG slices and a
+  # render download in the page under the scene's name.
+  axi eval "() => { window.__downloads = []; HTMLAnchorElement.prototype.click = function () { window.__downloads.push(this.download); }; return 'ok' }" >/dev/null
+  ./dev node "$here/check-agent.js" "$vxr" '[["look", {"view": "front", "size": 128}], ["render_settings", {"gamma": 1.8, "samples": 64, "export_size": "720p"}], ["export", {"kind": "slices"}], ["export", {"kind": "render"}]]' >"$fixtures/look.log"
+  looked="$(sed -n 1p "$fixtures/look.log" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const r=JSON.parse(s);console.log(JSON.stringify([r.isError, JSON.parse(r.text).view, r.image]))})")"
+  expect "look answers a real agent with a PNG picture through the bridge" "$looked" '[false,"front",{"mimeType":"image/png","png":"PNG"}]'
+  set_gamma="$(sed -n 2p "$fixtures/look.log" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const r=JSON.parse(s);const v=JSON.parse(r.text);console.log(JSON.stringify([r.isError, v.gamma, v.samples]))})")"
+  expect "render_settings answers with every setting" "$set_gamma" '[false,1.8,64]'
+  exported="$(sed -n '3,4p' "$fixtures/look.log" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{console.log(JSON.stringify(s.trim().split('\n').map(l=>{const r=JSON.parse(l);return r.isError?r.text:JSON.parse(r.text).exported[0]})))})")"
+  expect "export downloads the PNG slices and, once traced, the render" "$exported" '["island-slices.png","island-render.png"]'
+  downloads="$(axi eval "async () => { await window.__frames(5); const s = JSON.parse(window.vxr.state()); return JSON.stringify([window.__downloads, s.render.gamma, s.render.maxSpp, s.voxels - $before]) }" | unwrap)"
+  expect "the page downloads them, the Render panel has the settings, and no voxel changed" "$downloads" '[["island-slices.png","island-render.png"],1.8,64,4]'
   # Regenerate writes a new token; the switch unpairs the page and the socket goes.
   token="$(cat "$VXR_LIVE_DIR/live.token")"
   axi eval "async () => { await window.__click(window.vxr.hit('agents-regenerate')); await window.__frames(20); return 'ok' }" >/dev/null

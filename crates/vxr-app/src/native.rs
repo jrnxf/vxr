@@ -246,14 +246,14 @@ impl State {
                 let stem = path.file_stem().map_or("vxr".into(), |s| s.to_string_lossy().into_owned());
                 let dir = path.parent().map(|d| d.to_path_buf()).unwrap_or_default();
                 let written = obj_files(&self.editor.scene, &stem).and_then(|(files, quads)| {
-                    for (name, bytes) in files {
+                    for (name, bytes) in &files {
                         std::fs::write(dir.join(name), bytes).map_err(|e| e.to_string())?;
                     }
-                    Ok(quads)
+                    Ok((files[0].0.clone(), quads))
                 });
                 match written {
-                    Ok(quads) => {
-                        self.editor.ui.toast(&ctx, format!("Exported {stem}.obj, .mtl and .png ({quads} quads)"))
+                    Ok((obj, quads)) => {
+                        self.editor.ui.toast(&ctx, format!("Exported {obj}, .mtl and .png ({quads} quads)"))
                     }
                     Err(e) => self.editor.ui.toast(&ctx, format!("Could not export: {e}")),
                 }

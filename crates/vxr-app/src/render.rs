@@ -3,6 +3,8 @@
 //! without waiting and encoded as PNG.
 
 use glam::Vec3;
+use serde_json::{Value, json};
+pub use vxr_core::files::png;
 use vxr_core::material::Material;
 use vxr_render::gpu::Readback;
 use vxr_render::map::srgb_to_linear;
@@ -12,6 +14,8 @@ use vxr_render::{EditBox, Gpu, GpuMap, Lighting, OrbitCamera, Preview};
 pub const SPP_CHOICES: [u32; 4] = [64, 256, 1024, 4096];
 /// Export sizes, all 16:9 like the corner, so an export frames what the corner shows.
 pub const EXPORT_SIZES: [(u32, u32); 4] = [(1280, 720), (1920, 1080), (2560, 1440), (3840, 2160)];
+/// The export sizes as an agent names them.
+pub const EXPORT_SIZE_NAMES: [&str; 4] = ["720p", "1080p", "1440p", "4k"];
 /// GPU time per frame an export may use.
 const EXPORT_BUDGET_MS: f64 = 12.0;
 
@@ -83,6 +87,77 @@ impl RenderSettings {
             aperture: self.blur * 0.03 * distance,
             focus: self.focus * distance,
         }
+    }
+
+    /// Set what an agent's `render_settings` call gives (the names `vxr_mcp::live` offers),
+    /// all or nothing: a value out of the panel's range changes nothing.
+    pub fn set_from(&mut self, args: &Value) -> Result<(), String> {
+        let o = args.as_object().ok_or("the arguments: an object")?;
+        let mut next = self.clone();
+        for (k, v) in o {
+            let num = |lo: f32, hi: f32| -> Result<f32, String> {
+                let n = v.as_f64().ok_or_else(|| format!("{k}: a number"))? as f32;
+                if (lo..=hi).contains(&n) { Ok(n) } else { Err(format!("{k} {n}: give {lo} to {hi}")) }
+            };
+            let flag = || v.as_bool().ok_or_else(|| format!("{k}: true or false"));
+            match k.as_str() {
+                "sun_direction" => next.sun_angle = num(0.0, 360.0)?,
+                "sun_height" => next.sun_height = num(2.0, 90.0)?,
+                "sun_strength" => next.sun_strength = num(0.0, 10.0)?,
+                "sun_color" => {
+                    let hex = v.as_str().ok_or("sun_color: #rrggbb")?;
+                    next.sun_color = parse_hex(hex).ok_or_else(|| format!("sun_color {hex}: #rrggbb"))?;
+                }
+                "sky_light" => next.sky = num(0.0, 3.0)?,
+                "show_sky" => next.sky_backdrop = flag()?,
+                "physical_sky" => next.physical_sky = flag()?,
+                "exposure" => next.exposure_ev = num(-3.0, 3.0)?,
+                "gamma" => next.gamma = num(1.0, 3.0)?,
+                "vignette" => next.vignette = num(0.0, 1.0)?,
+                "depth_of_field" => next.blur = num(0.0, 1.0)?,
+                "focus" => next.focus = num(0.25, 2.0)?,
+                "samples" => {
+                    let n = v.as_u64().unwrap_or(0);
+                    next.spp = SPP_CHOICES
+                        .iter()
+                        .position(|&c| c as u64 == n)
+                        .ok_or_else(|| format!("samples {v}: one of {SPP_CHOICES:?}"))?;
+                }
+                "export_size" => {
+                    let n = v.as_str().unwrap_or("");
+                    next.size = EXPORT_SIZE_NAMES
+                        .iter()
+                        .position(|&c| c.eq_ignore_ascii_case(n))
+                        .ok_or_else(|| format!("export_size {v}: one of {EXPORT_SIZE_NAMES:?}"))?;
+                }
+                other => return Err(format!("{}: not a render setting", vxr_ops::clean(other.as_bytes()))),
+            }
+        }
+        *self = next;
+        Ok(())
+    }
+
+    /// The settings as an agent's `render_settings` call names them.
+    pub fn to_json(&self) -> Value {
+        let (w, h) = self.export_size();
+        let c = self.sun_color;
+        json!({
+            "sun_direction": r3(self.sun_angle),
+            "sun_height": r3(self.sun_height),
+            "sun_color": format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2]),
+            "sun_strength": r3(self.sun_strength),
+            "sky_light": r3(self.sky),
+            "show_sky": self.sky_backdrop,
+            "physical_sky": self.physical_sky,
+            "exposure": r3(self.exposure_ev),
+            "gamma": r3(self.gamma),
+            "vignette": r3(self.vignette),
+            "depth_of_field": r3(self.blur),
+            "focus": r3(self.focus),
+            "samples": self.samples(),
+            "export_size": EXPORT_SIZE_NAMES[self.size.min(EXPORT_SIZES.len() - 1)],
+            "export_pixels": [w, h],
+        })
     }
 
     pub fn samples(&self) -> u32 {
@@ -171,19 +246,80 @@ impl Export {
     }
 }
 
-/// RGBA8 rows as a PNG file.
-pub fn png(w: u32, h: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
-    let mut out = Vec::new();
-    let mut e = png::Encoder::new(&mut out, w, h);
-    e.set_color(png::ColorType::Rgba);
-    e.set_depth(png::BitDepth::Eight);
-    e.write_header().and_then(|mut wr| wr.write_image_data(rgba)).map_err(|e| e.to_string())?;
-    Ok(out)
+/// A setting as an agent reads it: to three decimals, not f32's tail.
+fn r3(v: f32) -> f64 {
+    (v as f64 * 1000.0).round() / 1000.0
+}
+
+/// `#rrggbb` as sRGB.
+fn parse_hex(s: &str) -> Option<[u8; 3]> {
+    let h = s.strip_prefix('#')?;
+    if h.len() != 6 || !h.is_ascii() {
+        return None;
+    }
+    let b = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).ok();
+    Some([b(0)?, b(2)?, b(4)?])
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_agent_sets_every_panel_setting_all_or_nothing() {
+        let mut r = RenderSettings::default();
+        let all = json!({
+            "sun_direction": 90, "sun_height": 30, "sun_color": "#ff8000", "sun_strength": 5,
+            "sky_light": 2, "show_sky": true, "physical_sky": true, "exposure": -1.5, "gamma": 1.8,
+            "vignette": 0.5, "depth_of_field": 0.25, "focus": 1.5, "samples": 1024, "export_size": "4K",
+        });
+        r.set_from(&all).unwrap();
+        let want = RenderSettings {
+            sun_angle: 90.0,
+            sun_height: 30.0,
+            sun_color: [255, 128, 0],
+            sun_strength: 5.0,
+            sky: 2.0,
+            sky_backdrop: true,
+            physical_sky: true,
+            exposure_ev: -1.5,
+            gamma: 1.8,
+            vignette: 0.5,
+            blur: 0.25,
+            focus: 1.5,
+            spp: 2,
+            size: 3,
+        };
+        assert_eq!(r, want);
+        let back = r.to_json();
+        for (k, v) in all.as_object().unwrap() {
+            if k != "export_size" {
+                assert_eq!(
+                    back[k].as_f64().or(back[k].as_bool().map(|b| b as u8 as f64)),
+                    v.as_f64().or(v.as_bool().map(|b| b as u8 as f64)),
+                    "{k}"
+                );
+            }
+        }
+        assert_eq!((back["export_size"].as_str(), back["export_pixels"][1].as_u64()), (Some("4k"), Some(2160)));
+        // Set from its own description, nothing changes.
+        let mut again = r.clone();
+        let mut j = back.clone();
+        j.as_object_mut().unwrap().remove("export_pixels");
+        again.set_from(&j).unwrap();
+        assert_eq!(again, r);
+        for bad in [
+            json!({"gamma": 1.5, "vignette": 2}),
+            json!({"samples": 100}),
+            json!({"export_size": "8k"}),
+            json!({"sun_color": "red"}),
+            json!({"show_sky": 1}),
+            json!({"bloom": 1}),
+        ] {
+            assert!(r.set_from(&bad).is_err(), "{bad}");
+            assert_eq!(r, want, "{bad} changed nothing");
+        }
+    }
 
     #[test]
     fn default_settings_match_the_preview_default() {
@@ -193,16 +329,5 @@ mod tests {
         assert!((l.sun_color - d.sun_color).abs().max_element() < 0.05, "{:?}", l.sun_color);
         assert_eq!((l.exposure, l.aperture, l.focus, l.sky), (1.0, 0.0, 100.0, 1.0));
         assert_eq!((l.gamma, l.vignette, l.physical_sky), (d.gamma, d.vignette, d.physical_sky));
-    }
-
-    #[test]
-    fn png_round_trips() {
-        let rgba: Vec<u8> = (0..4 * 3 * 2).map(|i| i as u8 * 10).collect();
-        let bytes = png(3, 2, &rgba).unwrap();
-        let mut r = png::Decoder::new(std::io::Cursor::new(bytes)).read_info().unwrap();
-        let mut buf = vec![0; r.output_buffer_size().unwrap()];
-        let info = r.next_frame(&mut buf).unwrap();
-        assert_eq!((info.width, info.height), (3, 2));
-        assert_eq!(&buf[..info.buffer_size()], &rgba[..]);
     }
 }

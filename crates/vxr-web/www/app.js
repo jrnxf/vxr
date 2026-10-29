@@ -124,6 +124,7 @@ function bridgeConnect() {
   };
 }
 function bridgeFlush() {
+  agentDownloads();
   for (const m of app.bridge_out()) {
     if (m === 'connect') bridgeConnect();
     else if (m === 'close') bridgeClose();
@@ -267,12 +268,20 @@ function wire() {
   new ResizeObserver(fit).observe(canvas);
 }
 
-function download(bytes, name, type) {
+function download(bytes, name, type, quiet) {
   const url = URL.createObjectURL(new Blob([bytes], { type }));
   const a = Object.assign(document.createElement('a'), { href: url, download: name });
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
-  app.toast(`Downloaded ${name}`);
+  if (!quiet) app.toast(`Downloaded ${name}`);
+}
+
+// What terminal agents exported (the editor toasts who exported what).
+function agentDownloads() {
+  for (let name; (name = app.agent_download_name()); ) {
+    const type = name.endsWith('.zip') ? 'application/zip' : name.endsWith('.png') ? 'image/png' : 'application/octet-stream';
+    download(app.take_agent_download(), name, type, true);
+  }
 }
 
 function save() {

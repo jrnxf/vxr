@@ -2,7 +2,7 @@
 //! nested group, three linked copies of one tree model, three layers, hidden objects) plus a
 //! `MATL` chunk for every slot (the slab metal, the gem glass, orange emissive), render
 //! settings (`rOBJ`), three saved cameras (`rCAM`) and palette row names (`NOTE`). Used by the
-//! tests and, through `examples/fixture.rs`, by the live check from Claude Code.
+//! tests and, through `examples/live-fixture.rs`, by the live check from Claude Code.
 
 use vxr_vox::Dict;
 use vxr_vox::fixtures::{self, GREY, MAGENTA, ORANGE};

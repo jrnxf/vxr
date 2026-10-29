@@ -10,10 +10,13 @@
 use std::collections::{HashSet, VecDeque};
 
 use serde_json::{Value, json};
+use vxr_mcp::Reply;
 use vxr_mcp::bridge::{PORT, normalize_code};
+use vxr_mcp::live::EXPORT_TOOL;
 
 use crate::Editor;
 use crate::agents::Fail;
+use crate::files::{File, zip};
 use crate::ui::Action;
 
 /// What the page's script does with the WebSocket.
@@ -92,6 +95,10 @@ pub struct Page {
     /// Regenerate was asked and the bridge has not answered: requests wait.
     regenerating: bool,
     out: Vec<Out>,
+    /// An agent's `export` of a render, answered once the export ends.
+    waiting: Option<Request>,
+    /// Files agents exported, for the page to download.
+    downloads: Vec<File>,
 }
 
 impl Default for Page {
@@ -109,11 +116,18 @@ impl Page {
             stopped: HashSet::new(),
             regenerating: false,
             out: Vec::new(),
+            waiting: None,
+            downloads: Vec::new(),
         }
     }
 
     pub fn link(&self) -> Link {
         self.link
+    }
+
+    /// Files agents exported since the last call, for the page to download.
+    pub fn take_downloads(&mut self) -> Vec<File> {
+        std::mem::take(&mut self.downloads)
     }
 
     /// What the page's script should do now, oldest first.
@@ -319,19 +333,40 @@ impl Page {
 
     /// Run what agents asked since the last frame, unless the user is mid-drag.
     pub fn tick(&mut self, ed: &mut Editor) {
-        while self.link == Link::Paired && !self.regenerating && !ed.agent_busy() {
+        // Stop, a new token or the link closing dropped the agent waiting for its render.
+        if self
+            .waiting
+            .as_ref()
+            .is_some_and(|w| self.link != Link::Paired || !ed.agents.clients.iter().any(|(c, _)| *c == w.conn))
+        {
+            self.waiting = None;
+            ed.forget_agent_render();
+        }
+        if self.waiting.is_some()
+            && let Some(r) = ed.take_agent_render()
+        {
+            let w = self.waiting.take().unwrap();
+            let r = r.and_then(|what| self.deliver(ed, &w.client, &what)).map(Reply::from);
+            self.send(answer(&w.id, r));
+        }
+        while self.link == Link::Paired && !self.regenerating && !ed.agent_busy() && self.waiting.is_none() {
             let Some(r) = self.pending.pop_front() else { break };
             let reply = match &r.ask {
                 Ask::Call { name, args } => {
-                    let (text, is_error) = match ed.agent_call(r.conn, &r.client, name, args) {
-                        Some(Ok(t)) => (t, false),
-                        Some(Err(e)) => (e, true),
-                        None => {
-                            self.pending.push_front(r);
-                            continue;
-                        }
+                    let Some(a) = ed.agent_call(r.conn, &r.client, name, args) else {
+                        self.pending.push_front(r);
+                        continue;
                     };
-                    json!({"id": r.id, "text": text, "isError": is_error})
+                    if ed.agent_waits(r.conn) {
+                        self.waiting = Some(r);
+                        continue;
+                    }
+                    let a = if name == EXPORT_TOOL {
+                        a.and_then(|a| self.deliver(ed, &r.client, &a.text).map(Reply::from))
+                    } else {
+                        a
+                    };
+                    answer(&r.id, a)
                 }
                 Ask::Read(uri) => match ed.agent_read(uri) {
                     Some(Ok(t)) => json!({"id": r.id, "text": t, "isError": false}),
@@ -344,6 +379,25 @@ impl Page {
         self.sync(ed);
     }
 
+    /// Hand an agent's exported files to the page to download (an OBJ's three as one zip),
+    /// and the answer naming them.
+    fn deliver(&mut self, ed: &mut Editor, client: &str, what: &str) -> Result<String, String> {
+        let files = std::mem::take(&mut ed.agent_files);
+        let file = match files.as_slice() {
+            [one] => one.clone(),
+            _ => (format!("{}-obj.zip", ed.export_stem()), zip(&files)),
+        };
+        let ctx = ed.ctx.clone();
+        ed.ui.toast(&ctx, format!("{client} exported {}", file.0));
+        let text = json!({
+            "exported": [&file.0],
+            "what": what,
+            "note": "downloaded by the browser into the user's downloads folder",
+        });
+        self.downloads.push(file);
+        Ok(text.to_string())
+    }
+
     /// The panel's state: the browser's variant, paired or not, and connecting.
     pub fn sync(&self, ed: &mut Editor) {
         ed.agents.available = true;
@@ -352,5 +406,14 @@ impl Page {
         ed.agents.connecting = matches!(self.link, Link::Connecting | Link::Pairing);
         let now = ed.ctx.input(|i| i.time);
         ed.agents.note_clients(now);
+    }
+}
+
+/// An answer to the bridge: text and picture, or an error's text.
+fn answer(id: &Value, r: Result<Reply, String>) -> Value {
+    match r {
+        Ok(Reply { text, image: Some(image) }) => json!({"id": id, "text": text, "isError": false, "image": image}),
+        Ok(Reply { text, image: None }) => json!({"id": id, "text": text, "isError": false}),
+        Err(e) => json!({"id": id, "text": e, "isError": true}),
     }
 }

@@ -6,12 +6,14 @@
 //! - [`Session`]: one request's staged change on a live [`vxr_core::Scene`], its limits
 //!   ([`Limits`]), its steps for the review card, and Apply (one undo step) or Discard.
 //! - The views of the scene: the summary, `get_voxels` (cells, column tops, a box), `slice`
-//!   and the named parts ([`parts`]), all reading staged removals as empty.
+//!   and the named parts ([`parts`]), all reading staged removals as empty, and `look`, a
+//!   picture of it cast on the CPU ([`look`]).
 //!
 //! Names from a file reach the model at most 64 characters long, without control
 //! characters, as JSON strings under `file_content`, marked as data.
 
 pub mod args;
+pub mod look;
 pub mod parts;
 pub mod session;
 #[cfg(test)]
@@ -20,6 +22,7 @@ mod text;
 mod view;
 
 pub use args::{Op, Tool, tools};
+pub use look::Camera;
 pub use session::{Changes, Error, ErrorKind, Ghost, Limits, Session, Step, notes_of};
 pub use text::{MAX_NAME, clean};
 
