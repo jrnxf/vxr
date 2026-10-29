@@ -1481,11 +1481,13 @@ async () => {
   await tapAt('edit-color');
   const [hx, hy] = window.vxr.hit('field-hex');
   touch('pointerdown', 0, hx, hy);
-  await frames(1);
+  await frames(2);
+  const ime = document.getElementById('ime');
+  const unfocused = window.vxr.wants_keyboard() && document.activeElement !== ime;
   touch('pointerup', 0, hx, hy);
-  const focused = document.activeElement === document.getElementById('ime');
+  const focused = document.activeElement === ime;
   await frames();
-  step('a tap on a text field focuses the hidden field inside the tap', st().colorEdit && focused, JSON.stringify([st().colorEdit, document.activeElement?.id]));
+  step('a tap on a text field focuses the hidden field inside the tap, not before', st().colorEdit && unfocused && focused, JSON.stringify([st().colorEdit, unfocused, document.activeElement?.id]));
   for (let i = 0; i < 2 && st().colorEdit; i++) await key('Escape');
   step('Escape leaves the field and closes the colour editor', !st().colorEdit, JSON.stringify(st().colorEdit));
   await tapAt('dock-color');

@@ -9,6 +9,10 @@ const fileInput = document.getElementById('file');
 const msg = document.getElementById('msg');
 const dpr = () => devicePixelRatio || 1;
 let app, composing = false;
+// The fingers down on the canvas. While one is, only the touch handlers focus the hidden
+// field, since iPadOS opens its keyboard only for a focus inside the tap.
+const fingers = new Set();
+const focusIme = () => { if (app.wants_keyboard() && document.activeElement !== ime) ime.focus(); };
 
 // The assistant's keys, when the user asks this browser to remember one: encrypted with an
 // AES-GCM key that never leaves the browser (non-extractable, kept in IndexedDB), so what is
@@ -148,7 +152,6 @@ function wire() {
   canvas.addEventListener('contextmenu', (e) => e.preventDefault());
   // Fingers go to the editor's touch gestures (app.touch); a mouse press brings back the
   // mouse layout, and a pen draws like the mouse in whichever layout shows.
-  const fingers = new Set();
   const finger = (e, phase) => {
     if (e.pointerType !== 'touch') return false;
     if (phase === 0) fingers.add(e.pointerId);
@@ -158,11 +161,12 @@ function wire() {
     e.preventDefault();
     if (phase === 2) {
       step(performance.now());
-      if (app.wants_keyboard() && document.activeElement !== ime) ime.focus();
+      focusIme();
     }
     return true;
   };
   canvas.addEventListener('pointercancel', (e) => finger(e, 2));
+  canvas.addEventListener('touchend', focusIme);
   canvas.addEventListener('pointerdown', (e) => {
     if (finger(e, 0)) {
       canvas.setPointerCapture(e.pointerId);
@@ -304,7 +308,7 @@ function tick(now) {
   const c = app.cursor();
   if (c !== cursor) canvas.style.cursor = cursor = c;
   // Keep the hidden field focused while egui is typing so the OS IME targets it.
-  if (app.wants_keyboard() && document.activeElement !== ime) ime.focus();
+  if (!fingers.size) focusIme();
   if (!app.wants_keyboard() && document.activeElement === ime) canvas.focus();
   requestAnimationFrame(tick);
 }
