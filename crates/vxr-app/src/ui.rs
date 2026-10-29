@@ -2716,9 +2716,20 @@ impl Hybrid {
         if !self.mirror && self.lock.is_none() {
             return;
         }
-        // Under the selection flyout when it shows too, so neither covers the other.
-        let below = if self.selection_shown() && !self.touch { self.select_y + SELECTION_H + 8.0 } else { self.axes_y };
-        let rect = self.flyout_rect(self.axes_y.max(below), "mirror", vec2(150.0, 6.0 + 2.0 * 40.0 + 2.0 + 6.0));
+        let mut rect = self.flyout_rect(self.axes_y, "mirror", vec2(150.0, 6.0 + 2.0 * 40.0 + 2.0 + 6.0));
+        // Under the selection flyout when it shows too, so neither covers the other, else
+        // beside it when under would run off the screen.
+        if self.selection_shown() && !self.touch {
+            let (screen, sel) = (ctx.content_rect(), self.selection_rect(ctx));
+            let fits = |r: Rect| r.bottom() <= screen.bottom() - 12.0 && r.right() <= screen.right() - 12.0;
+            let below = rect.translate(vec2(0.0, (sel.bottom() + 8.0 - rect.top()).max(0.0)));
+            let beside = rect.translate(vec2(sel.right() + 8.0 - rect.left(), 0.0));
+            if fits(below) {
+                rect = below;
+            } else if fits(beside) {
+                rect = beside;
+            }
+        }
         self.hits.insert("axes".into(), rect);
         let (mirror, lock) = (self.mirror_axes(), self.lock);
         let mut clicked = (None, None);
@@ -2771,6 +2782,16 @@ impl Hybrid {
         }
     }
 
+    /// Where the selection flyout opens: beside the select button, lifted to end on screen.
+    fn selection_rect(&self, ctx: &Context) -> Rect {
+        let rect = self.flyout_rect(self.select_y, "select", vec2(162.0, SELECTION_H));
+        if self.touch {
+            return rect;
+        }
+        let over = rect.bottom() - (ctx.content_rect().bottom() - 12.0);
+        rect.translate(vec2(0.0, -over.min(rect.top() - TOP).max(0.0)))
+    }
+
     /// Whether the selection flyout shows: with the select tool or a selection, in a model.
     fn selection_shown(&self) -> bool {
         !self.world && (self.tool == Tool::Select || self.selected > 0)
@@ -2791,7 +2812,7 @@ impl Hybrid {
         if !self.selection_shown() {
             return;
         }
-        let rect = self.flyout_rect(self.select_y, "select", vec2(162.0, SELECTION_H));
+        let rect = self.selection_rect(ctx);
         self.hits.insert("selection".into(), rect);
         let (selected, has_clip, can_split) = (self.selected, self.has_clip, self.can_split);
         let mut region = self.region;
@@ -3057,13 +3078,13 @@ impl Hybrid {
         job.wrap.max_width = inner_w;
         let note = ctx.fonts_mut(|f| f.layout_job(job));
         let h = 36.0 + 28.0 + 12.0 + note.size().y + 14.0;
-        // The fields' row lines up with the Resize button (its centre is select_y + 178).
+        // The fields' row lines up with the Resize button (its centre 184 below the flyout's top).
         let rect = match self.hits.get("selection").copied().filter(|_| self.touch) {
             // Over the dock: beside the selection flyout, level with its bottom.
             Some(sel) => Rect::from_min_size(pos2(sel.right() + 8.0, sel.bottom() - h), vec2(w, h)),
             None => {
-                let top = self.select_y + 178.0 - 50.0;
-                Rect::from_min_size(pos2(self.flyout_x() + 162.0 + 8.0, top), vec2(w, h))
+                let sel = self.selection_rect(ctx);
+                Rect::from_min_size(pos2(sel.right() + 8.0, sel.top() + 184.0 - 50.0), vec2(w, h))
             }
         };
         self.hits.insert("bounds-panel".into(), rect);

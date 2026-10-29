@@ -3616,6 +3616,15 @@ fn column_short_window(dir: &Path) -> Result<(), String> {
         format!("short: the palette opens beside the wider rail, on screen: {palette:?}"),
     )?;
     s.save_png(&dir.join("app-2x-rail-short.png"))?;
+    s.ui_click("select")?;
+    s.ui_click("mirror")?;
+    s.frames(2);
+    let (selection, axes) = (rect(&s, "selection")?, rect(&s, "axes")?);
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 520.0));
+    check(
+        screen.contains_rect(selection) && screen.contains_rect(axes) && !selection.intersects(axes),
+        format!("short: the selection and axis flyouts both on screen, apart: {selection:?} {axes:?}"),
+    )?;
     Ok(())
 }
 
