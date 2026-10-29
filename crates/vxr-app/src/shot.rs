@@ -5053,8 +5053,8 @@ fn agents_bridge(dir: &Path) -> Result<(), String> {
 
 /// `vxr --agents <dir> [scene.vox]`, only in a build with the `live` feature: the live mode
 /// check from a real terminal agent. The editor runs headless on the scene (the house if none
-/// is given) with "Allow terminal agents" switched on through the panel, at the default
-/// socket, as the window would; while an agent is connected each applied or undone edit
+/// is given) with "Allow agents to edit this window" switched on through the Agents tab, at the
+/// default socket, as the window would; while an agent is connected each applied or undone edit
 /// writes `agents-live.png` (chip and card), and once `<dir>/done` appears (or after 15 minutes) it
 /// writes `agents-live-done.png` and the scene as `agents-live.vox` and stops.
 #[cfg(all(feature = "live", unix))]
