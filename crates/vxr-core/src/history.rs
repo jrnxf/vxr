@@ -68,7 +68,9 @@ pub enum At {
 }
 
 /// A world edit (move, copy, group, hide, ...): the tree before and after, and the models
-/// it added (a duplicate's own model), which undo drops and redo puts back.
+/// it added (a duplicate's own model), which undo drops and redo puts back. Selection to
+/// new object also changes a model in place, moves the map from one object to another
+/// and may make the world of a new scene.
 #[derive(Clone)]
 pub struct WorldChange {
     pub old: vxr_vox::Tree,
@@ -76,17 +78,56 @@ pub struct WorldChange {
     /// How many models there were before.
     pub models: usize,
     pub added: Vec<crate::BrickMap>,
+    /// Models changed in place: index, before and after.
+    pub replaced: Vec<(usize, crate::BrickMap, crate::BrickMap)>,
+    /// What the map holds before and after: the world for an edit made there.
+    pub at: [At; 2],
+    /// The selection before and after, in world cells, when the edit sets it.
+    pub selection: Option<[Vec<[i32; 3]>; 2]>,
+    /// The world the edit made for a new scene, which undo takes away again.
+    pub made: Option<Box<Made>>,
+}
+
+/// The world of a new scene, made for its first split (see
+/// [`crate::scene::Scene::selection_to_object`]): one object holding the map, the file it
+/// saves into, and the scene's mirror planes and ground to restore when undo drops it.
+#[derive(Clone)]
+pub struct Made {
+    pub world: crate::World,
+    pub source: vxr_vox::Document,
+    pub pivot: [i32; 3],
+    pub floor: i32,
+}
+
+impl WorldChange {
+    /// A change of the tree and added models only, made where the map is `at`.
+    pub fn tree(old: vxr_vox::Tree, new: vxr_vox::Tree, models: usize, added: Vec<crate::BrickMap>, at: At) -> Self {
+        WorldChange { old, new, models, added, replaced: Vec::new(), at: [at; 2], selection: None, made: None }
+    }
 }
 
 impl std::fmt::Debug for WorldChange {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("WorldChange").field("models", &self.models).field("added", &self.added.len()).finish()
+        f.debug_struct("WorldChange")
+            .field("models", &self.models)
+            .field("added", &self.added.len())
+            .field("replaced", &self.replaced.len())
+            .field("at", &self.at)
+            .field("made", &self.made.is_some())
+            .finish()
     }
 }
 
 impl PartialEq for WorldChange {
     fn eq(&self, o: &Self) -> bool {
-        self.old == o.old && self.new == o.new && self.models == o.models && self.added.len() == o.added.len()
+        self.old == o.old
+            && self.new == o.new
+            && self.models == o.models
+            && self.added.len() == o.added.len()
+            && self.replaced.iter().map(|r| r.0).eq(o.replaced.iter().map(|r| r.0))
+            && self.at == o.at
+            && self.selection == o.selection
+            && self.made.is_some() == o.made.is_some()
     }
 }
 

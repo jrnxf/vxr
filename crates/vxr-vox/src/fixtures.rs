@@ -490,6 +490,30 @@ pub fn all() -> Vec<Fixture> {
     b.root.push(SceneNode::shape(gem, None, [3, -3, 1]).named("lost gem").hidden());
     add("22-world", "A grey 8 x 8 slab named slab; a group named trees, 3 up, holding three linked copies of one tree model (tree a at (-2, -2), tree b turned 90 degrees at (2, 2), and tree c inside a nested group named grove at (2, -2)), all on the trees layer; a magenta gem on the hidden secret layer and a hidden lost gem.".into(), b);
 
+    // 23: a scene in one model, as people often build them: a desk with a cup of coffee on
+    // it and a book, every voxel in one object.
+    let mut b = builder(200);
+    let mut v = Vec::new();
+    for x in 0..16u8 {
+        for y in 0..10u8 {
+            v.push([x, y, 4, BROWN]);
+            if (x == 0 || x == 15) && (y == 0 || y == 9) {
+                v.extend((0..4).map(|z| [x, y, z, BROWN]));
+            }
+        }
+    }
+    for x in 3..7u8 {
+        for y in 3..7u8 {
+            let wall = x == 3 || x == 6 || y == 3 || y == 6;
+            v.push([x, y, 5, WHITE]);
+            v.extend((6..9).map(|z| [x, y, z, if wall { WHITE } else { ORANGE }]).filter(|c| wall || c[2] < 8));
+        }
+    }
+    v.extend((9..14u8).flat_map(|x| (2..8u8).flat_map(move |y| (5..7u8).map(move |z| [x, y, z, BLUE]))));
+    let m = b.model([16, 10, 9], v);
+    b.root.push(SceneNode::shape(m, None, [0, 0, 0]));
+    add("23-desk", "One model: a brown desk on four legs, a white cup on it with orange coffee inside (two layers, under the rim), and a blue book beside the cup.".into(), b);
+
     out
 }
 

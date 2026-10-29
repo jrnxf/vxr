@@ -26,6 +26,7 @@ cd "$root"
 fixtures="$(mktemp -d)"
 trap 'rm -rf "$fixtures"' EXIT
 ./dev cargo run -q --release -p vxr-vox --example fixture -- 22-world "$fixtures/22-world.vox"
+./dev cargo run -q --release -p vxr-vox --example fixture -- 23-desk "$fixtures/23-desk.vox"
 ./dev cargo build -q -p vxr-app
 vxr="$root/target/debug/vxr"
 ./dev node "$here/check-server.js" "$dist" "$port" "$fixtures" &

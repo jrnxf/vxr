@@ -17,7 +17,7 @@ use vxr_vox::{Camera, Document, Material};
 
 use crate::brickmap::BrickMap;
 use crate::history::{
-    At, Bounds, BoundsChange, CameraChange, Change, ColorChange, History, MaterialChange, SelectionChange, Step,
+    At, Bounds, BoundsChange, CameraChange, Change, ColorChange, History, Made, MaterialChange, SelectionChange, Step,
     WorldChange,
 };
 use crate::select::Clip;
@@ -71,6 +71,18 @@ pub struct Scene {
     picked: Option<usize>,
     /// The world edit in progress (a drag): the tree and model count before it.
     world_stroke: Option<(vxr_vox::Tree, usize)>,
+}
+
+/// Why Selection to new object cannot run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SplitError {
+    /// The world shows: voxels are selected in a model.
+    World,
+    NothingSelected,
+    /// The whole model is selected: it is already the object.
+    Everything,
+    /// The model is shared by linked copies, so the voxels would leave every copy.
+    Linked,
 }
 
 /// The changes of the edit in progress: one entry per cell or palette slot, first old value
@@ -161,6 +173,13 @@ impl Scene {
         }
         let world: BTreeMap<[i32; 3], u8> =
             self.world_voxels(false).into_iter().map(|(p, c)| (world_to_vox(p), c)).collect();
+        let mut b = self.builder();
+        b.add_world(&world);
+        b.build().write()
+    }
+
+    /// A fresh version 200 file with the palette, materials and cameras and no voxels.
+    fn builder(&self) -> Builder {
         let mut b = Builder::new(200);
         b.palette = Some((0..256).map(|k| self.palette[(k + 1) % 256]).collect());
         b.materials = (1..=255u8)
@@ -168,8 +187,7 @@ impl Scene {
             .map(|i| (i as i32, self.materials[i as usize].to_dict()))
             .collect();
         b.cameras = self.cameras.iter().map(|c| (c.id, c.to_dict())).collect();
-        b.add_world(&world);
-        b.build().write()
+        b
     }
 
     fn save_into(&self, mut doc: Document, mut world: World) -> Option<Vec<u8>> {
@@ -279,7 +297,7 @@ impl Scene {
         if w.tree == old && w.models.len() == models {
             return None;
         }
-        Some(Box::new(WorldChange { old, new: w.tree.clone(), models, added: w.models[models..].to_vec() }))
+        Some(Box::new(WorldChange::tree(old, w.tree.clone(), models, w.models[models..].to_vec(), At::World)))
     }
 
     /// The object or group picked in world mode, if it is still in the world.
@@ -329,10 +347,15 @@ impl Scene {
     /// Store the current model into the world and load `at` into the map.
     fn switch(&mut self, at: At) -> Result<(), String> {
         self.commit();
+        self.store_model();
+        self.load(at)
+    }
+
+    /// Store the model being edited into the world, so the world's copy is current.
+    fn store_model(&mut self) {
         if let (At::Object(i), Some(w)) = (self.at, &mut self.world) {
             w.store(i, &self.map, self.origin);
         }
-        self.load(at)
     }
 
     /// Fill the map from the world: one object's model in world axes, or every shown object.
@@ -372,6 +395,9 @@ impl Scene {
             }
             At::Map => return Err("no world".into()),
         };
+        if self.picked.is_some_and(|i| !w.in_tree(i)) {
+            self.picked = None;
+        }
         map.track_dirty(self.map.tracking());
         let size = map.size_voxels();
         self.map = map;
@@ -642,7 +668,10 @@ impl Scene {
     pub fn undo(&mut self) -> bool {
         self.commit();
         let Some(mut step) = self.history.undo().cloned() else { return false };
-        if step.needs_map() && step.at != self.at && self.switch(step.at).is_err() {
+        if step.world.is_some() {
+            // A world step loads the map it lands on itself.
+            self.store_model();
+        } else if step.needs_map() && step.at != self.at && self.switch(step.at).is_err() {
             self.history.redo();
             return false;
         }
@@ -653,7 +682,9 @@ impl Scene {
     pub fn redo(&mut self) -> bool {
         self.commit();
         let Some(mut step) = self.history.redo().cloned() else { return false };
-        if step.needs_map() && step.at != self.at && self.switch(step.at).is_err() {
+        if step.world.is_some() {
+            self.store_model();
+        } else if step.needs_map() && step.at != self.at && self.switch(step.at).is_err() {
             self.history.undo();
             return false;
         }
@@ -669,16 +700,8 @@ impl Scene {
     /// (revert) or after they are dropped (apply), so the step's cells are always in the
     /// map they name.
     fn apply(&mut self, step: &mut Step, revert: bool) {
-        if let (Some(c), Some(w)) = (&step.world, &mut self.world) {
-            if revert {
-                w.tree = c.old.clone();
-                w.models.truncate(c.models);
-            } else {
-                w.tree = c.new.clone();
-                w.models.extend(c.added.iter().cloned());
-            }
-            // It fitted when it was made, so it fits again.
-            let _ = self.load(At::World);
+        if let Some(c) = &step.world {
+            self.apply_world(c, revert);
         }
         if revert && let Some(b) = step.bounds {
             let d = self.reshape(b.old);
@@ -723,6 +746,146 @@ impl Scene {
                 self.selection_version += 1;
             }
         }
+    }
+
+    /// Apply or revert a world step, then load the map it lands on (unless it only changed
+    /// the tree where the map already is) and its selection.
+    fn apply_world(&mut self, c: &WorldChange, revert: bool) {
+        if !revert && let Some(m) = &c.made {
+            self.world = Some(m.world.clone());
+            self.source = Some(m.source.clone());
+        }
+        let Some(w) = &mut self.world else { return };
+        if revert {
+            w.tree = c.old.clone();
+            w.models.truncate(c.models);
+        } else {
+            w.tree = c.new.clone();
+            w.models.extend(c.added.iter().cloned());
+        }
+        for (m, before, after) in &c.replaced {
+            w.models[*m] = if revert { before } else { after }.clone();
+        }
+        let at = c.at[!revert as usize];
+        if revert && let Some(m) = &c.made {
+            // Back to a new scene without a world: its one object's model is the map again.
+            let (mut map, lo) = w.object_map(w.objects()[0]).expect("the made world has one object");
+            map.track_dirty(self.map.tracking());
+            (self.map, self.origin, self.pivot, self.floor) = (map, lo, m.pivot, m.floor);
+            (self.world, self.source, self.at, self.picked) = (None, None, At::Map, None);
+            self.reshapes += 1;
+        } else if !(c.added.is_empty() && c.replaced.is_empty() && c.at[0] == c.at[1] && at == self.at)
+            || at == At::World
+        {
+            // It fitted when it was made, so it fits again.
+            let _ = self.load(at);
+        }
+        if let Some(sel) = &c.selection {
+            self.selection = sel[!revert as usize].iter().map(|&q| self.to_map(q)).collect();
+            self.selection_version += 1;
+            self.selected_cache.set(None);
+        }
+    }
+
+    /// Selection to new object, as one undo step: the selected voxels leave the model being
+    /// edited and become a new object right after it (see [`World::add_object_after`]), each
+    /// on the world cell it was on. A new scene first becomes a world of one object, which
+    /// undo takes away again. The map then holds the new object, its voxels selected.
+    /// Returns the new object, or why it cannot run (nothing changes then).
+    pub fn selection_to_object(&mut self) -> Result<usize, SplitError> {
+        self.commit();
+        let cells: Vec<[i32; 3]> = self.selection().collect();
+        match self.at {
+            At::World => return Err(SplitError::World),
+            _ if cells.is_empty() => return Err(SplitError::NothingSelected),
+            _ if cells.len() as u64 == self.map.voxels => return Err(SplitError::Everything),
+            At::Object(i) => {
+                let w = self.world.as_ref().expect("an object is in the world");
+                if w.model_of(i).is_some_and(|m| w.users(m) > 1) {
+                    return Err(SplitError::Linked);
+                }
+            }
+            At::Map => {}
+        }
+        let before_at = self.at;
+        let made = (self.world.is_none()).then(|| self.make_world());
+        let At::Object(src) = self.at else { unreachable!("a model is edited") };
+        let old_selection: Vec<[i32; 3]> = self.selection.iter().map(|&p| self.to_world(p)).collect();
+        let (mut lo, mut hi) = ([i32::MAX; 3], [i32::MIN; 3]);
+        for p in &cells {
+            for a in 0..3 {
+                lo[a] = lo[a].min(p[a]);
+                hi[a] = hi[a].max(p[a]);
+            }
+        }
+        let mut rest = self.map.clone();
+        let mut part = BrickMap::new(std::array::from_fn(|a| (hi[a] - lo[a] + 1) as u32));
+        for p in &cells {
+            part.set(p[0] - lo[0], p[1] - lo[1], p[2] - lo[2], self.map.get(p[0], p[1], p[2]));
+            rest.set(p[0], p[1], p[2], 0);
+        }
+        let new_selection: Vec<[i32; 3]> = cells.iter().map(|&p| self.to_world(p)).collect();
+        let (map, origin, part_lo) = (&self.map, self.origin, self.to_world(lo));
+        let w = self.world.as_mut().unwrap();
+        // The world's copy of the model being edited is stale until it is stored.
+        w.store(src, map, origin);
+        let (old, models) = (w.tree.clone(), w.models.len());
+        let m = w.model_of(src).unwrap();
+        let before = w.models[m].clone();
+        w.store(src, &rest, origin);
+        let after = w.models[m].clone();
+        let new = w.add_object_after(src, &part, part_lo).unwrap();
+        let change = WorldChange {
+            old,
+            new: w.tree.clone(),
+            models,
+            added: w.models[models..].to_vec(),
+            replaced: vec![(m, before, after)],
+            at: [before_at, At::Object(new)],
+            selection: Some([old_selection, new_selection]),
+            made,
+        };
+        // Back to where it was, so the step applies the same way now as on redo.
+        (w.tree, w.models[m]) = (change.old.clone(), change.replaced[0].1.clone());
+        w.models.truncate(models);
+        self.apply_world(&change, false);
+        self.history.push(Step { world: Some(Box::new(change)), at: At::Object(new), ..Step::default() });
+        Ok(new)
+    }
+
+    /// The world of a new scene: one object whose model is the map, where it is, saved into
+    /// a fresh file with the palette, materials and cameras. Not an undo step by itself.
+    fn make_world(&mut self) -> Box<Made> {
+        let source = Document::read(&self.builder().build().write()).expect("a fresh file reads");
+        let mut w = World::from_doc(&source).expect("a fresh file has a world");
+        let s = self.map.size_voxels();
+        w.models.push(BrickMap::new([s[0], s[2], s[1]]));
+        w.tree
+            .nodes
+            .push(vxr_vox::tree::TreeNode::new(vxr_vox::tree::Kind::Object(0), vxr_vox::scene::Affine::IDENTITY));
+        w.tree.nodes[0].kind = vxr_vox::tree::Kind::Group(vec![1]);
+        w.store(1, &self.map, self.origin);
+        let made = Box::new(Made { world: w.clone(), source: source.clone(), pivot: self.pivot, floor: self.floor });
+        (self.world, self.source, self.at) = (Some(w), Some(source), At::Object(1));
+        made
+    }
+
+    /// Name tree node `i` (None clears the name) as one undo step, in world mode or while
+    /// editing a model. False if there is no world or `i` is not in it.
+    pub fn set_node_name(&mut self, i: usize, name: Option<&str>) -> bool {
+        if self.at == At::World {
+            return self.edit_world(|w| w.set_name(i, name)).is_some();
+        }
+        self.commit();
+        self.store_model();
+        let Some(w) = self.world.as_mut().filter(|w| w.in_tree(i)) else { return false };
+        let old = w.tree.clone();
+        w.set_name(i, name);
+        if w.tree != old {
+            let change = WorldChange::tree(old, w.tree.clone(), w.models.len(), Vec::new(), self.at);
+            self.history.push(Step { world: Some(Box::new(change)), at: self.at, ..Step::default() });
+        }
+        true
     }
 
     /// The model bounds: where the map sits in the world, its size, and the ground layer.

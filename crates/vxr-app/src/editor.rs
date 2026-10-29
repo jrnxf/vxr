@@ -6,6 +6,7 @@ use glam::Vec3;
 use vxr_core::Scene;
 use vxr_core::history::At;
 use vxr_core::material::Material;
+use vxr_core::scene::SplitError;
 use vxr_core::select::{Mode, MoveDrag, Transform};
 use vxr_core::tools::{Brush, Gesture, Press, Shape, Target, Tool, plane_cell};
 use vxr_mcp::Reply;
@@ -16,7 +17,9 @@ use crate::assistant::{Assistant, Entry, Progress};
 use crate::render::{EXPORT_SIZES, Export};
 use crate::review::{Answer, Review, Script};
 use crate::touch::Touches;
-use crate::ui::{Action, AiAction, ChatView, EditRow, FontBytes, Hybrid, LayerRow, Named, Stats, TreeRow};
+use crate::ui::{
+    Action, AiAction, ChatView, EditRow, FontBytes, Hybrid, LayerRow, Named, Stats, TreeRow, group_thousands,
+};
 
 /// Input quiet for this long raises the preview's budget (spikes/preview/RESULTS.md).
 const IDLE_MS: f64 = 300.0;
@@ -1024,9 +1027,29 @@ impl Editor {
                     self.ui.toast(&self.ctx, format!("Pasted {n} voxels"));
                 }
             }
+            Action::ToObject => self.selection_to_object(),
             Action::Group | Action::Ungroup => self.ui.toast(&self.ctx, "Tab to the world to group objects"),
             _ => {}
         }
+    }
+
+    /// Selection to new object: the selected voxels become an object of their own, in place,
+    /// as one undo step, and the editor moves to it with its rename field open.
+    fn selection_to_object(&mut self) {
+        let msg = match self.scene.selection_to_object() {
+            Ok(new) => {
+                self.last_object = Some(new);
+                self.ui.tree = tree_rows(&self.scene);
+                self.ui.open_rename(new);
+                let name = object_name(self.scene.world().unwrap(), new);
+                format!("Made {name} of {} voxels", group_thousands(self.scene.selected_count() as u64))
+            }
+            Err(SplitError::Linked) => "Linked copy: make it its own object first".into(),
+            Err(SplitError::Everything) => "The whole model is selected: it is its own object already".into(),
+            Err(SplitError::NothingSelected) => "Select voxels to make an object of them".into(),
+            Err(SplitError::World) => "Tab into an object to edit its voxels".into(),
+        };
+        self.ui.toast(&self.ctx, msg);
     }
 
     /// Wheel zoom toward the point under the pointer, in notches (positive zooms in).
@@ -1376,6 +1399,8 @@ impl Editor {
         self.ui.unsaved = self.scene.history().position() != self.saved_at;
         self.ui.selected = self.scene.selected_count();
         self.ui.has_clip = self.scene.clipboard.is_some();
+        self.ui.can_split =
+            self.scene.at() != At::World && self.ui.selected > 0 && (self.ui.selected as u64) < self.scene.map.voxels;
         self.ui.bounds = self.scene.bounds().size;
         self.ui.world = self.scene.at() == At::World;
         self.ui.lifting = self.lifting();
@@ -1527,6 +1552,7 @@ impl Editor {
                 | Action::FillInterior
                 | Action::Resize(_)
                 | Action::Crop
+                | Action::ToObject
                 | Action::Copy
                 | Action::Cut
                 | Action::Paste
@@ -1929,7 +1955,7 @@ impl Editor {
         if w.tree.nodes.get(i).is_none_or(|n| n.name.as_deref() == new.map(str::as_bytes)) {
             return;
         }
-        if self.scene.edit_world(|w| w.set_name(i, new)).is_some() {
+        if self.scene.set_node_name(i, new) {
             let msg = format!("Renamed to {}", node_name(self.scene.world().unwrap(), i));
             self.ui.toast(&self.ctx, msg);
         }

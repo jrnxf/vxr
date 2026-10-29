@@ -277,6 +277,8 @@ pub enum Action {
     Resize([u32; 3]),
     /// Fit the model bounds to the voxels.
     Crop,
+    /// Take the selected voxels out of the model into a new object of their own, in place.
+    ToObject,
     /// Switch between editing a model and the world of every object (Tab).
     ToggleWorld,
     /// Copy the picked object beside itself in world mode: its own model, or a linked copy
@@ -446,6 +448,8 @@ pub enum Named {
 /// The scene tree's width, and how many rows it shows before scrolling.
 const TREE_W: f32 = 212.0;
 const TREE_ROWS: usize = 14;
+/// The selection flyout's height, in points.
+const SELECTION_H: f32 = 344.0;
 
 /// What the next swatch click does, armed from the colour editor or Cmd-K.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -612,6 +616,8 @@ pub struct Hybrid {
     /// How many voxels are selected, and whether Copy or Cut has filled the clipboard.
     pub selected: usize,
     pub has_clip: bool,
+    /// Selection to new object can run: some of the model's voxels are selected, not all.
+    pub can_split: bool,
     /// World mode is showing (set by the editor), and the name of the object picked there.
     pub world: bool,
     pub picked: Option<String>,
@@ -721,6 +727,7 @@ const COMMANDS: &[Command] = &[
     Command { label: "Fill inside", keys: &[], run: |h| h.actions.push(Action::FillInterior) },
     Command { label: "Resize bounds…", keys: &[], run: |h| h.toggle_bounds_panel() },
     Command { label: "Crop to content", keys: &[], run: |h| h.actions.push(Action::Crop) },
+    Command { label: "Selection to new object", keys: &[], run: |h| h.actions.push(Action::ToObject) },
     Command { label: "Copy", keys: &["⌘", "C"], run: |h| h.actions.push(Action::Copy) },
     Command { label: "Cut", keys: &["⌘", "X"], run: |h| h.actions.push(Action::Cut) },
     Command { label: "Paste", keys: &["⌘", "V"], run: |h| h.actions.push(Action::Paste) },
@@ -910,6 +917,7 @@ impl Hybrid {
             rail_w: RAIL_W,
             selected: 0,
             has_clip: false,
+            can_split: false,
             world: false,
             picked: None,
             tree: Vec::new(),
@@ -1124,6 +1132,22 @@ impl Hybrid {
         if self.world {
             self.renaming = Some((Named::Node(row.node), row.name.clone()));
             self.rename_focus = true;
+        }
+    }
+
+    /// Open the rename field on object `node` in any mode (a new object, named at once).
+    pub fn open_rename(&mut self, node: usize) {
+        if let Some(row) = self.tree.iter().find(|r| r.node == node) {
+            self.renaming = Some((Named::Node(row.node), row.name.clone()));
+            self.rename_focus = true;
+        }
+    }
+
+    /// The node whose rename field is open.
+    pub fn renaming_node(&self) -> Option<usize> {
+        match self.renaming {
+            Some((Named::Node(n), _)) => Some(n),
+            _ => None,
         }
     }
 
@@ -2637,13 +2661,17 @@ impl Hybrid {
         }
     }
 
+    fn size_rect(&self) -> Rect {
+        self.flyout_rect(self.voxel_y, "voxel", vec2(150.0, 6.0 + 40.0 + 6.0))
+    }
+
     // The size flyout beside the rail's voxel brush button: SIZE, minus, the size, plus.
     // Built like the axis flyout.
     fn size_flyout(&mut self, ctx: &Context) {
         if !self.size_shown() {
             return;
         }
-        let rect = self.flyout_rect(self.voxel_y, "voxel", vec2(150.0, 6.0 + 40.0 + 6.0));
+        let rect = self.size_rect();
         let size = self.size;
         let mut step = 0;
         let mut hits = Vec::new();
@@ -2692,7 +2720,7 @@ impl Hybrid {
         if !self.mirror && self.lock.is_none() {
             return;
         }
-        let rect = self.flyout_rect(self.axes_y, "mirror", vec2(150.0, 6.0 + 2.0 * 40.0 + 2.0 + 6.0));
+        let rect = self.axes_rect(ctx);
         self.hits.insert("axes".into(), rect);
         let (mirror, lock) = (self.mirror_axes(), self.lock);
         let mut clicked = (None, None);
@@ -2745,6 +2773,47 @@ impl Hybrid {
         }
     }
 
+    /// Where the axis flyout opens: the first spot on screen clear of the other flyouts beside
+    /// the rail (the selection flyout, the Bounds panel and the size flyout): beside its
+    /// buttons, under the selection flyout, beside it, then beside the Bounds panel.
+    fn axes_rect(&self, ctx: &Context) -> Rect {
+        let own = self.flyout_rect(self.axes_y, "mirror", vec2(150.0, 6.0 + 2.0 * 40.0 + 2.0 + 6.0));
+        if self.touch {
+            return own;
+        }
+        let sel = self.selection_shown().then(|| self.selection_rect(ctx));
+        let bounds = self.bounds_panel.as_ref().map(|_| self.bounds_rect(ctx));
+        let size = self.size_shown().then(|| self.size_rect());
+        let taken: Vec<Rect> = [sel, bounds, size].into_iter().flatten().collect();
+        let below = sel.map(|r| own.translate(vec2(0.0, (r.bottom() + 8.0 - own.top()).max(0.0))));
+        let beside = |r: Option<Rect>| r.map(|r| own.translate(vec2(r.right() + 8.0 - own.left(), 0.0)));
+        let screen = ctx.content_rect();
+        [Some(own), below, beside(sel), beside(bounds)]
+            .into_iter()
+            .flatten()
+            .find(|r| {
+                r.bottom() <= screen.bottom() - 12.0
+                    && r.right() <= screen.right() - 12.0
+                    && !taken.iter().any(|t| t.intersects(*r))
+            })
+            .unwrap_or(own)
+    }
+
+    /// Where the selection flyout opens: beside the select button, lifted to end on screen.
+    fn selection_rect(&self, ctx: &Context) -> Rect {
+        let rect = self.flyout_rect(self.select_y, "select", vec2(162.0, SELECTION_H));
+        if self.touch {
+            return rect;
+        }
+        let over = rect.bottom() - (ctx.content_rect().bottom() - 12.0);
+        rect.translate(vec2(0.0, -over.min(rect.top() - TOP).max(0.0)))
+    }
+
+    /// Whether the selection flyout shows: with the select tool or a selection, in a model.
+    fn selection_shown(&self) -> bool {
+        !self.world && (self.tool == Tool::Select || self.selected > 0)
+    }
+
     /// Choose what a select click takes, and switch to the select tool.
     pub fn set_region(&mut self, region: Region) {
         self.region = region;
@@ -2754,15 +2823,15 @@ impl Hybrid {
     // The selection flyout beside the rail's select button, shown with the select tool or a
     // selection: the count, ROTATE / FLIP / LOOP X Y Z and hollow and fill inside (the
     // whole model when nothing is selected), crop and resize of the model bounds, select all
-    // and invert, what a click selects (colour, face or volume), and fill, copy, cut, paste
-    // and delete. Built like the axis flyout.
+    // and invert, selection to new object, what a click selects (colour, face or volume),
+    // and fill, copy, cut, paste and delete. Built like the axis flyout.
     fn selection_panel(&mut self, ctx: &Context) {
-        if self.world || (self.tool != Tool::Select && self.selected == 0) {
+        if !self.selection_shown() {
             return;
         }
-        let rect = self.flyout_rect(self.select_y, "select", vec2(162.0, 310.0));
+        let rect = self.selection_rect(ctx);
         self.hits.insert("selection".into(), rect);
-        let (selected, has_clip) = (self.selected, self.has_clip);
+        let (selected, has_clip, can_split) = (self.selected, self.has_clip, self.can_split);
         let mut region = self.region;
         let bounds_open = self.bounds_panel.is_some();
         let mut toggle_bounds = false;
@@ -2870,8 +2939,25 @@ impl Hybrid {
                     }
                 }
             }
+            // Selection to new object: some of the model's voxels selected, not all.
+            let c = Rect::from_min_size(pos2(rect.left() + 12.0, hy + 30.0 + 6.0 * 34.0 - 13.0), vec2(138.0, 26.0));
+            hits.push(("to-object".to_string(), c));
+            let p = ui.painter().clone();
+            if can_split {
+                let resp = ui.interact(c, Id::unique("to-object"), Sense::click());
+                let border = if resp.hovered() { th().tint(64) } else { th().line2 };
+                p.rect_stroke(c, CornerRadius::same(7), Stroke::new(1.0, border), StrokeKind::Inside);
+                let color = if resp.hovered() { th().text } else { th().muted };
+                p.text(c.center(), Align2::CENTER_CENTER, "To new object", sans(11.0), color);
+                if resp.clicked() {
+                    run.push(Action::ToObject);
+                }
+            } else {
+                p.rect_stroke(c, CornerRadius::same(7), Stroke::new(1.0, th().line), StrokeKind::Inside);
+                p.text(c.center(), Align2::CENTER_CENTER, "To new object", sans(11.0), th().faint);
+            }
             // What a click on a voxel selects.
-            let row = Rect::from_min_size(pos2(rect.left() + 12.0, hy + 30.0 + 6.0 * 34.0 - 13.0), vec2(138.0, 26.0));
+            let row = Rect::from_min_size(pos2(rect.left() + 12.0, hy + 30.0 + 7.0 * 34.0 - 13.0), vec2(138.0, 26.0));
             let mut seg = Vec::new();
             let labels = ["Color", "Face", "Volume"].map(String::from);
             let names = ["click-color", "click-face", "click-volume"];
@@ -2881,7 +2967,7 @@ impl Hybrid {
                 region = regions[k];
             }
             hits.extend(seg.into_iter().map(|(n, r)| (n.to_string(), r)));
-            let cy = hy + 30.0 + 7.0 * 34.0 + 4.0;
+            let cy = hy + 30.0 + 8.0 * 34.0 + 4.0;
             ui.painter().line_segment(
                 [pos2(rect.left() + 10.0, cy - 20.5), pos2(rect.right() - 10.0, cy - 20.5)],
                 Stroke::new(1.0, th().line),
@@ -2993,31 +3079,39 @@ impl Hybrid {
         }
     }
 
-    // The Bounds panel, beside the selection flyout at its Resize button: the model's size as
-    // X, Y and Z fields (vxr's axes, Y up). Enter or leaving a field resizes, keeping the
-    // bottom and the centre, as one undo step.
-    fn bounds_panel(&mut self, ctx: &Context) {
-        let Some(mut fields) = self.bounds_panel.take() else { return };
-        let size = self.bounds;
-        let (w, inner_w) = (232.0, 208.0);
+    fn bounds_note(ctx: &Context) -> Arc<egui::Galley> {
         let mut job = LayoutJob::default();
         job.append(
             "Keeps the bottom and the center. Erases the voxels outside.",
             0.0,
             TextFormat { font_id: sans(11.0), color: th().faint, line_height: Some(15.95), ..Default::default() },
         );
-        job.wrap.max_width = inner_w;
-        let note = ctx.fonts_mut(|f| f.layout_job(job));
-        let h = 36.0 + 28.0 + 12.0 + note.size().y + 14.0;
-        // The fields' row lines up with the Resize button (its centre is select_y + 178).
-        let rect = match self.hits.get("selection").copied().filter(|_| self.touch) {
+        job.wrap.max_width = 208.0;
+        ctx.fonts_mut(|f| f.layout_job(job))
+    }
+
+    fn bounds_rect(&self, ctx: &Context) -> Rect {
+        let (w, h) = (232.0, 36.0 + 28.0 + 12.0 + Self::bounds_note(ctx).size().y + 14.0);
+        // The fields' row lines up with the Resize button (its centre 184 below the flyout's top).
+        match self.hits.get("selection").copied().filter(|_| self.touch) {
             // Over the dock: beside the selection flyout, level with its bottom.
             Some(sel) => Rect::from_min_size(pos2(sel.right() + 8.0, sel.bottom() - h), vec2(w, h)),
             None => {
-                let top = self.select_y + 178.0 - 50.0;
-                Rect::from_min_size(pos2(self.flyout_x() + 162.0 + 8.0, top), vec2(w, h))
+                let sel = self.selection_rect(ctx);
+                Rect::from_min_size(pos2(sel.right() + 8.0, sel.top() + 184.0 - 50.0), vec2(w, h))
             }
-        };
+        }
+    }
+
+    // The Bounds panel, beside the selection flyout at its Resize button: the model's size as
+    // X, Y and Z fields (vxr's axes, Y up). Enter or leaving a field resizes, keeping the
+    // bottom and the centre, as one undo step.
+    fn bounds_panel(&mut self, ctx: &Context) {
+        let Some(mut fields) = self.bounds_panel.take() else { return };
+        let size = self.bounds;
+        let inner_w = 208.0;
+        let note = Self::bounds_note(ctx);
+        let rect = self.bounds_rect(ctx);
         self.hits.insert("bounds-panel".into(), rect);
         let mut close = false;
         let mut resize = None;
