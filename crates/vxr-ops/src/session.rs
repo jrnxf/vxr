@@ -113,6 +113,29 @@ pub struct Step {
     pub lane: u64,
     /// The call to replay, for steps that change the scene or the selection.
     op: Option<Op>,
+    /// The world nodes and layer the call names, as the replay finds them.
+    refs: Refs,
+    /// The world nodes and layers the call made when it last ran.
+    made: Made,
+}
+
+/// A world node or layer a step names: one it found, or the `k`th one step `j` made.
+#[derive(Clone, Copy, Debug)]
+enum Ref<T> {
+    Found(T),
+    Made(usize, usize),
+}
+
+#[derive(Clone, Debug, Default)]
+struct Refs {
+    nodes: Vec<Ref<usize>>,
+    layer: Option<Ref<i32>>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct Made {
+    nodes: Vec<usize>,
+    layers: Vec<i32>,
 }
 
 /// What a staged cell shows as.
@@ -362,6 +385,9 @@ impl Session {
                 | Op::SetLayer(_)
         );
         let query = op.is_query();
+        self.show_before(scene, false);
+        let refs = self.refer(&mut op.clone());
+        let mark = Mark::of(scene);
         let r = self.run(scene, op.clone());
         if matches!(&r, Err(e) if e.kind == ErrorKind::NeedsApproval) {
             // Not run: the same call comes again once the user answers.
@@ -382,6 +408,8 @@ impl Session {
                 dropped: false,
                 lane: self.lane,
                 op: (replay && r.is_ok()).then_some(op),
+                refs,
+                made: if replay && r.is_ok() { mark.made(scene) } else { Made::default() },
             });
         }
         r
@@ -808,10 +836,7 @@ impl Session {
         let me = self.lane;
         let mut out = Vec::new();
         for i in 0..self.steps.len() {
-            let Some(op) = self.steps[i].op.clone().filter(|_| !self.steps[i].dropped) else { continue };
-            self.switch(self.steps[i].lane);
-            let _ = self.run(scene, op);
-            if !self.open {
+            if !self.replay(scene, i) || !self.open {
                 continue;
             }
             let changes = self.changes(scene);
@@ -1491,14 +1516,64 @@ impl Session {
         self.revert(scene);
         self.replaying = true;
         let me = self.lane;
-        let ops: Vec<(u64, Op)> =
-            self.steps.iter().filter(|s| !s.dropped).filter_map(|s| Some((s.lane, s.op.clone()?))).collect();
-        for (lane, op) in ops {
-            self.switch(lane);
-            let _ = self.run(scene, op);
+        for i in 0..self.steps.len() {
+            self.replay(scene, i);
         }
         self.switch(me);
         self.replaying = false;
+    }
+
+    /// Run step `i` again in its lane, naming the world nodes and layers this replay made in
+    /// place of those it made before. A dropped step, or one naming what a dropped or failed
+    /// step made, is not run: returns false.
+    fn replay(&mut self, scene: &mut Scene, i: usize) -> bool {
+        self.steps[i].made = Made::default();
+        let s = &self.steps[i];
+        let Some(mut op) = s.op.clone().filter(|_| !s.dropped) else { return false };
+        let lane = s.lane;
+        let (nodes, layer) = world_args(&mut op);
+        for (a, &r) in nodes.into_iter().zip(&s.refs.nodes) {
+            match self.resolve(r, |m| &m.nodes) {
+                Some(n) => *a = n,
+                None => return false,
+            }
+        }
+        if let (Some(a), Some(r)) = (layer, s.refs.layer) {
+            match self.resolve(r, |m| &m.layers) {
+                Some(l) => *a = l,
+                None => return false,
+            }
+        }
+        self.switch(lane);
+        let mark = Mark::of(scene);
+        if self.run(scene, op).is_ok() {
+            self.steps[i].made = mark.made(scene);
+        }
+        true
+    }
+
+    /// The node or layer `r` names in the world as the steps last made it.
+    fn resolve<T: Copy>(&self, r: Ref<T>, made: impl Fn(&Made) -> &Vec<T>) -> Option<T> {
+        match r {
+            Ref::Found(v) => Some(v),
+            Ref::Made(j, k) => made(&self.steps[j].made).get(k).copied(),
+        }
+    }
+
+    /// What `op`'s world nodes and layer are: made by a step still kept, or found.
+    fn refer(&self, op: &mut Op) -> Refs {
+        fn find<T: Copy + PartialEq>(steps: &[Step], v: T, made: impl Fn(&Made) -> &Vec<T>) -> Ref<T> {
+            steps
+                .iter()
+                .enumerate()
+                .find_map(|(j, s)| made(&s.made).iter().position(|&m| m == v).map(|k| Ref::Made(j, k)))
+                .unwrap_or(Ref::Found(v))
+        }
+        let (nodes, layer) = world_args(op);
+        Refs {
+            nodes: nodes.into_iter().map(|&mut n| find(&self.steps, n, |m| &m.nodes)).collect(),
+            layer: layer.map(|&mut l| find(&self.steps, l, |m| &m.layers)),
+        }
     }
 }
 
@@ -1522,6 +1597,43 @@ struct Lane {
     selection: HashSet<Cell>,
     clip_before: Option<Clip>,
     clip: Option<Clip>,
+}
+
+/// The world nodes and layers an op names.
+fn world_args(op: &mut Op) -> (Vec<&mut usize>, Option<&mut i32>) {
+    match op {
+        Op::MoveObject(a) => (vec![&mut a.node], None),
+        Op::Duplicate(a) => (vec![&mut a.node], None),
+        Op::Group(a) => (a.nodes.iter_mut().collect(), None),
+        Op::Ungroup(a) => (vec![&mut a.node], None),
+        Op::Hide(a) => (vec![&mut a.node], None),
+        Op::SetLayer(a) => (vec![&mut a.node], a.layer.as_mut()),
+        _ => (Vec::new(), None),
+    }
+}
+
+/// How many nodes the world had and its layers, before a step.
+struct Mark {
+    nodes: usize,
+    layers: Vec<i32>,
+}
+
+impl Mark {
+    fn of(scene: &Scene) -> Mark {
+        match scene.world() {
+            Some(w) => Mark { nodes: w.tree.nodes.len(), layers: w.layers().iter().map(|l| l.id).collect() },
+            None => Mark { nodes: 0, layers: Vec::new() },
+        }
+    }
+
+    /// The nodes and layers the world gained since.
+    fn made(&self, scene: &Scene) -> Made {
+        let Some(w) = scene.world() else { return Made::default() };
+        Made {
+            nodes: (self.nodes..w.tree.nodes.len()).collect(),
+            layers: w.layers().iter().map(|l| l.id).filter(|id| !self.layers.contains(id)).collect(),
+        }
+    }
 }
 
 /// What staging some cells did.

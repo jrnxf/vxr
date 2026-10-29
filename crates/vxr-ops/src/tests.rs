@@ -1306,3 +1306,59 @@ fn world_steps_apply_one_by_one_and_undo_to_the_file() {
     assert!(!s.undo());
     assert_eq!(s.to_vox(), bytes);
 }
+
+#[test]
+fn dropping_a_world_step_never_retargets_the_nodes_and_layers_later_steps_made() {
+    fn hidden(s: &Scene) -> Vec<usize> {
+        let w = s.world().unwrap();
+        (1..w.tree.nodes.len()).filter(|&i| w.in_tree(i) && w.tree.nodes[i].hidden).collect()
+    }
+    let bytes = world_file();
+    let mut s = Scene::from_vox(&bytes).unwrap();
+    assert_eq!(hidden(&s), [8]);
+    let mut o = Session::new(&s, Some(&bytes));
+    assert!(call(&mut o, &mut s, "duplicate", json!({"node": 1})).starts_with("copied object 1 as object 9"));
+    assert!(call(&mut o, &mut s, "duplicate", json!({"node": 3})).starts_with("copied object 3 as object 10"));
+    call(&mut o, &mut s, "hide", json!({"node": 9}));
+    let after = s.to_vox();
+    assert_eq!(hidden(&s), [8, 9]);
+
+    // Without the slab's copy, the tree's copy is node 9: the hide named the slab's copy, so
+    // it is skipped and hides nothing.
+    assert!(o.set_dropped(&mut s, 0, true));
+    assert_eq!(s.world().unwrap().tree.nodes.len(), 10);
+    assert_eq!(hidden(&s), [8]);
+    assert!(o.set_dropped(&mut s, 0, false));
+    assert_eq!(s.to_vox(), after);
+
+    // A step on the tree's copy follows it to node 9, as do steps on a new group and layer.
+    call(&mut o, &mut s, "hide", json!({"node": 9, "hidden": false}));
+    call(&mut o, &mut s, "hide", json!({"node": 10}));
+    assert!(
+        call(&mut o, &mut s, "group", json!({"nodes": [10, 4]})).starts_with("grouped 2 nodes [10, 4] into group 11")
+    );
+    call(&mut o, &mut s, "move_object", json!({"node": 11, "offset": [0, 3, 0]}));
+    assert!(call(&mut o, &mut s, "set_layer", json!({"node": 11, "new_layer": "copy"})).contains("on new layer 3"));
+    call(&mut o, &mut s, "set_layer", json!({"node": 3, "layer": 3}));
+    let after = s.to_vox();
+    let layer_of = |s: &Scene, i: usize| s.world().unwrap().tree.nodes[i].layer;
+    assert!(o.set_dropped(&mut s, 0, true));
+    assert_eq!(hidden(&s), [8, 9]);
+    let w = s.world().unwrap();
+    assert!(matches!(&w.tree.nodes[10].kind, vxr_vox::tree::Kind::Group(k) if k == &vec![9, 4]));
+    assert_eq!(w.tree.nodes[10].local.t, [0, 0, 3], "up is the file's z");
+    assert_eq!((layer_of(&s, 9), layer_of(&s, 4), layer_of(&s, 3)), (3, 3, 3));
+    assert!(o.set_dropped(&mut s, 0, false));
+    assert_eq!(s.to_vox(), after);
+
+    // Applied one by one without the slab's copy, the same holds; undone, the file's bytes.
+    assert!(o.set_dropped(&mut s, 0, true));
+    let dropped = s.to_vox();
+    let landed = o.apply_steps(&mut s, |_, st, _| st.tool.to_string());
+    assert_eq!(s.to_vox(), dropped);
+    for _ in 0..landed.len() {
+        assert!(s.undo());
+    }
+    assert!(!s.undo());
+    assert_eq!(s.to_vox(), bytes);
+}

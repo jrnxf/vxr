@@ -249,6 +249,9 @@ impl Agents {
             return self.stage(scene, review, conn, client, "scene_summary", &json!({}));
         }
         if name == "show_world" {
+            if scene.world().is_none() {
+                return Err("the scene is one model, not a world of several objects".into());
+            }
             if scene.at() != At::World {
                 return Err("edits wait for the user's review in this object's model: the world can be shown once they apply or discard them (review_status tells you)".into());
             }
