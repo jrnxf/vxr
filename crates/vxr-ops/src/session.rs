@@ -12,13 +12,14 @@
 use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
-use vxr_core::Scene;
 use vxr_core::history::At;
 use vxr_core::material::{Kind, Material};
 use vxr_core::scene::MAX_EXTENT;
 use vxr_core::select::{Clip, bounds};
+use vxr_core::{Scene, World};
 use vxr_vox::chunk::{NOTE, Note};
 use vxr_vox::raw::RawFile;
+use vxr_vox::tree::{Kind as NodeKind, Tree, TreeNode};
 
 use crate::args::*;
 use crate::parts::{self, Part};
@@ -61,6 +62,11 @@ impl Default for Limits {
 const MAX_RADIUS: i32 = 64;
 const MAX_LINE: i32 = 4096;
 const WORLD: &str = "the scene shows the world of several objects, where voxels cannot be edited; the user opens one object's model (Tab) to edit it";
+const NO_WORLD: &str =
+    "the scene is one model, not a world of several objects: the world tools work on a file with several objects";
+const IN_MODEL: &str = "the scene shows one object's model: the world tools work on the world of objects, which show_world (or the user's Tab) shows";
+/// Longest layer name a call may give.
+const MAX_LAYER_NAME: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorKind {
@@ -131,6 +137,9 @@ pub struct Changes {
     pub palette: Vec<(u8, [u8; 4], [u8; 4])>,
     /// Slot, old material, new material.
     pub materials: Vec<(u8, Material, Material)>,
+    /// World nodes (objects and groups) the change adds, takes out, moves, hides or puts on
+    /// another layer: a world change has no cells.
+    pub nodes: usize,
 }
 
 pub struct Session {
@@ -143,6 +152,8 @@ pub struct Session {
     staged: usize,
     pub(crate) palette_before: [[u8; 4]; 256],
     materials_before: [Material; 256],
+    /// The world's objects and groups as the change found them.
+    tree_before: Option<Tree>,
     /// The assistant's selection (map cells), seeded from the user's.
     pub(crate) selection: HashSet<Cell>,
     selection_before: HashSet<Cell>,
@@ -203,6 +214,7 @@ impl Session {
             staged: 0,
             palette_before: scene.palette,
             materials_before: scene.materials,
+            tree_before: scene.world().map(|w| w.tree.clone()),
             selection_before: selection.clone(),
             clip: None,
             clip_before: None,
@@ -342,6 +354,12 @@ impl Session {
                 | Op::Crop(_)
                 | Op::PaletteSet(_)
                 | Op::MaterialSet(_)
+                | Op::MoveObject(_)
+                | Op::Duplicate(_)
+                | Op::Group(_)
+                | Op::Ungroup(_)
+                | Op::Hide(_)
+                | Op::SetLayer(_)
         );
         let query = op.is_query();
         let r = self.run(scene, op.clone());
@@ -549,6 +567,70 @@ impl Session {
                 self.rebound(scene, scene.to_world(lo), std::array::from_fn(|k| (hi[k] - lo[k] + 1) as u32))
             }
             Op::MaterialSet(a) => self.material_set(scene, &a),
+            Op::MoveObject(a) => {
+                let what = self.node(scene, a.node)?;
+                let t = self.world_edit(scene, |w| w.move_by(a.node, a.offset))?.1;
+                Ok(format!("moved {what} by {:?}{}; {t}", a.offset, self.extent_text(scene, a.node)))
+            }
+            Op::Duplicate(a) => {
+                let what = self.node(scene, a.node)?;
+                let (c, t) = self.world_edit(scene, |w| w.duplicate(a.node, a.linked))?;
+                let c = c.ok_or_else(|| invalid(format!("node {}: the root cannot be copied", a.node)))?;
+                let copy = node_text(scene.world().expect("a world"), c);
+                let group = matches!(scene.world().expect("a world").tree.nodes[c].kind, NodeKind::Group(_));
+                let how = match (a.linked, group) {
+                    (true, false) => "a linked copy, sharing its model",
+                    (true, true) => "linked copies, sharing their models",
+                    (false, false) => "its own model",
+                    (false, true) => "each with its own model",
+                };
+                Ok(format!("copied {what} as {copy} ({how}){}; {t}", self.extent_text(scene, c)))
+            }
+            Op::Group(a) => {
+                let mut nodes = Vec::new();
+                for &n in &a.nodes {
+                    self.node(scene, n)?;
+                    if !nodes.contains(&n) {
+                        nodes.push(n);
+                    }
+                }
+                if nodes.is_empty() {
+                    return Err(invalid("nodes: give the objects or groups to group"));
+                }
+                let (g, t) = self.world_edit(scene, |w| w.group(&nodes))?;
+                let g = g.ok_or_else(|| {
+                    invalid("the nodes do not share a parent: only nodes in the same group are grouped together")
+                })?;
+                Ok(format!(
+                    "grouped {} nodes {:?} into {}; {t}",
+                    nodes.len(),
+                    nodes,
+                    node_text(scene.world().expect("a world"), g)
+                ))
+            }
+            Op::Ungroup(a) => {
+                let what = self.node(scene, a.node)?;
+                let w = scene.world().expect("a world");
+                let NodeKind::Group(kids) = &w.tree.nodes[a.node].kind else {
+                    return Err(invalid(format!("node {}: {what} is not a group", a.node)));
+                };
+                let kids = kids.clone();
+                let parent = w.tree.parents()[a.node].expect("a node in the tree has a parent");
+                let t = self.world_edit(scene, |w| w.ungroup(a.node))?.1;
+                let into = if parent == 0 { "the top of the world".to_string() } else { format!("group {parent}") };
+                Ok(format!("ungrouped {what}: nodes {kids:?} moved up into {into}; {t}"))
+            }
+            Op::Hide(a) => {
+                let what = self.node(scene, a.node)?;
+                let t = self.world_edit(scene, |w| w.set_hidden(a.node, a.hidden))?.1;
+                let w = scene.world().expect("a world");
+                let mut s = format!("{what} is {}; {t}", if a.hidden { "hidden" } else { "shown" });
+                if !a.hidden && !w.shown(a.node) {
+                    s += "; warning: it still does not show: its layer or a group it is in is hidden";
+                }
+                Ok(s)
+            }
+            Op::SetLayer(a) => self.set_layer(scene, &a),
             Op::PaletteSet(a) => {
                 let s = slot(a.slot)?;
                 let c = parse_hex(&a.hex).map_err(invalid)?;
@@ -674,6 +756,9 @@ impl Session {
             .filter(|&i| scene.materials[i as usize] != self.materials_before[i as usize])
             .map(|i| (i, self.materials_before[i as usize], scene.materials[i as usize]))
             .collect();
+        if let (Some(old), Some(w)) = (&self.tree_before, scene.world()) {
+            c.nodes = changed_nodes(old, &w.tree);
+        }
         c
     }
 
@@ -745,6 +830,7 @@ impl Session {
             self.staged = 0;
             self.palette_before = scene.palette;
             self.materials_before = scene.materials;
+            self.tree_before = scene.world().map(|w| w.tree.clone());
         }
         self.replaying = false;
         self.switch(me);
@@ -1171,6 +1257,97 @@ impl Session {
         Ok(t)
     }
 
+    /// Node `i` of the world the scene shows, as text ("object 3", "group 2 (3 objects)"),
+    /// or why a world tool cannot work on it.
+    fn node(&self, scene: &Scene, i: usize) -> Result<String, Error> {
+        let w = match scene.at() {
+            At::World => scene.world().expect("world mode has a world"),
+            At::Object(_) => return Err(invalid(IN_MODEL)),
+            At::Map => return Err(invalid(NO_WORLD)),
+        };
+        if i == 0 {
+            return Err(invalid(
+                "node 0 is the root of the world: give an object or group from the summary's world list",
+            ));
+        }
+        if !w.in_tree(i) {
+            return Err(invalid(format!(
+                "node {i}: not an object or group of this world; the summary's world list has them"
+            )));
+        }
+        Ok(node_text(w, i))
+    }
+
+    /// Change the world as one step of the change, inside its open edit. Returns what `f`
+    /// gave and "2 nodes changed ...; staged so far: ...", with a warning when nothing changed.
+    fn world_edit<R>(&mut self, scene: &mut Scene, f: impl FnOnce(&mut World) -> R) -> Result<(R, String), Error> {
+        self.open(scene);
+        let old = scene.world().expect("a world").tree.clone();
+        let r = scene.put_world(f).ok_or_else(|| {
+            invalid(format!("nothing changed: the world would be over {MAX_EXTENT} voxels on an axis"))
+        })?;
+        // The map holds the world again: what shows picked is what shows selected.
+        self.selection = scene.selection().collect();
+        let tree = &scene.world().expect("a world").tree;
+        let n = changed_nodes(&old, tree);
+        let all = self.tree_before.as_ref().map_or(0, |b| changed_nodes(b, tree));
+        let mut t = format!(
+            "{} changed in the world, no voxel of any model; staged so far: {} in the world{}",
+            nodes_text(n),
+            nodes_text(all),
+            if self.base.is_empty() { String::new() } else { format!(", {}", self.staged_text(scene)) }
+        );
+        if n == 0 {
+            t += "; warning: nothing changed";
+        }
+        Ok((r, t))
+    }
+
+    /// ", now from [x, y, z] to [x, y, z]": where node `i`'s objects are in the world.
+    fn extent_text(&self, scene: &Scene, i: usize) -> String {
+        match scene.world().and_then(|w| w.extent(i)) {
+            Some((lo, size)) => {
+                let hi: Cell = std::array::from_fn(|k| lo[k] + size[k] as i32 - 1);
+                format!(", now from {lo:?} to {hi:?}")
+            }
+            None => String::new(),
+        }
+    }
+
+    fn set_layer(&mut self, scene: &mut Scene, a: &SetLayer) -> Result<String, Error> {
+        let what = self.node(scene, a.node)?;
+        let w = scene.world().expect("a world");
+        let name = a.new_layer.as_deref().map(|n| n.chars().filter(|c| !c.is_control()).collect::<String>());
+        let id = match (a.layer, name) {
+            (Some(_), Some(_)) => return Err(invalid("give layer or new_layer, not both")),
+            (None, None) => return Err(invalid("give layer (an id from the summary's layers) or new_layer")),
+            (Some(id), None) => {
+                if !w.layers().iter().any(|l| l.id == id) {
+                    let ids: Vec<i32> = w.layers().iter().map(|l| l.id).collect();
+                    return Err(invalid(format!(
+                        "layer {id}: no such layer; the layers are {ids:?}, or give new_layer"
+                    )));
+                }
+                id
+            }
+            (None, Some(n)) => {
+                let n = n.trim();
+                if n.is_empty() || n.chars().count() > MAX_LAYER_NAME {
+                    return Err(invalid(format!("new_layer: a name of 1 to {MAX_LAYER_NAME} characters")));
+                }
+                let n = n.to_string();
+                self.world_edit(scene, |w| w.add_layer(&n))?.0
+            }
+        };
+        let t = self.world_edit(scene, |w| w.put_on_layer(a.node, id))?.1;
+        let new = if a.new_layer.is_some() { "new " } else { "" };
+        let mut s = format!("put {what} on {new}layer {id}; {t}");
+        if scene.world().expect("a world").layers().iter().any(|l| l.id == id && l.hidden) {
+            s += &format!("; warning: layer {id} is hidden, so {what} does not show");
+        }
+        Ok(s)
+    }
+
     fn select(&mut self, scene: &Scene, a: &Select) -> Result<String, Error> {
         if a.none {
             self.selection.clear();
@@ -1354,6 +1531,49 @@ struct Staged {
     outside: usize,
     /// Map cells set to a voxel, changed or not.
     made: Vec<Cell>,
+}
+
+/// "object 3", "group 2 (3 objects)".
+fn node_text(w: &World, i: usize) -> String {
+    match &w.tree.nodes[i].kind {
+        NodeKind::Object(_) => format!("object {i}"),
+        NodeKind::Group(_) => {
+            let n = w.objects_under(i).len();
+            format!("group {i} ({n} object{})", if n == 1 { "" } else { "s" })
+        }
+    }
+}
+
+/// "1 node", "3 nodes".
+fn nodes_text(n: usize) -> String {
+    format!("{n} node{}", if n == 1 { "" } else { "s" })
+}
+
+/// How many nodes under the root of `new` differ from `old`: added or taken out of the tree,
+/// moved to another parent, or with another name, flag, layer, transform or model. A
+/// group whose children change does not count; the children do.
+fn changed_nodes(old: &Tree, new: &Tree) -> usize {
+    fn at<'a>(t: &'a Tree, p: &[Option<usize>], i: usize) -> Option<(&'a TreeNode, usize)> {
+        Some((t.nodes.get(i)?, p.get(i).copied().flatten()?))
+    }
+    let (po, pn) = (old.parents(), new.parents());
+    (1..old.nodes.len().max(new.nodes.len()))
+        .filter(|&i| match (at(old, &po, i), at(new, &pn, i)) {
+            (None, None) => false,
+            (Some((a, pa)), Some((b, pb))) => pa != pb || !same_node(a, b),
+            _ => true,
+        })
+        .count()
+}
+
+/// Whether two nodes are the same but for the children a group holds.
+fn same_node(a: &TreeNode, b: &TreeNode) -> bool {
+    let kind = match (&a.kind, &b.kind) {
+        (NodeKind::Object(x), NodeKind::Object(y)) => x == y,
+        (NodeKind::Group(_), NodeKind::Group(_)) => true,
+        _ => false,
+    };
+    kind && (&a.name, a.hidden, a.layer, a.local) == (&b.name, b.hidden, b.layer, b.local)
 }
 
 fn add(p: Cell, d: Cell) -> Cell {

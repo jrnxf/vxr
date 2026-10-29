@@ -273,14 +273,13 @@ impl Scene {
         Some(r)
     }
 
-    /// Close the open world edit as one undo step, if it changed anything.
-    fn commit_world(&mut self) {
-        let (Some((old, models)), Some(w)) = (self.world_stroke.take(), &self.world) else { return };
+    /// Close the open world edit: what it changed, if anything, for the undo step.
+    fn commit_world(&mut self) -> Option<Box<WorldChange>> {
+        let (Some((old, models)), Some(w)) = (self.world_stroke.take(), &self.world) else { return None };
         if w.tree == old && w.models.len() == models {
-            return;
+            return None;
         }
-        let change = WorldChange { old, new: w.tree.clone(), models, added: w.models[models..].to_vec() };
-        self.history.push(Step { world: Some(Box::new(change)), at: At::World, ..Step::default() });
+        Some(Box::new(WorldChange { old, new: w.tree.clone(), models, added: w.models[models..].to_vec() }))
     }
 
     /// The object or group picked in world mode, if it is still in the world.
@@ -519,9 +518,18 @@ impl Scene {
         self.selection_version += 1;
     }
 
-    /// Put back every cell the open edit changed, and the bounds, keeping the edit open (its
-    /// colour and material changes stay). Shape drags redraw from scratch on each move this way.
+    /// Put back every cell the open edit changed, the bounds and the world, keeping the edit
+    /// open (its colour and material changes stay). Shape drags redraw from scratch on each
+    /// move this way.
     pub fn revert_voxels(&mut self) {
+        if let (Some((tree, models)), Some(w)) = (&self.world_stroke, &mut self.world)
+            && (w.tree != *tree || w.models.len() != *models)
+        {
+            w.tree = tree.clone();
+            w.models.truncate(*models);
+            // It fitted when the edit began, so it fits again.
+            let _ = self.load(At::World);
+        }
         if let Some(b) = self.stroke.as_mut().and_then(|s| s.bounds.take()) {
             self.reshape(b.old);
         }
@@ -546,8 +554,14 @@ impl Scene {
     }
 
     fn commit_as(&mut self, label: Option<String>) -> usize {
-        self.commit_world();
-        let Some(mut s) = self.stroke.take() else { return 0 };
+        // A world change and the palette changes of the same edit are one step.
+        let world = self.commit_world();
+        let Some(mut s) = self.stroke.take() else {
+            if world.is_some() {
+                self.history.push(Step { world, at: At::World, label, ..Step::default() });
+            }
+            return 0;
+        };
         if !self.selection.is_empty() {
             let emptied: Vec<_> =
                 s.changes.iter().filter(|c| c.new == 0 && self.selection.contains(&c.pos)).map(|c| c.pos).collect();
@@ -570,7 +584,7 @@ impl Scene {
             cameras: s.cameras.into_iter().filter(|c| c.old != c.new).collect(),
             selection,
             bounds: s.bounds.filter(|b| b.old != b.new),
-            world: None,
+            world,
             at: self.at,
             label,
         };

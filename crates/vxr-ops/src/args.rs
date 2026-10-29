@@ -329,6 +329,60 @@ pub struct MaterialSet {
     pub power: Option<f32>,
 }
 
+/// Move an object or group of the world by offset [dx, dy, dz] cells, as a drag in world mode does. node is its number from the summary's world list. A group moves with everything in it.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MoveObject {
+    pub node: usize,
+    pub offset: Cell,
+}
+
+/// Copy an object or group of the world and put the copy beside it on +x, as Cmd-D does. linked makes a linked copy that shares the models (editing one changes every copy, as Cmd-Shift-D does); otherwise each copied object gets its own model. The result gives the copy's node.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Duplicate {
+    pub node: usize,
+    #[serde(default)]
+    pub linked: bool,
+}
+
+/// Put objects or groups of the world that share a parent into a new group, where the first of them was, as Cmd-G does. The result gives the group's node.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Group {
+    pub nodes: Vec<usize>,
+}
+
+/// Take a group of the world apart, as Cmd-Shift-G does: what it holds moves up into its parent, where it was, keeping where it is in the world (and hidden if the group was).
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Ungroup {
+    pub node: usize,
+}
+
+/// Hide an object or group of the world, or show it again with hidden false, as its eye in the scene tree does. A hidden object stays in the file.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Hide {
+    pub node: usize,
+    #[serde(default = "yes")]
+    pub hidden: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// Put an object or group of the world (and everything in it) on a layer: layer is an id from the summary's layers, or new_layer names a new layer to make for it. An object on a hidden layer does not show.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SetLayer {
+    pub node: usize,
+    pub layer: Option<i32>,
+    /// The name of a new layer, instead of layer.
+    pub new_layer: Option<String>,
+}
+
 /// Set a palette slot's colour as #rrggbb. Every voxel of that slot changes colour. Pick an unused slot for a new colour.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -420,6 +474,12 @@ ops! {
     "crop" => Crop(Crop),
     "palette_set" => PaletteSet(PaletteSet),
     "material_set" => MaterialSet(MaterialSet),
+    "move_object" => MoveObject(MoveObject),
+    "duplicate" => Duplicate(Duplicate),
+    "group" => Group(Group),
+    "ungroup" => Ungroup(Ungroup),
+    "hide" => Hide(Hide),
+    "set_layer" => SetLayer(SetLayer),
     "undo" => Undo(Undo),
     "done" => Done(Done),
 }

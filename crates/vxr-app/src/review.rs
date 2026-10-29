@@ -247,6 +247,7 @@ impl Review {
             agents: self.agents.is_some(),
             summary: s.done().map(str::to_string),
             counts: [c.added.len(), c.removed.len(), c.repainted.len()],
+            objects: c.nodes,
             slots,
             steps,
             held: (!self.held.is_empty()).then_some((s.allowed(), s.limits.changed_cells)),

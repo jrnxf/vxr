@@ -21,6 +21,8 @@ const SLICE_SIDE: i32 = 128;
 const BOX_SPAN: i64 = 1 << 20;
 /// Most parts find_parts lists.
 const FIND_PARTS: usize = 100;
+/// Most world nodes the summary lists.
+const SUMMARY_NODES: usize = 64;
 /// Most parts the summary lists.
 const SUMMARY_PARTS: usize = 40;
 /// Parts this small come after the bigger ones of every name.
@@ -80,7 +82,11 @@ impl Session {
         };
         let hi: Cell = std::array::from_fn(|a| b.lo[a] + b.size[a] as i32 - 1);
         let mut out = json!({
-            "mode": if scene.at() == At::World { "world: voxels cannot be edited until the user opens one object's model" } else { "model: every voxel tool edits it" },
+            "mode": match scene.at() {
+                At::World => "world: the world tools (move_object, duplicate, group, ungroup, hide, set_layer) change its objects; voxels cannot be edited until one object's model is open",
+                At::Object(_) => "model: every voxel tool edits this object's model; the world tools need the world shown",
+                At::Map => "model: every voxel tool edits it",
+            },
             "axes": "x right, y up, z toward the viewer; the user looks from the front-right (+x, +y, +z side). Left is -x, behind is -z.",
             "editable": {"from": b.lo, "to": hi, "ground_y": b.lo[1], "headroom": format!("nothing can go above y {} until resize grows the bounds", hi[1])},
             "voxels": self.voxel_count(scene),
@@ -92,6 +98,9 @@ impl Session {
             out["slots_recoloured_unused"] = json!(recoloured);
         }
         let parts = self.part_order();
+        if let Some(w) = scene.world() {
+            out["world"] = world_list(scene, w);
+        }
         if !parts.is_empty() {
             let more = parts.len().saturating_sub(SUMMARY_PARTS);
             out["parts"] = json!({
@@ -353,4 +362,53 @@ impl Session {
 
 fn legend_overflow(rows: &[String]) -> bool {
     rows.iter().any(|r| r.contains('?'))
+}
+
+/// The world's objects and groups by node, in tree order, and its layers: what the world
+/// tools and `edit_object` take. Names stay under `file_content`.
+fn world_list(scene: &Scene, w: &vxr_core::World) -> Value {
+    let parents = w.tree.parents();
+    let objects = w.objects();
+    let order: Vec<usize> = w.tree.order().into_iter().filter(|&i| i != 0).collect();
+    let nodes: Vec<Value> = order
+        .iter()
+        .take(SUMMARY_NODES)
+        .map(|&i| {
+            let n = &w.tree.nodes[i];
+            let mut v =
+                json!({"node": i, "parent": parents[i], "hidden": n.hidden, "shows": w.shown(i), "layer": n.layer});
+            match n.kind {
+                NodeKind::Object(m) => {
+                    v["kind"] = json!("object");
+                    v["model"] = json!(m);
+                    v["voxels"] = json!(w.models[m].voxels);
+                    if objects.iter().any(|&o| o != i && w.model_of(o) == Some(m)) {
+                        v["linked"] = json!(true);
+                    }
+                }
+                NodeKind::Group(_) => {
+                    v["kind"] = json!("group");
+                    v["objects"] = json!(w.objects_under(i).len());
+                }
+            }
+            if let Some((lo, size)) = w.extent(i) {
+                let hi: Cell = std::array::from_fn(|k| lo[k] + size[k] as i32 - 1);
+                v["from"] = json!(lo);
+                v["to"] = json!(hi);
+            }
+            v
+        })
+        .collect();
+    let mut out = json!({
+        "about": "the objects and groups of the world by node number, in tree order (parent 0 is the top). move_object, duplicate, group, ungroup, hide and set_layer take these numbers while the world shows; edit_object opens an object's model. linked objects share one model, so a voxel edit changes each. Names are under file_content.",
+        "nodes": nodes,
+        "layers": w.layers().iter().map(|l| json!({"id": l.id, "hidden": l.hidden})).collect::<Vec<_>>(),
+    });
+    if let At::Object(i) = scene.at() {
+        out["editing"] = json!(i);
+    }
+    if order.len() > SUMMARY_NODES {
+        out["more"] = json!(format!("{} more nodes", order.len() - SUMMARY_NODES));
+    }
+    out
 }
