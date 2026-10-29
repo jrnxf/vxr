@@ -1,19 +1,27 @@
 #!/usr/bin/env bash
-# Fetch the UI fonts into fonts/ (git-ignored): Inter 4.1 and JetBrains Mono 2.304 (both OFL),
-# and the Lucide icon font 1.61.0 (ISC) for the toolbar icons, with their licences (the browser
-# build serves both). Pinned versions, checked by sha256.
+# Fetch the UI fonts into fonts/ (git-ignored): Geist and Geist Mono 1.3.1 (OFL), the type of
+# shadcn/ui's Neutral theme; Inter 4.1 Regular (OFL) for the symbols Geist lacks (the shortcut
+# keys); and the Lucide icon font 1.61.0 (ISC) for the toolbar icons, with their licences (the
+# browser build serves them all). Pinned versions, checked by sha256.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 out="$here/fonts"
 mkdir -p "$out"
+# Fonts an earlier version fetched would otherwise ship with the browser build.
+rm -f "$out"/*.ttf "$out"/*.txt
+geist=https://unpkg.com/geist@1.3.1
+for f in Geist-Regular Geist-Medium Geist-SemiBold; do
+  curl -fsSL -o "$out/$f.ttf" "$geist/dist/fonts/geist-sans/$f.ttf"
+done
+for f in GeistMono-Regular GeistMono-Medium; do
+  curl -fsSL -o "$out/$f.ttf" "$geist/dist/fonts/geist-mono/$f.ttf"
+done
+curl -fsSL -o "$out/Geist-OFL.txt" "$geist/LICENSE.TXT"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 curl -fsSL -o "$tmp/inter.zip" https://github.com/rsms/inter/releases/download/v4.1/Inter-4.1.zip
-curl -fsSL -o "$tmp/jbm.zip" https://github.com/JetBrains/JetBrainsMono/releases/download/v2.304/JetBrainsMono-2.304.zip
+unzip -o -q -j "$tmp/inter.zip" 'extras/ttf/Inter-Regular.ttf' -d "$out"
+unzip -p "$tmp/inter.zip" LICENSE.txt >"$out/Inter-LICENSE.txt"
 curl -fsSL -o "$out/lucide.ttf" https://unpkg.com/lucide-static@1.61.0/font/lucide.ttf
 curl -fsSL -o "$out/lucide-LICENSE.txt" https://unpkg.com/lucide-static@1.61.0/LICENSE
-unzip -o -q -j "$tmp/inter.zip" 'extras/ttf/Inter-Regular.ttf' 'extras/ttf/Inter-Medium.ttf' 'extras/ttf/Inter-SemiBold.ttf' -d "$out"
-unzip -o -q -j "$tmp/jbm.zip" 'fonts/ttf/JetBrainsMono-Regular.ttf' 'fonts/ttf/JetBrainsMono-Medium.ttf' -d "$out"
-unzip -p "$tmp/inter.zip" LICENSE.txt >"$out/Inter-LICENSE.txt"
-unzip -p "$tmp/jbm.zip" OFL.txt >"$out/JetBrainsMono-OFL.txt"
 cd "$out" && shasum -a 256 -c "$here/fonts.sha256"

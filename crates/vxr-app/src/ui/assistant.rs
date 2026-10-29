@@ -137,7 +137,6 @@ impl Default for AiState {
 const EXAMPLES: [&str; 3] = ["Make the roof red", "Add a small tree beside the house", "Build a fence around it"];
 /// Calls an answer lists before the rest fold away.
 const CALL_ROWS: usize = 6;
-const INK: Color32 = Color32::from_rgb(0x0d, 0x10, 0x20);
 
 /// `text` wrapped to `width` in at most `rows` rows (0: as many as it takes).
 fn wrap(ui: &Ui, text: &str, font: FontId, color: Color32, width: f32, rows: usize) -> Arc<Galley> {
@@ -178,12 +177,12 @@ fn accent_button(ui: &mut Ui, r: Rect, glyph: Option<char>, label: &str, id: &st
     let (fill, ink) = if !enabled {
         (Color32::from_white_alpha(18), FAINT)
     } else if resp.hovered() {
-        (Color32::from_rgb(0xa6, 0xb6, 0xff), INK)
+        (ACCENT_HOVER, ON_ACCENT)
     } else {
-        (ACCENT, INK)
+        (ACCENT, ON_ACCENT)
     };
     p.rect_filled(r, CornerRadius::same(8), fill);
-    let g = (!label.is_empty()).then(|| p.layout_no_wrap(label.into(), inter_semibold(12.5), ink));
+    let g = (!label.is_empty()).then(|| p.layout_no_wrap(label.into(), sans_semibold(12.5), ink));
     let w =
         glyph.map_or(0.0, |_| 14.0) + g.as_ref().map_or(0.0, |g| g.size().x + if glyph.is_some() { 6.0 } else { 0.0 });
     let mut x = r.center().x - w / 2.0;
@@ -199,7 +198,7 @@ fn accent_button(ui: &mut Ui, r: Rect, glyph: Option<char>, label: &str, id: &st
 
 /// A section label like the review card's STEPS.
 fn section(ui: &Ui, at: Pos2, text: &str) {
-    let g = ui.painter().layout_job(spaced(text, inter(9.0), FAINT, 0.72));
+    let g = ui.painter().layout_job(spaced(text, sans(9.0), FAINT, 0.72));
     ui.painter().galley(pos2(at.x, at.y + 6.0 - g.size().y / 2.0), g, FAINT);
 }
 
@@ -216,7 +215,7 @@ fn ai_field(
 ) -> egui::Response {
     let focused = ui.memory(|m| m.has_focus(id));
     let p = ui.painter().clone();
-    let border = if focused { Color32::from_rgba_unmultiplied(142, 162, 255, 140) } else { LINE };
+    let border = if focused { RING } else { LINE };
     p.rect(r, CornerRadius::same(7), Color32::from_white_alpha(9), Stroke::new(1.0, border), StrokeKind::Inside);
     let mut tx = r.left() + 10.0;
     if !label.is_empty() {
@@ -226,7 +225,7 @@ fn ai_field(
     }
     let tr = Rect::from_min_max(pos2(tx, r.top() + 7.0), pos2(r.right() - 9.0, r.bottom() - 7.0));
     if text.is_empty() && !focused {
-        p.text(pos2(tr.left(), r.center().y), Align2::LEFT_CENTER, hint, inter(12.0), FAINT);
+        p.text(pos2(tr.left(), r.center().y), Align2::LEFT_CENTER, hint, sans(12.0), FAINT);
     }
     let edit = egui::TextEdit::singleline(text)
         .id(id)
@@ -241,7 +240,7 @@ fn ai_field(
 
 impl Hybrid {
     /// The width the docked panel takes from the right of the view, with its gap.
-    pub(super) fn ai_width(&self) -> f32 {
+    pub fn ai_width(&self) -> f32 {
         if self.ai_open { PANEL_W + 8.0 } else { 0.0 }
     }
 
@@ -312,8 +311,8 @@ impl Hybrid {
             return;
         }
         let rect = Rect::from_min_max(
-            pos2(screen.right() - 12.0 - PANEL_W, 68.0),
-            pos2(screen.right() - 12.0, (screen.bottom() - 12.0).max(68.0 + 240.0)),
+            pos2(screen.right() - 12.0 - PANEL_W, TOP),
+            pos2(screen.right() - 12.0, (screen.bottom() - 12.0).max(TOP + 240.0)),
         );
         let setup = self.ai_setup || !self.chat.ready();
         let chat = &self.chat;
@@ -328,7 +327,7 @@ impl Hybrid {
             // Header: ASSISTANT, then new conversation, keys and close on the right.
             let hy = inner.top() + 7.5;
             p.text(pos2(inner.left() + 6.0, hy), Align2::CENTER_CENTER, icon::SPARKLES, icon_font(13.0), ACCENT);
-            let g = p.layout_job(spaced("ASSISTANT", inter_semibold(11.0), MUTED, 0.88));
+            let g = p.layout_job(spaced("ASSISTANT", sans_semibold(11.0), MUTED, 0.88));
             p.galley(pos2(inner.left() + 18.0, hy - g.size().y / 2.0), g, MUTED);
             let mut bx = inner.right() + 4.0;
             for (glyph, id, on) in [
@@ -361,7 +360,7 @@ impl Hybrid {
             }
             // The composer at the bottom, Keep or Drop above it after a Stop.
             let w = inner.width();
-            let measure = wrap(ui, &format!("{}.", st.draft), inter(13.0), TEXT, w - 24.0, 0);
+            let measure = wrap(ui, &format!("{}.", st.draft), sans(13.0), TEXT, w - 24.0, 0);
             let rows = ((measure.size().y / 18.0).round() as usize).clamp(2, 6);
             let text_h = rows as f32 * 18.0;
             let comp_h = 10.0 + text_h + 6.0 + 28.0 + 8.0;
@@ -370,13 +369,7 @@ impl Hybrid {
             if chat.stop_ask {
                 let b = Rect::from_min_size(pos2(inner.left(), bottom - 76.0), vec2(w, 76.0));
                 bottom = b.top() - 10.0;
-                p.rect(
-                    b,
-                    CornerRadius::same(8),
-                    Color32::from_rgba_unmultiplied(255, 209, 102, 20),
-                    Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 209, 102, 90)),
-                    StrokeKind::Inside,
-                );
+                p.rect(b, CornerRadius::same(8), MID_BG, Stroke::new(1.0, MID_LINE), StrokeKind::Inside);
                 p.text(
                     pos2(b.left() + 17.0, b.top() + 20.5),
                     Align2::CENTER_CENTER,
@@ -388,7 +381,7 @@ impl Hybrid {
                     pos2(b.left() + 30.0, b.top() + 20.5),
                     Align2::LEFT_CENTER,
                     "Stopped. Keep what it staged?",
-                    inter(12.0),
+                    sans(12.0),
                     TEXT,
                 );
                 let keep = Rect::from_min_size(pos2(b.right() - 10.0 - 72.0, b.top() + 38.0), vec2(72.0, 26.0));
@@ -427,7 +420,7 @@ impl Hybrid {
             let id = Id::unique("ai-draft");
             let focused = ui.memory(|m| m.has_focus(id));
             focus |= focused;
-            let border = if focused { Color32::from_rgba_unmultiplied(142, 162, 255, 140) } else { LINE };
+            let border = if focused { RING } else { LINE };
             p.rect(
                 comp,
                 CornerRadius::same(10),
@@ -438,14 +431,14 @@ impl Hybrid {
             let tr = Rect::from_min_size(pos2(comp.left() + 12.0, comp.top() + 10.0), vec2(w - 24.0, text_h));
             if st.draft.is_empty() {
                 let hint = if chat.running { "Working on it…" } else { "Ask for a change…" };
-                p.text(pos2(tr.left(), tr.top() + 9.0), Align2::LEFT_CENTER, hint, inter(13.0), FAINT);
+                p.text(pos2(tr.left(), tr.top() + 9.0), Align2::LEFT_CENTER, hint, sans(13.0), FAINT);
             }
             if focused && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) && !chat.running {
                 send = Some(std::mem::take(&mut st.draft));
             }
             let edit = egui::TextEdit::multiline(&mut st.draft)
                 .id(id)
-                .font(inter(13.0))
+                .font(sans(13.0))
                 .text_color(TEXT)
                 .frame(egui::Frame::NONE)
                 .margin(egui::Margin::ZERO)
@@ -526,11 +519,11 @@ impl Hybrid {
     /// The empty conversation: what the assistant does, and a few requests to start from.
     /// Returns an example clicked.
     fn ai_welcome(ui: &mut Ui, w: f32, hits: &mut Vec<(String, Rect)>) -> Option<&'static str> {
-        let title = wrap(ui, "Ask for a change to the scene", inter_semibold(13.0), TEXT, w, 2);
+        let title = wrap(ui, "Ask for a change to the scene", sans_semibold(13.0), TEXT, w, 2);
         let body = wrap(
             ui,
             "The assistant edits the open model with vxr's own tools. Every change waits in the review card until you apply it, as one undo step.",
-            inter(12.0),
+            sans(12.0),
             MUTED,
             w,
             6,
@@ -563,7 +556,7 @@ impl Hybrid {
                 pos2(row.left() + 12.0, row.center().y),
                 Align2::LEFT_CENTER,
                 *ex,
-                inter(12.0),
+                sans(12.0),
                 if hover { TEXT } else { MUTED },
             );
             p.text(
@@ -584,30 +577,24 @@ impl Hybrid {
 
     /// A request, right-aligned in an accent bubble.
     fn ai_user(ui: &mut Ui, w: f32, text: &str) {
-        let g = wrap(ui, text, inter(13.0), TEXT, w * 0.85 - 24.0, 0);
+        let g = wrap(ui, text, sans(13.0), TEXT, w * 0.85 - 24.0, 0);
         let size = g.size() + vec2(24.0, 16.0);
         let (r, _) = ui.allocate_exact_size(vec2(w, size.y + 14.0), Sense::hover());
         let b = Rect::from_min_size(pos2(r.right() - size.x, r.top()), size);
         let p = ui.painter();
-        p.rect(
-            b,
-            CornerRadius::same(10),
-            ACCENT_BG,
-            Stroke::new(1.0, Color32::from_rgba_unmultiplied(142, 162, 255, 70)),
-            StrokeKind::Inside,
-        );
+        p.rect(b, CornerRadius::same(10), ACCENT_BG, Stroke::new(1.0, RING), StrokeKind::Inside);
         p.galley(b.min + vec2(12.0, 8.0), g, TEXT);
     }
 
     /// An answer: its text, its calls, then how it went, or what it is doing now.
     fn ai_answer(ui: &mut Ui, w: f32, i: usize, a: &AnswerView, st: &mut AiState, hits: &mut Vec<(String, Rect)>) {
         let working = matches!(a.progress, Progress::Working(_));
-        let text = (!a.text.is_empty()).then(|| wrap(ui, &a.text, inter(12.5), TEXT, w, 0));
+        let text = (!a.text.is_empty()).then(|| wrap(ui, &a.text, sans(12.5), TEXT, w, 0));
         let thinking = (working && !a.thinking.trim().is_empty()).then(|| {
             let t = a.thinking.trim();
             let tail: String = t.chars().rev().take(220).collect::<Vec<_>>().into_iter().rev().collect();
             let tail = if tail.len() < t.len() { format!("…{}", tail.trim_start()) } else { tail };
-            wrap(ui, &tail, inter(11.5), FAINT, w, 3)
+            wrap(ui, &tail, sans(11.5), FAINT, w, 3)
         });
         let n = a.calls.len();
         let folded = n > CALL_ROWS && !st.expanded.contains(&i);
@@ -618,7 +605,7 @@ impl Hybrid {
         };
         let rows = shown.len() + folded as usize;
         let error = match &a.progress {
-            Progress::Failed(e) => Some(wrap(ui, e, inter(12.0), DANGER, w - 20.0, 4)),
+            Progress::Failed(e) => Some(wrap(ui, e, sans(12.0), DANGER, w - 20.0, 4)),
             _ => None,
         };
         let row_h = 22.0;
@@ -672,7 +659,7 @@ impl Hybrid {
                     pos2(row.left() + 22.0, row.center().y),
                     Align2::LEFT_CENTER,
                     format!("{more} earlier calls"),
-                    inter(11.5),
+                    sans(11.5),
                     MUTED,
                 );
                 hits.push((id, row));
@@ -697,7 +684,7 @@ impl Hybrid {
                 let dc = if c.state == CallState::Failed { DANGER.gamma_multiply(0.8) } else { MUTED };
                 let mut job = LayoutJob::single_section(
                     c.detail.clone(),
-                    TextFormat { font_id: inter(11.5), color: dc, ..Default::default() },
+                    TextFormat { font_id: sans(11.5), color: dc, ..Default::default() },
                 );
                 job.wrap = egui::text::TextWrapping {
                     max_width: (row.right() - 6.0 - dx).max(1.0),
@@ -714,13 +701,7 @@ impl Hybrid {
         if let Some(g) = error {
             let gh = g.size().y;
             let b = Rect::from_min_size(pos2(r.left(), y), vec2(w, gh + 16.0));
-            p.rect(
-                b,
-                CornerRadius::same(8),
-                Color32::from_rgba_unmultiplied(255, 107, 122, 18),
-                Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 107, 122, 70)),
-                StrokeKind::Inside,
-            );
+            p.rect(b, CornerRadius::same(8), DANGER_BG, Stroke::new(1.0, DANGER_LINE), StrokeKind::Inside);
             p.galley(pos2(b.left() + 10.0, b.top() + 8.0), g, DANGER);
             y = b.bottom() + 8.0;
         }
@@ -731,7 +712,7 @@ impl Hybrid {
                 let pulse = 0.55 + 0.45 * (t * 4.0).sin().abs() as f32;
                 p.circle_filled(pos2(r.left() + 4.0, fy), 3.5, ACCENT.gamma_multiply(pulse));
                 let dots = ".".repeat(1 + (t * 3.0) as usize % 3);
-                p.text(pos2(r.left() + 14.0, fy), Align2::LEFT_CENTER, format!("{what}{dots}"), inter(12.0), MUTED);
+                p.text(pos2(r.left() + 14.0, fy), Align2::LEFT_CENTER, format!("{what}{dots}"), sans(12.0), MUTED);
                 ui.ctx().request_repaint();
             }
             done => {
@@ -748,7 +729,7 @@ impl Hybrid {
                 }
                 let mut job = LayoutJob::single_section(
                     parts.join(" · "),
-                    TextFormat { font_id: inter(11.0), color: FAINT, ..Default::default() },
+                    TextFormat { font_id: sans(11.0), color: FAINT, ..Default::default() },
                 );
                 job.wrap = egui::text::TextWrapping {
                     max_width: w,
@@ -801,13 +782,7 @@ impl Hybrid {
             };
             let p = ui.painter();
             if on {
-                p.rect(
-                    row,
-                    CornerRadius::same(8),
-                    ACCENT_BG,
-                    Stroke::new(1.0, Color32::from_rgba_unmultiplied(142, 162, 255, 89)),
-                    StrokeKind::Inside,
-                );
+                p.rect(row, CornerRadius::same(8), ACCENT_BG, Stroke::new(1.0, RING), StrokeKind::Inside);
             } else if resp.hovered() {
                 p.rect_filled(row, CornerRadius::same(8), HOVER);
             }
@@ -816,7 +791,7 @@ impl Hybrid {
             if on {
                 p.circle_filled(c, 3.0, ACCENT);
             }
-            let font = if mkind == Kind::Compatible { inter_medium(12.5) } else { mono(12.0) };
+            let font = if mkind == Kind::Compatible { sans_medium(12.5) } else { mono(12.0) };
             p.text(
                 pos2(row.left() + 30.0, row.top() + 15.0),
                 Align2::LEFT_CENTER,
@@ -824,7 +799,7 @@ impl Hybrid {
                 font,
                 if on { TEXT } else { MUTED },
             );
-            p.text(pos2(row.left() + 30.0, row.top() + 31.0), Align2::LEFT_CENTER, note, inter(11.0), FAINT);
+            p.text(pos2(row.left() + 30.0, row.top() + 31.0), Align2::LEFT_CENTER, note, sans(11.0), FAINT);
             let has = chat.has_key[mkind.index()];
             let (tag, tc) = match (has, mkind) {
                 (true, _) => ("key kept", OK),
@@ -850,7 +825,7 @@ impl Hybrid {
             hits.push(("ai-base".into(), r));
             ui.add_space(6.0);
             if chat.settings.browser && !st.base.trim().is_empty() && !browser_reachable(&st.base) {
-                let g = wrap(ui, BROWSER_LIMIT, inter(11.5), MID, w, 4);
+                let g = wrap(ui, BROWSER_LIMIT, sans(11.5), MID, w, 4);
                 let (r, _) = ui.allocate_exact_size(vec2(w, g.size().y), Sense::hover());
                 ui.painter().galley(r.min, g, MID);
                 hits.push(("ai-base-limit".into(), r));
@@ -877,7 +852,7 @@ impl Hybrid {
             p.rect(r, CornerRadius::same(8), Color32::from_white_alpha(9), Stroke::new(1.0, LINE), StrokeKind::Inside);
             p.text(pos2(r.left() + 17.0, r.center().y), Align2::CENTER_CENTER, icon::SHIELD_CHECK, icon_font(14.0), OK);
             let saved = if chat.remembered[kind.index()] { "Key kept in this browser" } else { "Key kept" };
-            p.text(pos2(r.left() + 32.0, r.center().y), Align2::LEFT_CENTER, saved, inter(12.0), TEXT);
+            p.text(pos2(r.left() + 32.0, r.center().y), Align2::LEFT_CENTER, saved, sans(12.0), TEXT);
             let rm = Rect::from_min_size(pos2(r.right() - 5.0 - 84.0, r.top() + 5.0), vec2(84.0, 26.0));
             hits.push(("ai-key-remove".into(), rm));
             if small_button(ui, rm, icon::TRASH, "Remove", "ai-key-remove", false).clicked() {
@@ -929,10 +904,10 @@ impl Hybrid {
                         pos2(row.left() + 30.0, row.top() + 12.0),
                         Align2::LEFT_CENTER,
                         title,
-                        inter(12.0),
+                        sans(12.0),
                         if on { TEXT } else { MUTED },
                     );
-                    p.text(pos2(row.left() + 30.0, row.top() + 27.0), Align2::LEFT_CENTER, note, inter(11.0), FAINT);
+                    p.text(pos2(row.left() + 30.0, row.top() + 27.0), Align2::LEFT_CENTER, note, sans(11.0), FAINT);
                     let id = if k == 0 { "ai-tab-only" } else { "ai-remember" };
                     hits.push((id.into(), row));
                     if resp.clicked() && !has {
@@ -944,20 +919,14 @@ impl Hybrid {
                     let g = wrap(
                         ui,
                         "Any script that runs on this page could still read a remembered key. Use a key with a spend limit.",
-                        inter(11.5),
+                        sans(11.5),
                         TEXT,
                         w - 40.0,
                         4,
                     );
                     let (r, _) = ui.allocate_exact_size(vec2(w, g.size().y + 20.0), Sense::hover());
                     let p = ui.painter();
-                    p.rect(
-                        r,
-                        CornerRadius::same(8),
-                        Color32::from_rgba_unmultiplied(255, 209, 102, 20),
-                        Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 209, 102, 90)),
-                        StrokeKind::Inside,
-                    );
+                    p.rect(r, CornerRadius::same(8), MID_BG, Stroke::new(1.0, MID_LINE), StrokeKind::Inside);
                     p.text(
                         pos2(r.left() + 17.0, r.top() + 18.5),
                         Align2::CENTER_CENTER,
@@ -975,7 +944,7 @@ impl Hybrid {
                     }
                     _ => "Kept in memory until vxr closes.",
                 };
-                let g = wrap(ui, text, inter(11.5), MUTED, w, 4);
+                let g = wrap(ui, text, sans(11.5), MUTED, w, 4);
                 let (r, _) = ui.allocate_exact_size(vec2(w, g.size().y), Sense::hover());
                 ui.painter().galley(r.min, g, MUTED);
             }
@@ -987,7 +956,7 @@ impl Hybrid {
             &format!(
                 "Requests go straight from vxr to {host}, with the scene summary and your words. No vxr server sees them."
             ),
-            inter(11.5),
+            sans(11.5),
             FAINT,
             w,
             4,
@@ -1054,7 +1023,7 @@ impl Hybrid {
                     mono(12.0),
                     if on { ACCENT } else { TEXT },
                 );
-                p.text(pos2(row.left() + 10.0, row.top() + 28.0), Align2::LEFT_CENTER, note, inter(11.0), FAINT);
+                p.text(pos2(row.left() + 10.0, row.top() + 28.0), Align2::LEFT_CENTER, note, sans(11.0), FAINT);
                 if on {
                     p.text(
                         pos2(row.right() - 12.0, row.center().y),
@@ -1098,8 +1067,8 @@ impl Hybrid {
         if done && self.review.is_some() && !self.chat.stop_ask && !failed {
             return;
         }
-        let right = view.right() - 12.0 - 232.0 - 8.0 - 304.0 - 8.0;
-        let (l, r) = (76.0, right.max(76.0 + 360.0));
+        let right = view.right() - 12.0 - PALETTE_W - 8.0 - 304.0 - 8.0;
+        let (l, r) = (12.0 + RAIL_W + 12.0, right.max(12.0 + RAIL_W + 12.0 + 360.0));
         let w = 560.0_f32.min(r - l - 16.0).max(320.0);
         let cx = (l + r) / 2.0;
         let result = (done && !self.chat.stop_ask).then_some(answer.as_ref()).flatten().map(|a| match &a.progress {
@@ -1111,7 +1080,7 @@ impl Hybrid {
             ctx.fonts_mut(|f| {
                 let mut job = LayoutJob::single_section(
                     t.clone(),
-                    TextFormat { font_id: inter(12.5), color: *c, line_height: Some(18.0), ..Default::default() },
+                    TextFormat { font_id: sans(12.5), color: *c, line_height: Some(18.0), ..Default::default() },
                 );
                 job.wrap = egui::text::TextWrapping {
                     max_width: w - 28.0,
@@ -1124,7 +1093,7 @@ impl Hybrid {
         });
         let stop_h = if bar.sent && self.chat.stop_ask { 44.0 } else { 0.0 };
         let h = 48.0 + res_g.as_ref().map_or(0.0, |g| g.size().y + 14.0) + stop_h;
-        let rect = Rect::from_min_size(pos2((cx - w / 2.0).round(), 68.0), vec2(w, h));
+        let rect = Rect::from_min_size(pos2((cx - w / 2.0).round(), TOP), vec2(w, h));
         let mut out = Vec::new();
         let mut hits: Vec<(String, Rect)> = Vec::new();
         let (mut close, mut panel, mut send) = (false, false, None);
@@ -1165,13 +1134,13 @@ impl Hybrid {
                     Some(Progress::Failed(_)) => "Failed".into(),
                     _ => "Done".into(),
                 };
-                let sg = p.layout_no_wrap(status, inter(12.0), MUTED);
+                let sg = p.layout_no_wrap(status, sans(12.0), MUTED);
                 let sw = sg.size().x;
                 p.galley(pos2(x - sw - 4.0, cy - sg.size().y / 2.0), sg, MUTED);
                 let tl = rect.left() + 42.0;
                 let mut job = LayoutJob::single_section(
                     bar.text.clone(),
-                    TextFormat { font_id: inter(13.0), color: TEXT, ..Default::default() },
+                    TextFormat { font_id: sans(13.0), color: TEXT, ..Default::default() },
                 );
                 job.wrap = egui::text::TextWrapping {
                     max_width: (x - sw - 16.0 - tl).max(1.0),
@@ -1193,14 +1162,14 @@ impl Hybrid {
                 x -= mw + 12.0;
                 let tr = Rect::from_min_max(pos2(rect.left() + 42.0, cy - 9.0), pos2(x, cy + 9.0));
                 if bar.text.is_empty() {
-                    p.text(pos2(tr.left(), cy), Align2::LEFT_CENTER, "Ask AI to change the scene…", inter(13.0), FAINT);
+                    p.text(pos2(tr.left(), cy), Align2::LEFT_CENTER, "Ask AI to change the scene…", sans(13.0), FAINT);
                 }
                 if ui.memory(|m| m.has_focus(id)) && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
                     send = Some(bar.text.clone());
                 }
                 let edit = egui::TextEdit::singleline(&mut bar.text)
                     .id(id)
-                    .font(inter(13.0))
+                    .font(sans(13.0))
                     .text_color(TEXT)
                     .frame(egui::Frame::NONE)
                     .margin(egui::Margin::ZERO)
@@ -1225,7 +1194,7 @@ impl Hybrid {
                     pos2(rect.left() + 14.0, y + 22.0),
                     Align2::LEFT_CENTER,
                     "Stopped. Keep what it staged?",
-                    inter(12.0),
+                    sans(12.0),
                     TEXT,
                 );
                 let keep = Rect::from_min_size(pos2(rect.right() - 10.0 - 72.0, y + 9.0), vec2(72.0, 26.0));

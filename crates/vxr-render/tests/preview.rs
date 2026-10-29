@@ -87,7 +87,7 @@ impl Rig {
 }
 
 /// Fraction of pixels whose colour class disagrees with the CPU: red where slot 1 is hit,
-/// green where slot 9 is, the dark editor background (blue over red, dim) on a miss.
+/// green where slot 9 is, the dark editor background (a dim neutral grey) on a miss.
 fn mismatch(img: &[u8], cpu: &[u8]) -> f64 {
     let bad = img
         .as_chunks::<4>()
@@ -97,7 +97,7 @@ fn mismatch(img: &[u8], cpu: &[u8]) -> f64 {
         .filter(|(p, v)| {
             let [r, g, b, _] = **p;
             match v {
-                0 => !(b > r && r < 60),
+                0 => !(r < 60 && r.abs_diff(g) <= 6 && r.abs_diff(b) <= 6),
                 1 => !(r > g && r > b),
                 9 => !(g > r && g > b),
                 _ => true,

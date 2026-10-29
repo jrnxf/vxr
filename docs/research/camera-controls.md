@@ -15,8 +15,8 @@ How MagicaVoxel 0.99.x moves the camera, from its own shortcut list and release 
 |---|---|---|---|
 | Orbit | Right-drag [S1] | Right-drag (a two-finger click-drag on a Mac trackpad) | - |
 | Pan | Middle-drag, or Space + left-drag [S1]; Space + right-drag [S4] | Middle-drag, Space + left or right-drag, Shift + right-drag | Shift + right-drag kept: it was vxr's pan before and needs no third button |
-| Zoom | Wheel [S1]; Z + drag on the view cube [S2] | Wheel and two-finger scroll, trackpad pinch, Cmd-= and Cmd--, the camera bar's zoom buttons | Pinch added for trackpads |
-| Zoom target | Not documented | The voxel under the pointer stays under it; the buttons and keys zoom about the middle of the view | Kept from vxr: zooming in on what you point at, safe because of the bounds below |
+| Zoom | Wheel [S1]; Z + drag on the view cube [S2] | Wheel and two-finger scroll, trackpad pinch, Cmd-= and Cmd-- | Pinch added for trackpads |
+| Zoom target | Not documented | The voxel under the pointer stays under it; the keys zoom about the middle of the view | Kept from vxr: zooming in on what you point at, safe because of the bounds below |
 | Orbit pivot | A focus point; middle-drag and Space-drag move it [S1] | The same: pan moves it | - |
 | Set the pivot | X + left-click [S1, S2 0.99.3] | X + left-click: orbit around the voxel clicked, which moves to the middle of the view | - |
 | Recenter | 4 / F4 [S1] | `.` (Frame scene), keeping the angle and projection | `4` is vxr's Right view |

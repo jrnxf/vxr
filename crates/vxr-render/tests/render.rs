@@ -192,11 +192,11 @@ fn background_and_recolor() {
         pollster::block_on(v.renderer.read_color(&g.device, &g.queue))
     };
     let before = shot(&map);
-    // Top left corner is background: close to the mockup's dark #0d0f14 to #262b37 range.
+    // Top left corner is background: in the dark neutral #0a0a0a to #1c1c1c range, with no hue.
     let px = &before[..4];
     assert!(
-        px[0] < 50 && px[1] < 55 && px[2] < 65 && px[2] >= px[0],
-        "background {px:?} is not the dark editor gradient"
+        px[0] < 40 && px[0] == px[1] && px[1] == px[2],
+        "background {px:?} is not the dark neutral editor gradient"
     );
     // Recolor index 1 to pure red: pixels showing index 1 change, nothing else does.
     let values = v.values(&g, &map, &cam);
@@ -233,7 +233,8 @@ fn island_matches_cpu_raycast() {
     assert_matches(&v.values(&g, &map, &cam), &cpu_values(&scene.map, &cam), "island");
 }
 
-/// The selection mask tints the selected voxels blue and leaves the rest as they were.
+/// The selection mask tints the selected voxels (lighter, edged in near black, no hue) and leaves
+/// the rest as they were.
 #[test]
 fn selection_tints_only_selected_voxels() {
     let Some(g) = gpu() else { return };
@@ -260,7 +261,8 @@ fn selection_tints_only_selected_voxels() {
     renderer.set_selection(&g.device, &g.queue, &s.selection_mask());
     let lit = draw(&renderer);
     // Which block each pixel shows, from the CPU ray cast.
-    let mut blue = [0usize; 2];
+    let mut tinted = [0usize; 2];
+    let mut hue = 0usize;
     let mut changed = [0usize; 2];
     let mut seen = [0usize; 2];
     for y in 0..H {
@@ -271,11 +273,14 @@ fn selection_tints_only_selected_voxels() {
             let i = ((y * W + x) * 4) as usize;
             seen[k] += 1;
             changed[k] += usize::from(plain[i..i + 3] != lit[i..i + 3]);
-            blue[k] += usize::from(lit[i + 2] > lit[i] + 30);
+            tinted[k] += usize::from(lit[i..i + 3] != plain[i..i + 3]);
+            let (lo, hi) = (lit[i..i + 3].iter().min().unwrap(), lit[i..i + 3].iter().max().unwrap());
+            hue += usize::from(k == 0 && hi - lo > 4);
         }
     }
     assert!(seen[0] > 50 && seen[1] > 50, "both blocks on screen: {seen:?}");
-    assert!(blue[0] * 10 >= seen[0] * 9, "the selected block is tinted: {blue:?} of {seen:?}");
+    assert!(tinted[0] * 10 >= seen[0] * 9, "the selected block is tinted: {tinted:?} of {seen:?}");
+    assert_eq!(hue, 0, "the grey selected block stays grey: the tint has no hue");
     assert!(changed[1] * 100 <= seen[1], "the other block is unchanged: {changed:?} of {seen:?}");
     renderer.set_selection(&g.device, &g.queue, &[]);
     assert_eq!(draw(&renderer), plain, "an empty mask clears the highlight");
@@ -383,11 +388,14 @@ fn guides_draw_ground_grid_and_frame() {
     let (line, cell) = (at(&grid, &top, [16.02, 0.0, 16.5]), at(&grid, &top, [16.5, 0.0, 16.5]));
     assert!(line[2] > cell[2] + 10, "a grid line {line:?} is brighter than the cell middle {cell:?}");
 
-    // Frame: an edge of the box shows in the accent blue; the middle of the view does not.
+    // Frame: an edge of the box shows as a light neutral line; the middle of the view does not.
     renderer.guides = vxr_render::Guides { frame: true, ..guides };
     let frame = draw(&renderer, &cam);
     let (on, off) = (at(&frame, &cam, [16.0, 16.0, 32.0]), at(&plain, &cam, [16.0, 16.0, 32.0]));
-    assert!(on[2] > off[2] + 30 && on[2] > on[0], "the top front edge {on:?} is drawn over {off:?}");
+    assert!(
+        on.iter().zip(off).all(|(o, b)| *o > b + 30) && on[0] == on[2],
+        "the top front edge {on:?} is drawn over {off:?}"
+    );
     assert_eq!(at(&frame, &cam, [16.0, 8.0, 16.0]), at(&plain, &cam, [16.0, 8.0, 16.0]), "inside the box");
 
     renderer.guides = vxr_render::Guides::default();

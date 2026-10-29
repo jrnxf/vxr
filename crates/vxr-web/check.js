@@ -113,7 +113,7 @@ async () => {
   step('erase removes a voxel', st().voxels === s0.voxels - 1, `${st().voxels}`);
   await key('z', cmd);
   await key('a');
-  await click(38, 154);
+  await click(35, 119);
   s = st();
   step('the rail button picks Erase without editing', s.tool === 'Erase' && s.voxels === s0.voxels, JSON.stringify(s));
   await key('a');
@@ -529,12 +529,9 @@ async () => {
   s = st();
   step('Home resets the camera', s.cam.every((v, i) => near(v, s0.cam[i])) && !s.ortho, `${s.cam} vs ${s0.cam}`);
 
-  // The camera bar above the render corner.
+  // The camera bar above the render corner: no zoom buttons (the wheel, a pinch and Cmd-= zoom).
   a = st();
-  await chip('nav-zoom-in');
-  const zin = st().cam[5];
-  await chip('nav-zoom-out');
-  step('the camera bar zooms in and out', zin < a.cam[5] * 0.8 && Math.abs(st().cam[5] - a.cam[5]) < 1e-2, `${a.cam[5]} ${zin} ${st().cam[5]}`);
+  step('the camera bar has no zoom buttons', !at('nav-zoom-in') && !at('nav-zoom-out') && !!at('nav-frame') && !!at('nav-reset'));
   const plusKept = await key('=', cmd);
   const zkey = st().cam[5];
   await key('-', cmd);
@@ -630,6 +627,9 @@ async () => {
   await key('z', cmd);
   while (st().slot > used) await key('[');
   while (st().slot < used) await key(']');
+  step('the palette shows the colors in use, not an unused slot', !!at(`sw${used}`) && !at(`sw${free}`));
+  await clickAt('palette-all');
+  step('its All button shows every slot', !!at(`sw${free}`));
   const [a1, b1] = [at(`sw${used}`), at(`sw${free}`)];
   await drag(a1[0], a1[1], b1[0], b1[1], 0, { ctrlKey: true });
   step('Ctrl-drag a swatch onto another swaps them', col(free).join() === c0.join(), `${col(free)}`);

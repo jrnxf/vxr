@@ -226,8 +226,8 @@ async function main() {
   const font = (n) => get('fonts/' + n).catch(() => new Uint8Array());
   const [vox, ...fonts] = await Promise.all([
     get('scene.vox'),
-    font('Inter-Regular.ttf'), font('Inter-Medium.ttf'), font('Inter-SemiBold.ttf'),
-    font('JetBrainsMono-Regular.ttf'), font('JetBrainsMono-Medium.ttf'), font('lucide.ttf'),
+    font('Geist-Regular.ttf'), font('Geist-Medium.ttf'), font('Geist-SemiBold.ttf'),
+    font('GeistMono-Regular.ttf'), font('GeistMono-Medium.ttf'), font('Inter-Regular.ttf'), font('lucide.ttf'),
   ]);
   app = await start(canvas, vox, 'island.vox', dpr(), ...fonts);
   window.vxr = app; // for the console and crates/vxr-web/check

@@ -1943,14 +1943,12 @@ fn camera(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     s.ed.scene.select(Vec::new(), vxr_core::select::Mode::Replace);
     press(&mut s, egui::Key::Home, egui::Modifiers::NONE);
 
-    // Zoom: the bar's buttons and Cmd-= / Cmd-- step about the middle; a pinch zooms too.
+    // Zoom: Cmd-= / Cmd-- step about the middle (the bar has no zoom buttons: the wheel and a
+    // pinch zoom); a pinch zooms too.
     let d = s.ed.cam.distance;
-    s.ui_click("nav-zoom-in")?;
-    let d1 = s.ed.cam.distance;
-    s.ui_click("nav-zoom-out")?;
     check(
-        d1 < d * 0.8 && (s.ed.cam.distance - d).abs() < d * 1e-3,
-        format!("the bar's zoom in and out: {d:.0} -> {d1:.0} -> {:.0}", s.ed.cam.distance),
+        !s.ed.ui.hits.contains_key("nav-zoom-in") && !s.ed.ui.hits.contains_key("nav-frame-sel"),
+        "the camera bar has no zoom buttons, and Frame selection only with a selection".into(),
     )?;
     press(&mut s, egui::Key::Equals, egui::Modifiers::COMMAND);
     let d1 = s.ed.cam.distance;
@@ -1974,14 +1972,13 @@ fn camera(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     check(s.ed.cam.ortho, "the bar's Persp button turns orthographic on".into())?;
     s.ui_click("nav-proj")?;
     check(!s.ed.cam.ortho, "and back to perspective".into())?;
-    // Where the flyout opens: below the bar (over the render corner) if it ends above undo/redo,
-    // else above the bar if it clears the palette, else left of the bar; never over undo/redo or
-    // the palette, always on screen.
+    // Where the flyout opens: below the bar (over the render corner) if it ends on screen, else
+    // above the bar if it clears the palette, else left of the bar; never over the top bar or the
+    // palette, always on screen.
     fn flyout_at(s: &mut Shot, corner: bool) -> Result<&'static str, String> {
         let points = (s.ed.width as f32 / s.ed.ppp, s.ed.height as f32 / s.ed.ppp);
         let hit = |s: &Shot, n: &str| s.ed.ui.hits.get(n).copied().ok_or(format!("no {n} at {points:?}"));
-        let (flyout, nav, palette, history) =
-            (hit(s, "view-flyout")?, hit(s, "nav")?, hit(s, "palette")?, hit(s, "history")?);
+        let (flyout, nav, palette, top) = (hit(s, "view-flyout")?, hit(s, "nav")?, hit(s, "palette")?, hit(s, "undo")?);
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(points.0, points.1));
         let at = if flyout.top() > nav.bottom() {
             "below"
@@ -1996,10 +1993,10 @@ fn camera(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
                 && screen.contains_rect(flyout)
                 && !flyout.intersects(nav)
                 && !flyout.intersects(palette)
-                && !flyout.intersects(history)
+                && !flyout.intersects(top)
                 && (at != "beside" || flyout.right() < nav.left()),
             format!(
-                "at {}x{} (render corner {}) the View flyout opens {at} the bar, on screen, clear of the palette and undo/redo",
+                "at {}x{} (render corner {}) the View flyout opens {at} the bar, on screen, clear of the palette and the top bar",
                 points.0,
                 points.1,
                 if corner { "shown" } else { "hidden" }
@@ -2009,11 +2006,11 @@ fn camera(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     }
     s.ui_click("nav-views")?;
     check(
-        flyout_at(&mut s, true)? == "below",
-        "at the default 1280x800 with the render corner shown it opens below the bar".into(),
+        flyout_at(&mut s, true)? == "above",
+        "at the default 1280x800 with the render corner shown it opens above the bar".into(),
     )?;
     for (points, corner, want) in [
-        ((1440, 1100), true, "below"),
+        ((1440, 1100), true, "above"),
         ((1280, 1000), false, "above"),
         ((1024, 700), true, "beside"),
         ((1024, 600), true, "beside"),
@@ -2239,7 +2236,7 @@ fn full_render(s: &mut Shot, dir: &Path) -> Result<(), String> {
     let corner = (s.ed.preview.width, s.ed.preview.height);
     let back = s.ed.ui.hits.get("render").map(|r| r.width());
     check(
-        !s.ed.ui.full_render && corner == (640, 360) && back == Some(320.0),
+        !s.ed.ui.full_render && corner == (640, 360) && back == Some(208.0),
         format!("its chip swaps back to the corner: a {}x{} preview", corner.0, corner.1),
     )?;
     s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
@@ -3076,9 +3073,22 @@ fn palette(s: &mut Shot, dir: &Path) -> Result<(), String> {
     check(s.ed.scene.palette[free as usize + 1] == cu, format!("copy slot {used} to slot {}", free + 1))?;
     s.ed.undo();
 
-    // Cmd-drag a swatch onto another swaps them, as Ctrl+drag does in MagicaVoxel.
+    // The palette shows the colours in use (and the current one); All shows every slot.
     s.ed.ui.slot = used;
     s.frames(2);
+    let shown = |s: &Shot| (1..=255u8).filter(|i| s.ed.ui.hits.contains_key(&format!("sw{i}"))).count();
+    let in_use = (1..=255).filter(|&i| counts[i] > 0).count();
+    check(
+        !s.ed.ui.palette_all && !s.ed.ui.hits.contains_key(&format!("sw{free}")) && shown(s) == in_use,
+        format!("the palette shows the {in_use} colours in use"),
+    )?;
+    s.ui_click("palette-all")?;
+    check(
+        s.ed.ui.palette_all && s.ed.ui.hits.contains_key(&format!("sw{free}")) && shown(s) > in_use,
+        format!("its All button shows every slot ({} on screen)", shown(s)),
+    )?;
+
+    // Cmd-drag a swatch onto another swaps them, as Ctrl+drag does in MagicaVoxel.
     let (a, b) = (s.at(&format!("sw{used}"))?, s.at(&format!("sw{free}"))?);
     s.ui_drag(a, b, egui::Modifiers::COMMAND);
     check(

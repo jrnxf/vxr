@@ -19,42 +19,65 @@ mod assistant;
 pub use agents::{AgentsView, EditRow, FILES_SETUP, LIVE_SETUP, SETUP};
 pub use assistant::{AiAction, AskBar, ChatView, PANEL_W};
 
-// :root custom properties.
-pub const PANEL: Color32 = Color32::from_rgba_unmultiplied_const(20, 23, 30, 199);
-pub const PANEL_SOLID: Color32 = Color32::from_rgb(0x16, 0x19, 0x20);
-pub const LINE: Color32 = Color32::from_rgba_unmultiplied_const(255, 255, 255, 20);
-pub const LINE2: Color32 = Color32::from_rgba_unmultiplied_const(255, 255, 255, 36);
-pub const TEXT: Color32 = Color32::from_rgb(0xe8, 0xea, 0xf0);
-pub const MUTED: Color32 = Color32::from_rgb(0x8a, 0x90, 0xa0);
-pub const FAINT: Color32 = Color32::from_rgb(0x5b, 0x60, 0x70);
-pub const ACCENT: Color32 = Color32::from_rgb(0x8e, 0xa2, 0xff);
-pub const ACCENT_BG: Color32 = Color32::from_rgba_unmultiplied_const(142, 162, 255, 41);
-pub const DANGER: Color32 = Color32::from_rgb(0xff, 0x6b, 0x7a);
+// shadcn/ui's Neutral theme (.dark): every grey is oklch(L 0 0), so the chrome has no hue and the
+// voxels are the only colour on screen. Each constant names the shadcn variable it copies.
+pub const PANEL: Color32 = Color32::from_rgba_unmultiplied_const(23, 23, 23, 240); // --card, 94%
+pub const PANEL_SOLID: Color32 = Color32::from_rgb(0x17, 0x17, 0x17); // --card
+pub const LINE: Color32 = Color32::from_rgba_unmultiplied_const(255, 255, 255, 26); // --border
+pub const LINE2: Color32 = Color32::from_rgba_unmultiplied_const(255, 255, 255, 38); // --input
+pub const TEXT: Color32 = Color32::from_rgb(0xfa, 0xfa, 0xfa); // --foreground
+pub const MUTED: Color32 = Color32::from_rgb(0xa1, 0xa1, 0xa1); // --muted-foreground
+pub const FAINT: Color32 = Color32::from_rgb(0x73, 0x73, 0x73); // --ring
+pub const ACCENT: Color32 = Color32::from_rgb(0xe5, 0xe5, 0xe5); // --primary
+/// The primary button under the pointer (shadcn's `bg-primary/90`).
+pub const ACCENT_HOVER: Color32 = Color32::from_rgb(0xd4, 0xd4, 0xd4);
+/// Text and icons on [`ACCENT`]: --primary-foreground.
+pub const ON_ACCENT: Color32 = Color32::from_rgb(0x17, 0x17, 0x17);
+/// An on state's fill: --accent (#262626) over a panel.
+pub const ACCENT_BG: Color32 = Color32::from_rgba_unmultiplied_const(255, 255, 255, 18);
+/// A faint fill for a picked row or drop target.
+pub const ACCENT_TINT: Color32 = Color32::from_rgba_unmultiplied_const(255, 255, 255, 10);
+/// An on state's or a focused field's border: --ring.
+pub const RING: Color32 = Color32::from_rgb(0x73, 0x73, 0x73);
+pub const DANGER: Color32 = Color32::from_rgb(0xff, 0x64, 0x67); // --destructive
+pub const DANGER_BG: Color32 = Color32::from_rgba_unmultiplied_const(255, 100, 103, 18);
+pub const DANGER_LINE: Color32 = Color32::from_rgba_unmultiplied_const(255, 100, 103, 70);
 pub const OK: Color32 = Color32::from_rgb(0x6e, 0xe7, 0xa8);
 pub const MID: Color32 = Color32::from_rgb(0xff, 0xd1, 0x66);
+pub const MID_BG: Color32 = Color32::from_rgba_unmultiplied_const(255, 209, 102, 20);
+pub const MID_LINE: Color32 = Color32::from_rgba_unmultiplied_const(255, 209, 102, 90);
 const HOVER: Color32 = Color32::from_rgba_unmultiplied_const(255, 255, 255, 15);
 pub(crate) const R: u8 = 12;
+/// The top of the panels under the top bar's two 40 px islands.
+pub(crate) const TOP: f32 = 60.0;
+/// The tool rail's width: 34 px buttons with 6 px padding.
+const RAIL_W: f32 = 46.0;
+/// A rail button's size, and its step down the rail.
+const TOOL: f32 = 34.0;
+const TOOL_STEP: f32 = 36.0;
 
 /// Font bytes, loaded by the caller (see `crate::fonts`).
 pub struct FontBytes {
-    pub inter_regular: Vec<u8>,
-    pub inter_medium: Vec<u8>,
-    pub inter_semibold: Vec<u8>,
+    pub sans_regular: Vec<u8>,
+    pub sans_medium: Vec<u8>,
+    pub sans_semibold: Vec<u8>,
     pub mono_regular: Vec<u8>,
     pub mono_medium: Vec<u8>,
+    /// Inter Regular, for the symbols Geist lacks (⌘ and ⌫).
+    pub symbols: Vec<u8>,
     pub icons: Vec<u8>,
 }
 
 fn family(name: &str) -> FontFamily {
     FontFamily::Name(name.into())
 }
-fn inter(size: f32) -> FontId {
+fn sans(size: f32) -> FontId {
     FontId::new(size, FontFamily::Proportional)
 }
-fn inter_medium(size: f32) -> FontId {
+fn sans_medium(size: f32) -> FontId {
     FontId::new(size, family("medium"))
 }
-fn inter_semibold(size: f32) -> FontId {
+fn sans_semibold(size: f32) -> FontId {
     FontId::new(size, family("semibold"))
 }
 fn mono(size: f32) -> FontId {
@@ -67,7 +90,7 @@ fn icon_font(size: f32) -> FontId {
     FontId::new(size, family("icons"))
 }
 
-/// Install Inter, JetBrains Mono and the Lucide icon font, and the dark style. Without the
+/// Install Geist, Geist Mono and the Lucide icon font, and the dark style. Without the
 /// fonts, egui's built-in ones stand in (and the icons show as boxes).
 pub fn install(ctx: &Context, fonts: Option<FontBytes>) {
     let defs = match fonts {
@@ -94,22 +117,25 @@ fn font_definitions(fonts: FontBytes) -> FontDefinitions {
             defs.families.entry(f.clone()).or_default().push(name.into());
         }
     };
-    add("inter", fonts.inter_regular, &[FontFamily::Proportional]);
-    add("inter-medium", fonts.inter_medium, &[family("medium")]);
-    add("inter-semibold", fonts.inter_semibold, &[family("semibold")]);
-    add("mono", fonts.mono_regular, &[FontFamily::Monospace]);
-    add("mono-medium", fonts.mono_medium, &[family("mono-medium")]);
+    add("geist", fonts.sans_regular, &[FontFamily::Proportional]);
+    add("geist-medium", fonts.sans_medium, &[family("medium")]);
+    add("geist-semibold", fonts.sans_semibold, &[family("semibold")]);
+    add("geist-mono", fonts.mono_regular, &[FontFamily::Monospace]);
+    add("geist-mono-medium", fonts.mono_medium, &[family("mono-medium")]);
     add("lucide", fonts.icons, &[family("icons")]);
-    // Inter covers the symbols the labels use; keep it as every family's fallback.
-    for f in [family("medium"), family("semibold"), FontFamily::Monospace, family("mono-medium")] {
-        defs.families.get_mut(&f).unwrap().push("inter".into());
-    }
+    // Inter covers the symbols Geist lacks (the ⌘ and ⌫ of the shortcut keys); keep it as every
+    // family's fallback.
+    add(
+        "inter",
+        fonts.symbols,
+        &[FontFamily::Proportional, family("medium"), family("semibold"), FontFamily::Monospace, family("mono-medium")],
+    );
     defs
 }
 
 fn style(ctx: &Context) {
     let mut visuals = egui::Visuals::dark();
-    visuals.selection.bg_fill = Color32::from_rgba_unmultiplied(142, 162, 255, 90);
+    visuals.selection.bg_fill = Color32::from_white_alpha(40);
     visuals.text_cursor.stroke = Stroke::new(1.5, ACCENT);
     visuals.extreme_bg_color = Color32::TRANSPARENT;
     visuals.override_text_color = Some(TEXT);
@@ -163,10 +189,9 @@ mod icon {
     pub const FILE_PLUS: char = '\u{e0c9}';
     pub const MAXIMIZE_2: char = '\u{e113}';
     pub const MINIMIZE_2: char = '\u{e11b}';
-    pub const ZOOM_IN: char = '\u{e1b6}';
-    pub const ZOOM_OUT: char = '\u{e1b7}';
     pub const SCAN_SEARCH: char = '\u{e537}';
     pub const ROTATE_CCW: char = '\u{e148}';
+    pub const PENCIL: char = '\u{e1f9}';
     pub const SPARKLES: char = '\u{e412}';
     pub const CHECK: char = '\u{e06c}';
     pub const TRIANGLE_ALERT: char = '\u{e193}';
@@ -418,10 +443,13 @@ pub struct ColorEdit {
 }
 
 const FIELDS: [&str; 7] = ["HEX", "R", "G", "B", "H", "S", "V"];
-/// Height of the swatch grid's scrolling view (#swatches max-height).
-const SWATCH_VIEW: f32 = 240.0;
-/// The palette panel's height (it sits at y 68, under the top bar).
-const PALETTE_H: f32 = 12.0 + 15.0 + 10.0 + 52.0 + 10.0 + SWATCH_VIEW + 10.0 + 48.0 + 12.0;
+
+/// The palette card's width, and its swatch grid: 8 columns of 19 px with 3 px gaps.
+pub(crate) const PALETTE_W: f32 = 200.0;
+const SWATCH: f32 = 19.0;
+const SWATCH_STEP: f32 = 22.0;
+/// The most swatch rows the palette shows before it scrolls.
+const SWATCH_ROWS: f32 = 8.0;
 
 /// Readouts for the stats corner.
 #[derive(Clone, Debug, Default)]
@@ -551,6 +579,8 @@ pub struct Hybrid {
     drag_from: Option<u8>,
     /// The slot the swatch grid last scrolled to.
     shown_slot: u8,
+    /// The palette shows all 255 slots, not only the colours in the scene.
+    pub palette_all: bool,
     shift: bool,
     alt: bool,
     actions: Vec<Action>,
@@ -795,6 +825,7 @@ impl Hybrid {
             lifting: false,
             drag_from: None,
             shown_slot: 28,
+            palette_all: false,
             shift: false,
             alt: false,
             actions: Vec::new(),
@@ -954,7 +985,7 @@ impl Hybrid {
     /// else the coach card.
     /// Where flyouts beside the rail start: right of the rail, or of the scene tree when it shows.
     fn flyout_x(&self) -> f32 {
-        12.0 + 52.0 + 8.0 + if self.tree.is_empty() { 0.0 } else { TREE_W + 8.0 }
+        12.0 + RAIL_W + 8.0 + if self.tree.is_empty() { 0.0 } else { TREE_W + 8.0 }
     }
 
     /// Open the rename field on tree node `node`, in world mode.
@@ -1063,7 +1094,6 @@ impl Hybrid {
         self.nav_bar(ctx, screen);
         self.view_panel(ctx, screen);
         self.hint_bar(ctx, screen);
-        self.history(ctx, screen);
         self.ask_bar(ctx, screen);
         self.agents_panel(ctx, screen);
         self.toast_panel(ctx, screen);
@@ -1280,73 +1310,104 @@ impl Hybrid {
         });
     }
 
-    // #top
+    // #top: two 40 px islands, so the scene shows between them. The left one has the scene,
+    // the file actions as icons and undo/redo; the right one the assistant, the keys and Embed.
     fn top_bar(&mut self, ctx: &Context, screen: Rect) {
-        let rect = Rect::from_min_max(pos2(12.0, 12.0), pos2(screen.right() - 12.0, 56.0));
-        Self::panel(ctx, "top", rect, Order::Middle, |ui, rect| {
+        let name = ctx.fonts_mut(|f| f.layout_no_wrap(self.scene_name.clone(), sans(13.0), TEXT));
+        let brand = ctx.fonts_mut(|f| f.layout_no_wrap("vxr".into(), sans_semibold(13.0), TEXT));
+        let sel_w = name.size().x + 34.0;
+        let w = 12.0 + 26.0 + brand.size().x + 10.0 + sel_w + 13.0 + 4.0 * 36.0 + 13.0 + 2.0 * 36.0 + 4.0;
+        let left = Rect::from_min_size(pos2(12.0, 12.0), vec2(w, 40.0));
+        let mut tip: Option<(Rect, &'static str, &'static [&'static str])> = None;
+        Self::panel(ctx, "top", left, Order::Middle, |ui, rect| {
             let cy = rect.center().y;
             let mut x = rect.left() + 12.0;
             logo(ui, pos2(x, cy - 9.0), 18.0);
             x += 26.0;
-            let g = ui.painter().layout_no_wrap("vxr".into(), inter_semibold(13.0), TEXT);
-            ui.painter().galley(pos2(x, cy - g.size().y / 2.0), g.clone(), TEXT);
-            x += g.size().x + 10.0 + 4.0;
+            ui.painter().galley(pos2(x, cy - brand.size().y / 2.0), brand.clone(), TEXT);
+            x += brand.size().x + 10.0;
             // #scene-select
-            let name = ui.painter().layout_no_wrap(self.scene_name.clone(), inter(13.0), TEXT);
-            let sel = Rect::from_min_size(pos2(x, cy - 16.0), vec2(name.size().x + 36.0, 32.0));
+            let sel = Rect::from_min_size(pos2(x, cy - 14.0), vec2(sel_w, 28.0));
             let resp = ui.interact(sel, Id::unique("scene-select"), Sense::click());
             let p = ui.painter();
             p.rect(
                 sel,
-                CornerRadius::same(8),
+                CornerRadius::same(7),
                 Color32::from_white_alpha(10),
                 Stroke::new(1.0, LINE),
                 StrokeKind::Inside,
             );
             if resp.hovered() {
-                p.rect_filled(sel, CornerRadius::same(8), HOVER);
+                p.rect_filled(sel, CornerRadius::same(7), HOVER);
             }
             p.galley(pos2(sel.left() + 10.0, cy - name.size().y / 2.0), name, TEXT);
-            p.text(pos2(sel.right() - 14.0, cy), Align2::CENTER_CENTER, icon::CHEVRON_DOWN, icon_font(12.0), MUTED);
-            x = sel.right() + 4.0 + 6.0;
-            p.line_segment([pos2(x, cy - 10.0), pos2(x, cy + 10.0)], Stroke::new(1.0, LINE));
-            x += 1.0 + 6.0 + 4.0;
-            let r = tbtn(ui, &mut x, cy, Some(icon::FILE_PLUS), "New", "new", true);
-            self.hits.insert("new".into(), r.rect);
-            if r.clicked() {
-                self.request_new();
+            p.text(pos2(sel.right() - 13.0, cy), Align2::CENTER_CENTER, icon::CHEVRON_DOWN, icon_font(12.0), MUTED);
+            let sep = |ui: &Ui, x: &mut f32| {
+                *x += 6.0;
+                ui.painter()
+                    .line_segment([pos2(*x + 0.5, cy - 10.0), pos2(*x + 0.5, cy + 10.0)], Stroke::new(1.0, LINE));
+                *x += 7.0;
+            };
+            x = sel.right();
+            sep(ui, &mut x);
+            let file: [(&str, char, &'static str, &'static [&'static str]); 4] = [
+                ("new", icon::FILE_PLUS, "New scene", &[]),
+                ("open", icon::FOLDER_OPEN, "Open .vox", &["⌘", "O"]),
+                ("save", icon::DOWNLOAD, "Save .vox", &["⌘", "S"]),
+                ("export", icon::FILE_OUTPUT, "Export", &[]),
+            ];
+            for (id, glyph, label, keys) in file {
+                if id == "export" {
+                    self.export_x = x;
+                }
+                let r = tbtn_on(ui, &mut x, cy, Some(glyph), "", id, true, id == "export" && self.export_menu);
+                self.hits.insert(id.into(), r.rect);
+                if r.hovered() && !(id == "export" && self.export_menu) {
+                    tip = Some((r.rect, label, keys));
+                }
+                if r.clicked() {
+                    match id {
+                        "new" => self.request_new(),
+                        "open" => self.actions.push(Action::Open),
+                        "save" => self.actions.push(Action::Save),
+                        _ => self.export_menu = !self.export_menu,
+                    }
+                }
             }
-            x += 4.0;
-            let r = tbtn(ui, &mut x, cy, Some(icon::FOLDER_OPEN), "Open .vox", "open", true);
-            self.hits.insert("open".into(), r.rect);
-            if r.clicked() {
-                self.actions.push(Action::Open);
+            sep(ui, &mut x);
+            // #history, moved up from its own card.
+            for (id, glyph, label, keys, enabled, action) in [
+                ("undo", icon::UNDO, "Undo", &["⌘", "Z"][..], self.can_undo, Action::Undo),
+                ("redo", icon::REDO, "Redo", &["⌘", "⇧", "Z"][..], self.can_redo, Action::Redo),
+            ] {
+                let r = tbtn(ui, &mut x, cy, Some(glyph), "", id, enabled);
+                self.hits.insert(id.into(), r.rect);
+                if r.hovered() {
+                    tip = Some((r.rect, label, keys));
+                }
+                if r.clicked() {
+                    self.actions.push(action);
+                }
             }
-            x += 4.0;
-            let r = tbtn(ui, &mut x, cy, Some(icon::DOWNLOAD), "Save .vox", "save", true);
-            self.hits.insert("save".into(), r.rect);
-            if r.clicked() {
-                self.actions.push(Action::Save);
-            }
-            x += 4.0;
-            self.export_x = x;
-            let r = tbtn_on(ui, &mut x, cy, Some(icon::FILE_OUTPUT), "Export", "export", true, self.export_menu);
-            self.hits.insert("export".into(), r.rect);
-            if r.clicked() {
-                self.export_menu = !self.export_menu;
-            }
-            // Right side, laid out from the right edge.
-            let embed_label =
-                ui.painter().layout_no_wrap("Embed".into(), inter_semibold(13.0), Color32::from_rgb(0x0d, 0x10, 0x20));
-            let ew = 10.0 + 16.0 + 6.0 + embed_label.size().x + 10.0;
-            let embed = Rect::from_min_size(pos2(rect.right() - 6.0 - ew, cy - 16.0), vec2(ew, 32.0));
+        });
+        if let Some((at, label, keys)) = tip {
+            // Below the button: above it is the window's edge.
+            tooltip(ctx, at, label, keys, Some((Rect::from_min_max(pos2(-1e6, -1e6), pos2(1e6, at.top())), true)));
+        }
+        // The right island, laid out from the right edge.
+        let embed_label = ctx.fonts_mut(|f| f.layout_no_wrap("Embed".into(), sans_semibold(13.0), ON_ACCENT));
+        let ew = 10.0 + 16.0 + 6.0 + embed_label.size().x + 10.0;
+        let rw = 4.0 + 36.0 + 4.0 + 36.0 + 4.0 + ew + 4.0;
+        let right = Rect::from_min_size(pos2(screen.right() - 12.0 - rw, 12.0), vec2(rw, 40.0));
+        Self::panel(ctx, "top-right", right, Order::Middle, |ui, rect| {
+            let cy = rect.center().y;
+            let embed = Rect::from_min_size(pos2(rect.right() - 4.0 - ew, cy - 16.0), vec2(ew, 32.0));
             let resp = ui.interact(embed, Id::unique("embed"), Sense::click());
-            let fill = if resp.hovered() { Color32::from_rgb(0xa6, 0xb6, 0xff) } else { ACCENT };
+            let fill = if resp.hovered() { ACCENT_HOVER } else { ACCENT };
             let p = ui.painter();
             p.rect_filled(embed, CornerRadius::same(8), fill);
-            let ink = Color32::from_rgb(0x0d, 0x10, 0x20);
-            p.text(pos2(embed.left() + 18.0, cy), Align2::CENTER_CENTER, icon::CODE, icon_font(16.0), ink);
-            p.galley(pos2(embed.left() + 32.0, cy - embed_label.size().y / 2.0), embed_label, ink);
+            p.text(pos2(embed.left() + 18.0, cy), Align2::CENTER_CENTER, icon::CODE, icon_font(16.0), ON_ACCENT);
+            p.galley(pos2(embed.left() + 32.0, cy - embed_label.size().y / 2.0), embed_label, ON_ACCENT);
             if resp.clicked() {
                 self.actions.push(Action::Embed);
             }
@@ -1369,12 +1430,11 @@ impl Hybrid {
 
     // #rail
     fn rail(&mut self, ctx: &Context) {
-        let h = 6.0 + rail_label_h() + 5.0 * 42.0 + 11.0 + rail_label_h() + 5.0 * 42.0 + 11.0 + 2.0 * 42.0 + 6.0 - 2.0;
-        let rect = Rect::from_min_size(pos2(12.0, 68.0), vec2(52.0, h));
+        let h = 6.0 + 5.0 * TOOL_STEP + 9.0 + 5.0 * TOOL_STEP + 9.0 + 2.0 * TOOL_STEP + 6.0 - 2.0;
+        let rect = Rect::from_min_size(pos2(12.0, TOP), vec2(RAIL_W, h));
         Self::panel(ctx, "rail", rect, Order::Middle, |ui, rect| {
             let x = rect.left() + 6.0;
             let mut y = rect.top() + 6.0;
-            rail_label(ui, rect, &mut y, "TOOL");
             let tool = self.tool;
             for (t, ic, k) in [
                 (Tool::Add, icon::BOX, "A"),
@@ -1393,10 +1453,9 @@ impl Hybrid {
                 if r.clicked() {
                     self.tool = t;
                 }
-                y += 42.0;
+                y += TOOL_STEP;
             }
             rail_sep(ui, rect, &mut y);
-            rail_label(ui, rect, &mut y, "BRUSH");
             let shape = self.shape;
             for (s, ic, k) in [
                 (Shape::Voxel, icon::POINTER, "V"),
@@ -1416,7 +1475,7 @@ impl Hybrid {
                         self.shape = s;
                     }
                 }
-                y += 42.0;
+                y += TOOL_STEP;
             }
             // One button for the center brush; its icon shows circle or sphere.
             let center = matches!(shape, Shape::Circle | Shape::Sphere);
@@ -1426,7 +1485,7 @@ impl Hybrid {
             if r.clicked() {
                 self.center_brush();
             }
-            y += 42.0;
+            y += TOOL_STEP;
             rail_sep(ui, rect, &mut y);
             self.axes_y = y;
             let r = tool_button(ui, pos2(x, y), icon::FLIP, "M", self.mirror);
@@ -1434,7 +1493,7 @@ impl Hybrid {
             if r.clicked() {
                 self.mirror = !self.mirror;
             }
-            y += 42.0;
+            y += TOOL_STEP;
             let r = tool_button(ui, pos2(x, y), icon::LOCK, "K", self.lock.is_some());
             self.hits.insert("lock".into(), r.rect);
             if r.clicked() {
@@ -1460,7 +1519,7 @@ impl Hybrid {
         let layers: &[LayerRow] = if world { &self.layers } else { &[] };
         let layers_h = if world { 1.0 + 30.0 + layers.len() as f32 * row_h } else { 0.0 };
         let rect = Rect::from_min_size(
-            pos2(12.0 + 52.0 + 8.0, 68.0),
+            pos2(12.0 + RAIL_W + 8.0, TOP),
             vec2(TREE_W, 36.0 + rows as f32 * row_h + layers_h + 6.0),
         );
         let objects = self.tree.iter().filter(|r| !r.group).count();
@@ -1474,7 +1533,7 @@ impl Hybrid {
         let mut wheel = 0.0;
         Self::panel(ctx, "tree", rect, Order::Middle, |ui, rect| {
             let header = |ui: &egui::Ui, y: f32, title: &str| {
-                let g = ui.painter().layout_job(spaced(title, inter(9.0), FAINT, 0.72));
+                let g = ui.painter().layout_job(spaced(title, sans(9.0), FAINT, 0.72));
                 ui.painter().galley(pos2(rect.left() + 12.0, y - g.size().y / 2.0), g, FAINT);
             };
             let hy = rect.top() + 18.0;
@@ -1483,7 +1542,7 @@ impl Hybrid {
                 pos2(rect.right() - 12.0, hy),
                 Align2::RIGHT_CENTER,
                 format!("{objects} objects"),
-                inter(11.0),
+                sans(11.0),
                 FAINT,
             );
             let body = Rect::from_min_size(
@@ -1646,7 +1705,7 @@ impl Hybrid {
     fn row_name(ui: &egui::Ui, name_r: Rect, r: Rect, name: &str, color: Color32) {
         let mut job = LayoutJob::single_section(
             name.to_string(),
-            TextFormat { font_id: inter(12.0), color, ..Default::default() },
+            TextFormat { font_id: sans(12.0), color, ..Default::default() },
         );
         job.wrap = egui::text::TextWrapping {
             max_width: name_r.width().max(1.0),
@@ -1677,17 +1736,17 @@ impl Hybrid {
             name_r.expand2(vec2(4.0, 0.0)),
             CornerRadius::same(6),
             Color32::from_white_alpha(9),
-            Stroke::new(1.0, Color32::from_rgba_unmultiplied(142, 162, 255, 140)),
+            Stroke::new(1.0, RING),
             StrokeKind::Inside,
         );
         let edit = egui::TextEdit::singleline(text)
             .id(Id::unique("tree-rename"))
-            .font(inter(12.0))
+            .font(sans(12.0))
             .text_color(TEXT)
             .frame(egui::Frame::NONE)
             .margin(egui::Margin::ZERO)
             .desired_width(name_r.width());
-        let line = ui.fonts_mut(|f| f.row_height(&inter(12.0)));
+        let line = ui.fonts_mut(|f| f.row_height(&sans(12.0)));
         let text_r = Rect::from_center_size(name_r.center(), vec2(name_r.width(), line));
         let out = ui.put(text_r, edit);
         if std::mem::take(focus) {
@@ -1717,7 +1776,7 @@ impl Hybrid {
         let mut hits = Vec::new();
         Self::panel(ctx, "export-menu", rect, Order::Foreground, |ui, rect| {
             let hy = rect.top() + 18.0;
-            let g = ui.painter().layout_job(spaced("EXPORT", inter(9.0), FAINT, 0.72));
+            let g = ui.painter().layout_job(spaced("EXPORT", sans(9.0), FAINT, 0.72));
             ui.painter().galley(pos2(rect.left() + 12.0, hy - g.size().y / 2.0), g, FAINT);
             for (k, (id, glyph, label, hint)) in rows.into_iter().enumerate() {
                 let r = Rect::from_min_size(
@@ -1735,7 +1794,7 @@ impl Hybrid {
                 };
                 let cy = r.center().y;
                 p.text(pos2(r.left() + 16.0, cy), Align2::CENTER_CENTER, glyph, icon_font(15.0), color);
-                p.text(pos2(r.left() + 32.0, cy), Align2::LEFT_CENTER, label, inter(13.0), TEXT);
+                p.text(pos2(r.left() + 32.0, cy), Align2::LEFT_CENTER, label, sans(13.0), TEXT);
                 if hint.len() == 1 {
                     kbd(ui, pos2(r.right() - 8.0, cy), hint, true);
                 } else {
@@ -1769,8 +1828,8 @@ impl Hybrid {
 
     // The View flyout of the camera bar: the projection (perspective, orthographic,
     // isometric) and the six side views with their number keys. It opens below the bar (over
-    // the render corner) if it ends above the undo/redo buttons, else above the bar if it
-    // clears the palette, else left of the bar, always on screen. The view the camera is at
+    // the render corner) if it fits on screen, else above the bar if it clears the palette,
+    // else left of the bar and the palette, always on screen. The view the camera is at
     // shows on.
     fn view_panel(&mut self, ctx: &Context, screen: Rect) {
         if !self.view_panel {
@@ -1778,19 +1837,22 @@ impl Hybrid {
         }
         let size = vec2(204.0, 176.0);
         let palette_bottom = self.hits.get("palette").map_or(screen.top(), |r| r.bottom());
-        let history_top = Self::history_rect(screen).top();
+        let floor = screen.bottom() - 12.0;
         let nav = self.hits.get("nav").copied().unwrap_or(Rect::from_min_size(screen.right_bottom(), egui::Vec2::ZERO));
         let right = nav.right().min(screen.right() - 12.0);
         let below = Rect::from_min_size(pos2(right - size.x, nav.bottom() + 8.0), size);
         let above = Rect::from_min_size(pos2(right - size.x, nav.top() - 8.0 - size.y), size);
-        let rect = if below.bottom() <= history_top - 8.0 {
+        let rect = if below.bottom() <= floor {
             below
         } else if above.top() >= palette_bottom + 8.0 {
             above
         } else {
-            // A short window: left of the bar, bottom-aligned with it, kept on screen.
-            let top = (nav.bottom() - size.y).clamp(68.0, (screen.bottom() - 12.0 - size.y).max(68.0));
-            Rect::from_min_size(pos2((nav.left() - 8.0 - size.x).max(screen.left() + 12.0), top), size)
+            // A short window: left of the bar, bottom-aligned with it, kept on screen and left of
+            // the palette when it would reach up beside it.
+            let top = (nav.bottom() - size.y).clamp(TOP, (screen.bottom() - 12.0 - size.y).max(TOP));
+            let palette = self.hits.get("palette").copied().filter(|p| p.bottom() + 8.0 > top);
+            let right = palette.map_or(nav.left(), |p| nav.left().min(p.left()));
+            Rect::from_min_size(pos2((right - 8.0 - size.x).max(screen.left() + 12.0), top), size)
         };
         self.view_flyout(ctx, rect);
     }
@@ -1807,7 +1869,7 @@ impl Hybrid {
             // click, not the corner.
             ui.allocate_rect(rect, Sense::click());
             let hy = rect.top() + 16.0;
-            let g = ui.painter().layout_job(spaced("VIEW", inter(9.0), FAINT, 0.72));
+            let g = ui.painter().layout_job(spaced("VIEW", sans(9.0), FAINT, 0.72));
             ui.painter().galley(pos2(rect.left() + 12.0, hy - g.size().y / 2.0), g, FAINT);
             let x = Rect::from_center_size(pos2(rect.right() - 19.0, hy), vec2(22.0, 22.0));
             let resp = ui.interact(x, Id::unique("view-close"), Sense::click());
@@ -1822,7 +1884,7 @@ impl Hybrid {
                 pos2(x.left() - 4.0, hy),
                 Align2::RIGHT_CENTER,
                 view.map_or("Free", |v| v.name()),
-                inter(11.0),
+                sans(11.0),
                 FAINT,
             );
             let iso = view == Some(View::Iso);
@@ -1831,7 +1893,7 @@ impl Hybrid {
             let mut seg = Vec::new();
             let labels = ["Persp", "Ortho", "Iso"].map(String::from);
             let names = ["view-persp", "view-ortho", "view-iso"];
-            match segmented(ui, row, &names, &labels, sel, &[true; 3], inter(11.0), &mut seg) {
+            match segmented(ui, row, &names, &labels, sel, &[true; 3], sans(11.0), &mut seg) {
                 Some(0) => run.push(Action::Ortho(false)),
                 Some(1) if iso || !ortho => run.push(Action::Ortho(true)),
                 Some(2) => run.push(Action::Snap(View::Iso)),
@@ -1890,7 +1952,7 @@ impl Hybrid {
         let mut hits = Vec::new();
         Self::panel(ctx, "size", rect, Order::Middle, |ui, rect| {
             let cy = rect.center().y;
-            let g = ui.painter().layout_job(spaced("SIZE", inter(9.0), FAINT, 0.72));
+            let g = ui.painter().layout_job(spaced("SIZE", sans(9.0), FAINT, 0.72));
             ui.painter().galley(pos2(rect.left() + 12.0, cy - g.size().y / 2.0), g, FAINT);
             for (k, (id, glyph, d)) in
                 [("size-minus", icon::MINUS, -1), ("size-plus", icon::PLUS, 1)].into_iter().enumerate()
@@ -1941,7 +2003,7 @@ impl Hybrid {
         Self::panel(ctx, "axes", rect, Order::Middle, |ui, rect| {
             for (row, label) in ["MIRROR", "LOCK"].into_iter().enumerate() {
                 let cy = rect.top() + 6.0 + 20.0 + row as f32 * 42.0;
-                let g = ui.painter().layout_job(spaced(label, inter(9.0), FAINT, 0.72));
+                let g = ui.painter().layout_job(spaced(label, sans(9.0), FAINT, 0.72));
                 ui.painter().galley(pos2(rect.left() + 12.0, cy - g.size().y / 2.0), g, FAINT);
                 for (a, name) in ["X", "Y", "Z"].into_iter().enumerate() {
                     let on = if row == 0 { mirror[a] } else { lock == Some(a) };
@@ -1952,13 +2014,7 @@ impl Hybrid {
                     hits.push((id, c));
                     let p = ui.painter();
                     let color = if on {
-                        p.rect(
-                            c,
-                            CornerRadius::same(7),
-                            ACCENT_BG,
-                            Stroke::new(1.0, Color32::from_rgba_unmultiplied(142, 162, 255, 89)),
-                            StrokeKind::Inside,
-                        );
+                        p.rect(c, CornerRadius::same(7), ACCENT_BG, Stroke::new(1.0, RING), StrokeKind::Inside);
                         ACCENT
                     } else {
                         let hover = resp.hovered();
@@ -2010,7 +2066,7 @@ impl Hybrid {
         let mut hits = Vec::new();
         Self::panel(ctx, "selection", rect, Order::Middle, |ui, rect| {
             let hy = rect.top() + 18.0;
-            let g = ui.painter().layout_job(spaced("SELECTION", inter(9.0), FAINT, 0.72));
+            let g = ui.painter().layout_job(spaced("SELECTION", sans(9.0), FAINT, 0.72));
             ui.painter().galley(pos2(rect.left() + 12.0, hy - g.size().y / 2.0), g, FAINT);
             if selected > 0 {
                 let x = Rect::from_center_size(pos2(rect.right() - 19.0, hy), vec2(22.0, 22.0));
@@ -2036,13 +2092,13 @@ impl Hybrid {
                     pos2(rect.right() - 12.0, hy),
                     Align2::RIGHT_CENTER,
                     "whole model",
-                    inter(11.0),
+                    sans(11.0),
                     FAINT,
                 );
             }
             for (row, label) in ["ROTATE", "FLIP", "LOOP"].into_iter().enumerate() {
                 let cy = hy + 30.0 + row as f32 * 34.0;
-                let g = ui.painter().layout_job(spaced(label, inter(9.0), FAINT, 0.72));
+                let g = ui.painter().layout_job(spaced(label, sans(9.0), FAINT, 0.72));
                 ui.painter().galley(pos2(rect.left() + 12.0, cy - g.size().y / 2.0), g, FAINT);
                 for (a, name) in ["X", "Y", "Z"].into_iter().enumerate() {
                     let c =
@@ -2091,10 +2147,10 @@ impl Hybrid {
                 let (hover, on) = (resp.hovered(), action.is_none() && bounds_open);
                 let p = ui.painter();
                 if on {
-                    p.rect_filled(c, CornerRadius::same(7), Color32::from_rgba_unmultiplied(142, 162, 255, 26));
+                    p.rect_filled(c, CornerRadius::same(7), ACCENT_TINT);
                 }
                 let border = if on {
-                    Color32::from_rgba_unmultiplied(142, 162, 255, 140)
+                    RING
                 } else if hover {
                     Color32::from_white_alpha(64)
                 } else {
@@ -2102,7 +2158,7 @@ impl Hybrid {
                 };
                 p.rect_stroke(c, CornerRadius::same(7), Stroke::new(1.0, border), StrokeKind::Inside);
                 let color = if hover || on { TEXT } else { MUTED };
-                p.text(c.center(), Align2::CENTER_CENTER, label, inter(11.0), color);
+                p.text(c.center(), Align2::CENTER_CENTER, label, sans(11.0), color);
                 if resp.clicked() {
                     match action {
                         Some(a) => run.push(a),
@@ -2117,7 +2173,7 @@ impl Hybrid {
             let names = ["click-color", "click-face", "click-volume"];
             let regions = [Region::Color, Region::Face, Region::Volume];
             let on = regions.iter().position(|&r| r == region).unwrap_or(0);
-            if let Some(k) = segmented(ui, row, &names, &labels, on, &[true; 3], inter(10.5), &mut seg) {
+            if let Some(k) = segmented(ui, row, &names, &labels, on, &[true; 3], sans(10.5), &mut seg) {
                 region = regions[k];
             }
             hits.extend(seg.into_iter().map(|(n, r)| (n.to_string(), r)));
@@ -2189,29 +2245,29 @@ impl Hybrid {
         let mut hits = Vec::new();
         let (mut cancel, mut discard) = (false, false);
         Self::panel(ctx, "new-confirm", rect, Order::Foreground, |ui, rect| {
-            let title = ui.painter().layout_no_wrap("Start a new scene?".into(), inter_semibold(13.0), TEXT);
+            let title = ui.painter().layout_no_wrap("Start a new scene?".into(), sans_semibold(13.0), TEXT);
             ui.painter().galley(pos2(rect.left() + 16.0, rect.top() + 16.0), title, TEXT);
             let mut job = LayoutJob::default();
             job.append(
                 "The edits to this scene are not saved and will be lost.",
                 0.0,
-                TextFormat { font_id: inter(12.0), color: MUTED, line_height: Some(17.0), ..Default::default() },
+                TextFormat { font_id: sans(12.0), color: MUTED, line_height: Some(17.0), ..Default::default() },
             );
             job.wrap.max_width = w - 32.0;
             let note = ui.fonts_mut(|f| f.layout_job(job));
             ui.painter().galley(pos2(rect.left() + 16.0, rect.top() + 40.0), note, MUTED);
             let by = rect.bottom() - 16.0 - 32.0;
-            let ink = Color32::from_rgb(0x0d, 0x10, 0x20);
-            let label = ui.painter().layout_no_wrap("Start new".into(), inter_semibold(13.0), ink);
+            let ink = ON_ACCENT;
+            let label = ui.painter().layout_no_wrap("Start new".into(), sans_semibold(13.0), ink);
             let dw = label.size().x + 28.0;
             let d = Rect::from_min_size(pos2(rect.right() - 16.0 - dw, by), vec2(dw, 32.0));
             let resp = ui.interact(d, Id::unique("new-discard"), Sense::click());
-            let fill = if resp.hovered() { Color32::from_rgb(0xa6, 0xb6, 0xff) } else { ACCENT };
+            let fill = if resp.hovered() { ACCENT_HOVER } else { ACCENT };
             ui.painter().rect_filled(d, CornerRadius::same(8), fill);
             ui.painter().galley(pos2(d.left() + 14.0, d.center().y - label.size().y / 2.0), label, ink);
             discard = resp.clicked();
             hits.push(("new-discard".to_string(), d));
-            let cl = ui.painter().layout_no_wrap("Cancel".into(), inter(13.0), MUTED);
+            let cl = ui.painter().layout_no_wrap("Cancel".into(), sans(13.0), MUTED);
             let cw = cl.size().x + 28.0;
             let c = Rect::from_min_size(pos2(d.left() - 6.0 - cw, by), vec2(cw, 32.0));
             let resp = ui.interact(c, Id::unique("new-cancel"), Sense::click());
@@ -2244,7 +2300,7 @@ impl Hybrid {
         job.append(
             "Keeps the bottom and the center. Erases the voxels outside.",
             0.0,
-            TextFormat { font_id: inter(11.0), color: FAINT, line_height: Some(15.95), ..Default::default() },
+            TextFormat { font_id: sans(11.0), color: FAINT, line_height: Some(15.95), ..Default::default() },
         );
         job.wrap.max_width = inner_w;
         let note = ctx.fonts_mut(|f| f.layout_job(job));
@@ -2257,7 +2313,7 @@ impl Hybrid {
         let mut hits = Vec::new();
         Self::panel(ctx, "bounds", rect, Order::Middle, |ui, rect| {
             let hy = rect.top() + 18.0;
-            let g = ui.painter().layout_job(spaced("BOUNDS", inter(9.0), FAINT, 0.72));
+            let g = ui.painter().layout_job(spaced("BOUNDS", sans(9.0), FAINT, 0.72));
             ui.painter().galley(pos2(rect.left() + 12.0, hy - g.size().y / 2.0), g, FAINT);
             let x = Rect::from_center_size(pos2(rect.right() - 19.0, hy), vec2(22.0, 22.0));
             let resp = ui.interact(x, Id::unique("bounds-close"), Sense::click());
@@ -2321,7 +2377,7 @@ impl Hybrid {
         };
         let w = 304.0;
         let inner_w = w - 24.0;
-        let x = (screen.right() - 12.0 - 232.0 - 8.0 - w).max(76.0);
+        let x = (screen.right() - 12.0 - PALETTE_W - 8.0 - w).max(12.0 + RAIL_W + 12.0);
         let wrapped = |text: &str, font: FontId, color: Color32, rows: usize| {
             let mut job = LayoutJob::single_section(
                 text.to_string(),
@@ -2335,8 +2391,8 @@ impl Hybrid {
             };
             ctx.fonts_mut(|f| f.layout_job(job))
         };
-        let prompt = wrapped(&card.prompt, inter_semibold(13.0), TEXT, 3);
-        let summary = card.summary.as_deref().filter(|s| !s.is_empty()).map(|s| wrapped(s, inter(12.0), MUTED, 2));
+        let prompt = wrapped(&card.prompt, sans_semibold(13.0), TEXT, 3);
+        let summary = card.summary.as_deref().filter(|s| !s.is_empty()).map(|s| wrapped(s, sans(12.0), MUTED, 2));
         let held_text = card.held.map(|(asked, most)| {
             let mut job = LayoutJob::default();
             job.append(
@@ -2346,7 +2402,7 @@ impl Hybrid {
                     group_thousands(most as u64)
                 ),
                 0.0,
-                TextFormat { font_id: inter(12.0), color: TEXT, line_height: Some(17.0), ..Default::default() },
+                TextFormat { font_id: sans(12.0), color: TEXT, line_height: Some(17.0), ..Default::default() },
             );
             job.wrap.max_width = inner_w - 20.0 - 20.0;
             ctx.fonts_mut(|f| f.layout_job(job))
@@ -2415,12 +2471,12 @@ impl Hybrid {
         // fewer steps show (the list scrolls), down to two.
         let below = [self.render_dock.filter(|_| !self.full_render), self.nav_rect];
         if let Some(top) = below.into_iter().flatten().filter(|c| c.left() < x + w).map(|c| c.top()).reduce(f32::min) {
-            while rows > 2 && 68.0 + h > top - 8.0 {
+            while rows > 2 && TOP + h > top - 8.0 {
                 rows -= 1;
                 h -= row_h;
             }
         }
-        let rect = Rect::from_min_size(pos2(x, 68.0), vec2(w, h));
+        let rect = Rect::from_min_size(pos2(x, TOP), vec2(w, h));
         let mut hits: Vec<(String, Rect)> = Vec::new();
         let mut actions = Vec::new();
         let mut scroll = self.review_scroll.min(card.steps.len().saturating_sub(rows));
@@ -2434,7 +2490,7 @@ impl Hybrid {
             // Header: AI CHANGE, and how many steps.
             let hy = inner.top() + 7.5;
             p.text(pos2(inner.left() + 6.0, hy), Align2::CENTER_CENTER, icon::SPARKLES, icon_font(13.0), ACCENT);
-            let g = p.layout_job(spaced("AI CHANGE", inter_semibold(11.0), MUTED, 0.88));
+            let g = p.layout_job(spaced("AI CHANGE", sans_semibold(11.0), MUTED, 0.88));
             p.galley(pos2(inner.left() + 18.0, hy - g.size().y / 2.0), g, MUTED);
             let n = card.steps.len();
             let right = if card.before {
@@ -2464,7 +2520,7 @@ impl Hybrid {
                     pos2(inner.left() + 14.0, y + 8.5),
                     Align2::LEFT_CENTER,
                     format!("{w}{dots}"),
-                    inter(12.0),
+                    sans(12.0),
                     MUTED,
                 );
                 ui.ctx().request_repaint();
@@ -2509,14 +2565,14 @@ impl Hybrid {
                     };
                     let sx = r.left() + 62.0;
                     sw(sx, c.old);
-                    p.text(pos2(sx + 23.0, cy), Align2::CENTER_CENTER, "→", inter(11.0), FAINT);
+                    p.text(pos2(sx + 23.0, cy), Align2::CENTER_CENTER, "→", sans(11.0), FAINT);
                     sw(sx + 32.0, c.new);
                     if c.old != c.new {
                         let hex = format!("#{:02X}{:02X}{:02X}", c.new[0], c.new[1], c.new[2]);
                         p.text(pos2(sx + 54.0, cy), Align2::LEFT_CENTER, hex, mono(11.0), TEXT);
                     }
                     if let Some(m) = &c.material {
-                        p.text(pos2(r.right(), cy), Align2::RIGHT_CENTER, m, inter(11.5), MUTED);
+                        p.text(pos2(r.right(), cy), Align2::RIGHT_CENTER, m, sans(11.5), MUTED);
                     }
                     hits.push((format!("review-slot-{}", c.slot), r));
                     y += slot_h;
@@ -2527,13 +2583,7 @@ impl Hybrid {
                 y += 10.0;
                 let gh = g.size().y;
                 let b = Rect::from_min_size(pos2(inner.left(), y), vec2(inner_w, 12.0 + gh + 10.0 + 26.0 + 12.0));
-                p.rect(
-                    b,
-                    CornerRadius::same(8),
-                    Color32::from_rgba_unmultiplied(255, 209, 102, 20),
-                    Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 209, 102, 90)),
-                    StrokeKind::Inside,
-                );
+                p.rect(b, CornerRadius::same(8), MID_BG, Stroke::new(1.0, MID_LINE), StrokeKind::Inside);
                 p.text(
                     pos2(b.left() + 10.0 + 7.0, b.top() + 12.0 + 8.5),
                     Align2::CENTER_CENTER,
@@ -2558,7 +2608,7 @@ impl Hybrid {
             // The steps, each with a checkbox that drops it from the change.
             if rows > 0 {
                 y += 14.0;
-                let g = p.layout_job(spaced("STEPS", inter(9.0), FAINT, 0.72));
+                let g = p.layout_job(spaced("STEPS", sans(9.0), FAINT, 0.72));
                 p.galley(pos2(inner.left(), y + 6.0 - g.size().y / 2.0), g, FAINT);
                 let kept = card.steps.iter().filter(|s| s.ok && !s.dropped).count();
                 p.text(pos2(inner.right(), y + 6.0), Align2::RIGHT_CENTER, format!("{kept} kept"), mono(10.0), FAINT);
@@ -2587,13 +2637,7 @@ impl Hybrid {
                         p.rect_stroke(cb, CornerRadius::same(4), Stroke::new(1.0, LINE2), StrokeKind::Inside);
                     } else {
                         p.rect_filled(cb, CornerRadius::same(4), ACCENT);
-                        p.text(
-                            cb.center(),
-                            Align2::CENTER_CENTER,
-                            icon::CHECK,
-                            icon_font(11.0),
-                            Color32::from_rgb(0x0d, 0x10, 0x20),
-                        );
+                        p.text(cb.center(), Align2::CENTER_CENTER, icon::CHECK, icon_font(11.0), ON_ACCENT);
                     }
                     let kept = st.ok && !st.dropped;
                     let tool_c = if kept { TEXT } else { FAINT };
@@ -2611,7 +2655,7 @@ impl Hybrid {
                     };
                     let mut job = LayoutJob::single_section(
                         st.detail.clone(),
-                        TextFormat { font_id: inter(11.5), color: detail_c, ..Default::default() },
+                        TextFormat { font_id: sans(11.5), color: detail_c, ..Default::default() },
                     );
                     job.wrap = egui::text::TextWrapping {
                         max_width: (r.right() - 6.0 - dx).max(1.0),
@@ -2623,10 +2667,7 @@ impl Hybrid {
                     p.galley(pos2(dx, r.center().y - dg.size().y / 2.0), dg, detail_c);
                     if st.dropped {
                         let end = dx
-                            + p.layout_no_wrap(st.detail.clone(), inter(11.5), FAINT)
-                                .size()
-                                .x
-                                .min(r.right() - 6.0 - dx);
+                            + p.layout_no_wrap(st.detail.clone(), sans(11.5), FAINT).size().x.min(r.right() - 6.0 - dx);
                         p.line_segment([pos2(tx, r.center().y), pos2(end, r.center().y)], Stroke::new(1.0, FAINT));
                     }
                     if st.droppable && resp.clicked() {
@@ -2646,7 +2687,7 @@ impl Hybrid {
                 &["Before".to_string(), "After".to_string()],
                 if card.before { 0 } else { 1 },
                 &[true, true],
-                inter(12.0),
+                sans(12.0),
                 &mut seg_hits,
             ) {
                 actions.push(Action::ReviewBefore(k == 0));
@@ -2657,7 +2698,7 @@ impl Hybrid {
             let fr = Rect::from_min_size(pos2(inner.left(), y), vec2(inner_w, 30.0));
             let id = Id::unique("review-ask");
             let focused = ui.memory(|m| m.has_focus(id));
-            let border = if focused { Color32::from_rgba_unmultiplied(142, 162, 255, 140) } else { LINE };
+            let border = if focused { RING } else { LINE };
             p.rect(
                 fr,
                 CornerRadius::same(7),
@@ -2677,7 +2718,7 @@ impl Hybrid {
                     pos2(fr.left() + 10.0, fr.center().y),
                     Align2::LEFT_CENTER,
                     "Ask for changes…",
-                    inter(12.0),
+                    sans(12.0),
                     FAINT,
                 );
             }
@@ -2685,7 +2726,7 @@ impl Hybrid {
                 Rect::from_min_max(pos2(fr.left() + 10.0, fr.top() + 7.0), pos2(fr.right() - 30.0, fr.bottom() - 7.0));
             let edit = egui::TextEdit::singleline(&mut ask)
                 .id(id)
-                .font(inter(12.0))
+                .font(sans(12.0))
                 .text_color(TEXT)
                 .frame(egui::Frame::NONE)
                 .margin(egui::Margin::ZERO)
@@ -2698,13 +2739,13 @@ impl Hybrid {
             }
             y += 30.0 + 12.0;
             // Discard (Escape) and Apply (Enter).
-            let ink = Color32::from_rgb(0x0d, 0x10, 0x20);
-            let label = p.layout_no_wrap("Apply".into(), inter_semibold(13.0), ink);
+            let ink = ON_ACCENT;
+            let label = p.layout_no_wrap("Apply".into(), sans_semibold(13.0), ink);
             let kw = ui.painter().layout_no_wrap("↵".into(), mono_medium(10.5), MUTED).size().x.max(8.0) + 10.0;
             let aw = label.size().x + 28.0 + kw + 8.0;
             let a = Rect::from_min_size(pos2(inner.right() - aw, y), vec2(aw, 32.0));
             let resp = ui.interact(a, Id::unique("review-apply"), Sense::click());
-            let fill = if resp.hovered() { Color32::from_rgb(0xa6, 0xb6, 0xff) } else { ACCENT };
+            let fill = if resp.hovered() { ACCENT_HOVER } else { ACCENT };
             p.rect_filled(a, CornerRadius::same(8), fill);
             p.galley(pos2(a.left() + 14.0, a.center().y - label.size().y / 2.0), label, ink);
             let kr = Rect::from_min_size(pos2(a.right() - 14.0 - kw, a.center().y - 9.5), vec2(kw, 19.0));
@@ -2714,7 +2755,7 @@ impl Hybrid {
                 actions.push(Action::ApplyReview);
             }
             hits.push(("review-apply".into(), a));
-            let dl = p.layout_no_wrap("Discard".into(), inter(13.0), MUTED);
+            let dl = p.layout_no_wrap("Discard".into(), sans(13.0), MUTED);
             let ew = p.layout_no_wrap("esc".into(), mono_medium(10.5), MUTED).size().x + 10.0;
             let dw = dl.size().x + 28.0 + ew + 8.0;
             let d = Rect::from_min_size(pos2(a.left() - 6.0 - dw, y), vec2(dw, 32.0));
@@ -2762,74 +2803,88 @@ impl Hybrid {
     fn marquee(&self, ctx: &Context) {
         if let Some(r) = self.marquee {
             let p = ctx.layer_painter(egui::LayerId::new(Order::Background, Id::unique("marquee")));
-            p.rect(
-                r,
-                CornerRadius::same(2),
-                Color32::from_rgba_unmultiplied(142, 162, 255, 26),
-                Stroke::new(1.0, ACCENT),
-                StrokeKind::Inside,
-            );
+            p.rect(r, CornerRadius::same(2), ACCENT_TINT, Stroke::new(1.0, ACCENT), StrokeKind::Inside);
         }
     }
 
     // #palette
     fn palette_panel(&mut self, ctx: &Context, screen: Rect) {
         let used_count = self.used.iter().skip(1).filter(|u| **u).count();
-        let rect = Rect::from_min_size(pos2(screen.right() - 12.0 - 232.0, 68.0), vec2(232.0, PALETTE_H));
+        // The colours in the scene (and the current one), or every slot: when asked, while a
+        // swap or copy waits for its target, and while the scene has no colour yet.
+        let all = self.palette_all || self.slot_op.is_some() || used_count == 0;
+        let slots: Vec<u8> = (1..=255u8).filter(|&i| all || self.used[i as usize] || i == self.slot).collect();
+        let rows = (slots.len() as f32 / 8.0).ceil();
+        let view_h = rows.min(SWATCH_ROWS) * SWATCH_STEP + 2.0;
+        let h = 12.0 + 20.0 + 8.0 + 38.0 + 10.0 + view_h + 10.0;
+        let rect = Rect::from_min_size(pos2(screen.right() - 12.0 - PALETTE_W, TOP), vec2(PALETTE_W, h));
         self.hits.insert("palette".into(), rect);
+        let mut set_all = None;
         Self::panel(ctx, "palette", rect, Order::Middle, |ui, rect| {
             let inner = rect.shrink(12.0);
             let p = ui.painter().clone();
-            // .ph
-            let hy = inner.top() + 7.5;
-            let g = ui.painter().layout_job(spaced("PALETTE", inter_semibold(11.0), MUTED, 0.88));
+            // .ph, with the Used / All toggle.
+            let hy = inner.top() + 10.0;
+            let g = ui.painter().layout_job(spaced("PALETTE", sans_semibold(10.5), MUTED, 0.84));
             p.galley(pos2(inner.left(), hy - g.size().y / 2.0), g, MUTED);
-            p.text(pos2(inner.right(), hy), Align2::RIGHT_CENTER, format!("{used_count} used"), mono(11.0), FAINT);
-            // #current
-            let cur = Rect::from_min_size(pos2(inner.left(), inner.top() + 25.0), vec2(inner.width(), 52.0));
+            let mut x = inner.right();
+            for (id, label, on) in
+                [("palette-all", "All".to_string(), all), ("palette-used", format!("Used {used_count}"), !all)]
+            {
+                let g = p.layout_no_wrap(label, sans_medium(10.5), if on { TEXT } else { FAINT });
+                let r = Rect::from_min_size(pos2(x - g.size().x - 12.0, hy - 10.0), vec2(g.size().x + 12.0, 20.0));
+                x = r.left() - 2.0;
+                let resp = ui.interact(r, Id::unique(id), Sense::click());
+                if on {
+                    p.rect(r, CornerRadius::same(6), ACCENT_BG, Stroke::new(1.0, LINE2), StrokeKind::Inside);
+                } else if resp.hovered() {
+                    p.rect_filled(r, CornerRadius::same(6), HOVER);
+                }
+                p.galley(r.center() - g.size() / 2.0, g, if on || resp.hovered() { TEXT } else { FAINT });
+                if resp.clicked() {
+                    set_all = Some(id == "palette-all");
+                }
+                self.hits.insert(id.into(), r);
+            }
+            // #current: the slot's colour, hex and number on one row, and its edit button.
+            let cur = Rect::from_min_size(pos2(inner.left(), inner.top() + 28.0), vec2(inner.width(), 38.0));
             p.rect(
                 cur,
-                CornerRadius::same(9),
+                CornerRadius::same(8),
                 Color32::from_white_alpha(9),
                 Stroke::new(1.0, LINE),
                 StrokeKind::Inside,
             );
-            let chip = Rect::from_min_size(cur.min + vec2(9.0, 9.0), vec2(34.0, 34.0));
-            p.add(
-                Shadow { offset: [0, 4], blur: 12, spread: 0, color: Color32::from_black_alpha(77) }
-                    .as_shape(chip, CornerRadius::same(8)),
-            );
+            let chip = Rect::from_min_size(cur.min + vec2(6.0, 6.0), vec2(26.0, 26.0));
             p.rect(
                 chip,
-                CornerRadius::same(8),
+                CornerRadius::same(6),
                 self.color(self.slot),
                 Stroke::new(1.0, Color32::from_white_alpha(38)),
                 StrokeKind::Inside,
             );
             let c = self.palette[self.slot as usize];
             let hex = format!("#{:02X}{:02X}{:02X}", c[0], c[1], c[2]);
-            let mx = chip.right() + 10.0;
-            p.text(pos2(mx, cur.center().y - 1.0), Align2::LEFT_BOTTOM, hex, mono(13.0), TEXT);
+            let mx = chip.right() + 8.0;
+            p.text(pos2(mx, cur.center().y), Align2::LEFT_BOTTOM, hex, mono(12.0), TEXT);
             let sub = if self.used[self.slot as usize] {
                 format!("Slot {} · in scene", self.slot)
             } else {
                 format!("Slot {}", self.slot)
             };
-            p.text(pos2(mx, cur.center().y + 1.0), Align2::LEFT_TOP, sub, inter(11.0), FAINT);
-            let eg = p.layout_no_wrap("Edit".into(), inter(12.0), MUTED);
-            let edit = Rect::from_min_size(
-                pos2(cur.right() - 9.0 - eg.size().x - 18.0, cur.center().y - 14.0),
-                vec2(eg.size().x + 18.0, 28.0),
-            );
+            p.text(pos2(mx, cur.center().y + 1.0), Align2::LEFT_TOP, sub, sans(10.5), FAINT);
+            let edit = Rect::from_min_size(pos2(cur.right() - 6.0 - 26.0, cur.center().y - 13.0), vec2(26.0, 26.0));
             let er = ui.interact(edit, Id::unique("edit-color"), Sense::click());
             self.hits.insert("edit-color".into(), edit);
             let open = self.color_edit.is_some();
-            let (ec, eb) = if er.hovered() || open { (TEXT, Color32::from_white_alpha(64)) } else { (MUTED, LINE2) };
-            if open {
-                p.rect_filled(edit, CornerRadius::same(7), HOVER);
+            if open || er.hovered() {
+                p.rect_filled(edit, CornerRadius::same(6), HOVER);
             }
-            p.rect_stroke(edit, CornerRadius::same(7), Stroke::new(1.0, eb), StrokeKind::Inside);
-            p.galley(edit.center() - eg.size() / 2.0, eg, ec);
+            let ec = if er.hovered() || open { TEXT } else { MUTED };
+            p.text(edit.center(), Align2::CENTER_CENTER, icon::PENCIL, icon_font(14.0), ec);
+            if er.hovered() {
+                tooltip(ctx, edit, "Edit color", &[], Some((Rect::NOTHING, true)));
+            }
             if er.clicked() {
                 if open {
                     self.color_edit = None;
@@ -2837,50 +2892,34 @@ impl Hybrid {
                     self.open_color_edit();
                 }
             }
-            // #swatches: 8 columns of 22 px with 4 px gaps, 2 px padding, all 255 slots in a
-            // view that scrolls (the prototype's max-height: 240px).
-            let view = Rect::from_min_size(pos2(inner.left(), cur.bottom() + 10.0), vec2(inner.width(), SWATCH_VIEW));
+            // #swatches: 8 columns, in a view that scrolls past eight rows.
+            let view = Rect::from_min_size(pos2(inner.left(), cur.bottom() + 10.0), vec2(inner.width(), view_h));
             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(view));
             child.spacing_mut().scroll = egui::style::ScrollStyle::thin();
             egui::ScrollArea::vertical()
                 .id_salt("swatches")
-                .max_height(SWATCH_VIEW)
+                .max_height(view_h)
                 .auto_shrink([false; 2])
-                .show(&mut child, |ui| self.swatches(ui, view.width()));
-            // .note
-            let ny = view.bottom() + 10.0;
-            let mut job = LayoutJob::default();
-            let fmt =
-                |color| TextFormat { font_id: inter(11.0), color, line_height: Some(15.95), ..Default::default() };
-            job.append(
-                "Editing a color recolors every voxel that uses it, instantly. Dots mark colors in the scene. ",
-                0.0,
-                fmt(FAINT),
-            );
-            job.append("[", 5.0, TextFormat { font_id: mono_medium(10.5), ..fmt(MUTED) });
-            job.append(" ", 5.0, fmt(FAINT));
-            job.append("]", 5.0, TextFormat { font_id: mono_medium(10.5), ..fmt(MUTED) });
-            job.append(" step colors.", 5.0, fmt(FAINT));
-            job.wrap.max_width = inner.width();
-            let g = p.layout_job(job);
-            kbd_frames(&p, pos2(inner.left(), ny), &g, &['[', ']']);
-            p.galley(pos2(inner.left(), ny), g, FAINT);
+                .show(&mut child, |ui| self.swatches(ui, view.width(), &slots));
         });
+        if let Some(all) = set_all {
+            self.palette_all = all;
+        }
     }
 
-    // #swatches, inside the scroll view.
-    fn swatches(&mut self, ui: &mut Ui, width: f32) {
-        let (area, _) = ui.allocate_exact_size(vec2(width, 32.0 * 26.0), Sense::hover());
+    // #swatches, inside the scroll view: `slots` in order, 8 to a row.
+    fn swatches(&mut self, ui: &mut Ui, width: f32, slots: &[u8]) {
+        let rows = (slots.len() as f32 / 8.0).ceil();
+        let (area, _) = ui.allocate_exact_size(vec2(width, rows * SWATCH_STEP + 2.0), Sense::hover());
         let grid = area.min + vec2(2.0, 2.0);
         let p = ui.painter().clone();
         let (pointer, released, cmd, shift) =
             ui.input(|i| (i.pointer.latest_pos(), i.pointer.any_released(), i.modifiers.command, i.modifiers.shift));
         let visible = ui.clip_rect();
         let mut drop_on = None;
-        for i in 0..255u8 {
-            let slot = i + 1;
+        for (i, &slot) in slots.iter().enumerate() {
             let (col, row) = ((i % 8) as f32, (i / 8) as f32);
-            let r = Rect::from_min_size(grid + vec2(col * 26.0, row * 26.0), vec2(22.0, 22.0));
+            let r = Rect::from_min_size(grid + vec2(col * SWATCH_STEP, row * SWATCH_STEP), vec2(SWATCH, SWATCH));
             let resp = ui.interact(r, Id::unique(("sw", slot)), Sense::click_and_drag());
             if visible.contains_rect(r) {
                 self.hits.insert(format!("sw{slot}"), r);
@@ -2899,12 +2938,12 @@ impl Hybrid {
             };
             let r = Rect::from_center_size(r.center(), r.size() * scale);
             if on {
-                p.rect_filled(r.expand(3.5), CornerRadius::same(9), Color32::WHITE);
-                p.rect_filled(r.expand(2.0), CornerRadius::same(7), PANEL_SOLID);
+                p.rect_filled(r.expand(3.0), CornerRadius::same(7), TEXT);
+                p.rect_filled(r.expand(1.5), CornerRadius::same(5), PANEL_SOLID);
             }
             p.rect(
                 r,
-                CornerRadius::same(5),
+                CornerRadius::same(4),
                 self.color(slot),
                 Stroke::new(1.0, Color32::from_white_alpha(20)),
                 StrokeKind::Inside,
@@ -2913,7 +2952,7 @@ impl Hybrid {
                 // A material other than diffuse: a light corner, like a glint.
                 let c = r.right_top() + vec2(-1.5, 1.5);
                 p.add(egui::Shape::convex_polygon(
-                    vec![c + vec2(-7.0, 0.0), c, c + vec2(0.0, 7.0)],
+                    vec![c + vec2(-6.0, 0.0), c, c + vec2(0.0, 6.0)],
                     Color32::from_white_alpha(200),
                     Stroke::new(1.0, Color32::from_black_alpha(90)),
                 ));
@@ -2922,7 +2961,7 @@ impl Hybrid {
                 // mix-blend-mode: difference against white at 75%.
                 let bg = self.color(slot);
                 let d = |v: u8| (v as f32 * 0.25 + (255.0 - v as f32) * 0.75) as u8;
-                p.circle_filled(r.center(), 2.0, Color32::from_rgb(d(bg.r()), d(bg.g()), d(bg.b())));
+                p.circle_filled(r.center(), 1.75, Color32::from_rgb(d(bg.r()), d(bg.g()), d(bg.b())));
             }
             if resp.drag_started() && cmd {
                 self.drag_from = Some(slot);
@@ -2940,11 +2979,11 @@ impl Hybrid {
         // MagicaVoxel's palette drags: Cmd (Ctrl) swaps, Cmd+Shift (Ctrl+Shift) copies.
         if let Some(from) = self.drag_from {
             if let Some(q) = pointer {
-                let ghost = Rect::from_center_size(q + vec2(10.0, 10.0), vec2(22.0, 22.0));
+                let ghost = Rect::from_center_size(q + vec2(10.0, 10.0), vec2(SWATCH, SWATCH));
                 let lp = ui.ctx().layer_painter(egui::LayerId::new(Order::Tooltip, Id::unique("sw-drag")));
                 lp.rect(
                     ghost,
-                    CornerRadius::same(5),
+                    CornerRadius::same(4),
                     self.color(from),
                     Stroke::new(1.5, Color32::WHITE),
                     StrokeKind::Outside,
@@ -2974,7 +3013,7 @@ impl Hybrid {
         let w = 232.0;
         let inner_w = w - 24.0;
         let mut job = LayoutJob::default();
-        let fmt = |color| TextFormat { font_id: inter(11.0), color, line_height: Some(15.95), ..Default::default() };
+        let fmt = |color| TextFormat { font_id: sans(11.0), color, line_height: Some(15.95), ..Default::default() };
         match self.slot_op {
             Some(op) => {
                 let what = match op {
@@ -3043,7 +3082,7 @@ impl Hybrid {
         } else {
             h
         };
-        let rect = Rect::from_min_size(pos2(screen.right() - 12.0 - 232.0 - 8.0 - w, 68.0), vec2(w, h));
+        let rect = Rect::from_min_size(pos2(screen.right() - 12.0 - PALETTE_W - 8.0 - w, TOP), vec2(w, h));
         let (mut close, mut commit, mut live) = (false, false, false);
         let mut new_mat = None;
         let mut op = None;
@@ -3063,12 +3102,12 @@ impl Hybrid {
             // .ph
             let hy = inner.top() + 7.5;
             let title = if ed.tab == EditTab::Material { "EDIT MATERIAL" } else { "EDIT COLOR" };
-            let g = p.layout_job(spaced(title, inter_semibold(11.0), MUTED, 0.88));
+            let g = p.layout_job(spaced(title, sans_semibold(11.0), MUTED, 0.88));
             p.galley(pos2(inner.left(), hy - g.size().y / 2.0), g, MUTED);
             let x = Rect::from_center_size(pos2(inner.right() - 6.0, hy), vec2(16.0, 22.0));
             let xr = ui.interact(x, Id::unique("color-edit-x"), Sense::click());
             hits.push(("color-edit-x", x));
-            p.text(x.center(), Align2::CENTER_CENTER, "×", inter(18.0), if xr.hovered() { TEXT } else { FAINT });
+            p.text(x.center(), Align2::CENTER_CENTER, "×", sans(18.0), if xr.hovered() { TEXT } else { FAINT });
             close |= xr.clicked();
             p.text(pos2(x.left() - 6.0, hy), Align2::RIGHT_CENTER, format!("Slot {slot}"), mono(11.0), FAINT);
             // Color and Material tabs.
@@ -3076,7 +3115,7 @@ impl Hybrid {
             let tabs = ["Color".to_string(), "Material".to_string()];
             let sel = (ed.tab == EditTab::Material) as usize;
             if let Some(k) =
-                segmented(ui, tr, &["tab-color", "tab-material"], &tabs, sel, &[true; 2], inter(12.0), &mut hits)
+                segmented(ui, tr, &["tab-color", "tab-material"], &tabs, sel, &[true; 2], sans(12.0), &mut hits)
             {
                 ed.tab = if k == 0 { EditTab::Color } else { EditTab::Material };
             }
@@ -3093,7 +3132,7 @@ impl Hybrid {
                 });
                 let sel = Kind::SHOWN.iter().position(|&k| k == mat.kind).unwrap_or(0);
                 let r = Rect::from_min_size(pos2(inner.left(), y), vec2(inner.width(), 28.0));
-                if let Some(k) = segmented(ui, r, &names, &kinds, sel, &[true; 5], inter(11.0), &mut hits)
+                if let Some(k) = segmented(ui, r, &names, &kinds, sel, &[true; 5], sans(11.0), &mut hits)
                     && Kind::SHOWN[k] != mat.kind
                 {
                     new_mat = Some((Material { kind: Kind::SHOWN[k], ..mat }, true));
@@ -3302,13 +3341,13 @@ impl Hybrid {
                 let lead = if t.starts_with(" for every") { 5.0 } else { 0.0 };
                 let f = if *b {
                     TextFormat {
-                        font_id: inter_medium(12.5),
+                        font_id: sans_medium(12.5),
                         color: TEXT,
                         line_height: Some(17.5),
                         ..Default::default()
                     }
                 } else {
-                    TextFormat { font_id: inter(12.5), color: MUTED, line_height: Some(17.5), ..Default::default() }
+                    TextFormat { font_id: sans(12.5), color: MUTED, line_height: Some(17.5), ..Default::default() }
                 };
                 job.append(t, lead, f);
             }
@@ -3326,13 +3365,13 @@ impl Hybrid {
                 pos2(left, rect.top() + 14.0 + 9.8),
                 Align2::LEFT_CENTER,
                 "Sculpt in under a minute",
-                inter_semibold(14.0),
+                sans_semibold(14.0),
                 TEXT,
             );
             let mut y = rect.top() + 14.0 + 19.6 + 4.0 + 8.0;
             for (i, g) in galleys.into_iter().enumerate() {
                 y += 2.0;
-                p.text(pos2(left + 14.0, y + 8.75), Align2::RIGHT_CENTER, format!("{}.", i + 1), inter(12.5), MUTED);
+                p.text(pos2(left + 14.0, y + 8.75), Align2::RIGHT_CENTER, format!("{}.", i + 1), sans(12.5), MUTED);
                 let h = g.size().y;
                 kbd_frames(&p, pos2(left + 18.0, y), &g, &['?']);
                 p.galley(pos2(left + 18.0, y), g, MUTED);
@@ -3340,7 +3379,7 @@ impl Hybrid {
             }
             let x = Rect::from_center_size(pos2(rect.right() - 16.0 - 8.0, rect.top() + 14.0 + 11.0), vec2(16.0, 22.0));
             let resp = ui.interact(x, Id::unique("welcome-x"), Sense::click());
-            p.text(x.center(), Align2::CENTER_CENTER, "×", inter(18.0), if resp.hovered() { TEXT } else { FAINT });
+            p.text(x.center(), Align2::CENTER_CENTER, "×", sans(18.0), if resp.hovered() { TEXT } else { FAINT });
             if resp.clicked() {
                 self.coach = false;
             }
@@ -3370,28 +3409,31 @@ impl Hybrid {
                 ),
             },
         ];
+        // One 28 px row: each label beside its value.
         let galleys: Vec<_> = cols
             .iter()
             .map(|(l, v, c)| {
-                let lg = ctx.fonts_mut(|f| f.layout_job(spaced(l, mono(9.5), FAINT, 0.76)));
-                let vg = ctx.fonts_mut(|f| f.layout_no_wrap(v.clone(), mono(13.0), *c));
+                let lg = ctx.fonts_mut(|f| f.layout_job(spaced(l, mono(9.0), FAINT, 0.72)));
+                let vg = ctx.fonts_mut(|f| f.layout_no_wrap(v.clone(), mono(11.5), *c));
                 (lg, vg)
             })
             .collect();
-        let w: f32 = 24.0
-            + galleys.iter().map(|(l, v)| l.size().x.max(v.size().x)).sum::<f32>()
-            + 16.0 * (cols.len() - 1) as f32;
-        let h = 16.0 + 13.3 + 18.2;
+        let w: f32 = 20.0
+            + galleys.iter().map(|(l, v)| l.size().x + 5.0 + v.size().x).sum::<f32>()
+            + 12.0 * (cols.len() - 1) as f32;
+        let h = 28.0;
         let rect = Rect::from_min_size(pos2(12.0, screen.bottom() - 12.0 - h), vec2(w, h));
         self.stats_right = rect.right();
+        self.hits.insert("stats".into(), rect);
         Self::panel(ctx, "stats", rect, Order::Middle, |ui, rect| {
             let p = ui.painter();
-            let mut x = rect.left() + 12.0;
+            let cy = rect.center().y;
+            let mut x = rect.left() + 10.0;
             for (lg, vg) in galleys {
-                let cw = lg.size().x.max(vg.size().x);
-                p.galley(pos2(x, rect.top() + 8.0 + (13.3 - lg.size().y) / 2.0), lg, FAINT);
-                p.galley(pos2(x, rect.top() + 8.0 + 13.3 + (18.2 - vg.size().y) / 2.0), vg, TEXT);
-                x += cw + 16.0;
+                p.galley(pos2(x, cy - lg.size().y / 2.0), lg.clone(), FAINT);
+                x += lg.size().x + 5.0;
+                p.galley(pos2(x, cy - vg.size().y / 2.0), vg.clone(), TEXT);
+                x += vg.size().x + 12.0;
             }
         });
     }
@@ -3407,12 +3449,9 @@ impl Hybrid {
         let mut open = false;
         let mut swap = false;
         let Some((spp, live)) = s.render.filter(|_| self.show_render) else { return };
-        let w = 320.0;
+        let w = 208.0;
         let size = vec2(w, (w * 9.0 / 16.0).round());
-        let corner = Rect::from_min_size(
-            pos2(screen.right() - 12.0 - size.x, screen.bottom() - 12.0 - 40.0 - 10.0 - size.y),
-            size,
-        );
+        let corner = Rect::from_min_size(pos2(screen.right() - 12.0 - size.x, screen.bottom() - 12.0 - size.y), size);
         let full = self.full_render;
         let rect = if full { screen } else { corner };
         self.render_rect = Some(rect);
@@ -3420,12 +3459,12 @@ impl Hybrid {
         self.hits.insert("render".into(), rect);
         let label = match s.export {
             Some(((w, h), done, of)) => format!("Exporting {w}×{h} · {:.0}/{of} spp", done.floor()),
-            None => format!("Path trace · {:.0} spp{}", spp.floor(), if live { " · live" } else { "" }),
+            None => format!("{:.0} spp{}", spp.floor(), if live { " · live" } else { "" }),
         };
-        let g = ctx.fonts_mut(|f| f.layout_no_wrap(label, inter_medium(11.0), TEXT));
-        let chip_size = g.size() + vec2(16.0, 6.0);
+        let g = ctx.fonts_mut(|f| f.layout_no_wrap(label, sans_medium(10.5), TEXT));
+        let chip_size = g.size() + vec2(14.0, 6.0);
         // The chips' row: the corner's top, or its bottom edge in the full view.
-        let top = if full { corner.bottom() - 8.0 - chip_size.y } else { corner.top() + 8.0 };
+        let top = if full { corner.bottom() - 6.0 - chip_size.y } else { corner.top() + 6.0 };
         let row = Rect::from_min_max(pos2(corner.left(), top - 8.0), pos2(corner.right(), top + chip_size.y + 8.0));
         let area = if full { row } else { corner };
         Area::new(Id::unique("render")).fade_in(false).order(Order::Middle).fixed_pos(area.min).constrain(false).show(
@@ -3448,13 +3487,13 @@ impl Hybrid {
                         StrokeKind::Inside,
                     );
                 }
-                let chip = Rect::from_min_size(pos2(corner.left() + 8.0, top), chip_size);
+                let chip = Rect::from_min_size(pos2(corner.left() + 6.0, top), chip_size);
                 let p = ui.painter();
                 p.rect_filled(chip, CornerRadius::same(6), Color32::from_black_alpha(140));
-                p.galley(chip.min + vec2(8.0, 3.0), g, TEXT);
+                p.galley(chip.min + vec2(7.0, 3.0), g, TEXT);
                 // The Render panel's button and the swap button, chips at the other corner.
-                let b = Rect::from_min_size(pos2(corner.right() - 8.0 - 26.0, top), vec2(26.0, chip.height()));
-                let f = b.translate(vec2(-26.0 - 4.0, 0.0));
+                let b = Rect::from_min_size(pos2(corner.right() - 6.0 - 24.0, top), vec2(24.0, chip.height()));
+                let f = b.translate(vec2(-24.0 - 4.0, 0.0));
                 let glyph = if full { icon::MINIMIZE_2 } else { icon::MAXIMIZE_2 };
                 for (rect, id, glyph, on) in
                     [(f, "render-full", glyph, false), (b, "render-settings", icon::APERTURE, self.render_panel)]
@@ -3474,7 +3513,7 @@ impl Hybrid {
                     } else {
                         MUTED
                     };
-                    p.text(rect.center(), Align2::CENTER_CENTER, glyph, icon_font(13.0), c);
+                    p.text(rect.center(), Align2::CENTER_CENTER, glyph, icon_font(12.0), c);
                     if r.clicked() {
                         if id == "render-full" {
                             swap = true;
@@ -3503,9 +3542,10 @@ impl Hybrid {
         let w = 232.0;
         let row = 34.0;
         let h = 12.0 + 15.0 + 10.0 + 9.0 * row + 28.0 + 8.0 + 28.0 + 12.0 + 2.0 * (14.0 + 28.0 + 10.0) + 32.0 + 12.0;
-        let right = self.render_dock.map_or(screen.right() - 12.0 - 232.0, |r| r.left()) - 8.0;
+        let right = self.render_dock.map_or(screen.right() - 12.0 - PALETTE_W, |r| r.left()) - 8.0;
         let bottom = self.render_dock.map_or(screen.bottom() - 62.0, |r| r.bottom());
-        let rect = Rect::from_min_size(pos2(right - w, (bottom - h).max(68.0)), vec2(w, h));
+        let rect = Rect::from_min_size(pos2(right - w, (bottom - h).max(TOP)), vec2(w, h));
+        self.hits.insert("render-panel".into(), rect);
         let mut rs = self.render.clone();
         let mut hits = Vec::new();
         let (mut close, mut export) = (false, false);
@@ -3514,12 +3554,12 @@ impl Hybrid {
             let inner = rect.shrink(12.0);
             let p = ui.painter().clone();
             let hy = inner.top() + 7.5;
-            let g = p.layout_job(spaced("RENDER", inter_semibold(11.0), MUTED, 0.88));
+            let g = p.layout_job(spaced("RENDER", sans_semibold(11.0), MUTED, 0.88));
             p.galley(pos2(inner.left(), hy - g.size().y / 2.0), g, MUTED);
             let x = Rect::from_center_size(pos2(inner.right() - 6.0, hy), vec2(16.0, 22.0));
             let xr = ui.interact(x, Id::unique("render-panel-x"), Sense::click());
             hits.push(("render-panel-x", x));
-            p.text(x.center(), Align2::CENTER_CENTER, "×", inter(18.0), if xr.hovered() { TEXT } else { FAINT });
+            p.text(x.center(), Align2::CENTER_CENTER, "×", sans(18.0), if xr.hovered() { TEXT } else { FAINT });
             close |= xr.clicked();
             p.text(pos2(x.left() - 6.0, hy), Align2::RIGHT_CENTER, "Path trace", mono(11.0), FAINT);
             let mut y = inner.top() + 25.0;
@@ -3610,7 +3650,7 @@ impl Hybrid {
                 ),
             ] {
                 let lr = next(14.0);
-                p.text(lr.left_center(), Align2::LEFT_CENTER, label, inter(12.0), MUTED);
+                p.text(lr.left_center(), Align2::LEFT_CENTER, label, sans(12.0), MUTED);
                 if name == "rs-size" {
                     let (w, h) = EXPORT_SIZES[*sel];
                     p.text(lr.right_center(), Align2::RIGHT_CENTER, format!("{w}×{h}"), mono(11.0), FAINT);
@@ -3625,7 +3665,7 @@ impl Hybrid {
             let r = next(32.0);
             hits.push(("rs-export", r));
             let resp = ui.interact(r, Id::unique("rs-export"), Sense::click());
-            let ink = Color32::from_rgb(0x0d, 0x10, 0x20);
+            let ink = ON_ACCENT;
             let p = ui.painter();
             let label = match s.export {
                 Some((_, done, of)) => {
@@ -3636,16 +3676,12 @@ impl Hybrid {
                     format!("Cancel export · {:.0}%", k * 100.0)
                 }
                 None => {
-                    p.rect_filled(
-                        r,
-                        CornerRadius::same(8),
-                        if resp.hovered() { Color32::from_rgb(0xa6, 0xb6, 0xff) } else { ACCENT },
-                    );
+                    p.rect_filled(r, CornerRadius::same(8), if resp.hovered() { ACCENT_HOVER } else { ACCENT });
                     "Export PNG".to_string()
                 }
             };
             let color = if s.export.is_some() { TEXT } else { ink };
-            let g = p.layout_no_wrap(label, inter_semibold(13.0), color);
+            let g = p.layout_no_wrap(label, sans_semibold(13.0), color);
             let total = 16.0 + 6.0 + g.size().x;
             let x0 = r.center().x - total / 2.0;
             p.text(pos2(x0 + 8.0, r.center().y), Align2::CENTER_CENTER, icon::IMAGE_DOWN, icon_font(16.0), color);
@@ -3766,53 +3802,87 @@ impl Hybrid {
             job.append(
                 k,
                 lead,
-                TextFormat { font_id: inter_medium(12.0), color: TEXT, line_height: Some(16.8), ..Default::default() },
+                TextFormat { font_id: sans_medium(12.0), color: TEXT, line_height: Some(16.8), ..Default::default() },
             );
             job.append(
                 v,
                 5.0,
-                TextFormat { font_id: inter(12.0), color: MUTED, line_height: Some(16.8), ..Default::default() },
+                TextFormat { font_id: sans(12.0), color: MUTED, line_height: Some(16.8), ..Default::default() },
             );
         }
         let g = ctx.fonts_mut(|f| f.layout_job(job));
-        // A connected terminal agent shows at the left, with Stop.
+        // A connected terminal agent shows at the left, with Stop, on a card; the hints alone
+        // are bare text over the view, with a dark edge so they read over a light model.
         let chip = self.agent_chip_width(ctx);
         let size = vec2(chip + g.size().x + 28.0, 16.8 + 16.0);
-        // Centred on the view, kept clear of the stats corner and of #history.
-        let (lo, hi) = (self.stats_right + 8.0, screen.right() - 12.0 - 82.0 - 8.0);
-        let x = (screen.center().x - size.x / 2.0).min(hi - size.x).max(lo);
-        let rect = Rect::from_min_size(pos2(x.round(), screen.bottom() - 12.0 - size.y), size);
-        Self::panel(ctx, "hint", rect, Order::Middle, |ui, rect| {
-            self.agent_chip(ui, rect, chip);
-            ui.painter().galley(pos2(rect.left() + chip + 14.0, rect.top() + 8.0), g, MUTED);
-        });
+        // Centred on the view, kept clear of the stats, the render corner and the camera bar.
+        let row_top = screen.bottom() - 12.0 - size.y;
+        let right = [
+            self.render_dock.filter(|_| !self.full_render),
+            self.hits.get("render-panel").copied(),
+            self.nav_rect.filter(|r| r.bottom() > row_top),
+        ]
+        .into_iter()
+        .flatten()
+        .fold(screen.right() - 12.0, |x, r| x.min(r.left()));
+        let (lo, hi) = (self.stats_right + 8.0, right - 8.0);
+        let rect = if size.x <= hi - lo {
+            let x = (screen.center().x - size.x / 2.0).min(hi - size.x).max(lo);
+            Rect::from_min_size(pos2(x.round(), row_top), size)
+        } else {
+            // Too wide for the gap (the assistant is docked): a row up, over the stats.
+            let stats_top = self.hits.get("stats").map_or(screen.bottom() - 12.0, |r| r.top());
+            Rect::from_min_size(pos2(screen.left() + 12.0, stats_top - 4.0 - size.y), size)
+        };
+        self.hits.insert("hint".into(), rect);
+        if chip > 0.0 {
+            Self::panel(ctx, "hint", rect, Order::Middle, |ui, rect| {
+                self.agent_chip(ui, rect, chip);
+                ui.painter().galley(pos2(rect.left() + chip + 14.0, rect.top() + 8.0), g, MUTED);
+            });
+            return;
+        }
+        Area::new(Id::unique("hint")).fade_in(false).order(Order::Middle).fixed_pos(rect.min).constrain(false).show(
+            ctx,
+            |ui| {
+                let at = pos2(rect.left() + 14.0, rect.top() + 8.0);
+                let p = ui.painter();
+                p.galley_with_override_text_color(at + vec2(0.0, 1.0), g.clone(), Color32::from_black_alpha(200));
+                p.galley(at, g, MUTED);
+            },
+        );
     }
 
-    // The camera bar: above the render corner (or the undo buttons when it is hidden), level
-    // with its right edge, so the camera's moves are always one click away. Projection, the
-    // View flyout, zoom, and the three ways back to the scene, each with a tooltip.
+    // The camera bar: above the render corner (or in the bottom right corner when it is hidden),
+    // level with its right edge, so the camera's moves are always one click away. Projection, the
+    // View flyout and the ways back to the scene, each with a tooltip.
     fn nav_bar(&mut self, ctx: &Context, screen: Rect) {
         let proj = match (self.ortho, self.view) {
             (_, Some(View::Iso)) => "Iso",
             (true, _) => "Ortho",
             (false, _) => "Persp",
         };
-        let pg = ctx.fonts_mut(|f| f.layout_no_wrap(proj.into(), inter_medium(12.0), MUTED));
+        let pg = ctx.fonts_mut(|f| f.layout_no_wrap(proj.into(), sans_medium(12.0), MUTED));
         let pw = (pg.size().x + 20.0).max(52.0);
-        let w = 4.0 + pw + 2.0 + 32.0 + 9.0 + 2.0 * 32.0 + 2.0 + 9.0 + 3.0 * 32.0 + 2.0 * 2.0 + 4.0;
+        let sel = self.selected > 0;
+        let w = 4.0 + pw + 2.0 + 34.0 + 9.0 + (2.0 + f32::from(u8::from(sel))) * 34.0 - 2.0 + 4.0;
         let size = vec2(w, 40.0);
         let dock = self.render_dock.unwrap_or_else(|| {
-            Rect::from_min_max(pos2(screen.right() - 12.0 - 82.0, screen.bottom() - 52.0), screen.right_bottom())
+            Rect::from_min_max(
+                pos2(screen.right() - 12.0, screen.bottom() - 12.0),
+                pos2(screen.right() - 12.0, screen.bottom() - 12.0),
+            )
         });
         let palette_bottom = self.hits.get("palette").map_or(screen.top(), |r| r.bottom());
-        let mut rect = Rect::from_min_size(pos2(dock.right() - w, dock.top() - 8.0 - size.y), size);
+        let gap = if self.render_dock.is_some() { 8.0 } else { 0.0 };
+        let mut rect = Rect::from_min_size(pos2(dock.right() - w, dock.top() - gap - size.y), size);
         if rect.top() < palette_bottom + 8.0 {
             // A short window: beside the corner instead, level with its bottom.
             rect = Rect::from_min_size(pos2(dock.left() - 8.0 - w, dock.bottom() - size.y), size);
         }
         self.hits.insert("nav".into(), rect);
         self.nav_rect = Some(rect);
-        let (sel, view_open) = (self.selected > 0, self.view_panel);
+        let view_open = self.view_panel;
         let mut run = Vec::new();
         let mut tip: Option<(Rect, &'static str, &'static [&'static str])> = None;
         let mut hits = Vec::new();
@@ -3839,29 +3909,30 @@ impl Hybrid {
             }
             hits.push(("nav-proj", b));
             x += pw + 2.0;
-            let buttons: [(&str, char, &str, &[&str], bool); 6] = [
+            // Zoom is the wheel, pinch and Cmd-= / Cmd--; Frame selection shows while there is one.
+            let buttons: [(&str, char, &str, &[&str], bool); 4] = [
                 ("nav-views", icon::AXIS_3D, "Views", &["0–6"], true),
-                ("nav-zoom-out", icon::ZOOM_OUT, "Zoom out", &["⌘", "-"], true),
-                ("nav-zoom-in", icon::ZOOM_IN, "Zoom in", &["⌘", "="], true),
                 ("nav-frame-sel", icon::SCAN_SEARCH, "Frame selection", &[], sel),
                 ("nav-frame", icon::SCAN, "Frame scene", &["."], true),
                 ("nav-reset", icon::ROTATE_CCW, "Reset camera", &["Home"], true),
             ];
-            for (k, (id, glyph, label, keys, enabled)) in buttons.into_iter().enumerate() {
-                if k == 1 || k == 3 {
+            let mut need_sep = true;
+            for (id, glyph, label, keys, shown) in buttons {
+                if !shown {
+                    continue;
+                }
+                if id != "nav-views" && std::mem::take(&mut need_sep) {
                     sep(ui, &mut x);
                 }
                 let b = Rect::from_min_size(pos2(x, cy - 16.0), vec2(32.0, 32.0));
                 let on = id == "nav-views" && view_open;
-                let r = nav_button(ui, b, Some(glyph), None, id, enabled, on);
+                let r = nav_button(ui, b, Some(glyph), None, id, true, on);
                 if r.hovered() {
                     tip = Some((b, label, keys));
                 }
                 if r.clicked() {
                     match id {
                         "nav-views" => toggle_view = true,
-                        "nav-zoom-out" => run.push(Action::Zoom(false)),
-                        "nav-zoom-in" => run.push(Action::Zoom(true)),
                         "nav-frame-sel" => run.push(Action::FrameSelection),
                         "nav-frame" => run.push(Action::Frame),
                         _ => run.push(Action::ResetCamera),
@@ -3885,27 +3956,6 @@ impl Hybrid {
         }
     }
 
-    // #history
-    fn history_rect(screen: Rect) -> Rect {
-        Rect::from_min_size(pos2(screen.right() - 12.0 - 82.0, screen.bottom() - 12.0 - 40.0), vec2(82.0, 40.0))
-    }
-
-    fn history(&mut self, ctx: &Context, screen: Rect) {
-        let rect = Self::history_rect(screen);
-        self.hits.insert("history".into(), rect);
-        Self::panel(ctx, "history", rect, Order::Middle, |ui, rect| {
-            let cy = rect.center().y;
-            let mut x = rect.left() + 4.0;
-            if tbtn(ui, &mut x, cy, Some(icon::UNDO), "", "undo", self.can_undo).clicked() {
-                self.actions.push(Action::Undo);
-            }
-            x += 2.0;
-            if tbtn(ui, &mut x, cy, Some(icon::REDO), "", "redo", self.can_redo).clicked() {
-                self.actions.push(Action::Redo);
-            }
-        });
-    }
-
     // #toast
     fn toast_panel(&mut self, ctx: &Context, screen: Rect) {
         let Some((msg, until)) = &self.toast else { return };
@@ -3915,13 +3965,13 @@ impl Hybrid {
             return;
         }
         ctx.request_repaint_after(std::time::Duration::from_secs_f64(until - now));
-        let g = ctx.fonts_mut(|f| f.layout_no_wrap(msg.clone(), inter(12.5), TEXT));
+        let g = ctx.fonts_mut(|f| f.layout_no_wrap(msg.clone(), sans(12.5), TEXT));
         let size = vec2(g.size().x + 28.0, g.size().y + 18.0);
         // Centred on the view, or on the part of it left of the review card (or the Agent edits
         // card) when that shows.
         let card = self.hits.get("review").filter(|_| self.review.is_some()).or_else(|| self.hits.get("agent-card"));
-        let cx = card.map_or(screen.center().x, |c| (76.0 + c.left()) / 2.0);
-        let top = self.ai.bar_bottom.map_or(68.0, |b| b + 8.0);
+        let cx = card.map_or(screen.center().x, |c| (12.0 + RAIL_W + 12.0 + c.left()) / 2.0);
+        let top = self.ai.bar_bottom.map_or(TOP, |b| b + 8.0);
         let rect = Rect::from_min_size(pos2((cx - size.x / 2.0).round(), top), size);
         Self::panel(ctx, "toast", rect, Order::Foreground, |ui, rect| {
             ui.painter().galley(pos2(rect.left() + 14.0, rect.top() + 9.0), g, TEXT);
@@ -3969,7 +4019,7 @@ impl Hybrid {
             );
             // Tab asks AI, from any row.
             let kx = field.right() - 10.0;
-            let ag = ui.painter().layout_no_wrap("Ask AI".into(), inter(12.0), FAINT);
+            let ag = ui.painter().layout_no_wrap("Ask AI".into(), sans(12.0), FAINT);
             let aw = ag.size().x;
             ui.painter().galley(pos2(kx - aw, field.center().y - ag.size().y / 2.0), ag, FAINT);
             let tw = kbd(ui, pos2(kx - aw - 6.0, field.center().y), "Tab", true);
@@ -3980,9 +4030,9 @@ impl Hybrid {
             let q = self.cmdk.as_mut().unwrap();
             let edit = egui::TextEdit::singleline(q)
                 .id(Id::unique("cmdk-field"))
-                .font(inter(14.0))
+                .font(sans(14.0))
                 .frame(egui::Frame::NONE)
-                .hint_text(egui::RichText::new("Type a command").color(FAINT).font(inter(14.0)))
+                .hint_text(egui::RichText::new("Type a command").color(FAINT).font(sans(14.0)))
                 .desired_width(text_rect.width());
             let resp = ui.put(text_rect, edit);
             resp.request_focus();
@@ -4009,12 +4059,12 @@ impl Hybrid {
                     icon_font(14.0),
                     ACCENT,
                 );
-                let g = p.layout_no_wrap("Ask AI".into(), inter(13.0), TEXT);
+                let g = p.layout_no_wrap("Ask AI".into(), sans(13.0), TEXT);
                 let gw = g.size().x;
                 p.galley(pos2(row.left() + 32.0, row.center().y - g.size().y / 2.0), g, TEXT);
                 let mut job = LayoutJob::single_section(
                     format!("“{}”", self.cmdk.as_deref().unwrap_or("").trim()),
-                    TextFormat { font_id: inter(13.0), color: MUTED, ..Default::default() },
+                    TextFormat { font_id: sans(13.0), color: MUTED, ..Default::default() },
                 );
                 job.wrap = egui::text::TextWrapping {
                     max_width: (row.width() - 32.0 - gw - 8.0 - 70.0).max(1.0),
@@ -4046,7 +4096,7 @@ impl Hybrid {
                     pos2(row.left() + 10.0, row.center().y),
                     Align2::LEFT_CENTER,
                     COMMANDS[i].label,
-                    inter(13.0),
+                    sans(13.0),
                     TEXT,
                 );
                 let mut kx = row.right() - 10.0;
@@ -4076,26 +4126,11 @@ impl Hybrid {
     }
 }
 
-fn rail_label_h() -> f32 {
-    4.0 + 12.6 + 2.0
-}
-
-// .rail-label
-fn rail_label(ui: &Ui, rail: Rect, y: &mut f32, text: &str) {
-    let g = ui.painter().layout_job(spaced(text, inter(9.0), FAINT, 0.72));
-    ui.painter().galley(
-        pos2(rail.center().x - g.size().x / 2.0 + 0.36, *y + 4.0 + (12.6 - g.size().y) / 2.0),
-        g,
-        FAINT,
-    );
-    *y += rail_label_h();
-}
-
 // .rail-sep
 fn rail_sep(ui: &Ui, rail: Rect, y: &mut f32) {
-    let sy = *y - 2.0 + 5.0 + 0.5;
+    let sy = *y + 2.5;
     ui.painter().line_segment([pos2(rail.left() + 10.0, sy), pos2(rail.right() - 10.0, sy)], Stroke::new(1.0, LINE));
-    *y += 11.0 - 2.0 + 2.0;
+    *y += 9.0;
 }
 
 // A text button of the View flyout with its key in the corner, accent when on. Returns
@@ -4105,13 +4140,7 @@ fn view_chip(ui: &mut Ui, c: Rect, id: &str, label: &str, key: &str, on: bool) -
     let hover = resp.hovered();
     let p = ui.painter();
     let color = if on {
-        p.rect(
-            c,
-            CornerRadius::same(7),
-            ACCENT_BG,
-            Stroke::new(1.0, Color32::from_rgba_unmultiplied(142, 162, 255, 89)),
-            StrokeKind::Inside,
-        );
+        p.rect(c, CornerRadius::same(7), ACCENT_BG, Stroke::new(1.0, RING), StrokeKind::Inside);
         ACCENT
     } else {
         let border = if hover { Color32::from_white_alpha(64) } else { LINE2 };
@@ -4119,7 +4148,7 @@ fn view_chip(ui: &mut Ui, c: Rect, id: &str, label: &str, key: &str, on: bool) -
         if hover { TEXT } else { MUTED }
     };
     let shift = if key.is_empty() { 0.0 } else { 3.0 };
-    p.text(pos2(c.center().x - shift, c.center().y), Align2::CENTER_CENTER, label, inter(11.0), color);
+    p.text(pos2(c.center().x - shift, c.center().y), Align2::CENTER_CENTER, label, sans(11.0), color);
     let kc = if on { ACCENT.gamma_multiply(0.8) } else { FAINT };
     p.text(pos2(c.right() - 4.0, c.bottom() - 2.0), Align2::RIGHT_BOTTOM, key, mono_medium(8.5), kc);
     resp.clicked()
@@ -4127,26 +4156,20 @@ fn view_chip(ui: &mut Ui, c: Rect, id: &str, label: &str, key: &str, on: bool) -
 
 // .tool, .tool.on, .tool .k
 fn tool_button(ui: &mut Ui, at: Pos2, glyph: char, key: &str, on: bool) -> egui::Response {
-    let r = Rect::from_min_size(at, vec2(40.0, 40.0));
+    let r = Rect::from_min_size(at, vec2(TOOL, TOOL));
     let resp = ui.interact(r, Id::unique(("tool", key)), Sense::click());
     let p = ui.painter();
     let mut color = MUTED;
     if on {
-        p.rect(
-            r,
-            CornerRadius::same(9),
-            ACCENT_BG,
-            Stroke::new(1.0, Color32::from_rgba_unmultiplied(142, 162, 255, 89)),
-            StrokeKind::Inside,
-        );
-        color = ACCENT;
+        p.rect(r, CornerRadius::same(8), ACCENT_BG, Stroke::new(1.0, RING), StrokeKind::Inside);
+        color = TEXT;
     } else if resp.hovered() {
-        p.rect_filled(r, CornerRadius::same(9), HOVER);
+        p.rect_filled(r, CornerRadius::same(8), HOVER);
         color = TEXT;
     }
-    p.text(r.center(), Align2::CENTER_CENTER, glyph, icon_font(19.0), color);
-    let kc = if on { ACCENT.gamma_multiply(0.8) } else { FAINT };
-    p.text(pos2(r.right() - 3.0, r.bottom() - 2.0), Align2::RIGHT_BOTTOM, key, mono_medium(8.5), kc);
+    p.text(r.center(), Align2::CENTER_CENTER, glyph, icon_font(17.0), color);
+    let kc = if on { MUTED } else { FAINT };
+    p.text(pos2(r.right() - 2.5, r.bottom() - 1.5), Align2::RIGHT_BOTTOM, key, mono_medium(8.0), kc);
     resp
 }
 
@@ -4175,7 +4198,7 @@ fn tbtn_on(
     enabled: bool,
     on: bool,
 ) -> egui::Response {
-    let g = (!label.is_empty()).then(|| ui.painter().layout_no_wrap(label.into(), inter(13.0), MUTED));
+    let g = (!label.is_empty()).then(|| ui.painter().layout_no_wrap(label.into(), sans(13.0), MUTED));
     let w = 20.0
         + glyph.map_or(0.0, |_| 16.0)
         + g.as_ref().map_or(0.0, |g| g.size().x + if glyph.is_some() { 6.0 } else { 0.0 });
@@ -4241,7 +4264,7 @@ fn nav_button(
 /// It keeps off `clear.0`: where above `at` would cross it, it goes below `at` if `clear.1`
 /// allows, else it is not shown.
 fn tooltip(ctx: &Context, at: Rect, label: &str, keys: &[&str], clear: Option<(Rect, bool)>) -> Option<Rect> {
-    let g = ctx.fonts_mut(|f| f.layout_no_wrap(label.into(), inter(12.0), TEXT));
+    let g = ctx.fonts_mut(|f| f.layout_no_wrap(label.into(), sans(12.0), TEXT));
     let kg: Vec<_> =
         keys.iter().map(|k| ctx.fonts_mut(|f| f.layout_no_wrap((*k).into(), mono_medium(10.5), MUTED))).collect();
     let kw: f32 = kg.iter().map(|k| (k.size().x + 10.0).max(18.0) + 3.0).sum();
@@ -4366,7 +4389,7 @@ fn handle(p: &egui::Painter, at: Pos2, c: [u8; 3]) {
 fn field(ui: &mut Ui, rect: Rect, label: &str, id: Id, text: &mut String) -> bool {
     let focused = ui.memory(|m| m.has_focus(id));
     let p = ui.painter().clone();
-    let border = if focused { Color32::from_rgba_unmultiplied(142, 162, 255, 140) } else { LINE };
+    let border = if focused { RING } else { LINE };
     p.rect(rect, CornerRadius::same(7), Color32::from_white_alpha(9), Stroke::new(1.0, border), StrokeKind::Inside);
     let g = p.layout_no_wrap(label.into(), mono(10.0), FAINT);
     let lw = g.size().x;
@@ -4415,7 +4438,7 @@ fn slider(
     }
     let p = ui.painter();
     let active = resp.hovered() || resp.dragged();
-    p.text(r.left_top() + vec2(0.0, 7.0), Align2::LEFT_CENTER, label, inter(12.0), if active { TEXT } else { MUTED });
+    p.text(r.left_top() + vec2(0.0, 7.0), Align2::LEFT_CENTER, label, sans(12.0), if active { TEXT } else { MUTED });
     p.text(r.right_top() + vec2(0.0, 7.0), Align2::RIGHT_CENTER, fmt(*v), mono(11.0), TEXT);
     let k = ((*v - lo) / (hi - lo)).clamp(0.0, 1.0);
     p.rect_filled(track, CornerRadius::same(2), LINE2);
@@ -4460,13 +4483,7 @@ fn segmented(
         let resp = ui.interact(c, Id::unique(names[k]), if enabled { Sense::click() } else { Sense::hover() });
         let p = ui.painter();
         let color = if k == sel {
-            p.rect(
-                c,
-                CornerRadius::same(7),
-                ACCENT_BG,
-                Stroke::new(1.0, Color32::from_rgba_unmultiplied(142, 162, 255, 89)),
-                StrokeKind::Inside,
-            );
+            p.rect(c, CornerRadius::same(7), ACCENT_BG, Stroke::new(1.0, RING), StrokeKind::Inside);
             ACCENT
         } else {
             let hover = enabled && resp.hovered();
@@ -4498,14 +4515,14 @@ fn small_button(ui: &mut Ui, r: Rect, glyph: char, label: &str, id: &str, on: bo
     let p = ui.painter();
     let (color, border) = if on {
         p.rect_filled(r, CornerRadius::same(7), ACCENT_BG);
-        (ACCENT, Color32::from_rgba_unmultiplied(142, 162, 255, 89))
+        (ACCENT, RING)
     } else if resp.hovered() {
         (TEXT, Color32::from_white_alpha(64))
     } else {
         (MUTED, LINE2)
     };
     p.rect_stroke(r, CornerRadius::same(7), Stroke::new(1.0, border), StrokeKind::Inside);
-    let g = p.layout_no_wrap(label.into(), inter(12.0), color);
+    let g = p.layout_no_wrap(label.into(), sans(12.0), color);
     let total = 14.0 + 6.0 + g.size().x;
     let x = r.center().x - total / 2.0;
     p.text(pos2(x + 7.0, r.center().y), Align2::CENTER_CENTER, glyph, icon_font(14.0), color);
