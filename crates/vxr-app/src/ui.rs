@@ -2406,7 +2406,8 @@ impl Hybrid {
             return;
         }
         let size = vec2(204.0, 176.0);
-        let palette_bottom = self.hits.get("palette").map_or(screen.top(), |r| r.bottom());
+        let palette_bottom =
+            self.hits.get("palette").filter(|r| r.left() < screen.right()).map_or(screen.top(), |r| r.bottom());
         let floor = screen.bottom() - 12.0;
         let nav = self.hits.get("nav").copied().unwrap_or(Rect::from_min_size(screen.right_bottom(), egui::Vec2::ZERO));
         let right = nav.right().min(screen.right() - 12.0);
@@ -2953,6 +2954,18 @@ impl Hybrid {
     // change adds, removes and repaints, the palette slots it sets, the steps with a checkbox
     // each, Before and After, a field to ask for changes, and Discard and Apply. Over 10,000
     // cells it asks before staging more.
+    /// Where a card of width `w` that sits by the palette goes: the right edge of the view, in the
+    /// column under the palette, or at the top beside the assistant's column when that is docked.
+    /// On touch, left of the palette over the dock.
+    pub(super) fn card_origin(&self, screen: Rect, w: f32) -> (f32, f32) {
+        if self.touch {
+            return ((screen.right() - 12.0 - PALETTE_W - 8.0 - w).max(12.0 + RAIL_W + 12.0), TOP);
+        }
+        let x = (screen.right() - 12.0 - w).max(12.0 + RAIL_W + 12.0);
+        let top = if self.ai_width() > 0.0 { TOP } else { TOP + self.palette_height() + 8.0 };
+        (x, top)
+    }
+
     fn review_card(&mut self, ctx: &Context, screen: Rect) {
         let Some(card) = self.review.take() else {
             self.ask_focus = false;
@@ -2962,7 +2975,7 @@ impl Hybrid {
         };
         let w = 304.0;
         let inner_w = w - 24.0;
-        let x = (screen.right() - 12.0 - PALETTE_W - 8.0 - w).max(12.0 + RAIL_W + 12.0);
+        let (x, top) = self.card_origin(screen, w);
         let wrapped = |text: &str, font: FontId, color: Color32, rows: usize| {
             let mut job = LayoutJob::single_section(
                 text.to_string(),
@@ -3055,13 +3068,16 @@ impl Hybrid {
         // The card ends above the render corner and the camera bar where they share columns:
         // fewer steps show (the list scrolls), down to two.
         let below = [self.render_dock.filter(|_| !self.full_render), self.nav_rect];
-        if let Some(top) = below.into_iter().flatten().filter(|c| c.left() < x + w).map(|c| c.top()).reduce(f32::min) {
-            while rows > 2 && TOP + h > top - 8.0 {
+        if let Some(below_top) =
+            below.into_iter().flatten().filter(|c| c.left() < x + w).map(|c| c.top()).reduce(f32::min)
+        {
+            while rows > 2 && top + h > below_top - 8.0 {
                 rows -= 1;
                 h -= row_h;
             }
         }
-        let rect = Rect::from_min_size(pos2(x, TOP), vec2(w, h));
+        let rect = Rect::from_min_size(pos2(x, top), vec2(w, h));
+        self.hits.insert("review".into(), rect);
         let mut hits: Vec<(String, Rect)> = Vec::new();
         let mut actions = Vec::new();
         let mut scroll = self.review_scroll.min(card.steps.len().saturating_sub(rows));
@@ -3390,15 +3406,37 @@ impl Hybrid {
     }
 
     // #palette
-    fn palette_panel(&mut self, ctx: &Context, screen: Rect) {
+    /// The slots the palette shows: the colours in the scene (and the current one), or every
+    /// slot when asked, while a swap or copy waits for its target, and while the scene has no
+    /// colour yet. With whether that is every slot, and how many colours are in use.
+    fn palette_slots(&self) -> (Vec<u8>, bool, usize) {
         let used_count = self.used.iter().skip(1).filter(|u| **u).count();
-        // The colours in the scene (and the current one), or every slot: when asked, while a
-        // swap or copy waits for its target, and while the scene has no colour yet.
         let all = self.palette_all || self.slot_op.is_some() || used_count == 0;
-        let slots: Vec<u8> = (1..=255u8).filter(|&i| all || self.used[i as usize] || i == self.slot).collect();
+        let slots = (1..=255u8).filter(|&i| all || self.used[i as usize] || i == self.slot).collect();
+        (slots, all, used_count)
+    }
+
+    /// The palette panel's height.
+    pub(super) fn palette_height(&self) -> f32 {
+        let rows = (self.palette_slots().0.len() as f32 / 8.0).ceil();
+        12.0 + 20.0 + 8.0 + 38.0 + 10.0 + rows.min(SWATCH_ROWS) * SWATCH_STEP + 2.0 + 10.0
+    }
+
+    /// Where the panels that open beside the palette end on the right: left of the palette, or,
+    /// with the assistant docked (the palette heads its column), left of that column.
+    pub(super) fn aside_right(&self, screen: Rect) -> f32 {
+        if !self.touch && self.ai_width() > 0.0 {
+            screen.right() - 12.0
+        } else {
+            screen.right() - 12.0 - PALETTE_W - 8.0
+        }
+    }
+
+    fn palette_panel(&mut self, ctx: &Context, screen: Rect) {
+        let (slots, all, used_count) = self.palette_slots();
         let rows = (slots.len() as f32 / 8.0).ceil();
+        let h = self.palette_height();
         let view_h = rows.min(SWATCH_ROWS) * SWATCH_STEP + 2.0;
-        let h = 12.0 + 20.0 + 8.0 + 38.0 + 10.0 + view_h + 10.0;
         let rect = if self.touch {
             // Over the dock, from its colour button.
             if !self.palette_open {
@@ -3408,7 +3446,9 @@ impl Hybrid {
             let x = (at - PALETTE_W / 2.0).min(screen.right() - 12.0 - PALETTE_W).max(screen.left() + 12.0);
             Rect::from_min_size(pos2(x, (self.dock_top - 8.0 - h).max(TOP)), vec2(PALETTE_W, h))
         } else {
-            Rect::from_min_size(pos2(screen.right() - 12.0 - PALETTE_W, TOP), vec2(PALETTE_W, h))
+            // Top right of the window, over the assistant's column when it is docked.
+            let right = screen.right() + self.ai_width();
+            Rect::from_min_size(pos2(right - 12.0 - PALETTE_W, TOP), vec2(PALETTE_W, h))
         };
         self.hits.insert("palette".into(), rect);
         let mut set_all = None;
@@ -3673,7 +3713,7 @@ impl Hybrid {
                     if pal.left() - 8.0 - w >= screen.left() + 12.0 { pal.left() - 8.0 - w } else { pal.right() + 8.0 };
                 Rect::from_min_size(pos2(x, (pal.bottom() - h).max(TOP)), vec2(w, h))
             }
-            None => Rect::from_min_size(pos2(screen.right() - 12.0 - PALETTE_W - 8.0 - w, TOP), vec2(w, h)),
+            None => Rect::from_min_size(pos2(self.aside_right(screen) - w, TOP), vec2(w, h)),
         };
         let (mut close, mut commit, mut live) = (false, false, false);
         let mut new_mat = None;
@@ -4179,7 +4219,7 @@ impl Hybrid {
         let w = 232.0;
         let row = 34.0;
         let h = 12.0 + 15.0 + 10.0 + 9.0 * row + 28.0 + 8.0 + 28.0 + 12.0 + 2.0 * (14.0 + 28.0 + 10.0) + 32.0 + 12.0;
-        let right = self.render_dock.map_or(screen.right() - 12.0 - PALETTE_W, |r| r.left()) - 8.0;
+        let right = self.render_dock.map_or(self.aside_right(screen) + 8.0, |r| r.left()) - 8.0;
         let bottom = self.render_dock.map_or(screen.bottom() - 62.0, |r| r.bottom());
         let rect = Rect::from_min_size(pos2(right - w, (bottom - h).max(TOP)), vec2(w, h));
         self.hits.insert("render-panel".into(), rect);
@@ -4557,7 +4597,8 @@ impl Hybrid {
                     pos2(screen.right() - 12.0, screen.bottom() - 12.0),
                 )
             });
-            let palette_bottom = self.hits.get("palette").map_or(screen.top(), |r| r.bottom());
+            let palette_bottom =
+                self.hits.get("palette").filter(|r| r.left() < screen.right()).map_or(screen.top(), |r| r.bottom());
             let gap = if self.render_dock.is_some() { 8.0 } else { 0.0 };
             let mut rect = Rect::from_min_size(pos2(dock.right() - w, dock.top() - gap - size.y), size);
             if rect.top() < palette_bottom + 8.0 {

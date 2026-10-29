@@ -316,9 +316,11 @@ impl Hybrid {
             let bottom = self.dock_rows(screen).last().map_or(screen.bottom() - 12.0, |r| r.top() - 8.0);
             Rect::from_min_max(pos2(screen.left() + 12.0, TOP), pos2(screen.right() - 12.0, bottom.max(TOP + 240.0)))
         } else {
+            // The right column, under the palette (which keeps its place at the top).
+            let top = if self.touch { TOP } else { TOP + self.palette_height() + 8.0 };
             Rect::from_min_max(
-                pos2(screen.right() - 12.0 - PANEL_W, TOP),
-                pos2(screen.right() - 12.0, (screen.bottom() - 12.0).max(TOP + 240.0)),
+                pos2(screen.right() - 12.0 - PANEL_W, top),
+                pos2(screen.right() - 12.0, (screen.bottom() - 12.0).max(top + 240.0)),
             )
         };
         let setup = self.ai_setup || !self.chat.ready();

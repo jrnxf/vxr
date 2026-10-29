@@ -275,6 +275,7 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     materials(&mut s, dir)?;
     export(&mut s, dir)?;
     review(dir)?;
+    assistant_layout(dir)?;
     assistant(dir)?;
     ai_refused()?;
     ai_new_chat()?;
@@ -3160,6 +3161,54 @@ const HOUSE_SCRIPT: &str = r##"{"prompt": "make the roof red, add a flag and ope
 /// removals hidden from the render corner, Before and After, a dropped step, every other edit
 /// kept out, Discard (button and Escape) leaving no step, Apply (Enter) as one undo step named
 /// after the request, a change over 10,000 cells held until Allow or Stop, and the ask field.
+/// The AI change card and the palette keep their places with the assistant docked: the palette at
+/// the top right of the window with the assistant's column under it, and the card in its own
+/// column, clear of both and of the scene's middle.
+fn assistant_layout(dir: &Path) -> Result<(), String> {
+    let mut s = Shot::new(house(), "house.vox", 2.0)?;
+    s.ed.ui.coach = false;
+    s.ed.cam.distance *= 1.9;
+    let h = s.ed.height as f32;
+    s.ed.cam.pan(-420.0, 0.0, h);
+    s.frames(2);
+    let answers = s.ed.stage_json(HOUSE_SCRIPT)?;
+    check(answers[0].len() == 6, "a scripted request stages the card for the layout check".into())?;
+    s.frames(40);
+    let window = s.ed.width as f32 / 2.0;
+    let rect = |s: &Shot, name: &str| s.ed.ui.hits.get(name).copied().ok_or(format!("no {name} on screen"));
+    let (palette, card) = (rect(&s, "palette")?, rect(&s, "review")?);
+    s.save_png(&dir.join("app-2x-review-closed.png"))?;
+    check(
+        (palette.right() - (window - 12.0)).abs() < 0.5 && (card.right() - (window - 12.0)).abs() < 0.5,
+        format!(
+            "closed: the palette and the card share the right edge ({:.0}, {:.0} of {window:.0})",
+            palette.right(),
+            card.right()
+        ),
+    )?;
+    check(
+        card.top() >= palette.bottom() + 7.5 && card.top() <= palette.bottom() + 8.5,
+        format!("closed: the card sits under the palette ({:.0} below its bottom {:.0})", card.top(), palette.bottom()),
+    )?;
+    s.ed.ui.ai_open = true;
+    s.frames(40);
+    let (pal, card2, ai) = (rect(&s, "palette")?, rect(&s, "review")?, rect(&s, "assistant")?);
+    s.save_png(&dir.join("app-2x-review-assistant.png"))?;
+    check(
+        (pal.min - palette.min).length() < 0.5 && (pal.max - palette.max).length() < 0.5,
+        format!("the palette stays at the top right with the assistant open: {pal:?} (was {palette:?})"),
+    )?;
+    check(
+        ai.top() >= pal.bottom() + 7.5 && (ai.right() - (window - 12.0)).abs() < 0.5 && !ai.intersects(pal),
+        format!("the assistant sits under the palette: {ai:?}, palette {pal:?}"),
+    )?;
+    check(
+        card2.right() <= ai.left() - 7.5 && card2.top() <= 60.5 && !card2.intersects(pal) && !card2.intersects(ai),
+        format!("the card sits beside the assistant's column, clear of both: {card2:?}"),
+    )?;
+    Ok(())
+}
+
 fn review(dir: &Path) -> Result<(), String> {
     let mut s = Shot::new(house(), "house.vox", 2.0)?;
     s.ed.ui.coach = false;
