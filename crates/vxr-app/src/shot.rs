@@ -3616,15 +3616,25 @@ fn column_short_window(dir: &Path) -> Result<(), String> {
         format!("short: the palette opens beside the wider rail, on screen: {palette:?}"),
     )?;
     s.save_png(&dir.join("app-2x-rail-short.png"))?;
-    s.ui_click("select")?;
-    s.ui_click("mirror")?;
-    s.frames(2);
-    let (selection, axes) = (rect(&s, "selection")?, rect(&s, "axes")?);
-    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 520.0));
-    check(
-        screen.contains_rect(selection) && screen.contains_rect(axes) && !selection.intersects(axes),
-        format!("short: the selection and axis flyouts both on screen, apart: {selection:?} {axes:?}"),
-    )?;
+    // The selection flyout, the axis flyout and the Bounds panel on screen and apart, with the
+    // rail in two columns and in one.
+    for h in [520, 620] {
+        let mut s = Shot::sized(house(), "house.vox", 2.0, (1280, h))?;
+        s.ed.ui.coach = false;
+        s.frames(2);
+        s.ui_click("select")?;
+        s.ui_click("mirror")?;
+        s.frames(2);
+        s.ui_click("resize")?;
+        s.frames(2);
+        let open = [rect(&s, "selection")?, rect(&s, "axes")?, rect(&s, "bounds-panel")?];
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, h as f32));
+        let apart = (0..3).all(|i| (i + 1..3).all(|j| !open[i].intersects(open[j])));
+        check(
+            open.iter().all(|r| screen.contains_rect(*r)) && apart,
+            format!("1280x{h}: the selection and axis flyouts and the Bounds panel on screen, apart: {open:?}"),
+        )?;
+    }
     Ok(())
 }
 

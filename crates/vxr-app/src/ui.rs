@@ -2661,13 +2661,17 @@ impl Hybrid {
         }
     }
 
+    fn size_rect(&self) -> Rect {
+        self.flyout_rect(self.voxel_y, "voxel", vec2(150.0, 6.0 + 40.0 + 6.0))
+    }
+
     // The size flyout beside the rail's voxel brush button: SIZE, minus, the size, plus.
     // Built like the axis flyout.
     fn size_flyout(&mut self, ctx: &Context) {
         if !self.size_shown() {
             return;
         }
-        let rect = self.flyout_rect(self.voxel_y, "voxel", vec2(150.0, 6.0 + 40.0 + 6.0));
+        let rect = self.size_rect();
         let size = self.size;
         let mut step = 0;
         let mut hits = Vec::new();
@@ -2716,20 +2720,7 @@ impl Hybrid {
         if !self.mirror && self.lock.is_none() {
             return;
         }
-        let mut rect = self.flyout_rect(self.axes_y, "mirror", vec2(150.0, 6.0 + 2.0 * 40.0 + 2.0 + 6.0));
-        // Under the selection flyout when it shows too, so neither covers the other, else
-        // beside it when under would run off the screen.
-        if self.selection_shown() && !self.touch {
-            let (screen, sel) = (ctx.content_rect(), self.selection_rect(ctx));
-            let fits = |r: Rect| r.bottom() <= screen.bottom() - 12.0 && r.right() <= screen.right() - 12.0;
-            let below = rect.translate(vec2(0.0, (sel.bottom() + 8.0 - rect.top()).max(0.0)));
-            let beside = rect.translate(vec2(sel.right() + 8.0 - rect.left(), 0.0));
-            if fits(below) {
-                rect = below;
-            } else if fits(beside) {
-                rect = beside;
-            }
-        }
+        let rect = self.axes_rect(ctx);
         self.hits.insert("axes".into(), rect);
         let (mirror, lock) = (self.mirror_axes(), self.lock);
         let mut clicked = (None, None);
@@ -2780,6 +2771,32 @@ impl Hybrid {
         if let Some(a) = clicked.1 {
             self.toggle_lock(a);
         }
+    }
+
+    /// Where the axis flyout opens: the first spot on screen clear of the other flyouts beside
+    /// the rail (the selection flyout, the Bounds panel and the size flyout): beside its
+    /// buttons, under the selection flyout, beside it, then beside the Bounds panel.
+    fn axes_rect(&self, ctx: &Context) -> Rect {
+        let own = self.flyout_rect(self.axes_y, "mirror", vec2(150.0, 6.0 + 2.0 * 40.0 + 2.0 + 6.0));
+        if self.touch {
+            return own;
+        }
+        let sel = self.selection_shown().then(|| self.selection_rect(ctx));
+        let bounds = self.bounds_panel.as_ref().map(|_| self.bounds_rect(ctx));
+        let size = self.size_shown().then(|| self.size_rect());
+        let taken: Vec<Rect> = [sel, bounds, size].into_iter().flatten().collect();
+        let below = sel.map(|r| own.translate(vec2(0.0, (r.bottom() + 8.0 - own.top()).max(0.0))));
+        let beside = |r: Option<Rect>| r.map(|r| own.translate(vec2(r.right() + 8.0 - own.left(), 0.0)));
+        let screen = ctx.content_rect();
+        [Some(own), below, beside(sel), beside(bounds)]
+            .into_iter()
+            .flatten()
+            .find(|r| {
+                r.bottom() <= screen.bottom() - 12.0
+                    && r.right() <= screen.right() - 12.0
+                    && !taken.iter().any(|t| t.intersects(*r))
+            })
+            .unwrap_or(own)
     }
 
     /// Where the selection flyout opens: beside the select button, lifted to end on screen.
@@ -3062,31 +3079,39 @@ impl Hybrid {
         }
     }
 
-    // The Bounds panel, beside the selection flyout at its Resize button: the model's size as
-    // X, Y and Z fields (vxr's axes, Y up). Enter or leaving a field resizes, keeping the
-    // bottom and the centre, as one undo step.
-    fn bounds_panel(&mut self, ctx: &Context) {
-        let Some(mut fields) = self.bounds_panel.take() else { return };
-        let size = self.bounds;
-        let (w, inner_w) = (232.0, 208.0);
+    fn bounds_note(ctx: &Context) -> Arc<egui::Galley> {
         let mut job = LayoutJob::default();
         job.append(
             "Keeps the bottom and the center. Erases the voxels outside.",
             0.0,
             TextFormat { font_id: sans(11.0), color: th().faint, line_height: Some(15.95), ..Default::default() },
         );
-        job.wrap.max_width = inner_w;
-        let note = ctx.fonts_mut(|f| f.layout_job(job));
-        let h = 36.0 + 28.0 + 12.0 + note.size().y + 14.0;
+        job.wrap.max_width = 208.0;
+        ctx.fonts_mut(|f| f.layout_job(job))
+    }
+
+    fn bounds_rect(&self, ctx: &Context) -> Rect {
+        let (w, h) = (232.0, 36.0 + 28.0 + 12.0 + Self::bounds_note(ctx).size().y + 14.0);
         // The fields' row lines up with the Resize button (its centre 184 below the flyout's top).
-        let rect = match self.hits.get("selection").copied().filter(|_| self.touch) {
+        match self.hits.get("selection").copied().filter(|_| self.touch) {
             // Over the dock: beside the selection flyout, level with its bottom.
             Some(sel) => Rect::from_min_size(pos2(sel.right() + 8.0, sel.bottom() - h), vec2(w, h)),
             None => {
                 let sel = self.selection_rect(ctx);
                 Rect::from_min_size(pos2(sel.right() + 8.0, sel.top() + 184.0 - 50.0), vec2(w, h))
             }
-        };
+        }
+    }
+
+    // The Bounds panel, beside the selection flyout at its Resize button: the model's size as
+    // X, Y and Z fields (vxr's axes, Y up). Enter or leaving a field resizes, keeping the
+    // bottom and the centre, as one undo step.
+    fn bounds_panel(&mut self, ctx: &Context) {
+        let Some(mut fields) = self.bounds_panel.take() else { return };
+        let size = self.bounds;
+        let inner_w = 208.0;
+        let note = Self::bounds_note(ctx);
+        let rect = self.bounds_rect(ctx);
         self.hits.insert("bounds-panel".into(), rect);
         let mut close = false;
         let mut resize = None;
