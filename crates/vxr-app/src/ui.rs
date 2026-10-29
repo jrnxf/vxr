@@ -4743,9 +4743,22 @@ impl Hybrid {
             Rect::from_min_size(pos2(x.round(), row_top), size)
         } else {
             // Too wide for the gap (the assistant is docked, or the chip beside the palette or
-            // the colour editor): a row up, over the stats.
+            // the colour editor): a row up, over the stats, right of the palette and the colour
+            // editor where they reach down to it; else above the taller of them.
             let stats_top = self.hits.get("stats").map_or(screen.bottom() - 12.0, |r| r.top());
-            Rect::from_min_size(pos2(screen.left() + 12.0, stats_top - 4.0 - size.y), size)
+            let y = stats_top - 4.0 - size.y;
+            let open: Vec<Rect> = ["palette", "color-edit"].iter().filter_map(|n| self.hits.get(*n).copied()).collect();
+            let x = open
+                .iter()
+                .filter(|r| r.bottom() > y && r.top() < stats_top)
+                .fold(screen.left() + 12.0, |x, r| x.max(r.right() + 8.0));
+            let up = Rect::from_min_size(pos2(x, y), size);
+            let corner = self.render_dock.filter(|_| !self.full_render);
+            let busy = open.iter().chain(&corner).any(|r| r.intersects(up)) || up.right() > screen.right() - 12.0;
+            match open.iter().map(|r| r.top()).reduce(f32::min) {
+                Some(top) if busy => Rect::from_min_size(pos2(self.flyout_x(), top - 8.0 - size.y), size),
+                _ => up,
+            }
         };
         self.hits.insert("hint".into(), rect);
         if chip > 0.0 {
@@ -4755,6 +4768,7 @@ impl Hybrid {
                     ui.painter().galley(pos2(rect.left() + chip + 14.0, rect.top() + 8.0), g, th().muted);
                 }
             });
+            ctx.move_to_top(egui::LayerId::new(Order::Middle, Id::unique("hint")));
             return;
         }
         Area::new(Id::unique("hint")).fade_in(false).order(Order::Middle).fixed_pos(rect.min).constrain(false).show(
