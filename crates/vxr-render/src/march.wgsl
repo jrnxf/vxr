@@ -17,7 +17,7 @@ struct Camera {
     // The theme's view colours in sRGB, 0 to 1 (`ViewColors`): the background gradient's inner
     // and outer colour, the ground's tile and base, the grid, the bounds frame, the selection
     // tint and its edges.
-    colors: array<vec4<f32>, 8>,
+    colors: array<vec4<f32>, 10>,
 };
 
 @group(0) @binding(0) var<uniform> cam: Camera;
@@ -38,10 +38,10 @@ struct Camera {
 // reads on pale voxels too.
 fn select_tint() -> vec3<f32> { return srgb_to_linear(cam.colors[6].rgb); }
 fn select_edge() -> vec3<f32> { return srgb_to_linear(cam.colors[7].rgb); }
-// Ghost tints, the UI's OK #6ee7a8 (added) and DANGER #ff6467 (removed) in linear light;
-// repainted cells keep their new colour with an accent edge.
-const ADDED_TINT: vec3<f32> = vec3<f32>(0.155, 0.799, 0.392);
-const REMOVED_TINT: vec3<f32> = vec3<f32>(1.0, 0.128, 0.136);
+// Ghost tints, the theme's ok (added) and danger (removed); repainted cells keep their new
+// colour with an accent edge.
+fn added_tint() -> vec3<f32> { return srgb_to_linear(cam.colors[8].rgb); }
+fn removed_tint() -> vec3<f32> { return srgb_to_linear(cam.colors[9].rgb); }
 
 // The editor view draws every cell in the map, staged removals included.
 fn hidden(brick: u32, local: u32) -> bool {
@@ -207,11 +207,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let edge = min(e.x, min(e.y, e.z)) < 0.08;
             let lit = amb + 0.85 * diff + 0.2;
             if (kind == 1u) {
-                col = mix(col, ADDED_TINT * lit, select(0.5, 0.9, edge));
+                col = mix(col, added_tint() * lit, select(0.5, 0.9, edge));
             } else if (kind == 2u) {
                 col = select(col, select_tint() * lit, edge);
             } else {
-                col = select(mix(col * 0.35, REMOVED_TINT * 0.35, 0.5), REMOVED_TINT * lit, edge);
+                col = select(mix(col * 0.35, removed_tint() * 0.35, 0.5), removed_tint() * lit, edge);
             }
         }
         if (cam.cursor.w == 1 && all(voxel == cam.cursor.xyz)) {
