@@ -39,6 +39,8 @@ pub struct FontBytes {
     pub sans_semibold: Vec<u8>,
     pub mono_regular: Vec<u8>,
     pub mono_medium: Vec<u8>,
+    /// Geist Mono UltraBlack, for the "vxr" wordmark.
+    pub mono_ultrablack: Vec<u8>,
     /// Inter Regular, for the symbols Geist lacks (⌘ and ⌫).
     pub symbols: Vec<u8>,
     pub icons: Vec<u8>,
@@ -62,6 +64,10 @@ fn mono(size: f32) -> FontId {
 fn mono_medium(size: f32) -> FontId {
     FontId::new(size, family("mono-medium"))
 }
+/// The wordmark's face: Geist Mono UltraBlack.
+fn brand_font(size: f32) -> FontId {
+    FontId::new(size, family("brand"))
+}
 fn icon_font(size: f32) -> FontId {
     FontId::new(size, family("icons"))
 }
@@ -77,7 +83,9 @@ pub fn install(ctx: &Context, fonts: Option<FontBytes>) {
             let mut defs = FontDefinitions::default();
             let prop = defs.families[&FontFamily::Proportional].clone();
             let mono = defs.families[&FontFamily::Monospace].clone();
-            for (name, list) in [("medium", &prop), ("semibold", &prop), ("icons", &prop), ("mono-medium", &mono)] {
+            for (name, list) in
+                [("medium", &prop), ("semibold", &prop), ("icons", &prop), ("mono-medium", &mono), ("brand", &mono)]
+            {
                 defs.families.insert(family(name), list.clone());
             }
             defs
@@ -100,6 +108,7 @@ fn font_definitions(fonts: FontBytes) -> FontDefinitions {
     add("geist-semibold", fonts.sans_semibold, &[family("semibold")]);
     add("geist-mono", fonts.mono_regular, &[FontFamily::Monospace]);
     add("geist-mono-medium", fonts.mono_medium, &[family("mono-medium")]);
+    add("geist-mono-ultrablack", fonts.mono_ultrablack, &[family("brand")]);
     add("lucide", fonts.icons, &[family("icons")]);
     // Inter covers the symbols Geist lacks (the ⌘ and ⌫ of the shortcut keys); keep it as every
     // family's fallback.
@@ -1393,12 +1402,12 @@ impl Hybrid {
     // the file actions as icons and undo/redo; the right one the assistant, the keys and Embed.
     fn top_bar(&mut self, ctx: &Context, screen: Rect) {
         let name = ctx.fonts_mut(|f| f.layout_no_wrap(self.scene_name.clone(), sans(13.0), th().text));
-        let brand = ctx.fonts_mut(|f| f.layout_no_wrap("vxr".into(), sans_semibold(13.0), th().text));
+        let brand = ctx.fonts_mut(|f| f.layout_no_wrap("vxr".into(), brand_font(13.0), th().text));
         let sel_w = name.size().x + 34.0;
         // Over the dock, undo and redo are on it.
         let history = !self.touch;
         let w = 12.0
-            + 26.0
+            + LOGO_STEP
             + brand.size().x
             + 10.0
             + sel_w
@@ -1412,7 +1421,7 @@ impl Hybrid {
             let cy = rect.center().y;
             let mut x = rect.left() + 12.0;
             logo(ui, pos2(x, cy - 9.0), 18.0);
-            x += 26.0;
+            x += LOGO_STEP;
             ui.painter().galley(pos2(x, cy - brand.size().y / 2.0), brand.clone(), th().text);
             x += brand.size().x + 10.0;
             // #scene-select
@@ -5020,18 +5029,35 @@ fn small_button(ui: &mut Ui, r: Rect, glyph: char, label: &str, id: &str, on: bo
     resp
 }
 
-// #brand .logo: the 24-unit hexagonal cube from the prototype's SVG, scaled to `size`.
+/// The top bar's logo and the gap before the wordmark: the 18-point cube is 15.6 wide, and
+/// the gap is a little wider than the lockup's (a third of the cube's height, not a quarter),
+/// so the word stays clear of the cube at this size.
+const LOGO_STEP: f32 = 22.0;
+
+/// The logo: a 2x2x2 voxel cube with its top front voxel out, in the theme's three face tones
+/// (`Theme::logo`), `size` tall with its top left at `at` (`assets/logo` has it as SVG). Each
+/// polygon is convex; where two of one tone meet, a hairline of their own colour hides the
+/// anti-aliased seam.
 fn logo(ui: &Ui, at: Pos2, size: f32) {
-    let s = size / 24.0;
-    let pt = |x: f32, y: f32| at + vec2(x * s, y * s);
-    let hex = vec![pt(12.0, 2.5), pt(20.5, 7.4), pt(20.5, 16.6), pt(12.0, 21.5), pt(3.5, 16.6), pt(3.5, 7.4)];
+    // On a unit-high box 0.866 wide: (tone, corners). Tone 0 is the top, 1 the left, 2 the right.
+    const FACES: [(usize, &[[f32; 2]]); 9] = [
+        (0, &[[0.433, 0.0], [0.866, 0.25], [0.6495, 0.375], [0.2165, 0.125]]),
+        (0, &[[0.2165, 0.125], [0.433, 0.25], [0.2165, 0.375], [0.0, 0.25]]),
+        (1, &[[0.0, 0.25], [0.2165, 0.375], [0.2165, 0.875], [0.0, 0.75]]),
+        (2, &[[0.866, 0.25], [0.866, 0.75], [0.6495, 0.875], [0.6495, 0.375]]),
+        // The notch: its two walls and its floor.
+        (1, &[[0.433, 0.25], [0.6495, 0.375], [0.6495, 0.625], [0.433, 0.5]]),
+        (2, &[[0.433, 0.25], [0.433, 0.5], [0.2165, 0.625], [0.2165, 0.375]]),
+        (0, &[[0.433, 0.5], [0.6495, 0.625], [0.433, 0.75], [0.2165, 0.625]]),
+        // The front corner voxel's two sides, under the notch.
+        (1, &[[0.2165, 0.625], [0.433, 0.75], [0.433, 1.0], [0.2165, 0.875]]),
+        (2, &[[0.6495, 0.625], [0.6495, 0.875], [0.433, 1.0], [0.433, 0.75]]),
+    ];
+    let tones = th().logo;
     let p = ui.painter();
-    p.add(egui::Shape::convex_polygon(hex.clone(), th().accent.gamma_multiply(0.25), Stroke::NONE));
-    let st = Stroke::new(1.6 * s, th().accent);
-    p.add(egui::Shape::closed_line(hex, st));
-    let c = pt(12.0, 12.0);
-    for e in [pt(20.5, 7.4), pt(12.0, 21.5), pt(3.5, 7.4)] {
-        p.line_segment([c, e], st);
+    for (tone, corners) in FACES {
+        let pts = corners.iter().map(|[x, y]| at + vec2(x * size, y * size)).collect();
+        p.add(egui::Shape::convex_polygon(pts, tones[tone], Stroke::new(0.5, tones[tone])));
     }
 }
 

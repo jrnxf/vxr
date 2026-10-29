@@ -60,6 +60,8 @@ pub struct Theme {
     /// The colour the translucent fills and borders are made of: white on Neutral, black on
     /// Paper, the foreground on the editor themes.
     base: Color32,
+    /// The logo cube's top, left and right faces (the notched cube in the top bar).
+    pub logo: [Color32; 3],
     /// The editor view's own colours.
     pub view: ViewColors,
 }
@@ -92,6 +94,8 @@ struct Spec {
     danger: u32,
     ok: u32,
     mid: u32,
+    /// The logo cube's top, left and right faces, lightest to darkest on a dark theme.
+    logo: [u32; 3],
     /// The view's colours; its ghost tints are set from `ok` and `danger`.
     view: ViewColors,
 }
@@ -149,6 +153,7 @@ const fn theme(s: Spec) -> Theme {
             Color32::from_rgba_unmultiplied_const(255, 255, 255, 200)
         },
         base: rgb(s.base),
+        logo: [rgb(s.logo[0]), rgb(s.logo[1]), rgb(s.logo[2])],
         view: ViewColors { added: bytes(s.ok), removed: bytes(s.danger), ..s.view },
     }
 }
@@ -169,6 +174,8 @@ pub static NEUTRAL: Theme = theme(Spec {
     danger: 0xff6467,
     ok: 0x6ee7a8,
     mid: 0xffd166,
+    // The logo's greys.
+    logo: [0xfafafa, 0xa1a1a1, 0x525252],
     view: ViewColors::NEUTRAL,
 });
 
@@ -189,6 +196,8 @@ pub static PAPER: Theme = theme(Spec {
     // dark theme's mint and amber are unreadable on white.
     ok: 0x15803d,
     mid: 0xa16207,
+    // The logo's greys on white.
+    logo: [0x5c5c5c, 0x2e2e2e, 0x1f1f1f],
     view: ViewColors {
         sky: [bytes(0xffffff), bytes(0xf5f5f5)],
         tile: bytes(0xe5e5e5),
@@ -216,6 +225,7 @@ pub static GRUVBOX: Theme = theme(Spec {
     danger: 0xfb4934,
     ok: 0xb8bb26,
     mid: 0xfe8019,
+    logo: [0xebdbb2, 0xa89984, mix(0xa89984, 0x1d2021, 128)],
     view: ViewColors {
         sky: [bytes(0x3c3836), bytes(0x282828)], // bg1 to bg0
         tile: bytes(0x32302f),                   // bg0_s
@@ -243,6 +253,7 @@ pub static TOKYO_NIGHT: Theme = theme(Spec {
     danger: 0xf7768e,
     ok: 0x9ece6a,
     mid: 0xe0af68,
+    logo: [0xc0caf5, 0xa9b1d6, mix(0xa9b1d6, 0x1a1b26, 128)],
     view: ViewColors {
         sky: [bytes(0x24283b), bytes(0x16161e)], // storm bg to bg_dark
         tile: bytes(0x1f2335),
@@ -270,6 +281,7 @@ pub static KANAGAWA: Theme = theme(Spec {
     danger: 0xff5d62, // peachRed
     ok: 0x98bb6c,     // springGreen
     mid: 0xe6c384,    // carpYellow
+    logo: [0xdcd7ba, 0xc8c093, mix(0xc8c093, 0x1f1f28, 128)],
     view: ViewColors {
         sky: [bytes(0x2a2a37), bytes(0x16161d)], // sumiInk4 to sumiInk0
         tile: bytes(0x1f1f28),
@@ -299,6 +311,7 @@ pub static NORD: Theme = theme(Spec {
     danger: mix(0xbf616a, 0xeceff4, 77),
     ok: 0xa3be8c,  // nord14
     mid: 0xebcb8b, // nord13
+    logo: [0xeceff4, 0xd8dee9, mix(0xd8dee9, 0x2e3440, 128)],
     view: ViewColors {
         sky: [bytes(0x434c5e), bytes(0x2e3440)], // nord2 to nord0
         tile: bytes(0x3b4252),                   // nord1

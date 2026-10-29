@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Fetch the UI fonts into fonts/ (git-ignored): Geist and Geist Mono 1.3.1 (OFL), the type of
-# shadcn/ui's Neutral theme; Inter 4.1 Regular (OFL) for the symbols Geist lacks (the shortcut
+# shadcn/ui's Neutral theme, with Geist Mono UltraBlack for the "vxr" wordmark; Inter 4.1 Regular (OFL) for the symbols Geist lacks (the shortcut
 # keys); and the Lucide icon font 1.61.0 (ISC) for the toolbar icons, with their licences (the
 # browser build serves them all). Pinned versions, checked by sha256.
 set -euo pipefail
@@ -13,7 +13,7 @@ geist=https://unpkg.com/geist@1.3.1
 for f in Geist-Regular Geist-Medium Geist-SemiBold; do
   curl -fsSL -o "$out/$f.ttf" "$geist/dist/fonts/geist-sans/$f.ttf"
 done
-for f in GeistMono-Regular GeistMono-Medium; do
+for f in GeistMono-Regular GeistMono-Medium GeistMono-UltraBlack; do
   curl -fsSL -o "$out/$f.ttf" "$geist/dist/fonts/geist-mono/$f.ttf"
 done
 curl -fsSL -o "$out/Geist-OFL.txt" "$geist/LICENSE.TXT"

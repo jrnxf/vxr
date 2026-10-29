@@ -329,7 +329,8 @@ async function main() {
   const [vox, ...fonts] = await Promise.all([
     get('scene.vox'),
     font('Geist-Regular.ttf'), font('Geist-Medium.ttf'), font('Geist-SemiBold.ttf'),
-    font('GeistMono-Regular.ttf'), font('GeistMono-Medium.ttf'), font('Inter-Regular.ttf'), font('lucide.ttf'),
+    font('GeistMono-Regular.ttf'), font('GeistMono-Medium.ttf'), font('GeistMono-UltraBlack.ttf'),
+    font('Inter-Regular.ttf'), font('lucide.ttf'),
   ]);
   app = await start(canvas, vox, 'island.vox', dpr(), ...fonts);
   window.vxr = app; // for the console and crates/vxr-web/check
