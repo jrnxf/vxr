@@ -93,6 +93,18 @@ impl Space {
     }
 }
 
+/// The cells of `solid` that cannot be seen from outside it: what [`Scene::hollow`] erases.
+pub fn inner(solid: &[[i32; 3]]) -> Vec<[i32; 3]> {
+    let Some(sp) = Space::new(solid) else { return Vec::new() };
+    solid.iter().copied().filter(|&p| !sp.seen(p)).collect()
+}
+
+/// The cells `solid` encloses that it does not hold: what [`Scene::fill_interior`] fills
+/// where they are empty.
+pub fn enclosed(solid: &[[i32; 3]]) -> Vec<[i32; 3]> {
+    Space::new(solid).map(|sp| sp.enclosed().collect()).unwrap_or_default()
+}
+
 impl Scene {
     /// Erase every voxel of the selection (or the whole model) that cannot be seen from
     /// outside it, leaving a shell one voxel thick, as one undo step. Returns how many
@@ -101,9 +113,7 @@ impl Scene {
         self.commit();
         let (cells, _) = self.subject();
         let solid: Vec<_> = cells.iter().map(|c| c.0).collect();
-        let Some(sp) = Space::new(&solid) else { return 0 };
-        let inner: Vec<_> = solid.into_iter().filter(|&p| !sp.seen(p)).collect();
-        self.edit(inner.into_iter().map(|p| (p, 0)))
+        self.edit(inner(&solid).into_iter().map(|p| (p, 0)))
     }
 
     /// Fill the empty space the selection (or the whole model) encloses with palette index
@@ -116,8 +126,7 @@ impl Scene {
         }
         let (cells, _) = self.subject();
         let solid: Vec<_> = cells.iter().map(|c| c.0).collect();
-        let Some(sp) = Space::new(&solid) else { return 0 };
-        let holes: Vec<_> = sp.enclosed().filter(|p| self.map.get(p[0], p[1], p[2]) == 0).collect();
+        let holes: Vec<_> = enclosed(&solid).into_iter().filter(|p| self.map.get(p[0], p[1], p[2]) == 0).collect();
         self.edit(holes.into_iter().map(|p| (p, v)))
     }
 
@@ -125,9 +134,14 @@ impl Scene {
     /// odd change goes to the low side when growing and the high side when shrinking), as
     /// [`Scene::set_bounds`].
     pub fn resize(&mut self, size: [u32; 3]) -> Option<usize> {
+        self.set_bounds(self.resized_lo(size), size)
+    }
+
+    /// The low corner [`Scene::resize`] gives bounds of `size`.
+    pub fn resized_lo(&self, size: [u32; 3]) -> [i32; 3] {
         let b = self.bounds();
         let grow = |a: usize| (b.size[a] as i32 - size[a] as i32).div_euclid(2);
-        self.set_bounds([b.lo[0] + grow(0), b.lo[1], b.lo[2] + grow(2)], size)
+        [b.lo[0] + grow(0), b.lo[1], b.lo[2] + grow(2)]
     }
 
     /// Shrink (or grow) the model bounds to fit the voxels exactly, as one undo step.

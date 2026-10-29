@@ -8,7 +8,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde_json::{Value, json};
 use vxr_core::Scene;
-use vxr_core::select::Mode;
+use vxr_core::select::{Clip, Mode};
 use vxr_ops::{Limits, Session, clean, notes_of};
 
 use crate::protocol::{Backend, INSTRUCTIONS, PALETTE_URI, SUMMARY_URI, decode, encode};
@@ -180,6 +180,8 @@ struct Open {
     /// The file as last read or written, for the palette notes.
     bytes: Vec<u8>,
     unsaved: bool,
+    /// The agent's clipboard (world cells), kept between calls.
+    clip: Option<Clip>,
 }
 
 type R = Result<String, String>;
@@ -320,7 +322,7 @@ impl Files {
             return Err(format!("size {size:?}: each side must be 1 to {MAX_NEW}"));
         }
         let scene = Scene::new([size[0] as u32, size[1] as u32, size[2] as u32]);
-        self.open = Some(Open { rel, path, scene, bytes: Vec::new(), unsaved: false });
+        self.open = Some(Open { rel, path, scene, bytes: Vec::new(), unsaved: false, clip: None });
         let o = self.open.as_mut().unwrap();
         Ok(format!(
             "new scene of {} x {} x {}; save writes it\n{}",
@@ -337,7 +339,7 @@ impl Files {
         let path = self.resolve(&rel)?;
         let bytes = self.read_file(&path, &rel)?;
         let scene = Scene::from_vox(&bytes).map_err(|e| format!("{}: {e}", clean(rel.as_bytes())))?;
-        self.open = Some(Open { rel, path, scene, bytes, unsaved: false });
+        self.open = Some(Open { rel, path, scene, bytes, unsaved: false, clip: None });
         let o = self.open.as_mut().unwrap();
         let hint = if o.scene.at() == vxr_core::history::At::World {
             "the file has several objects, shown as a world where voxels cannot be edited: call edit_object with a node from the summary's objects\n"
@@ -502,7 +504,7 @@ impl Open {
             _ => {
                 let query = READ_ONLY.contains(&name);
                 let r = self.run(name, args);
-                if r.is_ok() && !query && name != "select" {
+                if r.is_ok() && !query && name != "select" && name != "copy" {
                     self.unsaved = true;
                 }
                 r
@@ -519,9 +521,11 @@ impl Open {
         // A terminal agent is not asked per 10,000 cells: the hard limit stays.
         let limits = Limits { ask_over: Limits::default().changed_cells, ..Limits::default() };
         let mut session = Session::with_limits(&self.scene, Some(&self.bytes), limits);
+        session.set_clipboard(self.clip.clone());
         match session.call(&mut self.scene, name, args.clone()) {
             Ok(text) => {
                 let selection: Vec<[i32; 3]> = session.selection().collect();
+                self.clip = session.clipboard().cloned();
                 session.apply(&mut self.scene);
                 self.scene.select(selection, Mode::Replace);
                 Ok(text)

@@ -63,6 +63,17 @@ pub fn bounds(cells: impl IntoIterator<Item = [i32; 3]>) -> Option<([i32; 3], [i
     }))
 }
 
+impl Clip {
+    /// Where Paste puts the low corner: the bottom centre on cell `at`, or beside where it
+    /// was copied from on +X. In the cells `from` and `at` are given in.
+    pub fn corner(&self, at: Option<[i32; 3]>) -> [i32; 3] {
+        match at {
+            Some(p) => [p[0] - self.size[0] / 2, p[1], p[2] - self.size[2] / 2],
+            None => [self.from[0] + self.size[0], self.from[1], self.from[2]],
+        }
+    }
+}
+
 impl Transform {
     /// Where cell `p` goes, for cells inside the inclusive bounds `lo`..`hi`.
     pub fn apply(self, p: [i32; 3], lo: [i32; 3], hi: [i32; 3]) -> [i32; 3] {
@@ -312,11 +323,7 @@ impl Scene {
     /// Where Paste puts the clipboard's low corner: its bottom centre on cell `at` (the cell
     /// in front of the face under the pointer), or beside where it was copied from on +X.
     pub fn paste_corner(&self, at: Option<[i32; 3]>) -> Option<[i32; 3]> {
-        let c = self.clipboard.as_ref()?;
-        Some(match at {
-            Some(p) => [p[0] - c.size[0] / 2, p[1], p[2] - c.size[2] / 2],
-            None => [c.from[0] + c.size[0], c.from[1], c.from[2]],
-        })
+        Some(self.clipboard.as_ref()?.corner(at))
     }
 
     /// Paste the clipboard with its low corner at `corner`, as one undo step, and select it.

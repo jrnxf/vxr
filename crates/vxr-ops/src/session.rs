@@ -14,6 +14,9 @@ use std::collections::{HashMap, HashSet};
 use serde_json::Value;
 use vxr_core::Scene;
 use vxr_core::history::At;
+use vxr_core::material::{Kind, Material};
+use vxr_core::scene::MAX_EXTENT;
+use vxr_core::select::{Clip, bounds};
 use vxr_vox::chunk::{NOTE, Note};
 use vxr_vox::raw::RawFile;
 
@@ -116,7 +119,7 @@ pub enum Ghost {
 
 /// The staged change against the scene as it was, in world cells (sorted), as the review
 /// card counts it.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Changes {
     /// Cell and its new slot.
     pub added: Vec<(Cell, u8)>,
@@ -126,6 +129,8 @@ pub struct Changes {
     pub repainted: Vec<(Cell, u8, u8)>,
     /// Slot, old colour, new colour.
     pub palette: Vec<(u8, [u8; 4], [u8; 4])>,
+    /// Slot, old material, new material.
+    pub materials: Vec<(u8, Material, Material)>,
 }
 
 pub struct Session {
@@ -137,13 +142,19 @@ pub struct Session {
     /// Cells whose value differs from `base`.
     staged: usize,
     pub(crate) palette_before: [[u8; 4]; 256],
+    materials_before: [Material; 256],
     /// The assistant's selection (map cells), seeded from the user's.
     pub(crate) selection: HashSet<Cell>,
     selection_before: HashSet<Cell>,
-    /// The caller whose selection `selection` is ([`Session::set_lane`]), and every other
-    /// caller's selection as it started and as it is now.
+    /// What the assistant's copy or cut took, its `from` a world cell.
+    clip: Option<Clip>,
+    clip_before: Option<Clip>,
+    /// The caller whose selection and clipboard these are ([`Session::set_lane`]), and every
+    /// other caller's.
     lane: u64,
-    lanes: HashMap<u64, (HashSet<Cell>, HashSet<Cell>)>,
+    lanes: HashMap<u64, Lane>,
+    /// How far map cells moved since the session began, by resize and crop.
+    shift: Cell,
     pub(crate) parts: Vec<Part>,
     /// How many of `parts` were found in the scene; the rest the model named.
     detected: usize,
@@ -160,14 +171,9 @@ pub struct Session {
     open: bool,
     replaying: bool,
     done: Option<String>,
-    /// While the scene shows the change's Before: each touched cell's value with the change,
-    /// and the palette with it.
-    before: Option<Before>,
+    /// Whether the scene shows the change's Before ([`Session::show_before`]).
+    before: bool,
 }
-
-/// What [`Session::show_before`] set aside: each touched cell's value with the change, and the
-/// palette with it.
-type Before = (Vec<(Cell, u8)>, [[u8; 4]; 256]);
 
 /// The `NOTE` chunk's names, cleaned, if the file has one.
 pub fn notes_of(bytes: &[u8]) -> Vec<String> {
@@ -196,7 +202,11 @@ impl Session {
             removed: HashSet::new(),
             staged: 0,
             palette_before: scene.palette,
+            materials_before: scene.materials,
             selection_before: selection.clone(),
+            clip: None,
+            clip_before: None,
+            shift: [0; 3],
             selection,
             lane: 0,
             lanes: HashMap::new(),
@@ -211,7 +221,7 @@ impl Session {
             open: false,
             replaying: false,
             done: None,
-            before: None,
+            before: false,
         }
     }
 
@@ -237,17 +247,26 @@ impl Session {
             return;
         }
         let seed: HashSet<Cell> = seed.into_iter().collect();
-        self.lanes.entry(lane).or_insert_with(|| (seed.clone(), seed));
+        // As it was before a resize of the change moved the map, for a revert.
+        let back = self.shift.map(|d| -d);
+        let before = seed.iter().map(|&p| add(p, back)).collect();
+        self.lanes.entry(lane).or_insert_with(|| Lane { selection_before: before, selection: seed, ..Lane::default() });
         self.switch(lane);
     }
 
-    /// Make `lane`'s selection the current one (it must be in `lanes` unless it is current).
+    /// Make `lane`'s selection and clipboard the current ones (it must be in `lanes` unless
+    /// it is current).
     fn switch(&mut self, lane: u64) {
         if lane == self.lane {
             return;
         }
-        let (before, now) = self.lanes.remove(&lane).unwrap_or_default();
-        let old = (std::mem::replace(&mut self.selection_before, before), std::mem::replace(&mut self.selection, now));
+        let l = self.lanes.remove(&lane).unwrap_or_default();
+        let old = Lane {
+            selection_before: std::mem::replace(&mut self.selection_before, l.selection_before),
+            selection: std::mem::replace(&mut self.selection, l.selection),
+            clip_before: std::mem::replace(&mut self.clip_before, l.clip_before),
+            clip: std::mem::replace(&mut self.clip, l.clip),
+        };
         self.lanes.insert(self.lane, old);
         self.lane = lane;
     }
@@ -255,6 +274,18 @@ impl Session {
     /// The current lane ([`Session::set_lane`]).
     pub fn lane(&self) -> u64 {
         self.lane
+    }
+
+    /// What the assistant's copy or cut took (`from` is a world cell).
+    pub fn clipboard(&self) -> Option<&Clip> {
+        self.clip.as_ref()
+    }
+
+    /// Start from this clipboard, before any call: a terminal agent keeps its own between
+    /// calls so it never changes the user's.
+    pub fn set_clipboard(&mut self, clip: Option<Clip>) {
+        self.clip = clip.clone();
+        self.clip_before = clip;
     }
 
     /// A new model turn: the per-turn call count starts again.
@@ -300,7 +331,17 @@ impl Session {
                 | Op::Fill(_)
                 | Op::Paint(_)
                 | Op::Select(_)
+                | Op::Transform(_)
+                | Op::Copy(_)
+                | Op::Cut(_)
+                | Op::Paste(_)
+                | Op::Delete(_)
+                | Op::Hollow(_)
+                | Op::FillInside(_)
+                | Op::Resize(_)
+                | Op::Crop(_)
                 | Op::PaletteSet(_)
+                | Op::MaterialSet(_)
         );
         let query = op.is_query();
         let r = self.run(scene, op.clone());
@@ -441,6 +482,73 @@ impl Session {
                 self.edit(scene, cells, Mode::Paint, slot, None)
             }
             Op::Select(a) => self.select(scene, &a),
+            Op::Transform(a) => self.transform(scene, &a),
+            Op::Copy(_) => {
+                let c = self.clip(scene)?;
+                let s = format!(
+                    "copied {} voxels, a {} x {} x {} box from {:?}",
+                    c.voxels.len(),
+                    c.size[0],
+                    c.size[1],
+                    c.size[2],
+                    c.from
+                );
+                self.clip = Some(c);
+                Ok(s)
+            }
+            Op::Cut(_) => {
+                let clip = self.clip(scene)?;
+                let st = self.delete(scene)?;
+                let n = clip.voxels.len();
+                self.clip = Some(clip);
+                Ok(format!("cut {n} voxels; {}", self.stage_text(scene, &st)))
+            }
+            Op::Paste(a) => {
+                let Some(clip) = self.clip.clone() else {
+                    return Err(invalid("the clipboard is empty: copy or cut first"));
+                };
+                let corner = clip.corner(a.at);
+                let cells = clip.voxels.iter().map(|&(d, v)| (std::array::from_fn(|k| corner[k] + d[k]), v));
+                let st = self.stage(scene, cells.collect(), false)?;
+                self.selection = st.made.iter().copied().collect();
+                Ok(format!("pasted at {corner:?} (low corner); {}", self.stage_text(scene, &st)))
+            }
+            Op::Delete(_) => {
+                let st = self.delete(scene)?;
+                Ok(self.stage_text(scene, &st))
+            }
+            Op::Hollow(_) => {
+                let solid: Vec<Cell> = self.subject(scene).0.into_iter().map(|c| c.0).collect();
+                let inner = vxr_core::model::inner(&solid).into_iter().map(|p| (scene.to_world(p), 0)).collect();
+                let st = self.stage(scene, inner, false)?;
+                Ok(self.stage_text(scene, &st))
+            }
+            Op::FillInside(a) => {
+                let slot = slot(a.slot)?;
+                let solid: Vec<Cell> = self.subject(scene).0.into_iter().map(|c| c.0).collect();
+                let holes = vxr_core::model::enclosed(&solid)
+                    .into_iter()
+                    .filter(|&p| self.get(scene, p) == 0)
+                    .map(|p| (scene.to_world(p), slot))
+                    .collect();
+                let st = self.stage(scene, holes, false)?;
+                Ok(self.stage_text(scene, &st))
+            }
+            Op::Resize(a) => {
+                if a.size.iter().any(|&n| n == 0 || n > MAX_EXTENT) {
+                    return Err(invalid(format!("size {:?}: each side is 1 to {MAX_EXTENT}", a.size)));
+                }
+                self.rebound(scene, scene.resized_lo(a.size), a.size)
+            }
+            Op::Crop(_) => {
+                let mut cells = Vec::new();
+                self.for_each(scene, |p, _| cells.push(p));
+                let Some((lo, hi)) = bounds(cells) else {
+                    return Err(invalid("the model is empty: there is nothing to crop to"));
+                };
+                self.rebound(scene, scene.to_world(lo), std::array::from_fn(|k| (hi[k] - lo[k] + 1) as u32))
+            }
+            Op::MaterialSet(a) => self.material_set(scene, &a),
             Op::PaletteSet(a) => {
                 let s = slot(a.slot)?;
                 let c = parse_hex(&a.hex).map_err(invalid)?;
@@ -451,7 +559,9 @@ impl Session {
             }
             Op::Undo(_) => {
                 let Some(i) = self.steps.iter().rposition(|s| {
-                    !s.dropped && s.lane == self.lane && s.op.as_ref().is_some_and(|o| !matches!(o, Op::Select(_)))
+                    !s.dropped
+                        && s.lane == self.lane
+                        && s.op.as_ref().is_some_and(|o| !matches!(o, Op::Select(_) | Op::Copy(_)))
                 }) else {
                     return Err(invalid("nothing of yours to undo"));
                 };
@@ -510,11 +620,16 @@ impl Session {
         true
     }
 
-    /// Every staged cell (map cells) and how it shows, for the ghost overlay.
+    /// Every staged cell in the map (map cells) and how it shows, for the ghost overlay.
     pub fn ghost(&self, scene: &Scene) -> Vec<(Cell, Ghost)> {
-        if self.before.is_some() {
-            return Vec::new();
-        }
+        let size = scene.map.size_voxels();
+        let mut out = self.staged_cells(scene);
+        out.retain(|(p, _)| (0..3).all(|k| p[k] >= 0 && p[k] < size[k] as i32));
+        out
+    }
+
+    /// Every staged cell (map cells), those a resize left outside the map included.
+    fn staged_cells(&self, scene: &Scene) -> Vec<(Cell, Ghost)> {
         let mut out: Vec<(Cell, Ghost)> = self
             .base
             .iter()
@@ -539,10 +654,7 @@ impl Session {
     /// The staged change in world cells, as the review card shows it.
     pub fn changes(&self, scene: &Scene) -> Changes {
         let mut c = Changes::default();
-        if self.before.is_some() {
-            return c;
-        }
-        for (p, g) in self.ghost(scene) {
+        for (p, g) in self.staged_cells(scene) {
             let w = scene.to_world(p);
             let (b, v) = (self.base[&p], self.get(scene, p));
             match g {
@@ -557,6 +669,10 @@ impl Session {
         c.palette = (1..=255u8)
             .filter(|&i| scene.palette[i as usize] != self.palette_before[i as usize])
             .map(|i| (i, self.palette_before[i as usize], scene.palette[i as usize]))
+            .collect();
+        c.materials = (1..=255u8)
+            .filter(|&i| scene.materials[i as usize] != self.materials_before[i as usize])
+            .map(|i| (i, self.materials_before[i as usize], scene.materials[i as usize]))
             .collect();
         c
     }
@@ -628,6 +744,7 @@ impl Session {
             self.removed.clear();
             self.staged = 0;
             self.palette_before = scene.palette;
+            self.materials_before = scene.materials;
         }
         self.replaying = false;
         self.switch(me);
@@ -635,33 +752,25 @@ impl Session {
     }
 
     /// Show the scene as it was before the change (true) or with it again (false), for the
-    /// review card's Before and After. The map and palette are set directly, outside the open
-    /// edit, and put back before anything else runs: a call, a dropped step, Apply or Discard
-    /// first shows the change again. Before shows no ghost and no changes.
+    /// review card's Before and After. Before puts every cell, colour, material and the bounds
+    /// back inside the open edit; After runs the kept steps again, as dropping a step does. A
+    /// call, a dropped step, Apply or Discard first shows the change again. Before shows no
+    /// ghost and no changes.
     pub fn show_before(&mut self, scene: &mut Scene, on: bool) {
-        if on == self.before.is_some() {
+        if on == self.before {
             return;
         }
+        self.before = on;
         if on {
-            let mut after = Vec::with_capacity(self.base.len());
-            for (&p, &b) in &self.base {
-                after.push((p, scene.map.get(p[0], p[1], p[2])));
-                scene.map.set(p[0], p[1], p[2], b);
-            }
-            let palette = scene.palette;
-            scene.palette[1..].copy_from_slice(&self.palette_before[1..]);
-            self.before = Some((after, palette));
-        } else if let Some((after, palette)) = self.before.take() {
-            for (p, v) in after {
-                scene.map.set(p[0], p[1], p[2], v);
-            }
-            scene.palette = palette;
+            self.revert(scene);
+        } else {
+            self.rebuild(scene);
         }
     }
 
     /// Whether the scene shows the change's Before ([`Session::show_before`]).
     pub fn showing_before(&self) -> bool {
-        self.before.is_some()
+        self.before
     }
 
     /// Discard: put every cell and colour back and close the edit, leaving no undo step.
@@ -758,13 +867,47 @@ impl Session {
         slot: u8,
         name: Option<&str>,
     ) -> Result<String, Error> {
+        let v = if mode == Mode::Erase { 0 } else { slot };
+        let st = self.stage(scene, cells.into_iter().map(|q| (q, v)).collect(), mode == Mode::Paint)?;
+        let mut s = format!("{} cells changed; {}", st.changed, self.staged_text(scene));
+        if let Some(n) = name.map(|n| clean(n.as_bytes())).filter(|n| !n.is_empty() && !st.made.is_empty()) {
+            let made = st.made.clone();
+            let id = match self.parts[self.detected..].iter().position(|p| p.name.eq_ignore_ascii_case(&n)) {
+                Some(k) => {
+                    self.parts[self.detected + k].cells.extend(made);
+                    self.parts[self.detected + k].id.clone()
+                }
+                None => {
+                    let i = match self.names.iter().position(|m| m.eq_ignore_ascii_case(&n)) {
+                        Some(i) => i,
+                        None => {
+                            self.names.push(n.clone());
+                            self.names.len() - 1
+                        }
+                    };
+                    let part = parts::named(self.detected + i + 1, &n, made);
+                    let id = part.id.clone();
+                    self.parts.push(part);
+                    id
+                }
+            };
+            s += &format!("; part {id} {}", Value::from(n));
+        }
+        s += &self.warning(scene, &st);
+        Ok(s)
+    }
+
+    /// Stage world cells, each to its slot (0 erases), as one step of the change; with
+    /// `paint` only cells that hold a voxel. Cells outside the bounds are skipped and counted;
+    /// a cell listed twice keeps its first slot.
+    fn stage(&mut self, scene: &mut Scene, cells: Vec<(Cell, u8)>, paint: bool) -> Result<Staged, Error> {
         if scene.at() == At::World {
             return Err(invalid(WORLD));
         }
         let size = scene.map.size_voxels();
         let (mut outside, mut seen, mut plan, mut made) = (0usize, HashSet::new(), Vec::new(), Vec::new());
         let mut delta = 0isize;
-        for q in cells {
+        for (q, v) in cells {
             let p = scene.to_map(q);
             if (0..3).any(|a| p[a] < 0 || p[a] >= size[a] as i32) {
                 outside += 1;
@@ -774,12 +917,9 @@ impl Session {
                 continue;
             }
             let cur = self.get(scene, p);
-            let v = match mode {
-                Mode::Add => slot,
-                Mode::Erase => 0,
-                Mode::Paint if cur != 0 => slot,
-                Mode::Paint => continue,
-            };
+            if paint && cur == 0 {
+                continue;
+            }
             if v != 0 {
                 made.push(p);
             }
@@ -816,38 +956,219 @@ impl Session {
         for &(p, v) in &plan {
             self.set(scene, p, v);
         }
-        let mut s = format!("{} cells changed; {}", plan.len(), self.staged_text(scene));
-        if let Some(n) = name.map(|n| clean(n.as_bytes())).filter(|n| !n.is_empty() && !made.is_empty()) {
-            let id = match self.parts[self.detected..].iter().position(|p| p.name.eq_ignore_ascii_case(&n)) {
-                Some(k) => {
-                    self.parts[self.detected + k].cells.extend(made);
-                    self.parts[self.detected + k].id.clone()
-                }
-                None => {
-                    let i = match self.names.iter().position(|m| m.eq_ignore_ascii_case(&n)) {
-                        Some(i) => i,
-                        None => {
-                            self.names.push(n.clone());
-                            self.names.len() - 1
-                        }
-                    };
-                    let part = parts::named(self.detected + i + 1, &n, made);
-                    let id = part.id.clone();
-                    self.parts.push(part);
-                    id
-                }
-            };
-            s += &format!("; part {id} {}", Value::from(n));
-        }
-        if outside > 0 {
-            s += &format!(
-                "; warning: {outside} cells were outside the editable bounds ({}) and skipped",
+        Ok(Staged { changed: plan.len(), outside, made })
+    }
+
+    /// "12 cells changed; staged so far: ...", and a warning when it clipped or did nothing.
+    fn stage_text(&self, scene: &Scene, st: &Staged) -> String {
+        format!("{} cells changed; {}{}", st.changed, self.staged_text(scene), self.warning(scene, st))
+    }
+
+    fn warning(&self, scene: &Scene, st: &Staged) -> String {
+        if st.outside > 0 {
+            format!(
+                "; warning: {} cells were outside the editable bounds ({}) and skipped",
+                st.outside,
                 self.bounds_text(scene)
-            );
-        } else if plan.is_empty() {
+            )
+        } else if st.changed == 0 {
+            "; warning: nothing changed".into()
+        } else {
+            String::new()
+        }
+    }
+
+    /// The voxels a transform, hollow or fill inside works on (map cells and slots, sorted):
+    /// the selection, or every voxel when nothing is selected; and whether it is the selection.
+    fn subject(&self, scene: &Scene) -> (Vec<(Cell, u8)>, bool) {
+        let mut out: Vec<(Cell, u8)> =
+            self.selection.iter().map(|&p| (p, self.get(scene, p))).filter(|c| c.1 != 0).collect();
+        let selected = !out.is_empty();
+        if !selected {
+            self.for_each(scene, |p, v| out.push((p, v)));
+        }
+        out.sort_unstable();
+        (out, selected)
+    }
+
+    fn transform(&mut self, scene: &mut Scene, a: &Transform) -> Result<String, Error> {
+        use vxr_core::select::Transform as T;
+        let axis = || a.axis.map(Axis::index).ok_or_else(|| invalid("axis is needed for rotate, flip and loop"));
+        let t = match a.kind {
+            TransformKind::Move => T::Move(a.offset.ok_or_else(|| invalid("move needs offset [dx, dy, dz]"))?),
+            TransformKind::Rotate => T::Rotate(axis()?),
+            TransformKind::Flip => T::Flip(axis()?),
+            TransformKind::Loop => T::Loop(axis()?, a.steps.unwrap_or(1)),
+        };
+        if scene.at() == At::World {
+            return Err(invalid(WORLD));
+        }
+        let (cells, selected) = self.subject(scene);
+        let Some((lo, hi)) = bounds(cells.iter().map(|c| c.0)) else {
+            return Ok(format!(
+                "0 cells changed; {}; warning: nothing changed: there are no voxels",
+                self.staged_text(scene)
+            ));
+        };
+        let size = scene.map.size_voxels();
+        let out = cells
+            .iter()
+            .filter(|c| {
+                let q = t.apply(c.0, lo, hi);
+                (0..3).any(|k| q[k] < 0 || q[k] >= size[k] as i32)
+            })
+            .count();
+        if out > 0 {
+            return Err(invalid(format!(
+                "{out} of {} voxels would land outside the editable bounds ({}): nothing moved; resize first, or move less",
+                cells.len(),
+                self.bounds_text(scene)
+            )));
+        }
+        // Lift every voxel, then set each down where it goes.
+        let mut plan: HashMap<Cell, u8> = cells.iter().map(|c| (c.0, 0)).collect();
+        let mut moved = HashSet::with_capacity(cells.len());
+        for &(p, v) in &cells {
+            let q = t.apply(p, lo, hi);
+            plan.insert(q, v);
+            moved.insert(q);
+        }
+        let plan = plan.into_iter().map(|(p, v)| (scene.to_world(p), v)).collect();
+        let (nlo, nhi) = bounds(moved.iter().copied()).expect("voxels moved");
+        let st = self.stage(scene, plan, false)?;
+        if selected {
+            self.selection = moved;
+        }
+        let verb = match a.kind {
+            TransformKind::Move => "moved",
+            TransformKind::Rotate => "turned",
+            TransformKind::Flip => "flipped",
+            TransformKind::Loop => "looped",
+        };
+        Ok(format!(
+            "{verb} {} voxels ({}), now from {:?} to {:?}; {}",
+            cells.len(),
+            if selected { "the selection" } else { "every voxel" },
+            scene.to_world(nlo),
+            scene.to_world(nhi),
+            self.stage_text(scene, &st)
+        ))
+    }
+
+    /// The selected voxels as a clip.
+    fn clip(&self, scene: &Scene) -> Result<Clip, Error> {
+        let (cells, selected) = self.subject(scene);
+        let Some((lo, hi)) = bounds(cells.iter().map(|c| c.0)).filter(|_| selected) else {
+            return Err(invalid("nothing is selected: call select first"));
+        };
+        let voxels = cells.iter().map(|&(p, v)| (std::array::from_fn(|k| p[k] - lo[k]), v)).collect();
+        Ok(Clip { voxels, size: std::array::from_fn(|k| hi[k] - lo[k] + 1), from: scene.to_world(lo) })
+    }
+
+    /// Erase the selected voxels; the selection empties.
+    fn delete(&mut self, scene: &mut Scene) -> Result<Staged, Error> {
+        let cells = self.selected(scene);
+        if cells.is_empty() {
+            return Err(invalid("nothing is selected: call select first"));
+        }
+        let st = self.stage(scene, cells.into_iter().map(|q| (q, 0)).collect(), false)?;
+        self.selection.clear();
+        Ok(st)
+    }
+
+    /// Change the bounds to `size` from world cell `lo`, erasing the voxels outside.
+    fn rebound(&mut self, scene: &mut Scene, lo: Cell, size: [u32; 3]) -> Result<String, Error> {
+        if scene.at() == At::World {
+            return Err(invalid(WORLD));
+        }
+        let was = scene.bounds();
+        let inside = |w: Cell| (0..3).all(|k| w[k] >= lo[k] && w[k] < lo[k] + size[k] as i32);
+        let outside = self.voxels_where(scene, |w, _| !inside(w));
+        let st = self.stage(scene, outside.into_iter().map(|w| (w, 0)).collect(), false)?;
+        self.open(scene);
+        let (_, d) = scene
+            .put_bounds(lo, size)
+            .ok_or_else(|| invalid(format!("size {size:?}: each side is 1 to {MAX_EXTENT}")))?;
+        if d != [0; 3] {
+            let mv = |p: Cell| add(p, d);
+            self.base = self.base.drain().map(|(p, b)| (mv(p), b)).collect();
+            self.removed = self.removed.drain().map(mv).collect();
+            self.selection = self.selection.drain().map(mv).collect();
+            for l in self.lanes.values_mut() {
+                l.selection = l.selection.drain().map(mv).collect();
+            }
+            for p in &mut self.parts {
+                p.cells.iter_mut().for_each(|c| *c = mv(*c));
+            }
+            self.shift = add(self.shift, d);
+        }
+        // The erased cells outside the map are gone from it already: they read as empty.
+        let size = scene.map.size_voxels();
+        self.removed.retain(|p| (0..3).all(|k| p[k] >= 0 && p[k] < size[k] as i32));
+        let b = scene.bounds();
+        let mut s = format!(
+            "bounds {} ({} x {} x {}); {} cells changed; {}",
+            self.bounds_text(scene),
+            b.size[0],
+            b.size[1],
+            b.size[2],
+            st.changed,
+            self.staged_text(scene)
+        );
+        if st.changed > 0 {
+            s += &format!("; warning: {} voxels outside the new bounds were erased", st.changed);
+        } else if (b.lo, b.size) == (was.lo, was.size) {
             s += "; warning: nothing changed";
         }
         Ok(s)
+    }
+
+    fn material_set(&mut self, scene: &mut Scene, a: &MaterialSet) -> Result<String, Error> {
+        let s = slot(a.slot)?;
+        let old = scene.materials[s as usize];
+        let mut m = old;
+        if let Some(k) = a.kind {
+            m.kind = match k {
+                MaterialKind::Diffuse => Kind::Diffuse,
+                MaterialKind::Metal => Kind::Metal,
+                MaterialKind::Plastic => Kind::Plastic,
+                MaterialKind::Glass => Kind::Glass,
+                MaterialKind::Emit => Kind::Emit,
+            };
+        }
+        let sliders = [
+            ("roughness", a.roughness, 0.0, 1.0, &mut m.rough),
+            ("metalness", a.metalness, 0.0, 1.0, &mut m.metal),
+            ("specular", a.specular, 0.0, 1.0, &mut m.spec),
+            ("transparency", a.transparency, 0.0, 1.0, &mut m.trans),
+            ("refraction", a.refraction, 1.0, 3.0, &mut m.ior),
+            ("attenuation", a.attenuation, 0.0, 1.0, &mut m.att),
+            ("emission", a.emission, 0.0, 1.0, &mut m.emit),
+            ("power", a.power, 0.0, 4.0, &mut m.flux),
+        ];
+        for (name, v, lo, hi, field) in sliders {
+            if let Some(v) = v {
+                if !(lo..=hi).contains(&v) {
+                    return Err(invalid(format!("{name} {v}: {lo} to {hi}")));
+                }
+                *field = v;
+            }
+        }
+        if m != old {
+            self.open(scene);
+            scene.put_material(s, m);
+        }
+        let mut t = format!(
+            "slot {s}: {} -> {}{}; {} voxels use it",
+            old.kind.name(),
+            m.kind.name(),
+            settings(&m),
+            self.slot_count(scene, s)
+        );
+        if m == old {
+            t += "; warning: nothing changed";
+        }
+        Ok(t)
     }
 
     fn select(&mut self, scene: &Scene, a: &Select) -> Result<String, Error> {
@@ -965,16 +1286,27 @@ impl Session {
                 if scene.palette[i as usize] != self.palette_before[i as usize] {
                     scene.put_color(i, self.palette_before[i as usize]);
                 }
+                if scene.materials[i as usize] != self.materials_before[i as usize] {
+                    scene.put_material(i, self.materials_before[i as usize]);
+                }
             }
         }
         self.base.clear();
         self.removed.clear();
         self.staged = 0;
         self.selection = self.selection_before.clone();
-        for (before, now) in self.lanes.values_mut() {
-            *now = before.clone();
+        self.clip = self.clip_before.clone();
+        for l in self.lanes.values_mut() {
+            l.selection = l.selection_before.clone();
+            l.clip = l.clip_before.clone();
         }
         self.parts.truncate(self.detected);
+        // The map is back in the cells it began in.
+        let back = self.shift.map(|d| -d);
+        for p in &mut self.parts {
+            p.cells.iter_mut().for_each(|c| *c = add(*c, back));
+        }
+        self.shift = [0; 3];
     }
 
     /// Run the kept steps again from the scene as it was.
@@ -1004,6 +1336,46 @@ fn shape_slot(mode: Mode, s: Option<u8>) -> Result<u8, Error> {
         (_, Some(s)) => slot(s),
         (_, None) => Err(invalid("slot is needed unless mode is erase")),
     }
+}
+
+/// A caller's selection and clipboard, as they started and as they are now.
+#[derive(Default)]
+struct Lane {
+    selection_before: HashSet<Cell>,
+    selection: HashSet<Cell>,
+    clip_before: Option<Clip>,
+    clip: Option<Clip>,
+}
+
+/// What staging some cells did.
+struct Staged {
+    changed: usize,
+    /// Cells outside the bounds, skipped.
+    outside: usize,
+    /// Map cells set to a voxel, changed or not.
+    made: Vec<Cell>,
+}
+
+fn add(p: Cell, d: Cell) -> Cell {
+    std::array::from_fn(|k| p[k] + d[k])
+}
+
+/// The sliders a material's type reads, as text: " (roughness 0.2, metalness 1)".
+fn settings(m: &Material) -> String {
+    let v: Vec<(&str, f32)> = match m.kind {
+        Kind::Diffuse => vec![],
+        Kind::Metal => vec![("roughness", m.rough), ("metalness", m.metal)],
+        Kind::Plastic => vec![("roughness", m.rough), ("specular", m.spec)],
+        Kind::Glass => {
+            vec![("roughness", m.rough), ("transparency", m.trans), ("refraction", m.ior), ("attenuation", m.att)]
+        }
+        Kind::Emit => vec![("emission", m.emit), ("power", m.flux)],
+    };
+    if v.is_empty() {
+        return String::new();
+    }
+    let list: Vec<String> = v.iter().map(|(n, x)| format!("{n} {}", (x * 1000.0).round() / 1000.0)).collect();
+    format!(" ({})", list.join(", "))
 }
 
 pub(crate) fn order(a: Cell, b: Cell) -> (Cell, Cell) {

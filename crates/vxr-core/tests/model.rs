@@ -156,3 +156,41 @@ fn crop_of_an_empty_scene_does_nothing() {
     assert!(!s.crop());
     assert!(!s.undo());
 }
+
+#[test]
+fn a_resize_inside_an_open_edit_is_one_step_with_its_edits() {
+    let mut s = Scene::new([16, 16, 16]);
+    let lo = s.bounds().lo;
+    s.edit([([0, 0, 0], 1), ([5, 5, 5], 4)]);
+    s.select([[5, 5, 5]], Mode::Replace);
+    let (bounds, cells) = (s.bounds(), world(&s));
+    let w = |m: [i32; 3]| [lo[0] + m[0], lo[1] + m[1], lo[2] + m[2]];
+    s.begin();
+    s.put([1, 0, 0], 2);
+    // Taller: nothing moves, and a voxel goes above the old top.
+    assert_eq!(s.put_bounds(lo, [16, 24, 16]), Some((0, [0, 0, 0])));
+    assert!(s.put([1, 20, 0], 3));
+    // One narrower from the low x side: map cells move one down x and (0, 0, 0) falls out.
+    assert_eq!(s.put_bounds([lo[0] + 1, lo[1], lo[2]], [15, 24, 16]), Some((1, [-1, 0, 0])));
+    assert_eq!((s.map.get(0, 0, 0), s.map.get(0, 20, 0)), (2, 3), "the open edit's cells moved with the map");
+    assert_eq!(s.selected_count(), 1);
+    let after = world(&s);
+    assert_eq!(after, vec![(w([1, 0, 0]), 2), (w([1, 20, 0]), 3), (w([5, 5, 5]), 4)]);
+    // Reverted, the bounds come back with the voxels.
+    s.revert_voxels();
+    assert_eq!((s.bounds(), world(&s)), (bounds, cells.clone()));
+    // Again, closed as one step: undo and redo move the bounds and the voxels together, the
+    // voxel above the old top included.
+    let position = s.history().position();
+    s.put([1, 0, 0], 2);
+    s.put_bounds(lo, [16, 24, 16]);
+    s.put([1, 20, 0], 3);
+    s.put_bounds([lo[0] + 1, lo[1], lo[2]], [15, 24, 16]);
+    assert_eq!(s.commit(), 3);
+    assert_eq!(s.history().position(), position + 1);
+    let b = s.bounds();
+    assert!(s.undo());
+    assert_eq!((s.bounds(), world(&s), s.selected_count()), (bounds, cells, 1));
+    assert!(s.redo());
+    assert_eq!((s.bounds(), world(&s), s.selected_count()), (b, after, 1));
+}

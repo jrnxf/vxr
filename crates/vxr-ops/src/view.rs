@@ -82,7 +82,7 @@ impl Session {
         let mut out = json!({
             "mode": if scene.at() == At::World { "world: voxels cannot be edited until the user opens one object's model" } else { "model: every voxel tool edits it" },
             "axes": "x right, y up, z toward the viewer; the user looks from the front-right (+x, +y, +z side). Left is -x, behind is -z.",
-            "editable": {"from": b.lo, "to": hi, "ground_y": b.lo[1], "headroom": format!("nothing can go above y {}", hi[1])},
+            "editable": {"from": b.lo, "to": hi, "ground_y": b.lo[1], "headroom": format!("nothing can go above y {} until resize grows the bounds", hi[1])},
             "voxels": self.voxel_count(scene),
             "slots_used": slots,
             "selection": selection,

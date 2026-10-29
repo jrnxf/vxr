@@ -13,7 +13,6 @@
 
 use serde_json::Value;
 use vxr_core::Scene;
-use vxr_core::material::Material;
 use vxr_ops::{Changes, ErrorKind, Session};
 
 use crate::ui::{ReviewCard, SlotChange, StepRow};
@@ -75,8 +74,6 @@ pub struct Review {
     /// Turns not run yet because the change would grow past what the user allowed: the rest of
     /// the turn that asked, its first call the one that asked, then every turn after it.
     pub held: Vec<Vec<Call>>,
-    /// The scene's materials when the request started (the card lists material changes by slot).
-    materials: [Material; 256],
     /// The change as of its last edit, which Before keeps showing on the card.
     changes: Changes,
     /// Bumped on every change to the staged cells, the palette or the steps.
@@ -92,7 +89,6 @@ impl Review {
             session: Session::new(scene, None),
             prompt: prompt.into(),
             held: Vec::new(),
-            materials: scene.materials,
             changes: Changes::default(),
             version: 0,
             agents: None,
@@ -212,20 +208,17 @@ impl Review {
         let c = &self.changes;
         let mut slots: Vec<SlotChange> =
             c.palette.iter().map(|&(slot, old, new)| SlotChange { slot, old, new, material: None }).collect();
-        for i in 1..=255u8 {
-            let (old, new) = (self.materials[i as usize], scene.materials[i as usize]);
-            if old != new {
-                let text = if old.kind == new.kind {
-                    format!("{} settings", new.kind.name())
-                } else {
-                    format!("{} → {}", old.kind.name(), new.kind.name())
-                };
-                match slots.iter_mut().find(|c| c.slot == i) {
-                    Some(c) => c.material = Some(text),
-                    None => {
-                        let c = scene.palette[i as usize];
-                        slots.push(SlotChange { slot: i, old: c, new: c, material: Some(text) })
-                    }
+        for &(i, old, new) in &c.materials {
+            let text = if old.kind == new.kind {
+                format!("{} settings", new.kind.name())
+            } else {
+                format!("{} → {}", old.kind.name(), new.kind.name())
+            };
+            match slots.iter_mut().find(|c| c.slot == i) {
+                Some(c) => c.material = Some(text),
+                None => {
+                    let c = scene.palette[i as usize];
+                    slots.push(SlotChange { slot: i, old: c, new: c, material: Some(text) })
                 }
             }
         }
@@ -364,15 +357,15 @@ mod tests {
                 Call { name: "place".into(), input: json!({"cells": [[-16, 1, -15]], "slot": 3, "name": "flag"}) },
                 Call { name: "palette_set".into(), input: json!({"slot": 3, "hex": "#ff0000"}) },
                 Call { name: "erase".into(), input: json!({"part": "p999"}) },
+                Call { name: "material_set".into(), input: json!({"slot": 9, "type": "metal"}) },
             ],
         );
-        s.put_material(9, Material { kind: vxr_core::material::Kind::Metal, ..Material::default() });
         let card = r.card(&s);
         assert_eq!(card.counts, [1, 1, 63]);
         assert_eq!(card.slots.len(), 2);
         assert_eq!((card.slots[0].slot, card.slots[0].new), (3, [255, 0, 0, 255]));
         assert_eq!(card.slots[1].material.as_deref(), Some("Diffuse → Metal"));
-        assert_eq!(card.steps.len(), 5);
+        assert_eq!(card.steps.len(), 6);
         assert_eq!(card.steps[2].detail, "1 cells changed · flag");
         assert!(!card.steps[4].ok && !card.steps[4].droppable);
         // Dropping a step takes it out of the change; Before counts the same.
@@ -385,6 +378,8 @@ mod tests {
         assert!(r.ghost_mask(&s).is_empty());
         assert!(r.card(&s).before);
         assert_eq!(r.card(&s).counts, [1, 1, 0]);
+        assert_eq!(r.card(&s).slots[1].material.as_deref(), Some("Diffuse → Metal"));
+        assert_eq!(s.materials[9].kind, vxr_core::material::Kind::Diffuse);
         r.show_before(&mut s, false);
         assert!(!r.ghost_mask(&s).is_empty());
         assert_eq!(r.label(), "AI: paint it");
