@@ -4714,9 +4714,9 @@ impl Hybrid {
         // A connected terminal agent shows at the left, with Stop, on a card; the hints alone
         // are bare text over the view, with a dark edge so they read over a light model.
         let chip = self.agent_chip_width(ctx);
-        let size = vec2(chip + g.size().x + 28.0, 16.8 + 16.0);
+        let full = chip + g.size().x + 28.0;
         // Centred on the view, kept clear of the stats, the render corner and the camera bar.
-        let row_top = screen.bottom() - 12.0 - size.y;
+        let row_top = screen.bottom() - 12.0 - (16.8 + 16.0);
         let right = [
             self.render_dock.filter(|_| !self.full_render),
             self.hits.get("render-panel").copied(),
@@ -4731,15 +4731,19 @@ impl Hybrid {
             .filter_map(|n| self.hits.get(*n).filter(|r| r.bottom() > row_top))
             .fold(self.stats_right, |x, r| x.max(r.right()));
         let (lo, hi) = (left + 8.0, right - 8.0);
+        // Too wide for the gap beside the palette or the colour editor: the hints hide while
+        // they are open, and an agent's chip shows alone.
+        let hints = full <= hi - lo || left <= self.stats_right;
+        if !hints && chip == 0.0 {
+            return;
+        }
+        let size = vec2(if hints { full } else { chip }, 16.8 + 16.0);
         let rect = if size.x <= hi - lo {
             let x = (screen.center().x - size.x / 2.0).min(hi - size.x).max(lo);
             Rect::from_min_size(pos2(x.round(), row_top), size)
-        } else if left > self.stats_right {
-            // Too wide for the gap beside the palette or the colour editor: hidden while they
-            // are open.
-            return;
         } else {
-            // Too wide for the gap (the assistant is docked): a row up, over the stats.
+            // Too wide for the gap (the assistant is docked, or the chip beside the palette or
+            // the colour editor): a row up, over the stats.
             let stats_top = self.hits.get("stats").map_or(screen.bottom() - 12.0, |r| r.top());
             Rect::from_min_size(pos2(screen.left() + 12.0, stats_top - 4.0 - size.y), size)
         };
@@ -4747,7 +4751,9 @@ impl Hybrid {
         if chip > 0.0 {
             Self::panel(ctx, "hint", rect, Order::Middle, |ui, rect| {
                 self.agent_chip(ui, rect, chip);
-                ui.painter().galley(pos2(rect.left() + chip + 14.0, rect.top() + 8.0), g, th().muted);
+                if hints {
+                    ui.painter().galley(pos2(rect.left() + chip + 14.0, rect.top() + 8.0), g, th().muted);
+                }
             });
             return;
         }
