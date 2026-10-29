@@ -4684,9 +4684,12 @@ fn agents_look_render(
     let obj = std::fs::read_to_string(downloads.join("house.obj")).unwrap_or_default();
     check(obj.contains("mtllib house.mtl"), "the OBJ names its .mtl".into())?;
     let (t, e) = s.agent_call(live, claude, "export", json!({"kind": "obj"}));
-    let again = std::fs::read_to_string(downloads.join("house (1).obj")).unwrap_or_default();
+    let again = std::fs::read_to_string(downloads.join("house-1.obj")).unwrap_or_default();
+    let mtl = std::fs::read_to_string(downloads.join("house-1.mtl")).unwrap_or_default();
     check(
-        !e && again.contains("mtllib house (1).mtl") && downloads.join("house (1).png").is_file(),
+        !e && again.contains("mtllib house-1.mtl\n")
+            && mtl.contains("map_Kd house-1.png\n")
+            && downloads.join("house-1.png").is_file(),
         format!("again it replaces nothing: {t}"),
     )?;
     let (t, e) = s.agent_call(live, claude, "export", json!({"kind": "slices"}));

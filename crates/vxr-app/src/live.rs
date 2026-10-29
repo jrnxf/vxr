@@ -173,20 +173,13 @@ impl Live {
         self.sync(ed);
     }
 
-    /// Write an agent's exported files into Downloads, as a browser names a download (never
-    /// over a file there: "x (1).png"), and the answer naming where they went.
+    /// Write an agent's exported files into Downloads, never over a file there ("x-1.png"),
+    /// and the answer naming where they went.
     fn deliver(&self, ed: &mut Editor, client: &str, what: &str) -> Result<String, String> {
-        let mut files = std::mem::take(&mut ed.agent_files);
+        let files = std::mem::take(&mut ed.agent_files);
         std::fs::create_dir_all(&self.downloads).map_err(|e| format!("could not write into Downloads: {e}"))?;
         let (mut written, mut names) = (Vec::new(), Vec::new());
-        if let Some((old, new)) = unused_stem(&self.downloads, &files) {
-            files = if files.len() > 1 {
-                // An OBJ's three files name each other: made again under the new name.
-                crate::files::obj_files(&ed.scene, &new)?.0
-            } else {
-                files.into_iter().map(|(n, b)| (n.replacen(old.as_str(), &new, 1), b)).collect()
-            };
-        }
+        let files = unused_names(&self.downloads, files, &ed.scene)?;
         for (name, bytes) in &files {
             let path = self.downloads.join(name);
             write_new(&path, bytes).map_err(|e| format!("could not write {name} into Downloads: {e}"))?;
@@ -199,7 +192,22 @@ impl Live {
     }
 }
 
-/// The stem the files can share in `dir` without replacing a file: their own, or with " (n)"
+/// `files` under names that replace nothing in `dir`: their own, or with "-n" after their
+/// stem. No space, since an OBJ's `mtllib` and its `.mtl`'s `map_Kd` split names at one; an
+/// OBJ's three files name each other, so they are made again from `scene` under the new name.
+fn unused_names(
+    dir: &Path,
+    files: Vec<crate::files::File>,
+    scene: &vxr_core::Scene,
+) -> Result<Vec<crate::files::File>, String> {
+    let Some((old, new)) = unused_stem(dir, &files) else { return Ok(files) };
+    if files.len() > 1 {
+        return Ok(crate::files::obj_files(scene, &new)?.0);
+    }
+    Ok(files.into_iter().map(|(n, b)| (n.replacen(old.as_str(), &new, 1), b)).collect())
+}
+
+/// The stem the files can share in `dir` without replacing a file: their own, or with "-n"
 /// after it. None keeps their names.
 fn unused_stem(dir: &Path, files: &[crate::files::File]) -> Option<(String, String)> {
     let first = &files.first()?.0;
@@ -208,11 +216,48 @@ fn unused_stem(dir: &Path, files: &[crate::files::File]) -> Option<(String, Stri
     if free(&stem) {
         return None;
     }
-    (1..1000).map(|i| format!("{stem} ({i})")).find(|s| free(s)).map(|s| (stem, s))
+    (1..1000).map(|i| format!("{stem}-{i}")).find(|s| free(s)).map(|s| (stem, s))
 }
 
 /// Write a file that is not there yet.
 fn write_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     std::fs::OpenOptions::new().write(true).create_new(true).open(path)?.write_all(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_second_obj_export_names_files_without_spaces_that_name_each_other() {
+        let dir = std::env::temp_dir().join(format!("vxr-live-names-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut scene = vxr_core::Scene::new([4, 4, 4]);
+        scene.edit([([1, 1, 1], 3)]);
+        let export = || crate::files::obj_files(&scene, "my-house").unwrap().0;
+        for want in
+            [["my-house.obj", "my-house.mtl", "my-house.png"], ["my-house-1.obj", "my-house-1.mtl", "my-house-1.png"]]
+        {
+            let files = unused_names(&dir, export(), &scene).unwrap();
+            let names: Vec<&str> = files.iter().map(|f| f.0.as_str()).collect();
+            assert_eq!(names, want);
+            for (name, bytes) in &files {
+                write_new(&dir.join(name), bytes).unwrap();
+            }
+            let line = |file: &str, key: &str| {
+                let text = std::fs::read_to_string(dir.join(file)).unwrap();
+                text.lines().find_map(|l| l.strip_prefix(key)).unwrap().to_string()
+            };
+            let (mtl, png) = (line(want[0], "mtllib "), line(want[1], "map_Kd "));
+            assert!(!mtl.contains(char::is_whitespace) && !png.contains(char::is_whitespace), "{mtl} {png}");
+            assert_eq!([mtl.as_str(), png.as_str()], [want[1], want[2]]);
+        }
+        let slices = vec![("my-house-slices.png".to_string(), vec![1])];
+        write_new(&dir.join(&slices[0].0), &slices[0].1).unwrap();
+        let again = unused_names(&dir, slices, &scene).unwrap();
+        assert_eq!(again[0].0, "my-house-slices-1.png");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }
