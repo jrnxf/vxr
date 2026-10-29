@@ -3259,7 +3259,20 @@ fn assistant_column(dir: &Path) -> Result<(), String> {
             && ed.bottom() <= s.ed.height as f32 / 2.0 - 12.0,
         format!("the colour editor opens beside the palette, level with it as far as the window lets: {ed:?}"),
     )?;
+    let hint = s.ed.ui.hits.get("hint").copied();
+    check(
+        hint.is_none_or(|h| !h.intersects(ed) && !h.intersects(pal)),
+        format!("the hint bar keeps clear of the palette and the colour editor: {hint:?}"),
+    )?;
+    let at = s.at("edit-color")?;
+    s.frames_with(3, vec![egui::Event::PointerMoved(at)]);
+    let (tip, all) = (rect(&s, "edit-tip")?, rect(&s, "palette-all")?);
+    check(
+        !tip.intersects(all) && !tip.intersects(rect(&s, "palette-used")?),
+        format!("the Edit color tooltip keeps off the palette's Used / All toggle: {tip:?}"),
+    )?;
     s.save_png(&dir.join("app-2x-palette-rail.png"))?;
+    s.frames_with(1, vec![egui::Event::PointerGone]);
     s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
     check(s.ed.ui.color_edit.is_none() && s.ed.ui.palette_open, "Escape closes the editor first".into())?;
     s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);

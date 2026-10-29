@@ -3709,7 +3709,11 @@ impl Hybrid {
             let ec = if er.hovered() || open { th().text } else { th().muted };
             p.text(edit.center(), Align2::CENTER_CENTER, icon::PENCIL, icon_font(14.0), ec);
             if er.hovered() {
-                tooltip(ctx, edit, "Edit color", &[], Some((Rect::NOTHING, true)));
+                // Below the button when above it would cover the header's Used / All toggle.
+                let header = Rect::from_min_max(rect.min, pos2(rect.right(), cur.top()));
+                if let Some(r) = tooltip(ctx, edit, "Edit color", &[], Some((header, true))) {
+                    self.hits.insert("edit-tip".into(), r);
+                }
             }
             if er.clicked() {
                 if open {
@@ -4721,10 +4725,19 @@ impl Hybrid {
         .into_iter()
         .flatten()
         .fold(screen.right() - 12.0, |x, r| x.min(r.left()));
-        let (lo, hi) = (self.stats_right + 8.0, right - 8.0);
+        // And right of the palette and the colour editor where they reach down into the row.
+        let left = ["palette", "color-edit"]
+            .iter()
+            .filter_map(|n| self.hits.get(*n).filter(|r| r.bottom() > row_top))
+            .fold(self.stats_right, |x, r| x.max(r.right()));
+        let (lo, hi) = (left + 8.0, right - 8.0);
         let rect = if size.x <= hi - lo {
             let x = (screen.center().x - size.x / 2.0).min(hi - size.x).max(lo);
             Rect::from_min_size(pos2(x.round(), row_top), size)
+        } else if left > self.stats_right {
+            // Too wide for the gap beside the palette or the colour editor: hidden while they
+            // are open.
+            return;
         } else {
             // Too wide for the gap (the assistant is docked): a row up, over the stats.
             let stats_top = self.hits.get("stats").map_or(screen.bottom() - 12.0, |r| r.top());

@@ -623,6 +623,9 @@ async () => {
     const [, pt, pr] = window.vxr.hit_rect('palette');
     const [el, et] = window.vxr.hit_rect('color-edit');
     step('the color editor opens beside the palette', Math.abs(el - pr - 8) < 1 && et <= pt + 1, JSON.stringify([window.vxr.hit_rect('palette'), window.vxr.hit_rect('color-edit')]));
+    const hint = window.vxr.hit_rect('hint');
+    const clear = (a, b) => !b || !b.length || a[2] <= b[0] || b[2] <= a[0] || a[3] <= b[1] || b[3] <= a[1];
+    step('the hint bar keeps clear of the palette and the color editor', clear(window.vxr.hit_rect('color-edit'), hint) && clear(window.vxr.hit_rect('palette'), hint), JSON.stringify(hint));
   }
   const c0 = col(used);
   const sv = at('sv');
