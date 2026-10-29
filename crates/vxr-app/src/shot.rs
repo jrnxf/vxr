@@ -277,6 +277,7 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     review(dir)?;
     review_phone(dir)?;
     assistant_column(dir)?;
+    agent_chip_squeezed(dir)?;
     palette_beside_flyouts()?;
     column_short_window(dir)?;
     agents_states(dir)?;
@@ -3259,7 +3260,20 @@ fn assistant_column(dir: &Path) -> Result<(), String> {
             && ed.bottom() <= s.ed.height as f32 / 2.0 - 12.0,
         format!("the colour editor opens beside the palette, level with it as far as the window lets: {ed:?}"),
     )?;
+    let hint = s.ed.ui.hits.get("hint").copied();
+    check(
+        hint.is_none_or(|h| !h.intersects(ed) && !h.intersects(pal)),
+        format!("the hint bar keeps clear of the palette and the colour editor: {hint:?}"),
+    )?;
+    let at = s.at("edit-color")?;
+    s.frames_with(3, vec![egui::Event::PointerMoved(at)]);
+    let (tip, all) = (rect(&s, "edit-tip")?, rect(&s, "palette-all")?);
+    check(
+        !tip.intersects(all) && !tip.intersects(rect(&s, "palette-used")?),
+        format!("the Edit color tooltip keeps off the palette's Used / All toggle: {tip:?}"),
+    )?;
     s.save_png(&dir.join("app-2x-palette-rail.png"))?;
+    s.frames_with(1, vec![egui::Event::PointerGone]);
     s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
     check(s.ed.ui.color_edit.is_none() && s.ed.ui.palette_open, "Escape closes the editor first".into())?;
     s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
@@ -3301,6 +3315,50 @@ fn assistant_column(dir: &Path) -> Result<(), String> {
     s.ui_click("rail-color")?;
     s.frames(2);
     check(!s.ed.ui.palette_open, "the colour button closes the palette again".into())?;
+    Ok(())
+}
+
+/// With an agent connected, the palette and its colour editor open on a narrow window squeeze
+/// the hint row: the hints hide and the agent's chip stays, its Stop on screen, on top and clear
+/// of the palette and the colour editor. At 900x560, and at 900x420 with every slot shown, the
+/// palette down to the bottom.
+fn agent_chip_squeezed(dir: &Path) -> Result<(), String> {
+    for (h, all) in [(560, false), (420, true)] {
+        let mut many = house();
+        let cells: Vec<_> =
+            (1..=96u8).map(|v| (many.to_map([i32::from(v % 12) - 6, 8 + i32::from(v / 12), 0]), v)).collect();
+        many.edit(cells);
+        let mut s = Shot::sized(many, "house.vox", 2.0, (900, h))?;
+        s.ed.ui.coach = false;
+        s.frames(2);
+        let now = s.ed.ctx.input(|i| i.time);
+        let a = &mut s.ed.agents;
+        (a.available, a.allowed, a.since) = (true, true, Some(now - 240.0));
+        a.clients = vec![(1, "Claude Code".to_string())];
+        a.note_clients(now - 240.0);
+        s.ui_click("rail-color")?;
+        if all {
+            s.ui_click("palette-all")?;
+        }
+        s.ui_click("edit-color")?;
+        s.frames(3);
+        let rect = |s: &Shot, name: &str| s.ed.ui.hits.get(name).copied().ok_or(format!("no {name} on screen"));
+        let (pal, ed, stop, chip) =
+            (rect(&s, "palette")?, rect(&s, "color-edit")?, rect(&s, "agent-stop")?, rect(&s, "agent-chip")?);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, h as f32));
+        let top = s.ed.ctx.layer_id_at(stop.center()).map(|l| l.id);
+        s.save_png(&dir.join(format!("app-2x-agent-squeezed-{h}.png")))?;
+        check(
+            (!all || pal.bottom() > screen.bottom() - 12.0 - 32.8 - 4.0 - 28.0)
+                && screen.contains_rect(stop)
+                && top == Some(egui::Id::unique("hint"))
+                && [pal, ed].iter().all(|r| !r.intersects(stop) && !r.intersects(chip)),
+            format!(
+                "at 900x{h}, squeezed by the colour editor, the agent's Stop stays on screen, on top and clear: \
+                 {stop:?}, {pal:?}, {ed:?}"
+            ),
+        )?;
+    }
     Ok(())
 }
 
