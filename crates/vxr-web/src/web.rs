@@ -481,7 +481,7 @@ impl App {
         let e = &self.editor;
         let (c, h) = (&e.cam, e.scene.history());
         format!(
-            r#"{{"voxels":{},"tool":"{:?}","shape":"{:?}","mirror":{},"mirrorAxes":[{},{},{}],"lock":{},"brushSize":{},"sizePanel":{},"lifting":{},"span":{},"selected":{},"region":"{:?}","hasClip":{},"bounds":[{},{},{}],"boundsPanel":{},"slot":{},"colorEdit":{},"slotOp":"{:?}","undo":{},"redo":{},"cmdk":{},"coach":{},"name":{:?},"size":[{},{}],"ppp":{},"cam":[{},{},{},{},{},{}],"ortho":{},"inView":[{},{}],"cameraHints":{},"view":{},"viewPanel":{},"exportMenu":{},"confirmNew":{},"theme":"{}","themeMenu":{},"touch":{},"paletteOpen":{},"themeShown":{:?},"guides":[{},{},{}],"mode":"{}","objects":{},"models":{},"picked":{},"tree":[{}],"treeOn":{},"layers":[{}],"layerOn":{},"render":{{"shown":{},"spp":{},"rows":{},"restarts":{},"timestamps":{},"panel":{},"full":{},"size":[{},{}],"maxSpp":{},"exposure":{},"gamma":{},"vignette":{},"aperture":{},"sky":{},"physicalSky":{},"export":{}}},"review":{},"undoLabel":{},"asks":{:?},"agents":{{"panel":{},"available":{},"web":{},"allowed":{},"connecting":{},"error":{},"clients":[{}],"edits":[{}]}}}}"#,
+            r#"{{"voxels":{},"tool":"{:?}","shape":"{:?}","mirror":{},"mirrorAxes":[{},{},{}],"lock":{},"brushSize":{},"sizePanel":{},"lifting":{},"span":{},"selected":{},"region":"{:?}","hasClip":{},"bounds":[{},{},{}],"boundsPanel":{},"slot":{},"colorEdit":{},"slotOp":"{:?}","undo":{},"redo":{},"cmdk":{},"coach":{},"name":{:?},"size":[{},{}],"ppp":{},"cam":[{},{},{},{},{},{}],"ortho":{},"inView":[{},{}],"cameraHints":{},"view":{},"viewPanel":{},"exportMenu":{},"confirmNew":{},"theme":"{}","themeMenu":{},"touch":{},"paletteOpen":{},"themeShown":{:?},"guides":[{},{},{}],"mode":"{}","objects":{},"models":{},"picked":{},"tree":[{}],"treeOn":{},"layers":[{}],"layerOn":{},"render":{{"shown":{},"spp":{},"rows":{},"restarts":{},"timestamps":{},"panel":{},"full":{},"size":[{},{}],"maxSpp":{},"exposure":{},"gamma":{},"vignette":{},"aperture":{},"sky":{},"physicalSky":{},"export":{}}},"review":{},"undoLabel":{},"asks":{:?},"agents":{{"panel":{},"available":{},"web":{},"allowed":{},"review":{},"connecting":{},"error":{},"clients":[{}],"edits":[{}]}}}}"#,
             e.scene.map.voxels,
             e.ui.tool,
             e.ui.shape,
@@ -581,8 +581,9 @@ impl App {
             e.preview.lighting.physical_sky,
             e.export.as_ref().map_or("null".into(), |x| format!("{:?}", x.progress().0)),
             e.ui.review.as_ref().map_or("null".into(), |c| format!(
-                r#"{{"prompt":{:?},"summary":{},"counts":[{},{},{}],"slots":[{}],"steps":[{}],"held":{},"before":{}}}"#,
+                r#"{{"prompt":{:?},"agents":{},"summary":{},"counts":[{},{},{}],"slots":[{}],"steps":[{}],"held":{},"before":{}}}"#,
                 c.prompt,
+                c.agents,
                 c.summary.as_ref().map_or("null".into(), |s| format!("{s:?}")),
                 c.counts[0],
                 c.counts[1],
@@ -602,6 +603,7 @@ impl App {
             e.ui.agents.available,
             e.ui.agents.web,
             e.ui.agents.allowed,
+            e.ui.agents.review,
             e.ui.agents.connecting,
             e.ui.agents.error.as_ref().map_or("null".into(), |m| format!("{m:?}")),
             e.ui.agents.clients.iter().map(|(c, n)| format!("[{c},{n:?}]")).collect::<Vec<_>>().join(","),

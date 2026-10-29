@@ -325,6 +325,8 @@ pub enum Action {
     StopHeld,
     /// Let terminal agents edit this window (true), or stop listening (for the host).
     AllowAgents(bool),
+    /// Review every agent change (true): agents' edits wait for Apply or Discard.
+    ReviewAgents(bool),
     /// In the browser: pair this tab with `vxr bridge` with the code typed into the panel
     /// (`Hybrid::agents_code`), for the host.
     PairBridge,
@@ -342,8 +344,12 @@ pub enum Action {
 /// The review card of an AI change (set by the editor while one is under review).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ReviewCard {
-    /// The request, and the model's one-line summary once it called `done`.
+    /// The request, and the model's one-line summary once it called `done`. For terminal
+    /// agents' edits, the agents.
     pub prompt: String,
+    /// Terminal agents' edits ("Review every agent change"), not the assistant's: no Ask for
+    /// changes, since the agents take requests in the terminal.
+    pub agents: bool,
     pub summary: Option<String>,
     /// Cells added, removed and repainted.
     pub counts: [usize; 3],
@@ -3080,7 +3086,10 @@ impl Hybrid {
         if rows > 0 {
             h += 14.0 + 12.0 + 6.0 + rows as f32 * row_h;
         }
-        h += 12.0 + 28.0 + 8.0 + 30.0 + 12.0 + 32.0 + 12.0;
+        h += 12.0 + 28.0 + 8.0 + 32.0 + 12.0;
+        if !card.agents {
+            h += 30.0 + 12.0;
+        }
         // The card ends above the render corner and the camera bar where they share columns:
         // fewer steps show (the list scrolls), down to two.
         let (x, top) = self.card_origin(screen, w, h - rows.saturating_sub(2) as f32 * row_h);
@@ -3100,10 +3109,12 @@ impl Hybrid {
         Self::panel(ctx, "review", rect, Order::Middle, |ui, rect| {
             let inner = rect.shrink(12.0);
             let p = ui.painter().clone();
-            // Header: AI CHANGE, and how many steps.
+            // Header: AI CHANGE (or AGENT CHANGE), and how many steps.
             let hy = inner.top() + 7.5;
-            p.text(pos2(inner.left() + 6.0, hy), Align2::CENTER_CENTER, icon::SPARKLES, icon_font(13.0), th().accent);
-            let g = p.layout_job(spaced("AI CHANGE", sans_semibold(11.0), th().muted, 0.88));
+            let (glyph, title) =
+                if card.agents { (icon::TERMINAL, "AGENT CHANGE") } else { (icon::SPARKLES, "AI CHANGE") };
+            p.text(pos2(inner.left() + 6.0, hy), Align2::CENTER_CENTER, glyph, icon_font(13.0), th().accent);
+            let g = p.layout_job(spaced(title, sans_semibold(11.0), th().muted, 0.88));
             p.galley(pos2(inner.left() + 18.0, hy - g.size().y / 2.0), g, th().muted);
             let n = card.steps.len();
             let right = if card.before {
@@ -3310,44 +3321,49 @@ impl Hybrid {
             }
             hits.extend(seg_hits.into_iter().map(|(n, r)| (n.to_string(), r)));
             y += 28.0 + 8.0;
-            // Ask for changes: the assistant takes what is sent (`asked`).
-            let fr = Rect::from_min_size(pos2(inner.left(), y), vec2(inner_w, 30.0));
-            let id = Id::unique("review-ask");
-            let focused = ui.memory(|m| m.has_focus(id));
-            let border = if focused { th().ring } else { th().line };
-            p.rect(fr, CornerRadius::same(7), th().tint(9), Stroke::new(1.0, border), StrokeKind::Inside);
-            p.text(
-                pos2(fr.right() - 16.0, fr.center().y),
-                Align2::CENTER_CENTER,
-                icon::CORNER_DOWN_LEFT,
-                icon_font(13.0),
-                th().faint,
-            );
-            if ask.is_empty() && !focused {
+            // Ask for changes: the assistant takes what is sent (`asked`). Agents take theirs in
+            // the terminal.
+            if !card.agents {
+                let fr = Rect::from_min_size(pos2(inner.left(), y), vec2(inner_w, 30.0));
+                let id = Id::unique("review-ask");
+                let focused = ui.memory(|m| m.has_focus(id));
+                let border = if focused { th().ring } else { th().line };
+                p.rect(fr, CornerRadius::same(7), th().tint(9), Stroke::new(1.0, border), StrokeKind::Inside);
                 p.text(
-                    pos2(fr.left() + 10.0, fr.center().y),
-                    Align2::LEFT_CENTER,
-                    "Ask for changes…",
-                    sans(12.0),
+                    pos2(fr.right() - 16.0, fr.center().y),
+                    Align2::CENTER_CENTER,
+                    icon::CORNER_DOWN_LEFT,
+                    icon_font(13.0),
                     th().faint,
                 );
+                if ask.is_empty() && !focused {
+                    p.text(
+                        pos2(fr.left() + 10.0, fr.center().y),
+                        Align2::LEFT_CENTER,
+                        "Ask for changes…",
+                        sans(12.0),
+                        th().faint,
+                    );
+                }
+                let tr = Rect::from_min_max(
+                    pos2(fr.left() + 10.0, fr.top() + 7.0),
+                    pos2(fr.right() - 30.0, fr.bottom() - 7.0),
+                );
+                let edit = egui::TextEdit::singleline(&mut ask)
+                    .id(id)
+                    .font(sans(12.0))
+                    .text_color(th().text)
+                    .frame(egui::Frame::NONE)
+                    .margin(egui::Margin::ZERO)
+                    .desired_width(tr.width());
+                let resp = ui.put(tr, edit);
+                hits.push(("review-ask".into(), fr));
+                ask_focus = resp.has_focus();
+                if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) && !ask.trim().is_empty() {
+                    sent = Some(std::mem::take(&mut ask).trim().to_string());
+                }
+                y += 30.0 + 12.0;
             }
-            let tr =
-                Rect::from_min_max(pos2(fr.left() + 10.0, fr.top() + 7.0), pos2(fr.right() - 30.0, fr.bottom() - 7.0));
-            let edit = egui::TextEdit::singleline(&mut ask)
-                .id(id)
-                .font(sans(12.0))
-                .text_color(th().text)
-                .frame(egui::Frame::NONE)
-                .margin(egui::Margin::ZERO)
-                .desired_width(tr.width());
-            let resp = ui.put(tr, edit);
-            hits.push(("review-ask".into(), fr));
-            ask_focus = resp.has_focus();
-            if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) && !ask.trim().is_empty() {
-                sent = Some(std::mem::take(&mut ask).trim().to_string());
-            }
-            y += 30.0 + 12.0;
             // Discard (Escape) and Apply (Enter).
             let ink = th().on_accent;
             let label = p.layout_no_wrap("Apply".into(), sans_semibold(13.0), ink);

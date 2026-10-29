@@ -169,6 +169,61 @@ else
     *"pressed Stop in vxr"*) pass "the stopped agent is told so" ;;
     *) fail "the stopped agent is told so" "$(tail -1 "$fixtures/agent.log")" ;;
   esac
+  # Review every agent change: the panel's second switch. A real agent's edits wait as a
+  # preview; Apply lands them as its undo steps, Discard leaves nothing, and the agent hears
+  # which (review_status, or its next call); Stop during a review leaves the change waiting.
+  rlog="$fixtures/review.log"
+  rlines() { for _ in $(seq 150); do [ "$(wc -l <"$rlog" 2>/dev/null || echo 0)" -ge "$1" ] && break; sleep 0.1; done; }
+  rtext() { sed -n "${1}p" "$rlog" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const r=JSON.parse(s||'{}');console.log((r.isError?'error: ':'')+(r.text||'').split('\n')[0])})"; }
+  review="$(axi eval "async () => { const off = JSON.parse(window.vxr.state()).agents.review; await window.__click(window.vxr.hit('agents-review')); await window.__frames(5); const on = JSON.parse(window.vxr.state()).agents.review; await window.__click(window.vxr.hit('agents-close')); await window.__frames(5); return JSON.stringify([off, on]) }" | unwrap)"
+  expect "the panel's review switch is off by default and turns on" "$review" '[false,true]'
+  before="$(axi eval "() => JSON.stringify(JSON.parse(window.vxr.state()).voxels)" | unwrap)"
+  box() { echo "[\"box\", {\"from\": [$1, 28, -63], \"to\": [$(($1 + 1)), 28, -62], \"slot\": 7}]"; }
+  ./dev node "$here/check-agent.js" "$vxr" "[$(box -60), [\"review_status\", {}], \"wait $fixtures/go1\", [\"review_status\", {}], $(box -56), \"wait $fixtures/go2\", [\"scene_summary\", {}], $(box -52), \"wait $fixtures/stopped2\", [\"scene_summary\", {}]]" >"$rlog" &
+  agent=$!
+  rlines 2
+  case "$(rtext 1)|$(rtext 2)" in
+    "4 cells changed"*"waiting for the user's review"*"|1 edit of yours waits"*) pass "with review on the agent's edit waits, and review_status says so" ;;
+    *) fail "with review on the agent's edit waits, and review_status says so" "$(cat "$rlog")" ;;
+  esac
+  shown="$(axi eval "async () => { await window.__frames(10); const s = JSON.parse(window.vxr.state()); return JSON.stringify([s.voxels - $before, s.undoLabel, s.review && s.review.agents, s.review && s.review.prompt, s.review && s.review.counts]) }" | unwrap)"
+  expect "the page shows it as an agent change with no undo step yet" "$shown" '[4,"Claude Code: box 8 voxels",true,"Claude Code",[4,0,0]]'
+  axi screenshot "$shots/web-agent-review.png" >/dev/null
+  applied="$(axi eval "async () => { await window.__click(window.vxr.hit('review-apply')); await window.__frames(5); const s = JSON.parse(window.vxr.state()); return JSON.stringify([s.voxels - $before, s.undoLabel, s.review, s.agents.edits.map(e => e.label).slice(-1)]) }" | unwrap)"
+  expect "Apply lands the edit as an undo step named after the agent" "$applied" '[4,"Claude Code: box 4 voxels",null,["Claude Code: box 4 voxels"]]'
+  touch "$fixtures/go1"
+  rlines 4
+  case "$(rtext 3)" in
+    "vxr: the user applied your 1 edit"*) pass "review_status tells the agent it was applied" ;;
+    *) fail "review_status tells the agent it was applied" "$(rtext 3)" ;;
+  esac
+  discarded="$(axi eval "async () => { await window.__frames(5); const staged = JSON.parse(window.vxr.state()).review?.counts; await window.__click(window.vxr.hit('review-discard')); await window.__frames(5); const s = JSON.parse(window.vxr.state()); return JSON.stringify([staged, s.voxels - $before, s.undoLabel, s.review]) }" | unwrap)"
+  expect "Discard leaves the scene and its undo steps as they were" "$discarded" '[[4,0,0],4,"Claude Code: box 4 voxels",null]'
+  touch "$fixtures/go2"
+  rlines 6
+  case "$(rtext 5)" in
+    "vxr: the user discarded"*) pass "the agent's next call says it was discarded" ;;
+    *) fail "the agent's next call says it was discarded" "$(rtext 5)" ;;
+  esac
+  stopped="$(axi eval "async () => { await window.__frames(5); await window.__click(window.vxr.hit('agent-stop')); for (let i = 0; i < 100 && JSON.parse(window.vxr.state()).agents.clients.length; i++) await window.__frames(3); const s = JSON.parse(window.vxr.state()); return JSON.stringify([s.agents.clients, s.review && s.review.counts]) }" | unwrap)"
+  touch "$fixtures/stopped2"
+  wait "$agent" || true
+  expect "Stop during a review cuts the agent off and leaves its edit waiting" "$stopped" '[[],[4,0,0]]'
+  case "$(rtext 7)" in
+    "error: The user pressed Stop in vxr"*) pass "the agent stopped during a review is told so" ;;
+    *) fail "the agent stopped during a review is told so" "$(rtext 7)" ;;
+  esac
+  reopened="$(axi eval "async () => {
+    await window.__click(window.vxr.hit('review-discard'));
+    await window.__key('k', { metaKey: true });
+    for (const ch of 'terminal agents') await window.__key(ch);
+    await window.__key('Enter');
+    await window.__click(window.vxr.hit('agents-review'));
+    await window.__frames(5);
+    const s = JSON.parse(window.vxr.state());
+    return JSON.stringify([s.review, s.voxels - $before, s.agents.panel, s.agents.review]);
+  }" | unwrap)"
+  expect "Discard, then review off again in the panel" "$reopened" '[null,4,true,false]'
   # Regenerate writes a new token; the switch unpairs the page and the socket goes.
   token="$(cat "$VXR_LIVE_DIR/live.token")"
   axi eval "async () => { await window.__click(window.vxr.hit('agents-regenerate')); await window.__frames(20); return 'ok' }" >/dev/null

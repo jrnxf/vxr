@@ -131,7 +131,7 @@ fn a_call_goes_over_the_socket_and_back() {
     for op in vxr_ops::tools() {
         assert!(names.contains(&op.name), "{} is a tool", op.name);
     }
-    assert!(names.contains(&"edit_object"));
+    assert!(names.contains(&"edit_object") && names.contains(&"review_status"));
     for files_only in ["list_files", "open", "save", "new_scene"] {
         assert!(!names.contains(&files_only), "{files_only} is files mode only");
     }
