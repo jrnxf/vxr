@@ -28,6 +28,9 @@ const RAIL_W: f32 = 46.0;
 /// A rail button's size, and its step down the rail.
 const TOOL: f32 = 34.0;
 const TOOL_STEP: f32 = 36.0;
+/// The dock's bars: 44-point buttons with 5 points of padding, 8 apart.
+const DOCK_H: f32 = 46.0;
+const DOCK_BTN: f32 = 36.0;
 
 /// Font bytes, loaded by the caller (see `crate::fonts`).
 pub struct FontBytes {
@@ -66,6 +69,8 @@ fn icon_font(size: f32) -> FontId {
 /// Install Geist, Geist Mono and the Lucide icon font, and the dark style. Without the
 /// fonts, egui's built-in ones stand in (and the icons show as boxes).
 pub fn install(ctx: &Context, fonts: Option<FontBytes>) {
+    // The touch layout sets the zoom (`Editor::set_touch`); Cmd-= and Cmd-- zoom the view.
+    ctx.options_mut(|o| o.zoom_with_keyboard = false);
     let defs = match fonts {
         Some(f) => font_definitions(f),
         None => {
@@ -536,6 +541,14 @@ pub struct Hybrid {
     /// Where each clickable part of the UI was last drawn, in points, by name, for the
     /// headless checks ("edit-color", "sv", "hue", "swap", "copy", "sw<slot>", ...).
     pub hits: HashMap<String, Rect>,
+    /// The touch layout: the bottom dock in place of the rail, larger targets and gestures
+    /// (set by the editor, see `Editor::set_touch`).
+    pub touch: bool,
+    /// The palette shows above the dock (its colour button toggles it).
+    pub palette_open: bool,
+    /// The top of the dock's upper bar, where flyouts open above, and the view it is centred on.
+    dock_top: f32,
+    dock_view: Rect,
     /// Top of the mirror button in the rail, where the axis flyout lines up.
     axes_y: f32,
     voxel_y: f32,
@@ -809,6 +822,10 @@ impl Hybrid {
             ground: true,
             frame: true,
             hits: HashMap::new(),
+            touch: false,
+            palette_open: false,
+            dock_top: 0.0,
+            dock_view: Rect::NOTHING,
             axes_y: 0.0,
             voxel_y: 0.0,
             select_y: 0.0,
@@ -993,6 +1010,17 @@ impl Hybrid {
         12.0 + RAIL_W + 8.0 + if self.tree.is_empty() { 0.0 } else { TREE_W + 8.0 }
     }
 
+    /// Where a flyout of `size` opens: beside the rail level with `y` (its button's top), or
+    /// over the dock, centred on the button named `anchor`.
+    fn flyout_rect(&self, y: f32, anchor: &str, size: egui::Vec2) -> Rect {
+        if !self.touch {
+            return Rect::from_min_size(pos2(self.flyout_x(), y - 6.0), size);
+        }
+        let at = self.hits.get(anchor).map_or(self.dock_view.center().x, |r| r.center().x);
+        let x = (at - size.x / 2.0).min(self.dock_view.right() - 12.0 - size.x).max(self.dock_view.left() + 12.0);
+        Rect::from_min_size(pos2(x, (self.dock_top - 8.0 - size.y).max(TOP)), size)
+    }
+
     /// Open the rename field on tree node `node`, in world mode.
     pub fn start_rename(&mut self, node: Option<usize>) {
         let Some(row) = node.and_then(|n| self.tree.iter().find(|r| r.node == n)) else { return };
@@ -1106,7 +1134,11 @@ impl Hybrid {
         self.assistant_panel(ctx, screen);
         let full = screen;
         let screen = Rect::from_min_max(screen.min, pos2(screen.right() - self.ai_width(), screen.bottom()));
-        self.rail(ctx);
+        if self.touch {
+            self.dock(ctx, screen);
+        } else {
+            self.rail(ctx);
+        }
         self.tree_panel(ctx);
         self.axes(ctx);
         self.size_flyout(ctx);
@@ -1123,12 +1155,20 @@ impl Hybrid {
         if self.coach {
             self.coach_card(ctx, screen);
         }
-        self.stats(ctx, screen, stats);
+        if self.touch {
+            self.stats_right = screen.left() + 4.0;
+        } else {
+            self.stats(ctx, screen, stats);
+        }
         self.render_corner(ctx, screen, stats);
         self.render_panel(ctx, screen, stats);
         self.nav_bar(ctx, screen);
         self.view_panel(ctx, screen);
-        self.hint_bar(ctx, screen);
+        if !self.touch {
+            self.hint_bar(ctx, screen);
+        } else {
+            self.gesture_hints(ctx, screen);
+        }
         self.ask_bar(ctx, screen);
         self.agents_panel(ctx, screen);
         self.toast_panel(ctx, screen);
@@ -1355,7 +1395,17 @@ impl Hybrid {
         let name = ctx.fonts_mut(|f| f.layout_no_wrap(self.scene_name.clone(), sans(13.0), th().text));
         let brand = ctx.fonts_mut(|f| f.layout_no_wrap("vxr".into(), sans_semibold(13.0), th().text));
         let sel_w = name.size().x + 34.0;
-        let w = 12.0 + 26.0 + brand.size().x + 10.0 + sel_w + 13.0 + 4.0 * 36.0 + 13.0 + 2.0 * 36.0 + 4.0;
+        // Over the dock, undo and redo are on it.
+        let history = !self.touch;
+        let w = 12.0
+            + 26.0
+            + brand.size().x
+            + 10.0
+            + sel_w
+            + 13.0
+            + 4.0 * 36.0
+            + if history { 13.0 + 2.0 * 36.0 } else { 0.0 }
+            + 4.0;
         let left = Rect::from_min_size(pos2(12.0, 12.0), vec2(w, 40.0));
         let mut tip: Option<(Rect, &'static str, &'static [&'static str])> = None;
         Self::panel(ctx, "top", left, Order::Middle, |ui, rect| {
@@ -1412,6 +1462,9 @@ impl Hybrid {
                         _ => self.export_menu = !self.export_menu,
                     }
                 }
+            }
+            if !history {
+                return;
             }
             sep(ui, &mut x);
             // #history, moved up from its own card.
@@ -1642,6 +1695,156 @@ impl Hybrid {
         });
     }
 
+    // The dock, in place of the rail on a touch screen: the tools, the colour (it opens the
+    // palette above) and undo/redo along the bottom; the brushes, mirror and axis lock on a
+    // bar above. Flyouts open over both.
+    fn dock(&mut self, ctx: &Context, screen: Rect) {
+        let step = DOCK_BTN + 2.0;
+        let sep = 11.0;
+        let bar = |n: f32, seps: f32| 5.0 + n * step - 2.0 + seps * sep + 5.0;
+        let cx = screen.center().x;
+        let lower = Rect::from_min_size(
+            pos2(cx - bar(8.0, 2.0) / 2.0, screen.bottom() - 12.0 - DOCK_H),
+            vec2(bar(8.0, 2.0), DOCK_H),
+        );
+        let upper = Rect::from_min_size(
+            pos2(cx - bar(7.0, 1.0) / 2.0, lower.top() - 8.0 - DOCK_H),
+            vec2(bar(7.0, 1.0), DOCK_H),
+        );
+        (self.dock_top, self.dock_view) = (upper.top(), screen);
+        self.hits.insert("dock".into(), lower);
+        self.hits.insert("dock-brushes".into(), upper);
+        let mut hits = Vec::new();
+        Self::panel(ctx, "dock", lower, Order::Middle, |ui, rect| {
+            let (mut x, y) = (rect.left() + 5.0, rect.top() + 5.0);
+            let tool = self.tool;
+            for (t, ic, id) in [
+                (Tool::Add, icon::BOX, "tool-add"),
+                (Tool::Erase, icon::ERASER, "tool-erase"),
+                (Tool::Paint, icon::PAINTBRUSH, "tool-paint"),
+                (Tool::Pick, icon::PIPETTE, "tool-pick"),
+                (Tool::Select, icon::SELECT, "select"),
+            ] {
+                let r = dock_button(ui, pos2(x, y), ic, id, tool == t, true);
+                hits.push((id, r.rect));
+                if r.clicked() {
+                    self.tool = t;
+                }
+                x += step;
+            }
+            dock_sep(ui, rect, &mut x);
+            // The current colour; the palette opens over the dock.
+            let c = Rect::from_min_size(pos2(x, y), vec2(DOCK_BTN, DOCK_BTN));
+            let resp = ui.interact(c, Id::unique("dock-color"), Sense::click());
+            let p = ui.painter();
+            if self.palette_open {
+                p.rect(c, CornerRadius::same(8), th().accent_bg, Stroke::new(1.0, th().ring), StrokeKind::Inside);
+            } else if resp.hovered() {
+                p.rect_filled(c, CornerRadius::same(8), th().hover);
+            }
+            let sw = Rect::from_center_size(c.center(), vec2(22.0, 22.0));
+            p.rect(sw, CornerRadius::same(6), self.color(self.slot), Stroke::new(1.0, th().line2), StrokeKind::Outside);
+            hits.push(("dock-color", c));
+            if resp.clicked() {
+                self.palette_open = !self.palette_open;
+            }
+            x += step;
+            dock_sep(ui, rect, &mut x);
+            for (id, ic, enabled, action) in
+                [("undo", icon::UNDO, self.can_undo, Action::Undo), ("redo", icon::REDO, self.can_redo, Action::Redo)]
+            {
+                let r = dock_button(ui, pos2(x, y), ic, id, false, enabled);
+                hits.push((id, r.rect));
+                if r.clicked() {
+                    self.actions.push(action);
+                }
+                x += step;
+            }
+        });
+        Self::panel(ctx, "dock-brushes", upper, Order::Middle, |ui, rect| {
+            let (mut x, y) = (rect.left() + 5.0, rect.top() + 5.0);
+            let shape = self.shape;
+            for (s, ic, id) in [
+                (Shape::Voxel, icon::POINTER, "voxel"),
+                (Shape::Box, icon::SQUARE_DASHED, "brush-box"),
+                (Shape::Face, icon::LAYERS, "brush-face"),
+                (Shape::Line, icon::SLASH, "brush-line"),
+            ] {
+                let r = dock_button(ui, pos2(x, y), ic, id, shape == s, true);
+                hits.push((id, r.rect));
+                if r.clicked() {
+                    if s == Shape::Voxel {
+                        self.voxel_brush();
+                    } else {
+                        self.shape = s;
+                    }
+                }
+                x += step;
+            }
+            let center = matches!(shape, Shape::Circle | Shape::Sphere);
+            let ic = if shape == Shape::Sphere { icon::GLOBE } else { icon::CIRCLE_DOT };
+            let r = dock_button(ui, pos2(x, y), ic, "center", center, true);
+            hits.push(("center", r.rect));
+            if r.clicked() {
+                self.center_brush();
+            }
+            x += step;
+            dock_sep(ui, rect, &mut x);
+            let r = dock_button(ui, pos2(x, y), icon::FLIP, "mirror", self.mirror, true);
+            hits.push(("mirror", r.rect));
+            if r.clicked() {
+                self.mirror = !self.mirror;
+            }
+            x += step;
+            let r = dock_button(ui, pos2(x, y), icon::LOCK, "lock", self.lock.is_some(), true);
+            hits.push(("lock", r.rect));
+            if r.clicked() {
+                self.cycle_lock();
+            }
+        });
+        self.hits.extend(hits.into_iter().map(|(n, r)| (n.to_string(), r)));
+    }
+
+    // The touch gestures on a scrim chip over the view (they stay on, so they must read over
+    // any model): bottom left beside the dock, or centred over it when the screen is too
+    // narrow. Under every panel, and never takes a finger.
+    fn gesture_hints(&mut self, ctx: &Context, screen: Rect) {
+        let mut job = LayoutJob::default();
+        let lines: [&[(&str, &str)]; 2] =
+            [&[("Two fingers", "orbit"), ("Pinch", "zoom")], &[("Three fingers", "pan"), ("Two-finger tap", "undo")]];
+        for (l, line) in lines.iter().enumerate() {
+            for (i, (k, v)) in line.iter().enumerate() {
+                let lead = if i > 0 { 12.0 } else { 0.0 };
+                let k = if l > 0 && i == 0 { format!("\n{k}") } else { k.to_string() };
+                let f = |font_id, color| TextFormat { font_id, color, line_height: Some(18.0), ..Default::default() };
+                job.append(&k, lead, f(sans_medium(12.0), th().text));
+                job.append(v, 5.0, f(sans(12.0), th().muted));
+            }
+        }
+        let g = ctx.fonts_mut(|f| f.layout_job(job));
+        let dock = self.hits.get("dock").copied().unwrap_or(Rect::NOTHING);
+        let pad = vec2(10.0, 6.0);
+        let size = g.size() + 2.0 * pad;
+        let at = if screen.left() + 12.0 + size.x + 8.0 <= dock.left() {
+            pos2(screen.left() + 12.0, screen.bottom() - 12.0 - size.y)
+        } else {
+            pos2(screen.center().x - size.x / 2.0, self.dock_top - 8.0 - size.y)
+        };
+        let chip = Rect::from_min_size(at, size);
+        self.hits.insert("gestures".into(), chip);
+        Area::new(Id::unique("gestures"))
+            .fade_in(false)
+            .order(Order::Background)
+            .interactable(false)
+            .fixed_pos(at)
+            .constrain(false)
+            .show(ctx, |ui| {
+                let p = ui.painter();
+                p.rect_filled(chip, CornerRadius::same(10), th().scrim(150));
+                p.galley(at + pad, g, th().muted);
+            });
+    }
+
     // The scene tree (Diorama's .tree, kept for Hybrid): beside the rail once a second object
     // exists. A row per object and group in tree order, indented under its groups, with the
     // model's size and an eye. A click picks the object in world mode or edits its model;
@@ -1659,7 +1862,7 @@ impl Hybrid {
         let layers: &[LayerRow] = if world { &self.layers } else { &[] };
         let layers_h = if world { 1.0 + 30.0 + layers.len() as f32 * row_h } else { 0.0 };
         let rect = Rect::from_min_size(
-            pos2(12.0 + RAIL_W + 8.0, TOP),
+            pos2(if self.touch { 12.0 } else { 12.0 + RAIL_W + 8.0 }, TOP),
             vec2(TREE_W, 36.0 + rows as f32 * row_h + layers_h + 6.0),
         );
         let objects = self.tree.iter().filter(|r| !r.group).count();
@@ -1982,7 +2185,10 @@ impl Hybrid {
         let right = nav.right().min(screen.right() - 12.0);
         let below = Rect::from_min_size(pos2(right - size.x, nav.bottom() + 8.0), size);
         let above = Rect::from_min_size(pos2(right - size.x, nav.top() - 8.0 - size.y), size);
-        let rect = if below.bottom() <= floor {
+        let rect = if self.touch {
+            // Left of the standing bar, level with its top.
+            Rect::from_min_size(pos2(nav.left() - 8.0 - size.x, nav.top().min(floor - size.y)), size)
+        } else if below.bottom() <= floor {
             below
         } else if above.top() >= palette_bottom + 8.0 {
             above
@@ -2086,7 +2292,7 @@ impl Hybrid {
         if !self.size_shown() {
             return;
         }
-        let rect = Rect::from_min_size(pos2(self.flyout_x(), self.voxel_y - 6.0), vec2(150.0, 6.0 + 40.0 + 6.0));
+        let rect = self.flyout_rect(self.voxel_y, "voxel", vec2(150.0, 6.0 + 40.0 + 6.0));
         let size = self.size;
         let mut step = 0;
         let mut hits = Vec::new();
@@ -2135,8 +2341,7 @@ impl Hybrid {
         if !self.mirror && self.lock.is_none() {
             return;
         }
-        let rect =
-            Rect::from_min_size(pos2(self.flyout_x(), self.axes_y - 6.0), vec2(150.0, 6.0 + 2.0 * 40.0 + 2.0 + 6.0));
+        let rect = self.flyout_rect(self.axes_y, "mirror", vec2(150.0, 6.0 + 2.0 * 40.0 + 2.0 + 6.0));
         let (mirror, lock) = (self.mirror_axes(), self.lock);
         let mut clicked = (None, None);
         let mut hits = Vec::new();
@@ -2203,7 +2408,8 @@ impl Hybrid {
         if self.world || (self.tool != Tool::Select && self.selected == 0) {
             return;
         }
-        let rect = Rect::from_min_size(pos2(self.flyout_x(), self.select_y - 6.0), vec2(162.0, 310.0));
+        let rect = self.flyout_rect(self.select_y, "select", vec2(162.0, 310.0));
+        self.hits.insert("selection".into(), rect);
         let (selected, has_clip) = (self.selected, self.has_clip);
         let mut region = self.region;
         let bounds_open = self.bounds_panel.is_some();
@@ -2452,8 +2658,14 @@ impl Hybrid {
         let note = ctx.fonts_mut(|f| f.layout_job(job));
         let h = 36.0 + 28.0 + 12.0 + note.size().y + 14.0;
         // The fields' row lines up with the Resize button (its centre is select_y + 178).
-        let top = self.select_y + 178.0 - 50.0;
-        let rect = Rect::from_min_size(pos2(self.flyout_x() + 162.0 + 8.0, top), vec2(w, h));
+        let rect = match self.hits.get("selection").copied().filter(|_| self.touch) {
+            // Over the dock: beside the selection flyout, level with its bottom.
+            Some(sel) => Rect::from_min_size(pos2(sel.right() + 8.0, sel.bottom() - h), vec2(w, h)),
+            None => {
+                let top = self.select_y + 178.0 - 50.0;
+                Rect::from_min_size(pos2(self.flyout_x() + 162.0 + 8.0, top), vec2(w, h))
+            }
+        };
         let mut close = false;
         let mut resize = None;
         let mut hits = Vec::new();
@@ -2960,7 +3172,17 @@ impl Hybrid {
         let rows = (slots.len() as f32 / 8.0).ceil();
         let view_h = rows.min(SWATCH_ROWS) * SWATCH_STEP + 2.0;
         let h = 12.0 + 20.0 + 8.0 + 38.0 + 10.0 + view_h + 10.0;
-        let rect = Rect::from_min_size(pos2(screen.right() - 12.0 - PALETTE_W, TOP), vec2(PALETTE_W, h));
+        let rect = if self.touch {
+            // Over the dock, from its colour button.
+            if !self.palette_open {
+                return;
+            }
+            let at = self.hits.get("dock-color").map_or(screen.center().x, |r| r.center().x);
+            let x = (at - PALETTE_W / 2.0).min(screen.right() - 12.0 - PALETTE_W).max(screen.left() + 12.0);
+            Rect::from_min_size(pos2(x, (self.dock_top - 8.0 - h).max(TOP)), vec2(PALETTE_W, h))
+        } else {
+            Rect::from_min_size(pos2(screen.right() - 12.0 - PALETTE_W, TOP), vec2(PALETTE_W, h))
+        };
         self.hits.insert("palette".into(), rect);
         let mut set_all = None;
         Self::panel(ctx, "palette", rect, Order::Middle, |ui, rect| {
@@ -3217,7 +3439,15 @@ impl Hybrid {
         } else {
             h
         };
-        let rect = Rect::from_min_size(pos2(screen.right() - 12.0 - PALETTE_W - 8.0 - w, TOP), vec2(w, h));
+        let rect = match self.hits.get("palette").copied().filter(|_| self.touch) {
+            // Over the dock: beside the palette, level with its bottom, on whichever side fits.
+            Some(pal) => {
+                let x =
+                    if pal.left() - 8.0 - w >= screen.left() + 12.0 { pal.left() - 8.0 - w } else { pal.right() + 8.0 };
+                Rect::from_min_size(pos2(x, (pal.bottom() - h).max(TOP)), vec2(w, h))
+            }
+            None => Rect::from_min_size(pos2(screen.right() - 12.0 - PALETTE_W - 8.0 - w, TOP), vec2(w, h)),
+        };
         let (mut close, mut commit, mut live) = (false, false, false);
         let mut new_mat = None;
         let mut op = None;
@@ -3442,7 +3672,19 @@ impl Hybrid {
         let w = 440.0_f32.min(screen.width() - 32.0);
         let text_w = w - 32.0 - 14.0 - 19.0;
         let mut jobs = Vec::new();
-        let lines: [&[(&str, bool)]; 3] = [
+        let touch: [&[(&str, bool)]; 3] = [
+            &[("Tap", true), (" a surface to add a voxel. ", false), ("Drag", true), (" to draw along it.", false)],
+            &[
+                ("Two fingers", true),
+                (" orbit, ", false),
+                ("pinch", true),
+                (" to zoom, ", false),
+                ("three fingers", true),
+                (" pan.", false),
+            ],
+            &[("Tap with two fingers", true), (" to undo.", false)],
+        ];
+        let mouse: [&[(&str, bool)]; 3] = [
             &[
                 ("Click", true),
                 (" a surface to add a voxel. ", false),
@@ -3467,7 +3709,7 @@ impl Hybrid {
                 (" for every key.", false),
             ],
         ];
-        for line in lines {
+        for line in if self.touch { touch } else { mouse } {
             let mut job = LayoutJob::default();
             for (t, b) in line {
                 if *t == "?" {
@@ -3610,8 +3852,14 @@ impl Hybrid {
         let Some((spp, live)) = s.render.filter(|_| self.show_render) else { return };
         let w = 208.0;
         let size = vec2(w, (w * 9.0 / 16.0).round());
-        let corner = Rect::from_min_size(pos2(screen.right() - 12.0 - size.x, screen.bottom() - 12.0 - size.y), size);
         let full = self.full_render;
+        // Over the dock the corner moves up under the top bar, and a portrait screen leaves
+        // it out (the full render view still shows).
+        if self.touch && screen.height() > screen.width() && !full {
+            return;
+        }
+        let top = if self.touch { TOP } else { screen.bottom() - 12.0 - size.y };
+        let corner = Rect::from_min_size(pos2(screen.right() - 12.0 - size.x, top), size);
         let rect = if full { screen } else { corner };
         self.render_rect = Some(rect);
         self.render_dock = Some(corner);
@@ -4038,21 +4286,34 @@ impl Hybrid {
         let pg = ctx.fonts_mut(|f| f.layout_no_wrap(proj.into(), sans_medium(12.0), th().muted));
         let pw = (pg.size().x + 20.0).max(52.0);
         let sel = self.selected > 0;
-        let w = 4.0 + pw + 2.0 + 34.0 + 9.0 + (2.0 + f32::from(u8::from(sel))) * 34.0 - 2.0 + 4.0;
-        let size = vec2(w, 40.0);
-        let dock = self.render_dock.unwrap_or_else(|| {
-            Rect::from_min_max(
-                pos2(screen.right() - 12.0, screen.bottom() - 12.0),
-                pos2(screen.right() - 12.0, screen.bottom() - 12.0),
+        let len = 4.0 + 34.0 + 9.0 + (2.0 + f32::from(u8::from(sel))) * 34.0 - 2.0 + 4.0;
+        // Over the dock the bar stands on the right edge, under the render corner.
+        let vertical = self.touch;
+        let rect = if vertical {
+            let size = vec2(4.0 + pw + 4.0, len + 32.0 + 2.0);
+            let below = self.render_dock.map_or(TOP, |r| r.bottom() + 8.0);
+            Rect::from_min_size(
+                pos2(screen.right() - 12.0 - size.x, (screen.center().y - size.y / 2.0).max(below)),
+                size,
             )
-        });
-        let palette_bottom = self.hits.get("palette").map_or(screen.top(), |r| r.bottom());
-        let gap = if self.render_dock.is_some() { 8.0 } else { 0.0 };
-        let mut rect = Rect::from_min_size(pos2(dock.right() - w, dock.top() - gap - size.y), size);
-        if rect.top() < palette_bottom + 8.0 {
-            // A short window: beside the corner instead, level with its bottom.
-            rect = Rect::from_min_size(pos2(dock.left() - 8.0 - w, dock.bottom() - size.y), size);
-        }
+        } else {
+            let w = len + pw + 2.0;
+            let size = vec2(w, 40.0);
+            let dock = self.render_dock.unwrap_or_else(|| {
+                Rect::from_min_max(
+                    pos2(screen.right() - 12.0, screen.bottom() - 12.0),
+                    pos2(screen.right() - 12.0, screen.bottom() - 12.0),
+                )
+            });
+            let palette_bottom = self.hits.get("palette").map_or(screen.top(), |r| r.bottom());
+            let gap = if self.render_dock.is_some() { 8.0 } else { 0.0 };
+            let mut rect = Rect::from_min_size(pos2(dock.right() - w, dock.top() - gap - size.y), size);
+            if rect.top() < palette_bottom + 8.0 {
+                // A short window: beside the corner instead, level with its bottom.
+                rect = Rect::from_min_size(pos2(dock.left() - 8.0 - w, dock.bottom() - size.y), size);
+            }
+            rect
+        };
         self.hits.insert("nav".into(), rect);
         self.nav_rect = Some(rect);
         let view_open = self.view_panel;
@@ -4061,18 +4322,30 @@ impl Hybrid {
         let mut hits = Vec::new();
         let mut toggle_view = false;
         Self::panel(ctx, "nav", rect, Order::Middle, |ui, rect| {
-            let cy = rect.center().y;
-            let mut x = rect.left() + 4.0;
+            let (cx, cy) = (rect.center().x, rect.center().y);
+            // How far along the bar: across it, or down it when it stands.
+            let mut x = if vertical { rect.top() + 4.0 } else { rect.left() + 4.0 };
+            let at = |x: f32, w: f32| {
+                if vertical {
+                    Rect::from_min_size(pos2(cx - w / 2.0, x), vec2(w, 32.0))
+                } else {
+                    Rect::from_min_size(pos2(x, cy - 16.0), vec2(w, 32.0))
+                }
+            };
             let sep = |ui: &Ui, x: &mut f32| {
                 *x += 4.0;
-                ui.painter()
-                    .line_segment([pos2(*x + 0.5, cy - 10.0), pos2(*x + 0.5, cy + 10.0)], Stroke::new(1.0, th().line));
+                let line = if vertical {
+                    [pos2(cx - 10.0, *x + 0.5), pos2(cx + 10.0, *x + 0.5)]
+                } else {
+                    [pos2(*x + 0.5, cy - 10.0), pos2(*x + 0.5, cy + 10.0)]
+                };
+                ui.painter().line_segment(line, Stroke::new(1.0, th().line));
                 *x += 5.0;
             };
             let ortho = proj != "Persp";
             let (proj_tip, proj_keys): (&'static str, &'static [&'static str]) =
                 if ortho { ("Perspective", &["O"]) } else { ("Orthographic", &["O"]) };
-            let b = Rect::from_min_size(pos2(x, cy - 16.0), vec2(pw, 32.0));
+            let b = at(x, pw);
             let r = nav_button(ui, b, None, Some(pg), "nav-proj", true, false);
             if r.clicked() {
                 run.push(Action::Ortho(!ortho));
@@ -4081,7 +4354,7 @@ impl Hybrid {
                 tip = Some((b, proj_tip, proj_keys));
             }
             hits.push(("nav-proj", b));
-            x += pw + 2.0;
+            x += if vertical { 32.0 } else { pw } + 2.0;
             // Zoom is the wheel, pinch and Cmd-= / Cmd--; Frame selection shows while there is one.
             let buttons: [(&str, char, &str, &[&str], bool); 4] = [
                 ("nav-views", icon::AXIS_3D, "Views", &["0–6"], true),
@@ -4097,7 +4370,7 @@ impl Hybrid {
                 if id != "nav-views" && std::mem::take(&mut need_sep) {
                     sep(ui, &mut x);
                 }
-                let b = Rect::from_min_size(pos2(x, cy - 16.0), vec2(32.0, 32.0));
+                let b = at(x, 32.0);
                 let on = id == "nav-views" && view_open;
                 let r = nav_button(ui, b, Some(glyph), None, id, true, on);
                 if r.hovered() {
@@ -4330,6 +4603,33 @@ fn view_chip(ui: &mut Ui, c: Rect, id: &str, label: &str, key: &str, on: bool) -
     let kc = if on { th().accent.gamma_multiply(0.8) } else { th().faint };
     p.text(pos2(c.right() - 4.0, c.bottom() - 2.0), Align2::RIGHT_BOTTOM, key, mono_medium(8.5), kc);
     resp.clicked()
+}
+
+fn dock_sep(ui: &Ui, bar: Rect, x: &mut f32) {
+    let sx = *x + 3.5;
+    ui.painter().line_segment([pos2(sx, bar.top() + 13.0), pos2(sx, bar.bottom() - 13.0)], Stroke::new(1.0, th().line));
+    *x += 11.0;
+}
+
+// A dock button: a rail button at touch size, with no key.
+fn dock_button(ui: &mut Ui, at: Pos2, glyph: char, id: &str, on: bool, enabled: bool) -> egui::Response {
+    let r = Rect::from_min_size(at, vec2(DOCK_BTN, DOCK_BTN));
+    let sense = if enabled { Sense::click() } else { Sense::hover() };
+    let resp = ui.interact(r, Id::unique(("dock", id)), sense);
+    let p = ui.painter();
+    let mut color = th().muted;
+    if on {
+        p.rect(r, CornerRadius::same(8), th().accent_bg, Stroke::new(1.0, th().ring), StrokeKind::Inside);
+        color = th().text;
+    } else if enabled && resp.hovered() {
+        p.rect_filled(r, CornerRadius::same(8), th().hover);
+        color = th().text;
+    }
+    if !enabled {
+        color = color.gamma_multiply(0.35);
+    }
+    p.text(r.center(), Align2::CENTER_CENTER, glyph, icon_font(18.0), color);
+    resp
 }
 
 // .tool, .tool.on, .tool .k
@@ -4759,5 +5059,28 @@ mod tests {
         let hide = super::COMMANDS.iter().find(|c| c.label == "Toggle render preview").unwrap();
         (hide.run)(&mut h);
         assert!(!h.show_render && !h.full_render, "hiding the render leaves the full view");
+    }
+
+    #[test]
+    fn the_touch_layout_fits_a_phone_with_the_assistant_open() {
+        let ctx = egui::Context::default();
+        super::install(&ctx, None);
+        let mut h = super::Hybrid::new([[0; 4]; 256], [false; 256], "test");
+        (h.touch, h.ai_open, h.palette_open, h.tool) = (true, true, true, super::Tool::Select);
+        let stats = super::Stats::default();
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(300.0, 650.0))),
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |u| {
+                h.ui(u.ctx(), &stats);
+            });
+            out.textures_delta.clear();
+        }
+        for name in ["selection", "palette"] {
+            let r = h.hits.get(name).copied();
+            assert!(r.is_some_and(|r| r.left() == 12.0), "{name} keeps to the left gutter: {r:?}");
+        }
     }
 }

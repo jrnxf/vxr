@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use vxr_app::Editor;
 use vxr_app::bridge::{Out, Page};
-use vxr_app::editor::{Button, NEW_SIZE};
+use vxr_app::editor::{Button, Finger, NEW_SIZE};
 use vxr_app::files::{obj_files, slices_png, zip};
 use vxr_app::theme::ThemeChoice;
 use vxr_app::ui::{Action, FontBytes};
@@ -141,10 +141,52 @@ impl App {
         self.events.push(egui::Event::WindowFocused(false));
     }
 
+    /// A point in CSS pixels in the points egui last laid out in: the same, but in the touch
+    /// layout's larger ones.
+    fn pt(&self, x: f32, y: f32) -> egui::Pos2 {
+        let k = self.editor.native_ppp / self.editor.ctx.pixels_per_point();
+        egui::pos2(x * k, y * k)
+    }
+
     pub fn pointer_move(&mut self, x: f32, y: f32) {
-        self.events.push(egui::Event::PointerMoved(egui::pos2(x, y)));
-        let ppp = self.editor.ppp;
+        self.events.push(egui::Event::PointerMoved(self.pt(x, y)));
+        let ppp = self.editor.native_ppp;
         self.editor.pointer_moved(Some([x * ppp, y * ppp]));
+    }
+
+    /// Use the touch layout (a bottom dock, larger targets and touch gestures) or the mouse
+    /// layout: the page asks for it on a touch-first screen, a finger, or a mouse press.
+    pub fn set_touch(&mut self, on: bool) {
+        self.editor.set_touch(on);
+    }
+
+    /// Finger `id` touched down (`phase` 0), moved (1) or lifted (2) at (x, y). The view takes
+    /// it as a gesture, or egui as the pointer when it landed on the UI.
+    pub fn touch(&mut self, id: u32, phase: u8, x: f32, y: f32) {
+        self.editor.set_touch(true);
+        let phase = match phase {
+            0 => Finger::Down,
+            1 => Finger::Move,
+            _ => Finger::Up,
+        };
+        let ppp = self.editor.native_ppp;
+        if self.editor.touch(id.into(), phase, [x * ppp, y * ppp]) {
+            return;
+        }
+        let pos = self.pt(x, y);
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        self.events.push(egui::Event::PointerMoved(pos));
+        match phase {
+            Finger::Down => self.events.push(button(true)),
+            Finger::Move => {}
+            // No hover after a finger lifts.
+            Finger::Up => self.events.extend([button(false), egui::Event::PointerGone]),
+        }
     }
 
     pub fn pointer_leave(&mut self) {
@@ -160,7 +202,7 @@ impl App {
             2 => (Button::Right, egui::PointerButton::Secondary),
             _ => return,
         };
-        let pos = egui::pos2(x, y);
+        let pos = self.pt(x, y);
         self.events.push(egui::Event::PointerButton { pos, button: eb, pressed, modifiers: self.modifiers });
         let ctx = &self.editor.ctx;
         let over_ui = ctx.is_pointer_over_egui() || ctx.egui_wants_pointer_input();
@@ -236,7 +278,7 @@ impl App {
             && ctx
                 .memory(|m| m.focused())
                 .and_then(|id| ctx.read_response(id))
-                .is_some_and(|r| r.rect.contains(egui::pos2(x, y)))
+                .is_some_and(|r| r.rect.contains(self.pt(x, y)))
     }
 
     /// IME composition from the page's hidden text field: `commit` false is a preedit update.
@@ -293,7 +335,8 @@ impl App {
             system_theme: Some(if self.dark { egui::Theme::Dark } else { egui::Theme::Light }),
             ..Default::default()
         };
-        input.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point = Some(ppp);
+        input.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point =
+            Some(self.editor.native_ppp);
         self.bridge.tick(&mut self.editor);
         let (actions, platform) = self.editor.frame(input, &view);
         self.editor.gpu.queue.present(frame);
@@ -427,7 +470,7 @@ impl App {
         let e = &self.editor;
         let (c, h) = (&e.cam, e.scene.history());
         format!(
-            r#"{{"voxels":{},"tool":"{:?}","shape":"{:?}","mirror":{},"mirrorAxes":[{},{},{}],"lock":{},"brushSize":{},"sizePanel":{},"lifting":{},"span":{},"selected":{},"region":"{:?}","hasClip":{},"bounds":[{},{},{}],"boundsPanel":{},"slot":{},"colorEdit":{},"slotOp":"{:?}","undo":{},"redo":{},"cmdk":{},"coach":{},"name":{:?},"size":[{},{}],"ppp":{},"cam":[{},{},{},{},{},{}],"ortho":{},"inView":[{},{}],"cameraHints":{},"view":{},"viewPanel":{},"exportMenu":{},"confirmNew":{},"theme":"{}","themeMenu":{},"themeShown":{:?},"guides":[{},{},{}],"mode":"{}","objects":{},"models":{},"picked":{},"tree":[{}],"treeOn":{},"layers":[{}],"layerOn":{},"render":{{"shown":{},"spp":{},"rows":{},"restarts":{},"timestamps":{},"panel":{},"full":{},"size":[{},{}],"maxSpp":{},"exposure":{},"gamma":{},"vignette":{},"aperture":{},"sky":{},"physicalSky":{},"export":{}}},"review":{},"undoLabel":{},"asks":{:?},"agents":{{"panel":{},"available":{},"web":{},"allowed":{},"connecting":{},"error":{},"clients":[{}],"edits":[{}]}}}}"#,
+            r#"{{"voxels":{},"tool":"{:?}","shape":"{:?}","mirror":{},"mirrorAxes":[{},{},{}],"lock":{},"brushSize":{},"sizePanel":{},"lifting":{},"span":{},"selected":{},"region":"{:?}","hasClip":{},"bounds":[{},{},{}],"boundsPanel":{},"slot":{},"colorEdit":{},"slotOp":"{:?}","undo":{},"redo":{},"cmdk":{},"coach":{},"name":{:?},"size":[{},{}],"ppp":{},"cam":[{},{},{},{},{},{}],"ortho":{},"inView":[{},{}],"cameraHints":{},"view":{},"viewPanel":{},"exportMenu":{},"confirmNew":{},"theme":"{}","themeMenu":{},"touch":{},"paletteOpen":{},"themeShown":{:?},"guides":[{},{},{}],"mode":"{}","objects":{},"models":{},"picked":{},"tree":[{}],"treeOn":{},"layers":[{}],"layerOn":{},"render":{{"shown":{},"spp":{},"rows":{},"restarts":{},"timestamps":{},"panel":{},"full":{},"size":[{},{}],"maxSpp":{},"exposure":{},"gamma":{},"vignette":{},"aperture":{},"sky":{},"physicalSky":{},"export":{}}},"review":{},"undoLabel":{},"asks":{:?},"agents":{{"panel":{},"available":{},"web":{},"allowed":{},"connecting":{},"error":{},"clients":[{}],"edits":[{}]}}}}"#,
             e.scene.map.voxels,
             e.ui.tool,
             e.ui.shape,
@@ -474,6 +517,8 @@ impl App {
             e.ui.confirm_new,
             e.ui.theme.id(),
             e.ui.theme_menu,
+            e.ui.touch,
+            e.ui.palette_open,
             e.ui.shown_theme(&e.ctx).name,
             e.ui.grid,
             e.ui.ground,
@@ -592,7 +637,8 @@ impl App {
     /// The middle of a named part of the UI in CSS pixels (see `Hybrid::hits`), or an empty
     /// array if it is not on screen. For the browser check.
     pub fn hit(&self, name: &str) -> Vec<f32> {
-        self.editor.ui.hits.get(name).map(|r| vec![r.center().x, r.center().y]).unwrap_or_default()
+        let k = self.editor.ppp / self.editor.native_ppp;
+        self.editor.ui.hits.get(name).map(|r| vec![r.center().x * k, r.center().y * k]).unwrap_or_default()
     }
 
     /// A key the page read back from the browser's encrypted store (`vxrKeys.load`) at start:

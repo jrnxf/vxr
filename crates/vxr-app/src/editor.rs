@@ -14,6 +14,7 @@ use crate::agents::Agents;
 use crate::assistant::{Assistant, Entry, Progress};
 use crate::render::{EXPORT_SIZES, Export};
 use crate::review::{Answer, Review, Script};
+use crate::touch::Touches;
 use crate::ui::{Action, AiAction, ChatView, EditRow, FontBytes, Hybrid, LayerRow, Named, Stats, TreeRow};
 
 /// Input quiet for this long raises the preview's budget (spikes/preview/RESULTS.md).
@@ -54,6 +55,22 @@ struct WorldDrag {
     offset: [i32; 3],
 }
 
+/// The touch layout's scale: its points are this many of the mouse layout's, so the rail's
+/// 34-point buttons become 44-point targets.
+pub const TOUCH_SCALE: f32 = 1.3;
+
+/// Movement below this many points is a finger resting (see `Touches`).
+const TOUCH_SLOP: f32 = 10.0;
+
+/// A finger's change, from the host's touch events.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Finger {
+    Down,
+    Move,
+    /// Lifted, or taken by the system.
+    Up,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum CamDrag {
     Orbit,
@@ -76,10 +93,18 @@ pub struct Editor {
     pub ctx: egui::Context,
     egui: egui_wgpu::Renderer,
     pub ui: Hybrid,
-    /// Target size in pixels and pixels per point.
+    /// Target size in pixels and pixels per point: the display's (`native_ppp`, what the host
+    /// gives egui as its native pixels per point), times `TOUCH_SCALE` in the touch layout
+    /// (egui's zoom factor).
     pub width: u32,
     pub height: u32,
     pub ppp: f32,
+    pub native_ppp: f32,
+    /// The fingers on the view, and the one pressing the UI (the host gives it to egui).
+    touches: Touches,
+    ui_touch: Option<u64>,
+    /// A box brush was lifting when the current finger landed: its release places the box.
+    touch_places: bool,
     /// The width in points the docked assistant takes from the right of the view, as the
     /// camera last allowed for: the scene stays centred in the space left over.
     ai_dock: f32,
@@ -209,6 +234,10 @@ impl Editor {
             width,
             height,
             ppp,
+            native_ppp: ppp,
+            touches: Touches::new(TOUCH_SLOP * ppp),
+            ui_touch: None,
+            touch_places: false,
             ai_dock: 0.0,
             gesture: None,
             moving: None,
@@ -296,10 +325,106 @@ impl Editor {
         self.ui.toast(&self.ctx, "New scene");
     }
 
+    /// The target's new size in pixels, with the display's pixels per point.
     pub fn resize(&mut self, width: u32, height: u32, ppp: f32) {
         let (width, height) = (width.max(1), height.max(1));
         self.renderer.resize(&self.gpu.device, width, height);
-        (self.width, self.height, self.ppp) = (width, height, ppp);
+        (self.width, self.height, self.native_ppp) = (width, height, ppp);
+        self.ppp = ppp * if self.ui.touch { TOUCH_SCALE } else { 1.0 };
+        self.touches.set_slop(TOUCH_SLOP * self.ppp);
+    }
+
+    /// Switch to the touch layout (a bottom dock, larger targets and touch gestures) or back
+    /// to the mouse layout. The host calls it when the screen is touch-first or a finger
+    /// lands, and the mouse layout comes back with a mouse press.
+    pub fn set_touch(&mut self, on: bool) {
+        if self.ui.touch != on {
+            self.ui.touch = on;
+            self.ctx.set_zoom_factor(if on { TOUCH_SCALE } else { 1.0 });
+            self.resize(self.width, self.height, self.native_ppp);
+        }
+    }
+
+    /// Finger `id` touched, moved or lifted at `p` (pixels). True when the view takes it as a
+    /// gesture; false when it is the UI's, and the host passes it to egui as the pointer.
+    pub fn touch(&mut self, id: u64, phase: Finger, p: [f32; 2]) -> bool {
+        self.touch_at(id, phase, p, now_ms())
+    }
+
+    /// `touch` at time `t` (ms).
+    pub fn touch_at(&mut self, id: u64, phase: Finger, p: [f32; 2], t: f64) -> bool {
+        self.last_input = t;
+        if self.ui_touch == Some(id) {
+            if phase == Finger::Up {
+                self.ui_touch = None;
+            }
+            return false;
+        }
+        if phase == Finger::Down && self.ui_touch.is_none() && self.touches.count() == 0 {
+            let at = egui::pos2(p[0], p[1]) / self.ctx.pixels_per_point();
+            if self.ctx.layer_id_at(at).is_some_and(|l| l.order != egui::Order::Background) {
+                self.ui_touch = Some(id);
+                return false;
+            }
+        }
+        let gestures = match phase {
+            Finger::Down => self.touches.start(id, p, t),
+            Finger::Move => self.touches.moved(id, p, t),
+            Finger::Up => self.touches.end(id, p, t),
+        };
+        for g in gestures {
+            self.gesture_input(g);
+        }
+        true
+    }
+
+    fn gesture_input(&mut self, g: crate::touch::Gesture) {
+        use crate::touch::Gesture as G;
+        match g {
+            G::Press(p) => {
+                self.pointer_moved(Some(p));
+                // A lifting box's height follows the finger, and its release places it.
+                self.touch_places = self.lifting();
+                if !self.touch_places {
+                    self.button(Button::Left, true, false);
+                }
+            }
+            // A finger that has not moved does not move the drag: a mouse sends no move then
+            // either, and the drag's plane (through the middle of the first cell) can round a
+            // repeated move into the next cell.
+            G::Drag(p) => {
+                if self.pointer != Some(p) {
+                    self.pointer_moved(Some(p));
+                }
+            }
+            G::Release(p) => {
+                if self.pointer != Some(p) {
+                    self.pointer_moved(Some(p));
+                }
+                if std::mem::take(&mut self.touch_places) {
+                    self.place_box();
+                } else {
+                    self.button(Button::Left, false, false);
+                }
+                // No hover on a touch screen: the cursor goes with the finger, unless a box's
+                // height still follows it.
+                if !self.lifting() {
+                    self.pointer_moved(None);
+                }
+            }
+            G::Orbit(d) => self.cam.orbit(d[0], d[1]),
+            G::Pan(d) => {
+                let from = self.cam;
+                self.cam.pan(d[0], d[1], self.height as f32);
+                self.bound_camera(&from);
+            }
+            G::Pinch { scale, at } => {
+                let (o, d) = self.ray(at);
+                let hit = self.scene.map.raycast(o, d, 1e5).map(|h| Vec3::from(o) + Vec3::from(d) * h.t);
+                self.zoom(scale.max(0.01).ln() / -0.88f32.ln(), hit);
+            }
+            G::Undo => self.undo(),
+        }
     }
 
     /// The box the camera frames: the voxels, or the floor of an empty scene.

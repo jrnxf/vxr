@@ -25,6 +25,7 @@ pub mod live;
 pub mod render;
 pub mod review;
 pub mod theme;
+pub mod touch;
 pub mod ui;
 
 pub use editor::Editor;

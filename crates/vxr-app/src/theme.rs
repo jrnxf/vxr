@@ -92,6 +92,7 @@ struct Spec {
     danger: u32,
     ok: u32,
     mid: u32,
+    /// The view's colours; its ghost tints are set from `ok` and `danger`.
     view: ViewColors,
 }
 
@@ -148,7 +149,7 @@ const fn theme(s: Spec) -> Theme {
             Color32::from_rgba_unmultiplied_const(255, 255, 255, 200)
         },
         base: rgb(s.base),
-        view: s.view,
+        view: ViewColors { added: bytes(s.ok), removed: bytes(s.danger), ..s.view },
     }
 }
 
@@ -196,6 +197,7 @@ pub static PAPER: Theme = theme(Spec {
         frame: bytes(0x737373),
         select: bytes(0x171717),
         select_edge: bytes(0xfafafa),
+        ..ViewColors::NEUTRAL
     },
 });
 
@@ -222,6 +224,7 @@ pub static GRUVBOX: Theme = theme(Spec {
         frame: bytes(0xa89984),
         select: bytes(0xfabd2f),
         select_edge: bytes(0x282828),
+        ..ViewColors::NEUTRAL
     },
 });
 
@@ -248,6 +251,7 @@ pub static TOKYO_NIGHT: Theme = theme(Spec {
         frame: bytes(0xa9b1d6),
         select: bytes(0x7aa2f7),
         select_edge: bytes(0x1a1b26),
+        ..ViewColors::NEUTRAL
     },
 });
 
@@ -274,6 +278,7 @@ pub static KANAGAWA: Theme = theme(Spec {
         frame: bytes(0xc8c093),
         select: bytes(0x7e9cd8),
         select_edge: bytes(0x1f1f28),
+        ..ViewColors::NEUTRAL
     },
 });
 
@@ -302,6 +307,7 @@ pub static NORD: Theme = theme(Spec {
         frame: bytes(0xd8dee9),
         select: bytes(0x88c0d0),
         select_edge: bytes(0x2e3440),
+        ..ViewColors::NEUTRAL
     },
 });
 
@@ -451,6 +457,15 @@ mod tests {
         assert_eq!(NEUTRAL.text, Color32::from_rgb(0xfa, 0xfa, 0xfa));
         assert_eq!(NEUTRAL.tint(64), Color32::from_white_alpha(64));
         assert_eq!(NEUTRAL.view, ViewColors::NEUTRAL);
+    }
+
+    #[test]
+    fn ghost_tints_follow_ok_and_danger() {
+        let rgb = |c: Color32| [c.r(), c.g(), c.b()];
+        for t in themes() {
+            assert_eq!(t.view.added, rgb(t.ok), "{}", t.name);
+            assert_eq!(t.view.removed, rgb(t.danger), "{}", t.name);
+        }
     }
 
     #[test]

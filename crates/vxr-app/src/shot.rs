@@ -67,7 +67,8 @@ impl Shot {
                 system_theme: self.system,
                 ..Default::default()
             };
-            input.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point = Some(self.ed.ppp);
+            input.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point =
+                Some(self.ed.native_ppp);
             let (host, _) = self.ed.frame(input, &view);
             self.host.extend(host);
         }
@@ -188,6 +189,7 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     }
 
     themes(dir, &load)?;
+    touch(dir, &load)?;
 
     // Every tool at 2x through the pointer path.
     let (scene, name) = load()?;
@@ -312,6 +314,172 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
         frame_times(p)?;
         review_times(p)?;
     }
+    Ok(())
+}
+
+/// The touch layout on an iPad-sized screen (1180x820 points, 2x): the dock in place of the
+/// rail with 44-point targets, in landscape and portrait, Neutral and Paper, and the gestures
+/// through `Editor::touch_at`: a tap adds one voxel, two fingers orbit and pinch, three pan, a
+/// two-finger tap undoes, and a finger on the dock is the UI's.
+fn touch(dir: &Path, load: &dyn Fn() -> Result<(Scene, String), String>) -> Result<(), String> {
+    use vxr_app::editor::{Finger, TOUCH_SCALE};
+    use vxr_app::theme::ThemeChoice;
+    for (points, tag) in [((1180, 820), "land"), ((820, 1180), "port")] {
+        for theme in [ThemeChoice::Neutral, ThemeChoice::Paper] {
+            let (scene, name) = load()?;
+            let mut s = Shot::sized(scene, &name, 2.0, points)?;
+            s.ed.ui.theme = theme;
+            s.ed.set_touch(true);
+            s.frames(3);
+            let suffix = if theme == ThemeChoice::Paper { "-paper" } else { "" };
+            s.save_png(&dir.join(format!("app-2x-touch-{tag}{suffix}.png")))?;
+            if theme != ThemeChoice::Neutral {
+                continue;
+            }
+            let h = &s.ed.ui.hits;
+            let targets = ["tool-add", "select", "dock-color", "undo", "voxel", "center", "mirror", "lock"];
+            let small =
+                targets.iter().find(|n| h.get(**n).is_none_or(|r| r.width().min(r.height()) * TOUCH_SCALE < 44.0));
+            check(
+                s.ed.ui.touch && s.ed.ppp == 2.0 * TOUCH_SCALE && small.is_none() && !h.contains_key("hint"),
+                format!(
+                    "{tag}: the touch layout has the dock with 44-point targets and no hint bar (short: {small:?})"
+                ),
+            )?;
+            let corner = h.contains_key("render");
+            check(corner == (tag == "land"), format!("{tag}: the render corner shows in landscape only ({corner})"))?;
+        }
+    }
+
+    let (scene, name) = load()?;
+    let mut s = Shot::sized(scene, &name, 2.0, (1180, 820))?;
+    s.ed.ui.coach = false;
+    s.ed.set_touch(true);
+    s.frames(3);
+    let mid = [s.ed.width as f32 / 2.0, s.ed.height as f32 / 2.0];
+    let p = s.top_face_pixel(mid)?;
+    s.ed.pointer_moved(None);
+    let mut t = 1000.0;
+    let mut at = |s: &mut Shot, id, phase, p: [f32; 2], dt: f64| {
+        t += dt;
+        s.ed.touch_at(id, phase, p, t)
+    };
+    let v0 = s.voxels();
+    at(&mut s, 1, Finger::Down, p, 0.0);
+    at(&mut s, 1, Finger::Up, p, 60.0);
+    check(
+        s.voxels() == v0 + 1 && s.ed.cursor().is_none(),
+        format!("a tap adds one voxel ({} added)", s.voxels() - v0),
+    )?;
+    let near = [p[0] + 60.0, p[1]];
+    at(&mut s, 1, Finger::Down, p, 500.0);
+    at(&mut s, 2, Finger::Down, near, 20.0);
+    at(&mut s, 1, Finger::Up, p, 60.0);
+    at(&mut s, 2, Finger::Up, near, 10.0);
+    check(s.voxels() == v0, "a two-finger tap undoes it".into())?;
+
+    // A resize mid-stroke keeps the finger: its lift ends the stroke as one undo step.
+    at(&mut s, 1, Finger::Down, p, 500.0);
+    at(&mut s, 1, Finger::Move, p, 200.0);
+    let (w, h, ppp) = (s.ed.width, s.ed.height, s.ed.native_ppp);
+    s.ed.resize(w, h, ppp);
+    at(&mut s, 1, Finger::Up, p, 20.0);
+    let drawn = s.voxels() == v0 + 1 && s.ed.cursor().is_none();
+    at(&mut s, 1, Finger::Down, p, 500.0);
+    at(&mut s, 2, Finger::Down, near, 20.0);
+    at(&mut s, 1, Finger::Up, p, 60.0);
+    at(&mut s, 2, Finger::Up, near, 10.0);
+    check(drawn && s.voxels() == v0, "a resize mid-stroke keeps the finger, and its stroke undoes in one step".into())?;
+
+    // Two fingers landing together and moving together orbit; nothing is drawn.
+    let (cam0, b) = (s.ed.cam, [mid[0] + 200.0, mid[1]]);
+    at(&mut s, 1, Finger::Down, mid, 500.0);
+    at(&mut s, 2, Finger::Down, b, 40.0);
+    for k in 1..=20 {
+        let d = 8.0 * k as f32;
+        at(&mut s, 1, Finger::Move, [mid[0] + d, mid[1]], 8.0);
+        at(&mut s, 2, Finger::Move, [b[0] + d, b[1]], 0.0);
+    }
+    at(&mut s, 1, Finger::Up, mid, 30.0);
+    at(&mut s, 2, Finger::Up, b, 0.0);
+    let cam1 = s.ed.cam;
+    check(
+        (cam1.yaw - cam0.yaw).abs() > 0.2 && cam1.distance == cam0.distance && s.voxels() == v0,
+        format!("two fingers orbit ({:.2} rad) and draw nothing", cam1.yaw - cam0.yaw),
+    )?;
+    at(&mut s, 1, Finger::Down, mid, 500.0);
+    at(&mut s, 2, Finger::Down, b, 10.0);
+    for k in 1..=20 {
+        let d = 6.0 * k as f32;
+        at(&mut s, 1, Finger::Move, [mid[0] - d, mid[1]], 8.0);
+        at(&mut s, 2, Finger::Move, [b[0] + d, b[1]], 0.0);
+    }
+    at(&mut s, 1, Finger::Up, mid, 30.0);
+    at(&mut s, 2, Finger::Up, b, 0.0);
+    let cam2 = s.ed.cam;
+    check(
+        cam2.distance < cam1.distance * 0.8 && cam2.yaw == cam1.yaw,
+        format!("spreading two fingers zooms in ({:.0} to {:.0}) without orbiting", cam1.distance, cam2.distance),
+    )?;
+    let fingers = [mid, [mid[0] + 120.0, mid[1]], [mid[0] + 240.0, mid[1]]];
+    for (i, f) in fingers.iter().enumerate() {
+        at(&mut s, i as u64, Finger::Down, *f, 500.0 + i as f64);
+    }
+    for k in 1..=15 {
+        for (i, f) in fingers.iter().enumerate() {
+            at(&mut s, i as u64, Finger::Move, [f[0], f[1] + 10.0 * k as f32], 4.0);
+        }
+    }
+    for (i, f) in fingers.iter().enumerate() {
+        at(&mut s, i as u64, Finger::Up, *f, 10.0);
+    }
+    let cam3 = s.ed.cam;
+    check(
+        (cam3.target - cam2.target).length() > 1.0 && cam3.yaw == cam2.yaw && cam3.pitch == cam2.pitch,
+        format!("three fingers pan ({:.1} voxels) without orbiting", (cam3.target - cam2.target).length()),
+    )?;
+
+    // A finger on the dock is the UI's: the host gives it to egui.
+    s.frames(1);
+    let c = s.at("dock-color")?;
+    let c = [c.x * s.ed.ppp, c.y * s.ed.ppp];
+    let on_ui = !at(&mut s, 7, Finger::Down, c, 500.0);
+    at(&mut s, 7, Finger::Up, c, 50.0);
+    s.ui_click("dock-color")?;
+    let pal = s.ed.ui.hits.get("palette").copied();
+    let dock = s.ed.ui.hits.get("dock-brushes").copied();
+    check(
+        on_ui && s.ed.ui.palette_open && pal.zip(dock).is_some_and(|(p, d)| p.bottom() <= d.top()),
+        "a finger on the dock is the UI's, and its colour button opens the palette over the dock".into(),
+    )?;
+    s.ui_click("select")?;
+    s.ui_click("dock-color")?;
+    s.frames(2);
+    let sel = s.ed.ui.hits.get("selection").copied();
+    check(
+        s.ed.ui.tool == Tool::Select && sel.zip(dock).is_some_and(|(r, d)| r.bottom() <= d.top()),
+        "the select button opens its flyout over the dock".into(),
+    )?;
+    s.save_png(&dir.join("app-2x-touch-select.png"))?;
+    s.ed.set_touch(false);
+    s.frames(2);
+    check(
+        !s.ed.ui.touch && s.ed.ppp == 2.0 && s.ed.ui.hits.contains_key("hint"),
+        "a mouse brings back the mouse layout".into(),
+    )?;
+
+    // The finger that brings the touch layout lands on the mouse layout egui drew.
+    let pal = s.at("palette")?;
+    let pal = [pal.x * s.ed.ppp, pal.y * s.ed.ppp];
+    let v = s.voxels();
+    s.ed.set_touch(true);
+    let on_ui = !at(&mut s, 8, Finger::Down, pal, 500.0);
+    at(&mut s, 8, Finger::Up, pal, 50.0);
+    s.frames(2);
+    check(
+        on_ui && s.voxels() == v,
+        "the finger that brings the touch layout is the UI's where the mouse layout drew a panel".into(),
+    )?;
     Ok(())
 }
 

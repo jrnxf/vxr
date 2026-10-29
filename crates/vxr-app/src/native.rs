@@ -5,14 +5,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use vxr_app::Editor;
-use vxr_app::editor::{Button, NEW_SIZE};
+use vxr_app::editor::{Button, Finger, NEW_SIZE};
 use vxr_app::files::{obj_files, slices_png};
 use vxr_app::theme::ThemeChoice;
 use vxr_app::ui::Action;
 use vxr_core::Scene;
 use vxr_render::Gpu;
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
@@ -330,7 +330,21 @@ impl ApplicationHandler for App {
             }
             WindowEvent::CursorMoved { position, .. } => ed.pointer_moved(Some([position.x as f32, position.y as f32])),
             WindowEvent::CursorLeft { .. } => ed.pointer_moved(None),
+            // A finger brings the touch layout and its gestures; egui-winit gives one on the UI
+            // to egui as the pointer.
+            WindowEvent::Touch(t) => {
+                ed.set_touch(true);
+                let phase = match t.phase {
+                    TouchPhase::Started => Finger::Down,
+                    TouchPhase::Moved => Finger::Move,
+                    TouchPhase::Ended | TouchPhase::Cancelled => Finger::Up,
+                };
+                ed.touch(t.id, phase, [t.location.x as f32, t.location.y as f32]);
+            }
             WindowEvent::MouseInput { state, button, .. } => {
+                if state == ElementState::Pressed {
+                    ed.set_touch(false);
+                }
                 let b = match button {
                     MouseButton::Left => Button::Left,
                     MouseButton::Right => Button::Right,

@@ -3,10 +3,11 @@
 # serve crates/vxr-web/dist/ on 127.0.0.1 with the deploy's headers (check-server.js, with a
 # stand-in model provider), run check.js in the page (every tool, camera, undo/redo, Cmd-K,
 # the assistant, Open, Save, resize), check that a key remembered in the browser comes back
-# in a new page, pair the page with a real `vxr bridge` (a debug build, which takes pages
-# from 127.0.0.1, on its fixed port) and edit it from a real `vxr mcp --live` driven by a
-# scripted MCP client (check-agent.js), check the no-WebGPU message in a browser without
-# WebGPU, and write 1x and 2x screenshots into the git-ignored crates/vxr-web/shots/.
+# in a new page, check that a tablet-sized touch screen starts in the touch layout, pair the
+# page with a real `vxr bridge` (a debug build, which takes pages from 127.0.0.1, on its fixed
+# port) and edit it from a real `vxr mcp --live` driven by a scripted MCP client
+# (check-agent.js), check the no-WebGPU message in a browser without WebGPU, and write 1x and
+# 2x screenshots into the git-ignored crates/vxr-web/shots/.
 # Prints ok or FAIL per step and exits 1 on any failure. Run crates/vxr-web/build first.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -56,6 +57,24 @@ for scale in 1 2; do
   axi screenshot "$shots/web-${scale}x.png" >/dev/null
   echo "wrote $shots/web-${scale}x.png"
 done
+# The touch layout on an iPad-sized touch screen, landscape and portrait, Neutral and Paper:
+# a touch-first page starts in it.
+touch_results=""
+for view in 1180x820 820x1180; do
+  for theme in neutral paper; do
+    axi emulate --viewport "${view}x2,mobile,touch" >/dev/null
+    axi open "$url" >/dev/null
+    got="$(axi eval "async () => { for (let i = 0; i < 300 && !window.vxr; i++) await new Promise(r => setTimeout(r, 50)); window.vxr.set_theme('$theme'); await new Promise(r => setTimeout(r, 800)); const s = JSON.parse(window.vxr.state()); return JSON.stringify([s.touch, window.vxr.hit('dock').length > 0, window.vxr.hit('render').length > 0]) }" | unwrap)"
+    axi screenshot "$shots/web-touch-$view-$theme.png" >/dev/null
+    echo "wrote $shots/web-touch-$view-$theme.png"
+    corner=$([ "$view" = 1180x820 ] && echo true || echo false)
+    if [[ "$got" == "[true,true,$corner]" ]]; then
+      touch_results+=$'\nok '"$view $theme: a touch screen starts in the touch layout with the dock"
+    else
+      touch_results+=$'\nFAIL '"$view $theme: a touch screen starts in the touch layout with the dock: $got"
+    fi
+  done
+done
 axi emulate --viewport "1280x800x1" >/dev/null
 axi open "$url" >/dev/null
 # check.js outlasts one eval's 60 s request limit: start it, then poll for its lines.
@@ -67,6 +86,7 @@ for _ in $(seq 600); do
   sleep 1
 done
 [ -n "$results" ] || results="FAIL check.js did not finish in 10 minutes"
+results+="$touch_results"
 axi screenshot "$shots/web-1x-checked.png" >/dev/null
 
 # A key check.js asked this browser to remember comes back, encrypted, in a new page.

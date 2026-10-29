@@ -20,7 +20,7 @@ struct CameraUniform {
     select: [u32; 4],
     pix: [f32; 4],
     bounds: [u32; 4],
-    colors: [[f32; 4]; 8],
+    colors: [[f32; 4]; 10],
 }
 
 /// What the editor view draws besides the voxels, in map coordinates. Off by default, so a
@@ -58,6 +58,9 @@ pub struct ViewColors {
     /// The selection's tint (the theme's accent) and its voxel edges.
     pub select: [u8; 3],
     pub select_edge: [u8; 3],
+    /// A staged change's ghost tints (the theme's ok and danger): added and removed voxels.
+    pub added: [u8; 3],
+    pub removed: [u8; 3],
 }
 
 impl ViewColors {
@@ -70,11 +73,25 @@ impl ViewColors {
         frame: [0xa1; 3],
         select: [0xe5; 3],
         select_edge: [0x17; 3],
+        added: [0x6e, 0xe7, 0xa8],
+        removed: [0xff, 0x64, 0x67],
     };
 
-    fn uniform(&self) -> [[f32; 4]; 8] {
+    fn uniform(&self) -> [[f32; 4]; 10] {
         let c = |c: [u8; 3]| [c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0, 1.0];
-        [self.sky[0], self.sky[1], self.tile, self.base, self.grid, self.frame, self.select, self.select_edge].map(c)
+        [
+            self.sky[0],
+            self.sky[1],
+            self.tile,
+            self.base,
+            self.grid,
+            self.frame,
+            self.select,
+            self.select_edge,
+            self.added,
+            self.removed,
+        ]
+        .map(c)
     }
 }
 

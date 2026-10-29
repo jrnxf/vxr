@@ -1434,5 +1434,72 @@ async () => {
   await frames(6);
   s = st();
   step('resize back', s.size[0] === Math.round(innerWidth * devicePixelRatio), `${s.size}`);
+
+  // Touch: a finger switches to the touch layout (the dock, larger points), a tap uses the
+  // tool, two fingers orbit and pinch, three pan, a two-finger tap undoes, and the dock's
+  // buttons take taps; a mouse press brings the mouse layout back.
+  window.vxr.open(new Uint8Array(await (await fetch('scene.vox')).arrayBuffer()), 'island.vox');
+  await frames(6);
+  const touch = (type, id, x, y) => c.dispatchEvent(new PointerEvent(type, {
+    clientX: x, clientY: y, button: type === 'pointermove' ? -1 : 0, buttons: type === 'pointerup' ? 0 : 1,
+    pointerId: 10 + id, pointerType: 'touch', isPrimary: id === 0, bubbles: true, cancelable: true,
+  }));
+  const tap = async (x, y) => { touch('pointerdown', 0, x, y); await frames(1); touch('pointerup', 0, x, y); await frames(); };
+  const fingers = async (from, d, steps = 16) => {
+    from.forEach(([x, y], i) => touch('pointerdown', i, x, y));
+    await frames(1);
+    for (let k = 1; k <= steps; k++) {
+      from.forEach(([x, y], i) => touch('pointermove', i, x + d[i][0] * k / steps, y + d[i][1] * k / steps));
+      await frames(1);
+    }
+    from.forEach(([x, y], i) => touch('pointerup', i, x + d[i][0], y + d[i][1]));
+    await frames();
+  };
+  const tapAt = async (name) => { const [x, y] = window.vxr.hit(name); await tap(x, y); };
+  let v = st().voxels;
+  await tap(mx, my);
+  s = st();
+  step('a finger switches to the touch layout and a tap adds one voxel', s.touch && s.voxels === v + 1 && !!at('dock'), JSON.stringify([s.touch, s.voxels - v]));
+  touch('pointerdown', 0, mx, my); touch('pointerdown', 1, mx + 80, my); await frames(1);
+  touch('pointerup', 0, mx, my); touch('pointerup', 1, mx + 80, my); await frames();
+  step('a two-finger tap undoes', st().voxels === v, `${st().voxels - v}`);
+  s = st();
+  await fingers([[mx - 60, my], [mx + 60, my]], [[120, 0], [120, 0]]);
+  let s2 = st();
+  step('two fingers orbit and draw nothing', Math.abs(s2.cam[3] - s.cam[3]) > 0.1 && near(s2.cam[5], s.cam[5]) && s2.voxels === v, JSON.stringify([s.cam, s2.cam]));
+  await fingers([[mx - 60, my], [mx + 60, my]], [[-80, 0], [80, 0]]);
+  s = st();
+  step('a pinch zooms', s.cam[5] < s2.cam[5] * 0.85 && near(s.cam[3], s2.cam[3]), `${s2.cam[5]} -> ${s.cam[5]}`);
+  await fingers([[mx - 80, my], [mx, my], [mx + 80, my]], [[0, 100], [0, 100], [0, 100]]);
+  s2 = st();
+  step('three fingers pan', s2.cam.slice(0, 3).some((x, i) => Math.abs(x - s.cam[i]) > 0.5) && near(s2.cam[3], s.cam[3]), JSON.stringify([s.cam, s2.cam]));
+  await tapAt('tool-erase');
+  step("the dock's buttons take taps", st().tool === 'Erase' && st().voxels === v, st().tool);
+  await tapAt('tool-add');
+  await tapAt('dock-color');
+  step("the dock's colour opens the palette", st().paletteOpen && !!at('palette'), JSON.stringify(st().paletteOpen));
+  await tapAt('edit-color');
+  const [hx, hy] = window.vxr.hit('field-hex');
+  touch('pointerdown', 0, hx, hy);
+  await frames(2);
+  const ime = document.getElementById('ime');
+  const unfocused = window.vxr.wants_keyboard() && document.activeElement !== ime;
+  touch('pointerup', 0, hx, hy);
+  const focused = document.activeElement === ime;
+  await frames();
+  step('a tap on a text field focuses the hidden field inside the tap, not before', st().colorEdit && unfocused && focused, JSON.stringify([st().colorEdit, unfocused, document.activeElement?.id]));
+  touch('pointerdown', 0, hx, hy);
+  const kept = document.activeElement === ime;
+  await frames(2);
+  const held = document.activeElement === ime;
+  touch('pointerup', 0, hx, hy);
+  await frames();
+  step('a finger on the focused text field keeps the hidden field focused', kept && held && document.activeElement === ime, JSON.stringify([kept, held, document.activeElement?.id]));
+  for (let i = 0; i < 2 && st().colorEdit; i++) await key('Escape');
+  step('Escape leaves the field and closes the colour editor', !st().colorEdit, JSON.stringify(st().colorEdit));
+  await tapAt('dock-color');
+  await click(mx, my);
+  s = st();
+  step('a mouse press brings back the mouse layout', !s.touch && s.voxels === v + 1 && !at('dock'), JSON.stringify([s.touch, s.voxels - v]));
   return out.join('\n');
 }
