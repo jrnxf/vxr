@@ -1,6 +1,7 @@
 //! `vxr mcp --root <dir>`: a stdio MCP server that opens, edits and saves `.vox` files under
 //! one folder (`docs/research/ai.md` section 3, files mode). `vxr mcp --live` edits the
-//! scene open in the running desktop app instead, over a local socket ([`live`]).
+//! scene open in the running desktop app instead, over a local socket ([`live`]), or in the
+//! browser editor, whose socket `vxr bridge` hosts ([`bridge`]).
 //!
 //! - One tool per `vxr-ops` operation, with the schemas generated from its types, plus
 //!   `list_files`, `new_scene`, `open`, `edit_object` and `save` ([`files`]).
@@ -11,6 +12,9 @@
 //! It makes no model calls, has no network or shell tool, and reaches only files under the
 //! root. No GPU.
 
+pub mod bridge;
+#[cfg(all(test, unix))]
+mod bridge_tests;
 pub mod files;
 pub mod fixture;
 pub mod live;
@@ -32,7 +36,8 @@ Serves MCP on stdin and stdout for a terminal agent such as Claude Code.
 
   --root <dir>  open, edit and save the .vox files under <dir>
   --live        edit the scene open in the vxr window, once its Terminal agents panel
-                (Cmd-K "Terminal agents (MCP)…") allows it
+                (Cmd-K "Terminal agents (MCP)…") allows it, or in a vxr.jrnxf.co tab
+                paired with `vxr bridge`
 
 `vxr setup claude` (or codex) registers both with the agent."#;
 

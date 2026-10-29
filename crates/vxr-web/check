@@ -3,8 +3,10 @@
 # serve crates/vxr-web/dist/ on 127.0.0.1 with the deploy's headers (check-server.js, with a
 # stand-in model provider), run check.js in the page (every tool, camera, undo/redo, Cmd-K,
 # the assistant, Open, Save, resize), check that a key remembered in the browser comes back
-# in a new page, check the no-WebGPU message in a browser without WebGPU, and write 1x and 2x
-# screenshots into the git-ignored crates/vxr-web/shots/.
+# in a new page, pair the page with a real `vxr bridge` (a debug build, which takes pages
+# from 127.0.0.1, on its fixed port) and edit it from a real `vxr mcp --live` driven by a
+# scripted MCP client (check-agent.js), check the no-WebGPU message in a browser without
+# WebGPU, and write 1x and 2x screenshots into the git-ignored crates/vxr-web/shots/.
 # Prints ok or FAIL per step and exits 1 on any failure. Run crates/vxr-web/build first.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -23,14 +25,18 @@ cd "$root"
 fixtures="$(mktemp -d)"
 trap 'rm -rf "$fixtures"' EXIT
 ./dev cargo run -q --release -p vxr-vox --example fixture -- 22-world "$fixtures/22-world.vox"
+./dev cargo build -q -p vxr-app
+vxr="$root/target/debug/vxr"
 ./dev node "$here/check-server.js" "$dist" "$port" "$fixtures" &
 server=$!
+bridge=""
 gpu=vxr-check-$$
 nogpu=vxr-check-nogpu-$$
 cleanup() {
   CHROME_DEVTOOLS_AXI_SESSION=$gpu chrome-devtools-axi stop >/dev/null 2>&1 || true
   CHROME_DEVTOOLS_AXI_SESSION=$nogpu chrome-devtools-axi stop >/dev/null 2>&1 || true
   kill "$server" 2>/dev/null || true
+  [ -z "$bridge" ] || kill "$bridge" 2>/dev/null || true
   rm -rf "$fixtures"
 }
 trap cleanup EXIT
@@ -71,6 +77,78 @@ if [[ "$back" == '[true,true,"compatible"]' ]]; then
 else
   results+=$'\nFAIL a key remembered in this browser is back in a new page: '"$back"
 fi
+
+# Live mode through a real vxr bridge: its live folder (socket and token) in the temporary
+# folder, the page pairing with the code it printed, and a real `vxr mcp --live` editing.
+export VXR_LIVE_DIR="$fixtures/live"
+"$vxr" bridge >"$fixtures/bridge.log" 2>&1 &
+bridge=$!
+code=""
+for _ in $(seq 100); do
+  code="$(sed -n 's/^  Pairing code: //p' "$fixtures/bridge.log" | tail -1)"
+  [ -n "$code" ] && break
+  sleep 0.1
+done
+pass() { results+=$'\n'"ok $1"; }
+fail() { results+=$'\n'"FAIL $1: $2"; }
+expect() { if [ "$2" = "$3" ]; then pass "$1"; else fail "$1" "$2"; fi; }
+if [ -z "$code" ]; then
+  fail "vxr bridge prints a pairing code" "$(cat "$fixtures/bridge.log")"
+else
+  pass "vxr bridge prints a pairing code"
+  axi open "$url" >/dev/null
+  # Cmd-K Terminal agents, the code, Enter: the page pairs.
+  paired="$(axi eval "async () => {
+    for (let i = 0; i < 300 && !window.vxr; i++) await new Promise(r => setTimeout(r, 50));
+    const c = document.getElementById('c');
+    const frames = (n = 3) => new Promise((r) => { const f = () => (--n > 0 ? requestAnimationFrame(f) : r()); requestAnimationFrame(f); });
+    const key = async (k, mods = {}) => { const o = { key: k, bubbles: true, cancelable: true, ...mods }; c.dispatchEvent(new KeyboardEvent('keydown', o)); c.dispatchEvent(new KeyboardEvent('keyup', o)); await frames(); };
+    const click = async ([x, y]) => { for (const type of ['pointermove', 'pointerdown', 'pointerup']) { c.dispatchEvent(new PointerEvent(type, { clientX: x, clientY: y, button: type === 'pointermove' ? -1 : 0, buttons: type === 'pointerdown' ? 1 : 0, pointerId: 1, pointerType: 'mouse', isPrimary: true, bubbles: true, cancelable: true })); await frames(); } };
+    window.__key = key; window.__click = click; window.__frames = frames;
+    await frames(10);
+    await key('k', { metaKey: true });
+    for (const ch of 'terminal agents') await key(ch);
+    await key('Enter');
+    await click(window.vxr.hit('agents-code'));
+    for (const ch of '$code') await key(ch);
+    await key('Enter');
+    for (let i = 0; i < 200 && !JSON.parse(window.vxr.state()).agents.allowed; i++) await frames(3);
+    const a = JSON.parse(window.vxr.state()).agents;
+    return JSON.stringify([a.allowed, a.error]);
+  }" | unwrap)"
+  expect "the page pairs with the code vxr bridge printed" "$paired" '[true,null]'
+  [ -S "$VXR_LIVE_DIR/live.sock" ] && pass "vxr bridge opens the agents' socket once paired" || fail "vxr bridge opens the agents' socket once paired" "no socket"
+  before="$(axi eval "() => JSON.stringify(JSON.parse(window.vxr.state()).voxels)" | unwrap)"
+  # One agent: a box, then (after the page's Stop) another call that must be refused.
+  ./dev node "$here/check-agent.js" "$vxr" "[[\"box\", {\"from\": [-64, 28, -63], \"to\": [-63, 29, -62], \"slot\": 7}], \"wait $fixtures/stopped\", [\"scene_summary\", {}]]" >"$fixtures/agent.log" &
+  agent=$!
+  for _ in $(seq 100); do [ -s "$fixtures/agent.log" ] && break; sleep 0.1; done
+  expect "a real vxr mcp --live edits the page through the bridge" "$(head -1 "$fixtures/agent.log" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const r=JSON.parse(s);console.log(r.isError?r.text:'applied')})")" "applied"
+  shown="$(axi eval "async () => { await window.__frames(10); const s = JSON.parse(window.vxr.state()); return JSON.stringify([s.voxels - $before, s.undoLabel, s.agents.clients.map(c => c[1]), s.agents.edits.map(e => e.label)]) }" | unwrap)"
+  expect "the edit is one undo step named after the agent, listed with it" "$shown" '[8,"Claude Code: box 8 voxels",["Claude Code"],["Claude Code: box 8 voxels"]]'
+  axi screenshot "$shots/web-agents.png" >/dev/null
+  # Stop in the panel: the agent's next call is told it was stopped.
+  stopped="$(axi eval "async () => { const s = JSON.parse(window.vxr.state()); await window.__click(window.vxr.hit('agents-stop-' + s.agents.clients[0][0])); for (let i = 0; i < 100 && JSON.parse(window.vxr.state()).agents.clients.length; i++) await window.__frames(3); return JSON.stringify(JSON.parse(window.vxr.state()).agents.clients) }" | unwrap)"
+  touch "$fixtures/stopped"
+  wait "$agent" || true
+  expect "Stop in the panel disconnects the agent" "$stopped" '[]'
+  case "$(tail -1 "$fixtures/agent.log")" in
+    *"pressed Stop in vxr"*) pass "the stopped agent is told so" ;;
+    *) fail "the stopped agent is told so" "$(tail -1 "$fixtures/agent.log")" ;;
+  esac
+  # Regenerate writes a new token; the switch unpairs the page and the socket goes.
+  token="$(cat "$VXR_LIVE_DIR/live.token")"
+  axi eval "async () => { await window.__click(window.vxr.hit('agents-regenerate')); await window.__frames(20); return 'ok' }" >/dev/null
+  [ "$token" != "$(cat "$VXR_LIVE_DIR/live.token")" ] && pass "Regenerate in the panel writes a new token" || fail "Regenerate in the panel writes a new token" "same token"
+  off="$(axi eval "async () => { await window.__click(window.vxr.hit('agents-allow')); for (let i = 0; i < 100 && JSON.parse(window.vxr.state()).agents.allowed; i++) await window.__frames(3); await new Promise(r => setTimeout(r, 300)); return JSON.stringify(JSON.parse(window.vxr.state()).agents.allowed) }" | unwrap)"
+  [ "$off" = false ] && [ ! -e "$VXR_LIVE_DIR/live.sock" ] && pass "the switch unpairs the page and the socket closes" || fail "the switch unpairs the page and the socket closes" "$off"
+  for line in "Paired with the page: terminal agents can edit its scene now" "Claude Code connected" "The page left: agents can no longer edit it"; do
+    grep -qF "$line" "$fixtures/bridge.log" && pass "vxr bridge prints: $line" || fail "vxr bridge prints: $line" "$(cat "$fixtures/bridge.log")"
+  done
+  ! grep -qF "$code" <(sed '/Pairing code/d' "$fixtures/bridge.log") && pass "vxr bridge never prints the code again" || fail "vxr bridge never prints the code again" "$(cat "$fixtures/bridge.log")"
+fi
+kill "$bridge" 2>/dev/null || true
+bridge=""
 
 export CHROME_DEVTOOLS_AXI_SESSION=$nogpu
 export CHROME_DEVTOOLS_AXI_CHROME_ARGS='--disable-gpu --disable-webgpu'

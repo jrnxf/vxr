@@ -306,6 +306,9 @@ pub enum Action {
     StopHeld,
     /// Let terminal agents edit this window (true), or stop listening (for the host).
     AllowAgents(bool),
+    /// In the browser: pair this tab with `vxr bridge` with the code typed into the panel
+    /// (`Hybrid::agents_code`), for the host.
+    PairBridge,
     /// Make a new pairing token, disconnecting every agent (for the host).
     RegenerateToken,
     /// Disconnect one agent, or every agent (for the host).
@@ -604,6 +607,8 @@ pub struct Hybrid {
     pub agents: AgentsView,
     pub agents_panel: bool,
     pub agents_card_closed: usize,
+    /// The pairing code typed into the panel, in the browser (kept for this tab only).
+    pub agents_code: String,
 }
 
 struct Command {
@@ -846,6 +851,7 @@ impl Hybrid {
             agents: AgentsView::default(),
             agents_panel: false,
             agents_card_closed: 0,
+            agents_code: String::new(),
         }
     }
 
@@ -4137,8 +4143,12 @@ impl Hybrid {
         // Centred on the view, or on the part of it left of the review card (or the Agent edits
         // card) when that shows.
         let card = self.hits.get("review").filter(|_| self.review.is_some()).or_else(|| self.hits.get("agent-card"));
-        let cx = card.map_or(screen.center().x, |c| (12.0 + RAIL_W + 12.0 + c.left()) / 2.0);
-        let top = self.ai.bar_bottom.map_or(TOP, |b| b + 8.0);
+        let mut cx = card.map_or(screen.center().x, |c| (12.0 + RAIL_W + 12.0 + c.left()) / 2.0);
+        let mut top = self.ai.bar_bottom.map_or(TOP, |b| b + 8.0);
+        // Under the Terminal agents panel while it is open, whose own toasts it would cover.
+        if let Some(p) = self.hits.get("agents-panel").filter(|_| self.agents_panel) {
+            (cx, top) = (p.center().x, p.bottom() + 8.0);
+        }
         let rect = Rect::from_min_size(pos2((cx - size.x / 2.0).round(), top), size);
         Self::panel(ctx, "toast", rect, Order::Foreground, |ui, rect| {
             ui.painter().galley(pos2(rect.left() + 14.0, rect.top() + 9.0), g, th().text);

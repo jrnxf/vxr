@@ -278,6 +278,8 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     ai_bar_failed()?;
     #[cfg(unix)]
     agents_live(dir)?;
+    #[cfg(unix)]
+    agents_bridge(dir)?;
 
     // Save, reopen and compare.
     let bytes = s.ed.scene.to_vox();
@@ -4029,6 +4031,303 @@ fn agents_live(dir: &Path) -> Result<(), String> {
         Ok(())
     })();
     drop(live);
+    let _ = std::fs::remove_dir_all(&base);
+    r
+}
+
+/// The page's script in the browser, natively: the WebSocket to `vxr bridge` that
+/// `vxr_app::bridge::Page` asks for, opened as Chrome would (with the editor's origin).
+#[cfg(unix)]
+struct PageScript {
+    addr: std::net::SocketAddr,
+    ws: Option<tungstenite::WebSocket<std::net::TcpStream>>,
+}
+
+#[cfg(unix)]
+impl PageScript {
+    /// Do what the page asked, then hand it what the bridge sent; a socket that closed is
+    /// reported as the browser would (no reason).
+    fn pump(&mut self, page: &mut vxr_app::bridge::Page, ed: &mut Editor) {
+        use tungstenite::client::IntoClientRequest;
+        use vxr_app::bridge::Out;
+        for o in page.take_out() {
+            match o {
+                Out::Connect => {
+                    let mut req = format!("ws://{}/", self.addr).into_client_request().unwrap();
+                    let origin = tungstenite::http::HeaderValue::from_static(vxr_mcp::bridge::ORIGIN);
+                    req.headers_mut().insert("origin", origin);
+                    let ws = std::net::TcpStream::connect(self.addr)
+                        .ok()
+                        .and_then(|t| tungstenite::client(req, t).ok())
+                        .map(|(ws, _)| ws);
+                    match ws {
+                        Some(ws) => {
+                            let _ = ws.get_ref().set_read_timeout(Some(std::time::Duration::from_millis(1)));
+                            self.ws = Some(ws);
+                            page.opened();
+                        }
+                        None => page.closed("", ed),
+                    }
+                }
+                Out::Send(m) => {
+                    if let Some(ws) = &mut self.ws {
+                        let _ = ws.send(tungstenite::Message::text(m));
+                    }
+                }
+                Out::Close => {
+                    if let Some(mut ws) = self.ws.take() {
+                        let _ = ws.close(None);
+                        let _ = ws.flush();
+                    }
+                }
+            }
+        }
+        let mut closed = false;
+        while let Some(ws) = &mut self.ws {
+            match ws.read() {
+                Ok(tungstenite::Message::Text(t)) => page.message(&t, ed),
+                Ok(tungstenite::Message::Close(_)) => closed = true,
+                Ok(_) => continue,
+                Err(tungstenite::Error::Io(e))
+                    if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
+                Err(_) => closed = true,
+            }
+            if closed {
+                self.ws = None;
+                page.closed("", ed);
+            }
+            break;
+        }
+        // The page's script hands it the next message at once, not a frame later.
+        if self.ws.as_ref().is_some_and(|_| !closed) {
+            page.tick(ed);
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Shot {
+    /// One frame of the browser editor with its link to `vxr bridge`, as `vxr-web` runs it:
+    /// the page's script, the agents' requests, the frame, then what the UI asked of live mode.
+    fn bridge_frames(&mut self, page: &mut vxr_app::bridge::Page, script: &mut PageScript, n: usize) {
+        for _ in 0..n {
+            script.pump(page, &mut self.ed);
+            page.tick(&mut self.ed);
+            self.frames(1);
+            for a in std::mem::take(&mut self.host) {
+                if !page.act(&a, &mut self.ed) {
+                    self.host.push(a);
+                }
+            }
+            script.pump(page, &mut self.ed);
+        }
+    }
+
+    /// Frames until `done`, at most 2 s.
+    fn bridge_until(
+        &mut self,
+        page: &mut vxr_app::bridge::Page,
+        script: &mut PageScript,
+        done: impl Fn(&Self) -> bool,
+    ) -> bool {
+        let start = std::time::Instant::now();
+        while !done(self) {
+            if start.elapsed() > std::time::Duration::from_secs(2) {
+                return false;
+            }
+            self.bridge_frames(page, script, 1);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        true
+    }
+
+    /// An agent's tool call, answered by the tab through the bridge while frames run.
+    fn bridge_call(
+        &mut self,
+        page: &mut vxr_app::bridge::Page,
+        script: &mut PageScript,
+        agent: &mut LiveAgent,
+        name: &str,
+        args: serde_json::Value,
+    ) -> (String, bool) {
+        let msg = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": name, "arguments": args}});
+        let reply = std::thread::scope(|sc| {
+            let h = sc.spawn(|| agent.0.handle(&msg));
+            while !h.is_finished() {
+                self.bridge_frames(page, script, 1);
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            h.join().unwrap().unwrap()
+        });
+        self.bridge_frames(page, script, 3);
+        let r = &reply["result"];
+        (r["content"][0]["text"].as_str().unwrap_or("").to_string(), r["isError"].as_bool().unwrap_or(true))
+    }
+}
+
+/// Live mode in the browser end to end, natively: a real `vxr bridge` on a loopback port with
+/// its socket in a temporary folder, the editor with the browser's panel and the page's link
+/// ([`vxr_app::bridge::Page`]), and real `vxr mcp --live` servers. The panel says to run
+/// `vxr bridge` and takes its code; a malformed or wrong code is refused with nothing for
+/// agents; the right one pairs, and an agent's calls apply as undo steps named after it; Stop
+/// and Regenerate in the panel behave as on desktop; the switch and the bridge stopping end it.
+#[cfg(unix)]
+fn agents_bridge(dir: &Path) -> Result<(), String> {
+    use vxr_app::bridge::{BAD_CODE, LOST, Page};
+    use vxr_mcp::bridge::{Bridge, Config, WRONG_CODE, show_code};
+    use vxr_mcp::live::{NOT_LIVE, REFUSED, SOCKET, STOPPED, TOKEN};
+    let base = std::env::temp_dir().join(format!("vxw-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).map_err(|e| e.to_string())?;
+    let sock_dir = base.join("live");
+    let r = (|| -> Result<(), String> {
+        let cfg = Config { addr: ([127, 0, 0, 1], 0).into(), dir: sock_dir.clone(), dev_origins: false };
+        let bridge = Bridge::bind(cfg, |_| {})?;
+        let code = bridge.code();
+        let bridge = bridge.spawn();
+        let mut script = PageScript { addr: bridge.addr(), ws: None };
+        let mut page = Page::new();
+        let mut s = Shot::new(house(), "house.vox", 2.0)?;
+        s.ed.ui.coach = false;
+        s.ed.cam.distance *= 1.9;
+        let h = s.ed.height as f32;
+        s.ed.cam.pan(-420.0, 0.0, h);
+        page.sync(&mut s.ed);
+        s.ed.ui.open_agents();
+        s.bridge_frames(&mut page, &mut script, 2);
+        let v = &s.ed.ui.agents;
+        check(
+            v.web
+                && v.available
+                && !v.allowed
+                && ["agents-copy-bridge", "agents-code", "agents-allow", "agents-copy-live"]
+                    .iter()
+                    .all(|k| s.ed.ui.hits.contains_key(*k)),
+            "the browser's panel says to run vxr bridge and takes its code, switched off".into(),
+        )?;
+        let mut claude = LiveAgent::new(&sock_dir, "claude-code");
+        let (t, e) = s.bridge_call(&mut page, &mut script, &mut claude, "scene_summary", serde_json::json!({}));
+        check(e && t == NOT_LIVE && !sock_dir.join(SOCKET).exists(), "before pairing an agent finds nothing".into())?;
+
+        // A code that cannot be one, then a wrong one.
+        s.ui_click("agents-allow")?;
+        s.bridge_frames(&mut page, &mut script, 2);
+        check(
+            s.ed.ui.agents.error.as_deref() == Some(BAD_CODE) && script.ws.is_none(),
+            "no code: nothing opens".into(),
+        )?;
+        s.type_into("agents-code", "0000-0000")?;
+        let refused = s.bridge_until(&mut page, &mut script, |s| s.ed.ui.agents.error.as_deref() == Some(WRONG_CODE));
+        check(
+            refused && !s.ed.ui.agents.allowed && !sock_dir.join(SOCKET).exists(),
+            "a wrong code is refused, with no socket for agents".into(),
+        )?;
+
+        // The code vxr bridge printed, typed loosely, and Enter.
+        s.type_into("agents-code", &show_code(&code).to_lowercase())?;
+        let paired = s.bridge_until(&mut page, &mut script, |s| s.ed.ui.agents.allowed);
+        check(
+            paired && s.ed.ui.agents.error.is_none() && sock_dir.join(SOCKET).exists() && bridge.paired(),
+            "the right code pairs the tab, and the bridge opens the agents' socket".into(),
+        )?;
+        let calls = [
+            ("box", serde_json::json!({"from": [9, 7, 8], "to": [12, 9, 8], "slot": 50}), "Claude Code: box 12 voxels"),
+            ("palette_set", serde_json::json!({"slot": 50, "hex": "#3A7BD9"}), "Claude Code: palette_set slot 50"),
+        ];
+        for (name, args, label) in calls {
+            let (t, e) = s.bridge_call(&mut page, &mut script, &mut claude, name, args);
+            check(
+                !e && s.ed.scene.history().undo_label() == Some(label),
+                format!(
+                    "through the bridge, {name} applies at once as \"{label}\" ({})",
+                    t.chars().take(60).collect::<String>()
+                ),
+            )?;
+        }
+        s.bridge_until(&mut page, &mut script, |s| !s.ed.ui.agents.clients.is_empty());
+        let names: Vec<String> = s.ed.ui.agents.clients.iter().map(|c| c.1.clone()).collect();
+        check(names == ["Claude Code"], format!("the panel lists the agent: {names:?}"))?;
+        s.bridge_frames(&mut page, &mut script, 40);
+        s.save_png(&dir.join("app-2x-agents-web.png"))?;
+
+        // Stop in the panel: that agent is told so, for good.
+        let conn = s.ed.ui.agents.clients[0].0;
+        s.ui_click(&format!("agents-stop-{conn}"))?;
+        for a in std::mem::take(&mut s.host) {
+            if !page.act(&a, &mut s.ed) {
+                s.host.push(a);
+            }
+        }
+        // A listing and a request the bridge sent before it read the stop change nothing.
+        let label = s.ed.scene.history().undo_label().map(str::to_string);
+        let stale = serde_json::json!({"id": 1_000_000, "conn": conn, "client": "Claude Code", "call": "place",
+            "args": {"cells": [[2, 12, 2]], "slot": 9}});
+        page.message(&serde_json::json!({"clients": [[conn, "Claude Code"]]}).to_string(), &mut s.ed);
+        page.message(&stale.to_string(), &mut s.ed);
+        page.tick(&mut s.ed);
+        check(
+            s.ed.agents.clients.is_empty() && s.ed.scene.history().undo_label().map(str::to_string) == label,
+            "a stopped agent's request already on its way does not run".into(),
+        )?;
+        s.bridge_until(&mut page, &mut script, |s| s.ed.ui.agents.clients.is_empty());
+        let (t, e) = s.bridge_call(&mut page, &mut script, &mut claude, "scene_summary", serde_json::json!({}));
+        check(e && t == STOPPED, "Stop in the panel ends that agent for good".into())?;
+        let mut codex = LiveAgent::new(&sock_dir, "codex");
+        let (_, e) = s.bridge_call(
+            &mut page,
+            &mut script,
+            &mut codex,
+            "place",
+            serde_json::json!({"cells": [[1, 12, 1]], "slot": 9}),
+        );
+        check(!e && s.ed.scene.history().undo_label() == Some("Codex: place 1 voxel"), "another agent edits".into())?;
+
+        // Regenerate: a new token, every agent disconnected, old ones turned away.
+        let old = std::fs::read_to_string(sock_dir.join(TOKEN)).map_err(|e| e.to_string())?;
+        s.bridge_until(&mut page, &mut script, |s| !s.ed.ui.agents.clients.is_empty());
+        let conn = s.ed.ui.agents.clients[0].0;
+        s.ui_click("agents-regenerate")?;
+        for a in std::mem::take(&mut s.host) {
+            if !page.act(&a, &mut s.ed) {
+                s.host.push(a);
+            }
+        }
+        // A request on its way when Regenerate was pressed waits for the answer, then is dropped.
+        let label = s.ed.scene.history().undo_label().map(str::to_string);
+        let stale = serde_json::json!({"id": 1_000_001, "conn": conn, "client": "Codex", "call": "place",
+            "args": {"cells": [[2, 12, 2]], "slot": 9}});
+        page.message(&stale.to_string(), &mut s.ed);
+        page.tick(&mut s.ed);
+        let held = s.ed.scene.history().undo_label().map(str::to_string) == label;
+        s.bridge_until(&mut page, &mut script, |s| s.ed.ui.agents.clients.is_empty());
+        check(
+            held && s.ed.scene.history().undo_label().map(str::to_string) == label,
+            "a request on its way at Regenerate does not run".into(),
+        )?;
+        let new = std::fs::read_to_string(sock_dir.join(TOKEN)).map_err(|e| e.to_string())?;
+        let (t, e) = s.bridge_call(&mut page, &mut script, &mut codex, "scene_summary", serde_json::json!({}));
+        check(old != new && e && t == REFUSED, "Regenerate makes a new token and turns old agents away".into())?;
+
+        // The switch ends the link: the bridge closes the agents' socket.
+        s.ui_click("agents-allow")?;
+        let off = s.bridge_until(&mut page, &mut script, |_| !sock_dir.join(SOCKET).exists() && !bridge.paired());
+        s.bridge_frames(&mut page, &mut script, 2);
+        check(off && !s.ed.ui.agents.allowed, "the switch unpairs the tab and the socket closes".into())?;
+        let mut fresh = LiveAgent::new(&sock_dir, "claude-code");
+        let (t, e) = s.bridge_call(&mut page, &mut script, &mut fresh, "scene_summary", serde_json::json!({}));
+        check(e && t == NOT_LIVE, "an agent then finds the tab off".into())?;
+
+        // The same code pairs again; the bridge stopping is shown.
+        s.ui_click("agents-allow")?;
+        check(s.bridge_until(&mut page, &mut script, |s| s.ed.ui.agents.allowed), "the switch pairs again".into())?;
+        drop(bridge);
+        let lost = s.bridge_until(&mut page, &mut script, |s| !s.ed.ui.agents.allowed);
+        check(lost && s.ed.ui.agents.error.as_deref() == Some(LOST), "the bridge stopping turns the tab off".into())?;
+        s.bridge_frames(&mut page, &mut script, 40);
+        s.save_png(&dir.join("app-2x-agents-web-lost.png"))?;
+        Ok(())
+    })();
     let _ = std::fs::remove_dir_all(&base);
     r
 }

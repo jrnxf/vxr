@@ -28,6 +28,8 @@ use crate::protocol::{Backend, PALETTE_URI, SUMMARY_URI};
 
 #[cfg(unix)]
 pub use unix::{Ask, Host, Remote, Request};
+#[cfg(unix)]
+pub(crate) use unix::{random, same};
 
 /// The socket's and the token's file names, in [`dir`].
 pub const SOCKET: &str = "live.sock";
@@ -87,7 +89,7 @@ pub fn client_name(raw: &str) -> String {
 }
 
 /// Text for the agent when the window is not there to edit.
-pub const NOT_LIVE: &str = "vxr is not open, or live editing is off. Ask the user to open vxr, press Cmd-K, choose \"Terminal agents\" and turn on \"Allow terminal agents to edit this window\"; then call again.";
+pub const NOT_LIVE: &str = "vxr is not open, or live editing is off. Ask the user to open vxr, press Cmd-K, choose \"Terminal agents\" and turn on \"Allow terminal agents to edit this window\"; in the browser editor at vxr.jrnxf.co, to run `vxr bridge` in a terminal and pair the tab there with the code it prints. Then call again.";
 pub const STOPPED: &str = "The user pressed Stop in vxr: this server will not edit the window again. Stop here and tell the user; they can reconnect it (in Claude Code, /mcp) when they want you to edit again.";
 pub const REFUSED: &str = "vxr refused this server's pairing token: the user made a new one. Restart this MCP server (in Claude Code, /mcp) to pair again.";
 
@@ -181,7 +183,7 @@ mod unix {
     }
 
     /// Whether two tokens are the same, in time that does not depend on where they differ.
-    fn same(a: &str, b: &str) -> bool {
+    pub(crate) fn same(a: &str, b: &str) -> bool {
         a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0
     }
 
@@ -235,12 +237,17 @@ mod unix {
         valid_token(&t).then_some(t)
     }
 
+    /// Fill `buf` from the system's randomness.
+    pub(crate) fn random(buf: &mut [u8]) -> Result<(), String> {
+        std::fs::File::open("/dev/urandom")
+            .and_then(|mut f| f.read_exact(buf))
+            .map_err(|e| format!("no randomness: {e}"))
+    }
+
     /// Write a new random token to `dir`, readable only by this user, replacing the old one.
     fn write_token(dir: &Path) -> Result<String, String> {
         let mut bytes = [0u8; 32];
-        std::fs::File::open("/dev/urandom")
-            .and_then(|mut f| f.read_exact(&mut bytes))
-            .map_err(|e| format!("no randomness for the token: {e}"))?;
+        random(&mut bytes).map_err(|e| format!("no token: {e}"))?;
         let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
         let tmp = dir.join(format!("{TOKEN}.tmp"));
         let _ = std::fs::remove_file(&tmp);

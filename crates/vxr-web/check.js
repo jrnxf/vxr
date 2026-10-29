@@ -571,13 +571,22 @@ async () => {
   await key('k', cmd);
   await key('Escape');
   step('Escape closes the command list', !st().cmdk);
-  // Terminal agents: no live mode in the browser; the panel points to the desktop app or
-  // files mode, with no switch.
+  // Terminal agents: the panel says to run vxr bridge and takes its code (crates/vxr-web/check
+  // pairs it with a real one after this script). Here nothing listens on its port.
   await key('k', cmd);
   for (const ch of 'terminal agents') await key(ch);
   await key('Enter');
   s = st();
-  step('Cmd-K Terminal agents opens the panel, without live mode', s.agents.panel && !s.agents.available && window.vxr.hit('agents-copy-files').length === 2 && window.vxr.hit('agents-allow').length === 0, JSON.stringify(s.agents));
+  step('Cmd-K Terminal agents opens the panel, with vxr bridge and its code', s.agents.panel && s.agents.available && s.agents.web && !s.agents.allowed && ['agents-copy-bridge', 'agents-code', 'agents-allow', 'agents-copy-live'].every((h) => window.vxr.hit(h).length === 2), JSON.stringify(s.agents));
+  await click(...window.vxr.hit('agents-allow'));
+  s = st();
+  step('the switch without a code asks for one', !s.agents.allowed && !s.agents.connecting && /Type the code vxr bridge printed/.test(s.agents.error), JSON.stringify(s.agents));
+  await click(...window.vxr.hit('agents-code'));
+  for (const ch of 'K7QF-3MXP') await key(ch);
+  await key('Enter');
+  for (let i = 0; i < 100 && !/Nothing answered/.test(st().agents.error ?? ''); i++) await frames(3);
+  s = st();
+  step('with nothing on its port the panel says to run vxr bridge', !s.agents.allowed && !s.agents.connecting && /Nothing answered on 127\.0\.0\.1:41723: run vxr bridge/.test(s.agents.error), JSON.stringify(s.agents));
   await key('Escape');
   step('Escape closes it', !st().agents.panel);
   await key('?', { shiftKey: true });

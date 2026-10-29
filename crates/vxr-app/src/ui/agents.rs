@@ -3,7 +3,8 @@
 //! terminal agents to edit this window", the setup line, the pairing token and the agents
 //! connected; the chip in the hint bar while an agent is connected, with Stop; and the
 //! Agent edits card, each applied call with an Undo of its own. In the browser the panel
-//! says to use the desktop app or files mode. Drawn in the panel style.
+//! says to run `vxr bridge` and takes the pairing code it prints ([`crate::bridge`]). Drawn
+//! in the panel style.
 
 use super::*;
 
@@ -13,6 +14,11 @@ use super::*;
 pub const SETUP: &str = "vxr setup claude";
 pub const LIVE_SETUP: &str = "claude mcp add vxr-live -- vxr mcp --live";
 pub const FILES_SETUP: &str = "claude mcp add vxr -- vxr mcp --root <folder>";
+/// The browser's first step: the bridge between this tab and `vxr mcp --live`.
+pub const BRIDGE_SETUP: &str = "vxr bridge";
+
+/// Longest pairing code the field keeps: the code, a dash and room for spaces.
+const CODE_FIELD_MAX: usize = 12;
 
 /// Most Agent edits rows shown, newest first.
 const CARD_ROWS: usize = 8;
@@ -20,8 +26,13 @@ const CARD_ROWS: usize = 8;
 /// Terminal agents as the UI shows them (set by the editor).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AgentsView {
-    /// Live mode can run here (the desktop app on a Unix system).
+    /// Live mode can run here (the desktop app on a Unix system, or the browser through
+    /// `vxr bridge`).
     pub available: bool,
+    /// The browser's variant: a pairing code for `vxr bridge`, not a socket of its own.
+    pub web: bool,
+    /// The browser is connecting to `vxr bridge`.
+    pub connecting: bool,
     pub allowed: bool,
     /// Why turning it on failed.
     pub error: Option<String>,
@@ -238,6 +249,7 @@ impl Hybrid {
     }
 
     // The Terminal agents panel (Cmd-K): live mode's switch, setup, pairing and connections.
+    // In the browser it also says to run `vxr bridge` and takes the code it printed.
     pub(super) fn agents_panel(&mut self, ctx: &Context, screen: Rect) {
         if !self.agents_panel {
             return;
@@ -245,25 +257,27 @@ impl Hybrid {
         let w = 400.0;
         let inner_w = w - 32.0;
         let v = self.agents.clone();
-        let intro = if v.available {
+        let intro = if v.web {
+            "Let an agent in your terminal, like Claude Code, edit this scene while you watch. vxr bridge, in the vxr app (brew install jrnxf/tap/vxr), links this tab to it on this computer only. Each call applies at once as one undo step, listed under Agent edits."
+        } else if v.available {
             "Let an agent in your terminal, like Claude Code, edit this scene while you watch. Each call applies at once as one undo step, listed under Agent edits."
-        } else if cfg!(target_arch = "wasm32") {
-            "Live mode needs the desktop app: a web page cannot open the local socket agents connect to. Use the desktop app, or files mode, which edits .vox files on disk without a window:"
         } else {
             "Live mode is not built for this system yet. Files mode edits .vox files on disk without a window:"
         };
         let intro = wrapped(ctx, intro, sans(12.0), th().muted, inner_w);
         let error = v.error.as_deref().map(|e| wrapped(ctx, e, sans(12.0), th().danger, inner_w));
-        let pairing = wrapped(
-            ctx,
-            "vxr mcp --live reads a token from a file only you can read. A new token disconnects every agent; each must restart its MCP server to pair again.",
-            sans(11.5),
-            th().faint,
-            inner_w - 120.0,
-        );
+        let pairing = if v.web {
+            "vxr mcp --live reads a token from a file only you can read, and vxr bridge passes its calls to this tab. A new token disconnects every agent; each must restart its MCP server to pair again."
+        } else {
+            "vxr mcp --live reads a token from a file only you can read. A new token disconnects every agent; each must restart its MCP server to pair again."
+        };
+        let pairing = wrapped(ctx, pairing, sans(11.5), th().faint, inner_w - 120.0);
         let row_h = 32.0;
         let mut h = 16.0 + 18.0 + 12.0 + intro.size().y + 14.0;
         if v.available {
+            if v.web {
+                h += 16.0 + 6.0 + 34.0 + 14.0 + 16.0 + 6.0 + 34.0 + 10.0;
+            }
             h += 44.0 + 10.0;
             if let Some(g) = &error {
                 h += g.size().y + 10.0;
@@ -280,6 +294,7 @@ impl Hybrid {
         let mut actions = Vec::new();
         let mut close = false;
         let mut copied = None;
+        let mut code = std::mem::take(&mut self.agents_code);
         Self::panel_filled(ctx, "agents-panel", rect, Order::Foreground, th().panel_solid, |ui, rect| {
             let inner = rect.shrink(16.0);
             let p = ui.painter().clone();
@@ -316,7 +331,32 @@ impl Hybrid {
                 setup_line(ui, line, FILES_SETUP, "agents-copy-files", &mut hits, &mut copied);
                 return;
             }
-            // Allow terminal agents to edit this window.
+            let label = |ui: &Ui, y: f32, text: &str| {
+                let g = ui.painter().layout_job(spaced(text, sans(9.0), th().faint, 0.72));
+                ui.painter().galley(pos2(inner.left(), y + 8.0 - g.size().y / 2.0), g, th().faint);
+            };
+            // The browser: run vxr bridge, then type its code.
+            let on = v.allowed || v.connecting;
+            let mut pair = false;
+            if v.web {
+                label(ui, y, "1 · RUN IN A TERMINAL");
+                y += 16.0 + 6.0;
+                let line = Rect::from_min_size(pos2(inner.left(), y), vec2(inner_w, 34.0));
+                setup_line(ui, line, BRIDGE_SETUP, "agents-copy-bridge", &mut hits, &mut copied);
+                y += 34.0 + 14.0;
+                label(ui, y, "2 · TYPE THE PAIRING CODE IT PRINTS");
+                y += 16.0 + 6.0;
+                let r = Rect::from_min_size(pos2(inner.left(), y), vec2(inner_w, 34.0));
+                let resp =
+                    super::assistant::ai_field(ui, r, "CODE", Id::unique("agents-code"), &mut code, false, "K7QF-3MXP");
+                if code.chars().count() > CODE_FIELD_MAX {
+                    code = code.chars().take(CODE_FIELD_MAX).collect();
+                }
+                pair = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && !on;
+                hits.push(("agents-code".into(), r));
+                y += 34.0 + 10.0;
+            }
+            // Allow terminal agents to edit this window (or tab).
             let r = Rect::from_min_size(pos2(inner.left(), y), vec2(inner_w, 44.0));
             let resp = ui.interact(r, Id::unique("agents-allow-row"), Sense::click());
             let p = ui.painter();
@@ -327,20 +367,26 @@ impl Hybrid {
                 Stroke::new(1.0, if v.allowed { th().ring } else { th().line }),
                 StrokeKind::Inside,
             );
-            p.text(
-                pos2(r.left() + 12.0, r.top() + 14.0),
-                Align2::LEFT_CENTER,
-                "Allow terminal agents to edit this window",
-                sans_medium(12.5),
-                th().text,
-            );
-            let sub =
-                if v.allowed { "On: listening on a local socket only you can open" } else { "Off: nothing listens" };
+            let title = if v.web {
+                "Allow terminal agents to edit this tab"
+            } else {
+                "Allow terminal agents to edit this window"
+            };
+            p.text(pos2(r.left() + 12.0, r.top() + 14.0), Align2::LEFT_CENTER, title, sans_medium(12.5), th().text);
+            let sub = match (v.web, v.allowed, v.connecting) {
+                (false, true, _) => "On: listening on a local socket only you can open",
+                (false, false, _) => "Off: nothing listens",
+                (true, true, _) => "On: paired with vxr bridge on this computer",
+                (true, false, true) => "Connecting… if the browser asks, allow apps on this device",
+                (true, false, false) => "Off: this tab connects to nothing",
+            };
             p.text(pos2(r.left() + 12.0, r.top() + 31.0), Align2::LEFT_CENTER, sub, sans(11.0), th().muted);
             let sw = Rect::from_min_size(pos2(r.right() - 12.0 - 30.0, r.center().y - 9.0), vec2(30.0, 18.0));
-            let toggled = switch(ui, sw, "agents-allow", v.allowed).clicked() || resp.clicked();
-            if toggled {
-                actions.push(Action::AllowAgents(!v.allowed));
+            let toggled = switch(ui, sw, "agents-allow", on).clicked() || resp.clicked();
+            if v.web && (pair || (toggled && !on)) {
+                actions.push(Action::PairBridge);
+            } else if toggled {
+                actions.push(Action::AllowAgents(!on));
             }
             hits.push(("agents-allow".into(), r));
             y += 44.0 + 10.0;
@@ -349,11 +395,7 @@ impl Hybrid {
                 ui.painter().galley(pos2(inner.left(), y), g, th().danger);
                 y += gh + 10.0;
             }
-            let label = |ui: &Ui, y: f32, text: &str| {
-                let g = ui.painter().layout_job(spaced(text, sans(9.0), th().faint, 0.72));
-                ui.painter().galley(pos2(inner.left(), y + 8.0 - g.size().y / 2.0), g, th().faint);
-            };
-            label(ui, y, "ADD VXR TO CLAUDE CODE");
+            label(ui, y, if v.web { "3 · ADD VXR TO CLAUDE CODE" } else { "ADD VXR TO CLAUDE CODE" });
             y += 16.0 + 6.0;
             let line = Rect::from_min_size(pos2(inner.left(), y), vec2(inner_w, 34.0));
             setup_line(ui, line, SETUP, "agents-copy", &mut hits, &mut copied);
@@ -397,6 +439,7 @@ impl Hybrid {
                 y += row_h;
             }
         });
+        self.agents_code = code;
         if let Some(text) = copied {
             ctx.copy_text(text);
             self.toast(ctx, "Copied the setup line");

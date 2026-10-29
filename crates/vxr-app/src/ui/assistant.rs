@@ -204,7 +204,7 @@ fn section(ui: &Ui, at: Pos2, text: &str) {
 
 /// A single-line field with a mono label on its left, as the Bounds panel's; `password`
 /// hides what is typed. Returns the response of its text edit.
-fn ai_field(
+pub(super) fn ai_field(
     ui: &mut Ui,
     r: Rect,
     label: &str,
