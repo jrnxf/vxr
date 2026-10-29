@@ -119,7 +119,7 @@ pub enum Ghost {
 
 /// The staged change against the scene as it was, in world cells (sorted), as the review
 /// card counts it.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Changes {
     /// Cell and its new slot.
     pub added: Vec<(Cell, u8)>,
@@ -129,6 +129,8 @@ pub struct Changes {
     pub repainted: Vec<(Cell, u8, u8)>,
     /// Slot, old colour, new colour.
     pub palette: Vec<(u8, [u8; 4], [u8; 4])>,
+    /// Slot, old material, new material.
+    pub materials: Vec<(u8, Material, Material)>,
 }
 
 pub struct Session {
@@ -169,14 +171,9 @@ pub struct Session {
     open: bool,
     replaying: bool,
     done: Option<String>,
-    /// While the scene shows the change's Before: each touched cell's value with the change,
-    /// and the palette with it.
-    before: Option<Before>,
+    /// Whether the scene shows the change's Before ([`Session::show_before`]).
+    before: bool,
 }
-
-/// What [`Session::show_before`] set aside: each touched cell's value with the change, and the
-/// palette with it.
-type Before = (Vec<(Cell, u8)>, [[u8; 4]; 256]);
 
 /// The `NOTE` chunk's names, cleaned, if the file has one.
 pub fn notes_of(bytes: &[u8]) -> Vec<String> {
@@ -224,7 +221,7 @@ impl Session {
             open: false,
             replaying: false,
             done: None,
-            before: None,
+            before: false,
         }
     }
 
@@ -487,13 +484,23 @@ impl Session {
             Op::Select(a) => self.select(scene, &a),
             Op::Transform(a) => self.transform(scene, &a),
             Op::Copy(_) => {
-                let n = self.copy(scene)?;
-                let c = self.clip.as_ref().expect("copied");
-                Ok(format!("copied {n} voxels, a {} x {} x {} box from {:?}", c.size[0], c.size[1], c.size[2], c.from))
+                let c = self.clip(scene)?;
+                let s = format!(
+                    "copied {} voxels, a {} x {} x {} box from {:?}",
+                    c.voxels.len(),
+                    c.size[0],
+                    c.size[1],
+                    c.size[2],
+                    c.from
+                );
+                self.clip = Some(c);
+                Ok(s)
             }
             Op::Cut(_) => {
-                let n = self.copy(scene)?;
+                let clip = self.clip(scene)?;
                 let st = self.delete(scene)?;
+                let n = clip.voxels.len();
+                self.clip = Some(clip);
                 Ok(format!("cut {n} voxels; {}", self.stage_text(scene, &st)))
             }
             Op::Paste(a) => {
@@ -623,9 +630,6 @@ impl Session {
 
     /// Every staged cell (map cells), those a resize left outside the map included.
     fn staged_cells(&self, scene: &Scene) -> Vec<(Cell, Ghost)> {
-        if self.before.is_some() {
-            return Vec::new();
-        }
         let mut out: Vec<(Cell, Ghost)> = self
             .base
             .iter()
@@ -650,9 +654,6 @@ impl Session {
     /// The staged change in world cells, as the review card shows it.
     pub fn changes(&self, scene: &Scene) -> Changes {
         let mut c = Changes::default();
-        if self.before.is_some() {
-            return c;
-        }
         for (p, g) in self.staged_cells(scene) {
             let w = scene.to_world(p);
             let (b, v) = (self.base[&p], self.get(scene, p));
@@ -668,6 +669,10 @@ impl Session {
         c.palette = (1..=255u8)
             .filter(|&i| scene.palette[i as usize] != self.palette_before[i as usize])
             .map(|i| (i, self.palette_before[i as usize], scene.palette[i as usize]))
+            .collect();
+        c.materials = (1..=255u8)
+            .filter(|&i| scene.materials[i as usize] != self.materials_before[i as usize])
+            .map(|i| (i, self.materials_before[i as usize], scene.materials[i as usize]))
             .collect();
         c
     }
@@ -747,33 +752,25 @@ impl Session {
     }
 
     /// Show the scene as it was before the change (true) or with it again (false), for the
-    /// review card's Before and After. The map and palette are set directly, outside the open
-    /// edit, and put back before anything else runs: a call, a dropped step, Apply or Discard
-    /// first shows the change again. Before shows no ghost and no changes.
+    /// review card's Before and After. Before puts every cell, colour, material and the bounds
+    /// back inside the open edit; After runs the kept steps again, as dropping a step does. A
+    /// call, a dropped step, Apply or Discard first shows the change again. Before shows no
+    /// ghost and no changes.
     pub fn show_before(&mut self, scene: &mut Scene, on: bool) {
-        if on == self.before.is_some() {
+        if on == self.before {
             return;
         }
+        self.before = on;
         if on {
-            let mut after = Vec::with_capacity(self.base.len());
-            for (&p, &b) in &self.base {
-                after.push((p, scene.map.get(p[0], p[1], p[2])));
-                scene.map.set(p[0], p[1], p[2], b);
-            }
-            let palette = scene.palette;
-            scene.palette[1..].copy_from_slice(&self.palette_before[1..]);
-            self.before = Some((after, palette));
-        } else if let Some((after, palette)) = self.before.take() {
-            for (p, v) in after {
-                scene.map.set(p[0], p[1], p[2], v);
-            }
-            scene.palette = palette;
+            self.revert(scene);
+        } else {
+            self.rebuild(scene);
         }
     }
 
     /// Whether the scene shows the change's Before ([`Session::show_before`]).
     pub fn showing_before(&self) -> bool {
-        self.before.is_some()
+        self.before
     }
 
     /// Discard: put every cell and colour back and close the edit, leaving no undo step.
@@ -1058,15 +1055,14 @@ impl Session {
         ))
     }
 
-    /// Copy the selected voxels to the assistant's clipboard. Returns how many.
-    fn copy(&mut self, scene: &Scene) -> Result<usize, Error> {
+    /// The selected voxels as a clip.
+    fn clip(&self, scene: &Scene) -> Result<Clip, Error> {
         let (cells, selected) = self.subject(scene);
         let Some((lo, hi)) = bounds(cells.iter().map(|c| c.0)).filter(|_| selected) else {
             return Err(invalid("nothing is selected: call select first"));
         };
         let voxels = cells.iter().map(|&(p, v)| (std::array::from_fn(|k| p[k] - lo[k]), v)).collect();
-        self.clip = Some(Clip { voxels, size: std::array::from_fn(|k| hi[k] - lo[k] + 1), from: scene.to_world(lo) });
-        Ok(cells.len())
+        Ok(Clip { voxels, size: std::array::from_fn(|k| hi[k] - lo[k] + 1), from: scene.to_world(lo) })
     }
 
     /// Erase the selected voxels; the selection empties.

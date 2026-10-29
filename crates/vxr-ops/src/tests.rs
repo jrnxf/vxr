@@ -1015,6 +1015,49 @@ fn resize_shrinks_and_crop_fits_and_discard_puts_back() {
 }
 
 #[test]
+fn before_shows_the_materials_and_bounds_as_they_were() {
+    let mut s = opened();
+    let (bytes, before, bounds, materials) = (s.to_vox(), voxels(&s), s.bounds(), s.materials);
+    let mut o = Session::new(&s, None);
+    call(&mut o, &mut s, "material_set", json!({"slot": 10, "type": "emit"}));
+    let r = call(&mut o, &mut s, "resize", json!({"size": [2, 32, 2]}));
+    assert!(r.ends_with("; warning: 18 voxels outside the new bounds were erased"), "{r}");
+    let (after, after_bounds, after_materials, changes) = (voxels(&s), s.bounds(), s.materials, o.changes(&s));
+    o.show_before(&mut s, true);
+    assert_eq!((voxels(&s), s.bounds()), (before.clone(), bounds));
+    assert_eq!(s.materials, materials);
+    assert!(o.ghost(&s).is_empty());
+    assert_eq!(o.changes(&s), Default::default());
+    o.show_before(&mut s, false);
+    assert_eq!((voxels(&s), s.bounds()), (after, after_bounds));
+    assert_eq!(s.materials, after_materials);
+    assert_eq!(o.changes(&s), changes);
+    assert_eq!(changes.materials.len(), 1);
+    // Apply from Before applies the change; undo gives the file back.
+    o.show_before(&mut s, true);
+    apply_and_undo(o, &mut s, &bytes);
+    assert_eq!((voxels(&s), s.bounds()), (before, bounds));
+}
+
+#[test]
+fn a_cut_over_the_limit_keeps_the_clipboard() {
+    let mut s = opened();
+    let mut o = Session::with_limits(&s, None, Limits { changed_cells: 10, ..Limits::default() });
+    call(&mut o, &mut s, "select", json!({"color": 20}));
+    call(&mut o, &mut s, "copy", json!({}));
+    call(&mut o, &mut s, "select", json!({"color": 10}));
+    let (kind, m) = err(&mut o, &mut s, "cut", json!({}));
+    assert_eq!(
+        (kind, m.as_str()),
+        (ErrorKind::Limit, "this would stage 16 changed cells; the limit is 10 per request")
+    );
+    assert_eq!(get(&mut o, &mut s, [3, 0, 3]), 10, "the cut erased nothing");
+    let r = call(&mut o, &mut s, "paste", json!({"at": [5, 0, 5]}));
+    assert!(r.starts_with("pasted at [5, 0, 5] (low corner); 3 cells changed"), "{r}");
+    assert_eq!(o.clipboard().map(|c| c.voxels.len()), Some(3));
+}
+
+#[test]
 fn material_set() {
     let mut s = opened();
     let bytes = s.to_vox();
