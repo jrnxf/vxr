@@ -820,3 +820,21 @@ fn duplicates_cannot_grow_the_world_past_the_model_limit() {
     let saved = vxr_core::files::vox_bytes(&s).unwrap();
     assert_eq!(Scene::from_vox(&saved).unwrap().world_voxels(false), s.world_voxels(false));
 }
+
+#[test]
+fn editing_one_models_voxels_re_encodes_only_that_models_chunk() {
+    let bytes = fixture("22-world");
+    let (mut doc, mut w) = open(&bytes);
+    let slab = w.model_of(find(&w, "slab")).unwrap();
+    let [sx, sy, sz] = w.models[slab].size_voxels().map(|s| s as i32);
+    let cell = (0..sx)
+        .flat_map(|x| (0..sy).flat_map(move |y| (0..sz).map(move |z| (x, y, z))))
+        .find(|&(x, y, z)| w.models[slab].get(x, y, z) != 0)
+        .expect("the slab has voxels");
+    assert!(w.models[slab].set(cell.0, cell.1, cell.2, 0));
+    assert_eq!(w.save_into(&mut doc).unwrap(), WorldSave::Kept);
+    let (a, b) = (Document::read(&bytes).unwrap().raw.chunks, doc.raw.chunks);
+    assert_eq!(a.len(), b.len());
+    let changed: Vec<_> = (0..a.len()).filter(|&i| a[i] != b[i]).map(|i| a[i].id).collect();
+    assert_eq!(changed, [*chunk::XYZI], "only the slab's voxel chunk differs");
+}

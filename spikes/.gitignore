@@ -5,8 +5,5 @@ fetched/
 # Screenshots, raw benchmark data and .vox test files live in the phase-2-spikes-data release, not in git.
 */shots/
 */results/
-vox/logs/
-vox/fixtures/*.vox
-vox/fixtures/magicavoxel/
 # Python bytecode from the spikes that drive models from Python.
 __pycache__/

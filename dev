@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Run a command inside the vxr dev shell (Rust with wasm32, wasm-bindgen, wasm-opt):
 #   ./dev cargo test
+# ./dev --fuzz <command> uses nightly Rust with cargo-fuzz (see crates/vxr-core/fuzz).
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
-exec nix develop "path:$here/nix#default" -c "$@"
+shell="default"
+if [[ "${1:-}" == "--fuzz" ]]; then shell="fuzz"; shift; fi
+exec nix develop "path:$here/nix#$shell" -c "$@"
