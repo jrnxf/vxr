@@ -407,7 +407,7 @@ mod server {
     /// Text from the other side, shown in the terminal: no control characters (so no escape
     /// sequences), cut short.
     fn shown(s: &str) -> String {
-        let c: String = s.chars().filter(|c| !c.is_control()).collect();
+        let c: String = vxr_ops::sanitize(s);
         if c.chars().count() > 80 { c.chars().take(80).chain(['…']).collect() } else { c }
     }
 

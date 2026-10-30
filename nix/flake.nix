@@ -1,5 +1,5 @@
 {
-  description = "vxr phase 2 spikes: Rust with wasm32, wasm-bindgen, wasm-opt, twiggy, nightly for cargo-fuzz";
+  description = "vxr dev shell: Rust with wasm32, wasm-bindgen, wasm-opt, twiggy, nightly for cargo-fuzz";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";

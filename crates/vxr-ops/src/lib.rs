@@ -24,7 +24,7 @@ mod view;
 pub use args::{Op, Tool, tools};
 pub use look::Camera;
 pub use session::{Changes, Error, ErrorKind, Ghost, Limits, NewObject, Session, Step, notes_of};
-pub use text::{MAX_NAME, clean};
+pub use text::{MAX_NAME, clean, sanitize};
 
 /// The assistant's system prompt for these tools.
 pub const SYSTEM_PROMPT: &str = "You are the assistant inside vxr, a voxel scene editor. You change the user's open scene only through the tools.

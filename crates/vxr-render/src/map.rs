@@ -188,8 +188,6 @@ pub struct GpuMap {
     bdims: [u32; 3],
     lo: [u32; 3],
     hi: [u32; 3],
-    /// Bytes allocated on the GPU for scene data, headroom included.
-    pub allocated_bytes: u64,
     heap: Heap,
     scratch: Vec<u8>,
 }
@@ -272,7 +270,6 @@ impl GpuMap {
         queue.write_buffer(&masks, capacity as u64 * MASK_WORDS as u64 * 4, bytemuck::cast_slice(&heap.offsets));
         let coarse = mk("coarse", coarse_cpu.len() as u64 * 4);
         queue.write_buffer(&coarse, 0, bytemuck::cast_slice(&coarse_cpu));
-        let mut allocated = grid.size() + masks.size() + coarse.size();
         let mut pages = Vec::new();
         for p in 0..MAX_PAGES as u64 {
             if p < n_pages || p == 0 {
@@ -283,7 +280,6 @@ impl GpuMap {
                 if lo_b < hi_b {
                     queue.write_buffer(&buf, 0, &bytes[lo_b..hi_b]);
                 }
-                allocated += buf.size();
                 pages.push(buf);
             } else {
                 pages.push(mk("heap page (unused)", 16));
@@ -323,7 +319,6 @@ impl GpuMap {
             bdims,
             lo,
             hi,
-            allocated_bytes: allocated,
             heap,
             scratch: Vec::with_capacity(BRICK_VOXELS),
         };

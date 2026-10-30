@@ -82,7 +82,7 @@ pub const LOST: &str =
 
 /// Text from the bridge, shown in the UI: no control characters, cut short.
 fn shown(s: &str, max: usize) -> String {
-    s.chars().filter(|c| !c.is_control()).take(max).collect::<String>().trim().to_string()
+    vxr_ops::sanitize(s).chars().take(max).collect::<String>().trim().to_string()
 }
 
 /// The tab's link to the bridge, and the agents' requests waiting to run.

@@ -735,7 +735,7 @@ impl Session {
                 Ok(format!("deleted {what}; {t}"))
             }
             Op::Rename(a) => {
-                let name = a.name.chars().filter(|c| !c.is_control()).collect::<String>();
+                let name = crate::text::sanitize(&a.name);
                 let name = name.trim();
                 if name.chars().count() > MAX_LAYER_NAME {
                     return Err(invalid(format!("name: at most {MAX_LAYER_NAME} characters")));
@@ -768,7 +768,7 @@ impl Session {
             Op::NewLayer(a) => {
                 self.world_here(scene)?;
                 let name = match a.name {
-                    Some(n) => n.chars().filter(|c| !c.is_control()).collect::<String>().trim().to_string(),
+                    Some(n) => crate::text::sanitize(&n).trim().to_string(),
                     None => {
                         let w = scene.world().expect("a world");
                         format!("layer {}", w.layers().iter().map(|l| l.id + 1).max().unwrap_or(0))
@@ -870,7 +870,7 @@ impl Session {
                 Ok(format!("brought back step {} ({}); {}", i + 1, self.steps[i].tool, self.staged_text(scene)))
             }
             Op::Done(a) => {
-                let s: String = a.summary.chars().filter(|c| !c.is_control()).take(500).collect();
+                let s: String = crate::text::sanitize(&a.summary).chars().take(500).collect();
                 self.done = Some(s);
                 Ok("noted; the change goes to the user for review".into())
             }
@@ -1581,7 +1581,7 @@ impl Session {
 
     fn set_layer(&mut self, scene: &mut Scene, a: &SetLayer) -> Result<String, Error> {
         let what = self.node(scene, a.node)?;
-        let name = a.new_layer.as_deref().map(|n| n.chars().filter(|c| !c.is_control()).collect::<String>());
+        let name = a.new_layer.as_deref().map(crate::text::sanitize);
         let id = match (a.layer, name) {
             (Some(_), Some(_)) => return Err(invalid("give layer or new_layer, not both")),
             (None, None) => return Err(invalid("give layer (an id from the summary's layers) or new_layer")),
@@ -1615,7 +1615,7 @@ impl Session {
                 "the scene shows the world of several objects: make_object takes voxels from one object's model, which the user opens (Tab)",
             ));
         }
-        let name = a.name.as_deref().map(|n| n.chars().filter(|c| !c.is_control()).collect::<String>());
+        let name = a.name.as_deref().map(crate::text::sanitize);
         let name = name.as_deref().map(str::trim).filter(|n| !n.is_empty());
         if name.is_some_and(|n| n.chars().count() > MAX_LAYER_NAME) {
             return Err(invalid(format!("name: at most {MAX_LAYER_NAME} characters")));

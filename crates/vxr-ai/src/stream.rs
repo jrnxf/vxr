@@ -57,7 +57,7 @@ impl Decoder {
     /// Take the next bytes of the stream. An error the provider streamed ends it.
     pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<Delta>, String> {
         let mut out = Vec::new();
-        for e in self.sse.push(bytes) {
+        for e in self.sse.push(bytes)? {
             self.event(&e, &mut out)?;
         }
         Ok(out)
@@ -149,6 +149,7 @@ impl Decoder {
                 self.anthropic_usage(&m["usage"]);
             }
             "content_block_start" => {
+                check_index(index)?;
                 while self.blocks.len() <= index {
                     self.blocks.push(Value::Null);
                     self.inputs.push(String::new());
@@ -252,6 +253,7 @@ impl Decoder {
             }
             "response.output_item.done" => {
                 let i = d["output_index"].as_u64().map_or(self.output.len(), |i| i as usize);
+                check_index(i)?;
                 while self.output.len() <= i {
                     self.output.push(Value::Null);
                 }
@@ -320,6 +322,7 @@ impl Decoder {
         }
         for tc in delta["tool_calls"].as_array().into_iter().flatten() {
             let i = tc["index"].as_u64().map_or(self.calls.len().saturating_sub(1), |i| i as usize);
+            check_index(i)?;
             while self.calls.len() <= i {
                 self.calls.push(Default::default());
             }
@@ -370,6 +373,18 @@ fn output_text(output: &[Value]) -> String {
 }
 
 /// A provider's error as one line: its message, else its type or code.
+/// The most blocks, output items or tool calls one answer may index. The provider names the
+/// index and the lists grow up to it, so a broken or hostile endpoint could ask for billions.
+const MAX_INDEX: usize = 64;
+
+fn check_index(i: usize) -> Result<(), String> {
+    if i >= MAX_INDEX {
+        Err(format!("the provider sent block index {i}, past the {MAX_INDEX} an answer may have"))
+    } else {
+        Ok(())
+    }
+}
+
 pub fn error_text(e: &Value) -> String {
     let msg = e["message"].as_str().or(e["error"]["message"].as_str());
     let kind = e["type"].as_str().or(e["code"].as_str());
@@ -416,5 +431,31 @@ mod tests {
         assert_eq!(t.calls[0].bad.as_deref(), Some("{\"cells\": ["));
         assert_eq!(t.calls[0].input, json!({}));
         assert_eq!(t.stop, Stop::Tools);
+    }
+
+    #[test]
+    fn a_hostile_index_does_not_grow_the_answer() {
+        let big = u32::MAX;
+        for (kind, s) in [
+            (
+                Kind::Anthropic,
+                format!(
+                    "event: content_block_start\ndata: {{\"type\":\"content_block_start\",\"index\":{big},\"content_block\":{{\"type\":\"text\",\"text\":\"\"}}}}\n\n"
+                ),
+            ),
+            (
+                Kind::Compatible,
+                format!(
+                    "data: {{\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":{big},\"id\":\"a\"}}]}}}}]}}\n\n"
+                ),
+            ),
+            (
+                Kind::OpenAi,
+                format!("data: {{\"type\":\"response.output_item.done\",\"output_index\":{big},\"item\":{{}}}}\n\n"),
+            ),
+        ] {
+            let e = decode(kind, &s, 1000).0.unwrap_err();
+            assert!(e.contains("block index"), "{e}");
+        }
     }
 }

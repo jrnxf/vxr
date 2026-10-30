@@ -217,7 +217,7 @@ pub trait LiveLink {
 }
 
 /// The token file's path in `dir`.
-pub fn token_path(dir: &Path) -> PathBuf {
+fn token_path(dir: &Path) -> PathBuf {
     dir.join(TOKEN)
 }
 
