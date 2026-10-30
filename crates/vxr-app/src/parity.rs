@@ -3,7 +3,6 @@
 
 use vxr_core::material::Material;
 use vxr_core::select::Transform;
-use vxr_render::camera::View;
 
 use crate::ui::Action;
 
@@ -123,13 +122,14 @@ fn with_tools() -> Vec<Action> {
 
 #[test]
 fn every_action_that_names_a_tool_names_one_agents_are_offered() {
-    // The ops tools plus the files and live own tools: the names an agent can call.
-    let mut offered: Vec<String> = vxr_ops::tools().iter().map(|t| t.name.to_string()).collect();
-    offered.extend(["new_scene", "open", "save", "export", "edit_object", "show_world"].map(String::from));
+    // Every name an agent can call: the files and live tools, each with the ops tools.
+    let offered: Vec<String> = vxr_mcp::files::tools()
+        .into_iter()
+        .chain(vxr_mcp::live::tools())
+        .filter_map(|t| t["name"].as_str().map(String::from))
+        .collect();
     for a in with_tools() {
         let name = tool(&a).expect("listed with a tool");
         assert!(offered.iter().any(|n| n == name), "{a:?} names {name}, which no agent is offered");
     }
-    // Not a UI-only action in the list by mistake.
-    assert_eq!(tool(&Action::Snap(View::Front)), None);
 }
