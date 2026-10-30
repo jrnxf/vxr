@@ -10,11 +10,12 @@ on:
     branches: [main]
   workflow_call:
 
-# A newer push to a pull request replaces its run. github.workflow is the caller's name in a
-# called workflow, so a release's call never replaces the run of the same ref.
+# A newer push to a pull request replaces its run. In a called workflow github.workflow is the
+# caller's name and the caller holds its own group, so the ci- prefix keeps the two apart (group
+# names are case-insensitive) and a call never cancels another.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.workflow == 'CI' }}
 
 permissions:
   contents: read

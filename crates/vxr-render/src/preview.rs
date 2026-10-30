@@ -48,9 +48,10 @@ static FIXED_SAMPLES_PER_FRAME: AtomicU32 = AtomicU32::new(0);
 /// Make every preview trace exactly `n` full samples a frame instead of what a GPU time budget
 /// allows, so what a test or a headless run sees counts frames and does not depend on how fast
 /// the GPU is (a software GPU is orders of magnitude slower than a real one). `None` goes back
-/// to the budget, which is what the editor uses. Process-wide, as it is set once up front.
+/// to the budget, which is what the editor uses. At most `MAX_SAMPLES_PER_FRAME`. Process-wide,
+/// as it is set once up front.
 pub fn fix_samples_per_frame(n: Option<u32>) {
-    FIXED_SAMPLES_PER_FRAME.store(n.unwrap_or(0), Ordering::Relaxed);
+    FIXED_SAMPLES_PER_FRAME.store(n.unwrap_or(0).min(MAX_SAMPLES_PER_FRAME), Ordering::Relaxed);
 }
 
 /// Trace dispatches are cut to about this much GPU time each.
@@ -790,11 +791,19 @@ impl Preview {
         self.write_frame(queue, cam, flags, edit);
 
         let rows = if converged && !reset_pass { 0 } else { self.budget.rows(budget_ms, self.height) };
-        let rpd = ((DISPATCH_MS / self.budget.ms_per_row) as u32).max(8);
         // Dispatch slots: trace bands first, then A-trous steps, then resolve.
+        let trace_slots = MAX_SLOTS as u32 - ATROUS_ITERS - 2;
+        // A fixed count traces every row it asks for, whatever the height: the bands are sized to
+        // fit the slots, with one more band for each time the cursor wraps to the top.
+        let fixed = FIXED_SAMPLES_PER_FRAME.load(Ordering::Relaxed);
+        let rpd = if fixed > 0 {
+            rows.div_ceil(trace_slots - fixed).max(8)
+        } else {
+            ((DISPATCH_MS / self.budget.ms_per_row) as u32).max(8)
+        };
         let mut slots: Vec<DispatchU> = Vec::new();
         let mut left = rows;
-        while left > 0 && slots.len() + 1 + ATROUS_ITERS as usize + 1 < MAX_SLOTS as usize {
+        while left > 0 && (slots.len() as u32) < trace_slots {
             let n = left.min(rpd).min(self.height - self.cursor);
             let seed = self.frame_counter.wrapping_mul(64).wrapping_add(slots.len() as u32);
             slots.push(DispatchU { row0: self.cursor, rows: n, seed, step: 0 });
