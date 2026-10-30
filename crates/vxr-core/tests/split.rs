@@ -89,7 +89,7 @@ fn a_selection_becomes_an_object_in_place_as_one_undo_step() {
 
     // Saved and reopened: the same world, two objects where the slab was, and every chunk
     // the split did not need keeps its bytes.
-    let saved = s.to_vox();
+    let saved = s.to_vox().unwrap();
     let again = Scene::from_vox(&saved).unwrap();
     assert_eq!(again.world_voxels(false), all);
     assert_eq!(again.world().unwrap().objects().len(), s.world().unwrap().objects().len());
@@ -114,11 +114,11 @@ fn a_selection_becomes_an_object_in_place_as_one_undo_step() {
     assert_eq!(s.at(), At::Object(slab));
     assert_eq!(map_voxels(&s), slab_voxels);
     assert_eq!(s.selected_count(), picked.len());
-    assert!(s.to_vox() == bytes, "undone: the opened file");
+    assert!(s.to_vox().unwrap() == bytes, "undone: the opened file");
     assert!(s.redo());
     assert_eq!(s.at(), At::Object(new));
     assert_eq!(s.selected_count(), picked.len());
-    assert!(s.to_vox() == saved, "redone: the same file");
+    assert!(s.to_vox().unwrap() == saved, "redone: the same file");
 
     // Tab to the world and back keeps it; a rename in model mode is its own step.
     assert!(s.show_world());
@@ -131,10 +131,10 @@ fn a_selection_becomes_an_object_in_place_as_one_undo_step() {
     assert_eq!(s.world().unwrap().tree.nodes[new].name.as_deref(), Some(&b"mug"[..]));
     assert!(s.undo());
     assert_eq!(s.world().unwrap().tree.nodes[new].name.as_deref(), Some(&b"object 1"[..]));
-    assert!(s.to_vox() == saved);
+    assert!(s.to_vox().unwrap() == saved);
     assert!(s.undo());
     assert_eq!(s.picked(), None, "the pick goes with the object undo takes away");
-    assert!(s.to_vox() == bytes);
+    assert!(s.to_vox().unwrap() == bytes);
 }
 
 #[test]
@@ -153,7 +153,7 @@ fn the_split_is_refused_when_it_cannot_make_a_new_object() {
     let steps = s.history().position();
     assert_eq!(s.selection_to_object(), Err(SplitError::Linked), "tree a shares its model with b and c");
     assert_eq!(s.history().position(), steps);
-    assert!(s.to_vox() == bytes, "nothing changed");
+    assert!(s.to_vox().unwrap() == bytes, "nothing changed");
 }
 
 #[test]
@@ -172,7 +172,7 @@ fn a_new_scene_becomes_a_world_of_two_objects() {
     };
     s.edit(box_at([2, 0, 2], 3));
     s.edit(box_at([20, 0, 20], 7));
-    let (all, bytes, map) = (s.world_voxels(false), s.to_vox(), map_voxels(&s));
+    let (all, bytes, map) = (s.world_voxels(false), s.to_vox().unwrap(), map_voxels(&s));
     s.select_color(7, Mode::Replace);
     assert_eq!(s.selected_count(), 64);
 
@@ -183,7 +183,7 @@ fn a_new_scene_becomes_a_world_of_two_objects() {
     assert_eq!(w.tree.nodes[new].name.as_deref(), Some(&b"object 2"[..]), "the first object shows as object 1");
     assert_eq!(s.world_voxels(false), all);
     assert_eq!(s.selected_count(), 64);
-    let saved = s.to_vox();
+    let saved = s.to_vox().unwrap();
     let again = Scene::from_vox(&saved).unwrap();
     assert_eq!(again.world().unwrap().objects().len(), 2, "saves as two objects");
     assert_eq!(again.world_voxels(false), all);
@@ -195,9 +195,9 @@ fn a_new_scene_becomes_a_world_of_two_objects() {
     assert_eq!(map_voxels(&s), map);
     assert_eq!(s.bounds().size, [32, 32, 32]);
     assert_eq!(s.selected_count(), 64);
-    assert!(s.to_vox() == bytes, "undone: the same file");
+    assert!(s.to_vox().unwrap() == bytes, "undone: the same file");
     assert!(s.redo());
-    assert!(s.to_vox() == saved, "redone: the same file");
+    assert!(s.to_vox().unwrap() == saved, "redone: the same file");
     assert!(s.undo());
     assert!(s.undo() && s.undo());
     assert_eq!(s.map.voxels, 0, "the edits before it undo as before");
@@ -211,7 +211,7 @@ fn a_selection_over_256_saves_and_reopens() {
     s.select((0..280).map(|x| [x, 0, 1]), Mode::Replace);
     let new = s.selection_to_object().unwrap();
     assert_eq!(s.bounds().size, [280, 1, 1]);
-    let again = Scene::from_vox(&s.to_vox()).unwrap();
+    let again = Scene::from_vox(&s.to_vox().unwrap()).unwrap();
     assert_eq!(again.world_voxels(false), all, "the model over 256 saves as blocks");
     let w = again.world().unwrap();
     assert!(w.objects().len() >= 3, "the 280 voxel row is two blocks beside the rest");
@@ -254,7 +254,7 @@ proptest! {
         } else {
             Scene::from_vox(&one_model(&voxels)).unwrap()
         };
-        let (all, bytes) = (s.world_voxels(false), s.to_vox());
+        let (all, bytes) = (s.world_voxels(false), s.to_vox().unwrap());
         let mut cells = Vec::new();
         s.for_each_voxel(|p, _| cells.push(p));
         let chosen: Vec<_> = cells.iter().zip(&pick).filter(|(_, k)| **k).map(|(p, _)| *p).collect();
@@ -265,10 +265,10 @@ proptest! {
                 prop_assert_eq!(s.selected_count(), chosen.len());
                 prop_assert_eq!(s.world().unwrap().objects().len(), 2);
                 prop_assert_eq!(s.world_voxels(false), all.clone());
-                let again = Scene::from_vox(&s.to_vox()).unwrap();
+                let again = Scene::from_vox(&s.to_vox().unwrap()).unwrap();
                 prop_assert_eq!(again.world_voxels(false), all);
                 prop_assert!(s.undo());
-                prop_assert!(s.to_vox() == bytes);
+                prop_assert!(s.to_vox().unwrap() == bytes);
             }
             Err(e) => {
                 let want = if chosen.is_empty() { SplitError::NothingSelected } else { SplitError::Everything };
@@ -297,7 +297,7 @@ proptest! {
         } else {
             Scene::from_vox(&one_model(&voxels)).unwrap()
         };
-        let bytes = s.to_vox();
+        let bytes = s.to_vox().unwrap();
         let mut cells = Vec::new();
         s.for_each_voxel(|p, v| cells.push((p, v)));
         // Group 0 stays; groups 1 and 2 become objects. The first voxel is repainted in the
@@ -321,7 +321,7 @@ proptest! {
         if made.is_empty() {
             s.revert_voxels();
             s.commit();
-            prop_assert!(s.to_vox() == bytes);
+            prop_assert!(s.to_vox().unwrap() == bytes);
             return Ok(());
         }
         prop_assert!(matches!(s.at(), At::Object(_)), "the map stays on the model");
@@ -330,7 +330,7 @@ proptest! {
             s.commit();
             prop_assert_eq!(s.at(), at);
             prop_assert_eq!(s.history().position(), start);
-            prop_assert!(s.to_vox() == bytes, "put back: the file as it was");
+            prop_assert!(s.to_vox().unwrap() == bytes, "put back: the file as it was");
             return Ok(());
         }
         let position = s.history().position();
@@ -341,12 +341,12 @@ proptest! {
             prop_assert_eq!(object_voxels(&s, *n).len(), *k);
         }
         prop_assert_eq!(s.world_voxels(false), expect.clone());
-        let saved = s.to_vox();
+        let saved = s.to_vox().unwrap();
         prop_assert_eq!(Scene::from_vox(&saved).unwrap().world_voxels(false), expect);
         prop_assert!(s.undo());
         prop_assert_eq!(s.at(), at);
-        prop_assert!(s.to_vox() == bytes, "undone: the file");
+        prop_assert!(s.to_vox().unwrap() == bytes, "undone: the file");
         prop_assert!(s.redo());
-        prop_assert!(s.to_vox() == saved, "redone: the same file");
+        prop_assert!(s.to_vox().unwrap() == saved, "redone: the same file");
     }
 }

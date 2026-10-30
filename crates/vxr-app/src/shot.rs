@@ -238,7 +238,7 @@ fn run_steps(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     println!("opened {name}: {v0} voxels");
     let file = path.map(std::fs::read).transpose().map_err(|e| e.to_string())?;
     if let Some(file) = &file {
-        check(s.ed.scene.to_vox() == *file, format!("save without edits: byte-identical ({} bytes)", file.len()))?;
+        check(s.ed.scene.to_vox()? == *file, format!("save without edits: byte-identical ({} bytes)", file.len()))?;
     }
 
     s.tool(Tool::Add, Shape::Voxel);
@@ -331,7 +331,7 @@ fn run_steps(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     agents_bridge(dir)?;
 
     // Save, reopen and compare.
-    let bytes = s.ed.scene.to_vox();
+    let bytes = s.ed.scene.to_vox()?;
     let path = dir.join("edited.vox");
     std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
     let (reopened, _) = crate::native::open(&path)?;
@@ -838,7 +838,7 @@ fn new_scene_save(dir: &Path) -> Result<(), String> {
         format!("a box across the origin on a new scene: {} voxels, {lo:?} to {hi:?}", world.len()),
     )?;
     let path = dir.join("new.vox");
-    std::fs::write(&path, s.ed.scene.to_vox()).map_err(|e| e.to_string())?;
+    std::fs::write(&path, s.ed.scene.to_vox()?).map_err(|e| e.to_string())?;
     let (reopened, name) = crate::native::open(&path)?;
     let objects = reopened.world().map_or(0, |w| w.objects().len());
     let same = reopened.world_voxels(false) == world;
@@ -938,7 +938,7 @@ fn new_scene_command(dir: &Path) -> Result<(), String> {
     // Saved edits are not lost: New starts at once. An undo past the save is, so it asks.
     let path = dir.join("before-new.vox");
     s.stroke(mid, &[]);
-    std::fs::write(&path, s.ed.scene.to_vox()).map_err(|e| e.to_string())?;
+    std::fs::write(&path, s.ed.scene.to_vox()?).map_err(|e| e.to_string())?;
     s.ed.mark_saved();
     s.frames_with(2, vec![key(Key::N, Modifiers::COMMAND)]);
     check(
@@ -947,7 +947,7 @@ fn new_scene_command(dir: &Path) -> Result<(), String> {
     )?;
     s.host.clear();
     s.stroke(mid, &[]);
-    std::fs::write(&path, s.ed.scene.to_vox()).map_err(|e| e.to_string())?;
+    std::fs::write(&path, s.ed.scene.to_vox()?).map_err(|e| e.to_string())?;
     s.ed.mark_saved();
     s.frames_with(2, vec![key(Key::Z, Modifiers::COMMAND)]);
     s.frames_with(2, vec![key(Key::N, Modifiers::COMMAND)]);
@@ -961,7 +961,7 @@ fn new_scene_command(dir: &Path) -> Result<(), String> {
     s.stroke(mid, &[]);
     let voxels = s.voxels();
     let path = dir.join("after-new.vox");
-    std::fs::write(&path, s.ed.scene.to_vox()).map_err(|e| e.to_string())?;
+    std::fs::write(&path, s.ed.scene.to_vox()?).map_err(|e| e.to_string())?;
     let (reopened, _) = crate::native::open(&path)?;
     let objects = reopened.world().map_or(0, |w| w.objects().len());
     check(
@@ -1413,7 +1413,7 @@ fn selection(dir: &Path) -> Result<(), String> {
 
     // Invert: nothing selected inverts to every voxel, a colour's voxels to the rest, and
     // the flyout's All selects every voxel again. None of it is an undo step.
-    let saved = s.ed.scene.to_vox();
+    let saved = s.ed.scene.to_vox()?;
     s.ui_click("invert")?;
     let whole = count(&s);
     s.frames_with(2, vec![key(egui::Key::I, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT)]);
@@ -1429,7 +1429,7 @@ fn selection(dir: &Path) -> Result<(), String> {
     let rest = count(&s);
     s.ui_click("select-all")?;
     check(
-        color > 0 && rest == 32 - color && count(&s) == 32 && s.ed.scene.to_vox() == saved,
+        color > 0 && rest == 32 - color && count(&s) == 32 && s.ed.scene.to_vox()? == saved,
         format!(
             "Cmd-K Invert selection turns one colour's {color} voxels into the other {rest}; All selects 32; no edit"
         ),
@@ -1458,7 +1458,7 @@ fn selection(dir: &Path) -> Result<(), String> {
             && volume == (Region::Volume, 24)
             && both == 32
             && count(&s) == 23
-            && s.ed.scene.to_vox() == saved,
+            && s.ed.scene.to_vox()? == saved,
         format!(
             "a click selects the face {face:?}, Cmd-K the volume {volume:?}, Shift adds ({both}), Color the colour ({}); no edit",
             count(&s)
@@ -1670,7 +1670,7 @@ fn world(dir: &Path) -> Result<(), String> {
     check(s.ed.scene.at() == At::World, "Cmd-K 'World mode / edit model'".into())?;
     s.frames_with(2, vec![key(egui::Key::Z, egui::Modifiers::COMMAND)]);
     check(
-        s.ed.scene.at() == At::Object(first) && s.voxels() == model && s.ed.scene.to_vox() == bytes,
+        s.ed.scene.at() == At::Object(first) && s.voxels() == model && s.ed.scene.to_vox()? == bytes,
         "undo goes back into the model and the save is byte-identical again".into(),
     )?;
 
@@ -1739,14 +1739,14 @@ fn world(dir: &Path) -> Result<(), String> {
     check(counts(&s).0 == n0 + 2, "Cmd-K 'Duplicate object'".into())?;
     s.frames(2);
     s.save_png(&dir.join("app-2x-world-edit.png"))?;
-    let saved = s.ed.scene.to_vox();
+    let saved = s.ed.scene.to_vox()?;
     let again = Scene::from_vox(&saved)?;
     check(
         again.world_voxels(false) == s.ed.scene.world_voxels(false),
         "the edited world saves and reopens the same".into(),
     )?;
     while s.ed.scene.undo() {}
-    check(s.ed.scene.to_vox() == bytes, "every world edit undone: byte-identical save".into())?;
+    check(s.ed.scene.to_vox()? == bytes, "every world edit undone: byte-identical save".into())?;
     Ok(())
 }
 
@@ -1860,7 +1860,7 @@ fn scene_tree(dir: &Path) -> Result<(), String> {
         "in model mode a row click edits that object's model".into(),
     )?;
     while s.ed.scene.undo() {}
-    check(s.ed.scene.to_vox() == bytes, "every tree edit undone: byte-identical save".into())?;
+    check(s.ed.scene.to_vox()? == bytes, "every tree edit undone: byte-identical save".into())?;
     Ok(())
 }
 
@@ -1970,7 +1970,7 @@ fn organize(dir: &Path) -> Result<(), String> {
     s.save_png(&dir.join("app-2x-organized.png"))?;
     s.ed.undo();
     s.frames(2);
-    check(s.ed.scene.to_vox() == bytes, "undo gives the file's bytes back".into())
+    check(s.ed.scene.to_vox()? == bytes, "undo gives the file's bytes back".into())
 }
 
 /// Organize into objects (AI) on the opened file (the island), through the same scripted
@@ -2035,7 +2035,7 @@ fn organize_island(file: Option<&[u8]>) -> Result<(), String> {
     )?;
     s.ed.undo();
     s.frames(2);
-    check(s.ed.scene.to_vox() == bytes, "island: undo gives the file's bytes back".into())
+    check(s.ed.scene.to_vox()? == bytes, "island: undo gives the file's bytes back".into())
 }
 
 /// Selection to new object on the generated 23-desk, one model: the cup and the coffee are
@@ -2142,7 +2142,7 @@ fn to_object(dir: &Path) -> Result<(), String> {
             && s.ed.scene.at() == At::Object(src)
             && s.voxels() == total
             && s.ed.scene.selected_count() as u64 == picked
-            && s.ed.scene.to_vox() == bytes,
+            && s.ed.scene.to_vox()? == bytes,
         "undo takes the name, then the new object, back: byte-identical save, selection kept".into(),
     )?;
 
@@ -2155,23 +2155,23 @@ fn to_object(dir: &Path) -> Result<(), String> {
         made && s.ed.ui.renaming_node().is_none() && name_of(&s) == "object 2" && s.ed.scene.selected_count() > 0,
         "Cmd-K 'Selection to new object' does it too, and Escape keeps the default name".into(),
     )?;
-    let split = s.ed.scene.to_vox();
+    let split = s.ed.scene.to_vox()?;
     s.frames_with(2, vec![key(egui::Key::Tab, none)]);
     let world = s.ed.scene.at() == At::World && s.ed.scene.picked() == Some(new);
     s.frames_with(2, vec![key(egui::Key::Tab, none)]);
     check(
-        world && s.ed.scene.at() == At::Object(new) && s.voxels() == picked && s.ed.scene.to_vox() == split,
+        world && s.ed.scene.at() == At::Object(new) && s.voxels() == picked && s.ed.scene.to_vox()? == split,
         "Tab to the world picks it, and Tab again edits it".into(),
     )?;
     s.frames_with(2, vec![key(egui::Key::A, cmd)]);
     check(!s.ed.ui.can_split, "the whole model selected: To new object is off".into())?;
     s.ui_click("to-object")?;
-    check(s.ed.scene.to_vox() == split, "and a click on it does nothing".into())?;
+    check(s.ed.scene.to_vox()? == split, "and a click on it does nothing".into())?;
     s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
-    let undone = s.ed.scene.to_vox() == bytes;
+    let undone = s.ed.scene.to_vox()? == bytes;
     s.frames_with(2, vec![key(egui::Key::Z, cmd | egui::Modifiers::SHIFT)]);
     check(
-        undone && s.ed.scene.to_vox() == split && s.ed.scene.at() == At::Object(new),
+        undone && s.ed.scene.to_vox()? == split && s.ed.scene.at() == At::Object(new),
         "undo and redo: byte-identical saves".into(),
     )?;
     let again = Scene::from_vox(&split)?;
@@ -2320,7 +2320,7 @@ fn groups(s: &mut Shot, bytes: &[u8], dir: &Path) -> Result<(), String> {
     let editing = s.ed.scene.at() == At::Object(members[0]);
     s.frames_with(2, vec![key(egui::Key::Tab, egui::Modifiers::NONE)]);
     check(
-        editing && s.ed.scene.at() == At::World && s.ed.scene.to_vox() == bytes,
+        editing && s.ed.scene.at() == At::World && s.ed.scene.to_vox()? == bytes,
         "Tab with a group picked edits its first object; every group edit undone gives the file".into(),
     )?;
     Ok(())
@@ -2441,7 +2441,7 @@ fn layers(s: &mut Shot, bytes: &[u8], dir: &Path) -> Result<(), String> {
     s.frames_with(2, vec![key(egui::Key::Tab, egui::Modifiers::NONE)]);
     s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
     check(
-        none && s.ed.ui.hits.contains_key("layer-0") && s.ed.scene.to_vox() == bytes,
+        none && s.ed.ui.hits.contains_key("layer-0") && s.ed.scene.to_vox()? == bytes,
         "model mode lists no layers; every layer edit undone gives the file".into(),
     )?;
     Ok(())
@@ -3144,7 +3144,7 @@ fn materials(s: &mut Shot, dir: &Path) -> Result<(), String> {
     }
     s.save_png(&dir.join("app-2x-material.png"))?;
     // Saved as MATL chunks, read back the same.
-    let bytes = s.ed.scene.to_vox();
+    let bytes = s.ed.scene.to_vox()?;
     let back = Scene::from_vox(&bytes)?;
     let raw = vxr_vox::RawFile::parse(&bytes).map_err(|e| e.to_string())?;
     let n = raw.chunks.iter().filter(|c| c.is(b"MATL")).count();
@@ -4729,7 +4729,7 @@ fn assistant(dir: &Path) -> Result<(), String> {
 /// typed: the bar stays open and unsent, the composer gets its draft back, and nothing is sent.
 fn ai_refused() -> Result<(), String> {
     use vxr_core::history::At;
-    let mut s = Shot::new(Scene::from_vox(&house().to_vox())?, "house.vox", 1.0)?;
+    let mut s = Shot::new(Scene::from_vox(&house().to_vox()?)?, "house.vox", 1.0)?;
     s.ed.ui.coach = false;
     let fake = s.fake_assistant(0);
     s.ed.assistant.set_key(vxr_ai::Kind::Anthropic, "sk-ant-test-not-a-real-key", false)?;
@@ -5890,7 +5890,7 @@ fn agents_steps(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     }
     s.live_frames(&mut live, 40);
     s.save_png(&dir.join("agents-live-done.png"))?;
-    std::fs::write(dir.join("agents-live.vox"), s.ed.scene.to_vox()).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("agents-live.vox"), s.ed.scene.to_vox()?).map_err(|e| e.to_string())?;
     let labels: Vec<String> = s.ed.agents.edits.iter().map(|e| e.label.clone()).collect();
     println!("{} edits: {labels:?}", labels.len());
     Ok(())

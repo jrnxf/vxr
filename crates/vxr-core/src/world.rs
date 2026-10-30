@@ -9,11 +9,76 @@
 //! byte-identical and every other chunk keeps its bytes.
 
 use vxr_vox::scene::Affine;
-use vxr_vox::tree::{Kind, LayerInfo, ModelEdits, Tree, TreeNode};
+use vxr_vox::tree::{Kind, LayerInfo, MAX_MODEL, ModelEdits, Tree, TreeNode};
 use vxr_vox::{Document, WorldSave};
 
 use crate::brickmap::BrickMap;
 use crate::scene::{MAX_EXTENT, vox_to_world, world_to_vox};
+
+/// Most models a file may hold, and most cells (their sizes multiplied out) across them.
+/// Each model is a dense grid of brick slots over its size, so a few bytes of `SIZE` chunk
+/// would otherwise ask for 64 MiB, and each costs about a kilobyte however small. The
+/// budget is one scene of [`MAX_EXTENT`] on every axis, more than MagicaVoxel can make.
+pub const MAX_MODELS: usize = 1 << 16;
+pub const MAX_CELLS: u64 = (MAX_EXTENT as u64).pow(3);
+
+/// What models take of a scene's size limit: the file models they are saved as and their
+/// cells. A file over [`MAX_MODELS`] or [`MAX_CELLS`] does not open, so no edit may make a
+/// world over either, or the file vxr saves would not open again.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Budget {
+    pub models: u64,
+    pub cells: u64,
+}
+
+impl Budget {
+    /// A model of `size`: saved as one file model, or over 256 on an axis as blocks of up
+    /// to 256 (at most that many per axis, rounded up).
+    pub fn of(size: [u32; 3]) -> Budget {
+        Budget {
+            models: size.iter().map(|&k| (k as u64).div_ceil(MAX_MODEL as u64)).product(),
+            cells: size.iter().map(|&k| k as u64).product(),
+        }
+    }
+
+    pub fn plus(self, o: Budget) -> Budget {
+        Budget { models: self.models + o.models, cells: self.cells + o.cells }
+    }
+
+    pub fn minus(self, o: Budget) -> Budget {
+        Budget { models: self.models.saturating_sub(o.models), cells: self.cells.saturating_sub(o.cells) }
+    }
+
+    /// Within the size limit, or why not.
+    pub fn check(self) -> Result<(), String> {
+        if self.models > MAX_MODELS as u64 {
+            return Err(format!(
+                "the scene would have over {} models, the size limit of a scene",
+                grouped(MAX_MODELS as u64)
+            ));
+        }
+        if self.cells > MAX_CELLS {
+            let billions = MAX_CELLS as f64 / 1e9;
+            return Err(format!(
+                "the models would add up to over {billions:.1} billion cells, the size limit of a scene"
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// `n` with a comma between every three digits, as people read it: 65536 is "65,536".
+fn grouped(n: u64) -> String {
+    let d = n.to_string();
+    let mut s = String::new();
+    for (i, c) in d.chars().enumerate() {
+        if i > 0 && (d.len() - i).is_multiple_of(3) {
+            s.push(',');
+        }
+        s.push(c);
+    }
+    s
+}
 
 #[derive(Clone)]
 pub struct World {
@@ -62,11 +127,24 @@ impl World {
     pub fn from_doc(doc: &Document) -> Result<World, String> {
         let s = doc.scene().map_err(|e| e.to_string())?;
         let tree = vxr_vox::Tree::read(&s);
-        let mut models = Vec::with_capacity(s.models.len());
+        let mut budget = Budget { models: s.models.len() as u64, cells: 0 };
+        budget.check()?;
         for m in &s.models {
             if m.size.iter().any(|&k| k < 1 || k as u32 > MAX_EXTENT) {
                 return Err(format!("a model is {:?} voxels; each side must be 1 to {MAX_EXTENT}", m.size));
             }
+            // XYZI holds byte coordinates, so no voxel of it can be past 256.
+            if !m.compressed && m.size.iter().any(|&k| k > MAX_MODEL) {
+                return Err(format!(
+                    "a model is {:?} voxels; each side of an XYZI model must be 1 to {MAX_MODEL}",
+                    m.size
+                ));
+            }
+            budget.cells += m.size.iter().map(|&k| k as u64).product::<u64>();
+            budget.check()?;
+        }
+        let mut models = Vec::with_capacity(s.models.len());
+        for m in &s.models {
             let mut map = BrickMap::new([m.size[0] as u32, m.size[2] as u32, m.size[1] as u32]);
             for v in m.effective_voxels() {
                 let u = vox_to_local(m.size, [v[0] as i32, v[1] as i32, v[2] as i32]);
@@ -75,6 +153,11 @@ impl World {
             models.push(map);
         }
         Ok(World { tree, models, version: s.version })
+    }
+
+    /// What every model takes of the size limit, linked copies counted once.
+    pub fn budget(&self) -> Budget {
+        self.models.iter().fold(Budget::default(), |b, m| b.plus(Budget::of(m.size_voxels())))
     }
 
     /// Objects (tree nodes holding a model) in tree order.

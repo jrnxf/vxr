@@ -3,7 +3,7 @@ use std::rc::Rc;
 use vxr_app::Editor;
 use vxr_app::bridge::{Out, Page};
 use vxr_app::editor::{Button, Finger, NEW_SIZE};
-use vxr_app::files::{obj_files, slices_png, zip};
+use vxr_app::files::{obj_files, slices_png, vox_bytes, zip};
 use vxr_app::theme::ThemeChoice;
 use vxr_app::ui::{Action, FontBytes};
 use vxr_core::Scene;
@@ -436,9 +436,19 @@ impl App {
     }
 
     /// The scene as a `.vox` file, for the page to download; New then has nothing to lose.
+    /// Empty, with a toast, when the scene cannot be saved.
     pub fn save(&mut self) -> Vec<u8> {
-        self.editor.mark_saved();
-        self.editor.scene.to_vox()
+        match vox_bytes(&self.editor.scene) {
+            Ok(bytes) => {
+                self.editor.mark_saved();
+                bytes
+            }
+            Err(e) => {
+                let ctx = self.editor.ctx.clone();
+                self.editor.ui.toast(&ctx, format!("Could not save: {e}"));
+                Vec::new()
+            }
+        }
     }
 
     /// The finished render export's PNG (empty if none), for the page to download.

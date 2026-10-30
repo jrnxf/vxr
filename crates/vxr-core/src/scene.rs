@@ -21,7 +21,7 @@ use crate::history::{
     WorldChange,
 };
 use crate::select::Clip;
-use crate::world::World;
+use crate::world::{Budget, World};
 
 /// Largest scene extent per axis, in voxels. The brick grid for 2048^3 is 64 MiB.
 pub const MAX_EXTENT: u32 = 2048;
@@ -106,6 +106,21 @@ pub enum SplitError {
     Everything,
     /// The model is shared by linked copies, so the voxels would leave every copy.
     Linked,
+    /// The new object's model would put the scene over its size limit
+    /// ([`crate::world::Budget`]).
+    TooBig,
+}
+
+impl std::fmt::Display for SplitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            SplitError::World => "the world shows, not a model",
+            SplitError::NothingSelected => "no voxels to take",
+            SplitError::Everything => "those are every voxel of the model",
+            SplitError::Linked => "the model is shared by linked copies",
+            SplitError::TooBig => "the scene would be over its size limit",
+        })
+    }
 }
 
 /// The changes of the edit in progress: one entry per cell or palette slot, first old value
@@ -187,18 +202,17 @@ impl Scene {
     /// materials through [`Document::set_palette`] and [`Document::set_material`], and the
     /// cameras through [`Document::set_camera`], so every chunk they do not touch keeps its
     /// bytes. A new scene is written as a fresh version 200 file, split into models of at
-    /// most 256^3.
-    pub fn to_vox(&self) -> Vec<u8> {
-        if let (Some(doc), Some(world)) = (&self.source, &self.world)
-            && let Some(bytes) = self.save_into(doc.clone(), world.clone())
-        {
-            return bytes;
+    /// most 256^3. An opened file that cannot be written this way is an error, never a fresh
+    /// file: that would drop its names, groups, layers and hidden flags.
+    pub fn to_vox(&self) -> Result<Vec<u8>, String> {
+        if let (Some(doc), Some(world)) = (&self.source, &self.world) {
+            return self.save_into(doc.clone(), world.clone());
         }
         let world: BTreeMap<[i32; 3], u8> =
             self.world_voxels(false).into_iter().map(|(p, c)| (world_to_vox(p), c)).collect();
         let mut b = self.builder();
         b.add_world(&world);
-        b.build().write()
+        Ok(b.build().write())
     }
 
     /// A fresh version 200 file with the palette, materials and cameras and no voxels.
@@ -213,26 +227,26 @@ impl Scene {
         b
     }
 
-    fn save_into(&self, mut doc: Document, mut world: World) -> Option<Vec<u8>> {
-        let file = doc.scene().ok()?;
+    fn save_into(&self, mut doc: Document, mut world: World) -> Result<Vec<u8>, String> {
+        let file = doc.scene().map_err(|e| e.to_string())?;
         for i in 1..=255u8 {
             if file.color(i) != self.palette[i as usize] {
-                doc.set_palette(i, self.palette[i as usize]).ok()?;
+                doc.set_palette(i, self.palette[i as usize]).map_err(|e| format!("colour {i}: {e}"))?;
             }
             if doc.material(i) != self.materials[i as usize] {
-                doc.set_material(i, &self.materials[i as usize]).ok()?;
+                doc.set_material(i, &self.materials[i as usize]).map_err(|e| format!("material {i}: {e}"))?;
             }
         }
         for c in &self.cameras {
             if doc.camera(c.id) != Some(*c) {
-                doc.set_camera(c).ok()?;
+                doc.set_camera(c).map_err(|e| format!("camera {}: {e}", c.id))?;
             }
         }
         if let At::Object(i) = self.at {
             world.store(i, &self.map, self.origin);
         }
-        world.save_into(&mut doc).ok()?;
-        Some(doc.write())
+        world.save_into(&mut doc)?;
+        Ok(doc.write())
     }
 
     /// Every voxel of the scene by world cell: every object's (only shown ones with
@@ -281,9 +295,10 @@ impl Scene {
     }
 
     /// A world edit as one undo step, in world mode: `f` may change the tree (move, copy,
-    /// group, hide, rename, layers) and add models (a duplicate's own). None outside world
-    /// mode, or if the result would be over [`MAX_EXTENT`] on an axis (then nothing changes).
-    pub fn edit_world<R>(&mut self, f: impl FnOnce(&mut World) -> R) -> Option<R> {
+    /// group, hide, rename, layers) and add models (a duplicate's own). An error outside
+    /// world mode, or if the result would be over [`MAX_EXTENT`] on an axis or its models
+    /// over the size limit ([`crate::world::Budget`]); then nothing changes.
+    pub fn edit_world<R>(&mut self, f: impl FnOnce(&mut World) -> R) -> Result<R, String> {
         self.commit();
         let r = self.put_world(f);
         self.commit();
@@ -291,27 +306,27 @@ impl Scene {
     }
 
     /// A world change inside the open edit (opening one if needed), shown at once, so a
-    /// drag through many positions becomes one undo step at [`Scene::commit`]. None outside
-    /// world mode, or if the result would be over [`MAX_EXTENT`] on an axis (then this
-    /// change is dropped and the edit keeps what it had).
-    pub fn put_world<R>(&mut self, f: impl FnOnce(&mut World) -> R) -> Option<R> {
+    /// drag through many positions becomes one undo step at [`Scene::commit`]. An error
+    /// outside world mode, or if the result would be over [`MAX_EXTENT`] on an axis or its
+    /// models over the size limit (then this change is dropped and the edit keeps what it had).
+    pub fn put_world<R>(&mut self, f: impl FnOnce(&mut World) -> R) -> Result<R, String> {
         if self.at != At::World {
-            return None;
+            return Err("the world does not show".into());
         }
-        let w = self.world.as_mut()?;
+        let w = self.world.as_mut().ok_or("no world")?;
         let (tree, models) = (w.tree.clone(), w.models.len());
         self.world_stroke.get_or_insert_with(|| WorldStroke::of(w, At::World));
         let r = f(w);
         if w.tree == tree && w.models.len() == models {
-            return Some(r);
+            return Ok(r);
         }
-        if self.load(At::World).is_err() {
-            let w = self.world.as_mut()?;
+        if let Err(e) = w.budget().check().and_then(|()| self.load(At::World)) {
+            let w = self.world.as_mut().expect("a world");
             w.tree = tree;
             w.models.truncate(models);
-            return None;
+            return Err(e);
         }
-        Some(r)
+        Ok(r)
     }
 
     /// Move node `i` by `d` (vxr axes) inside the open edit, shown at once: the drag tick.
@@ -476,7 +491,7 @@ impl Scene {
                 for a in 0..3 {
                     let extent = hi[a] as i64 - lo[a] as i64 + 1;
                     if extent > MAX_EXTENT as i64 {
-                        return Err(format!("scene is {extent} voxels on one axis; the limit is {MAX_EXTENT}"));
+                        return Err(format!("the world would be over {MAX_EXTENT} voxels on an axis ({extent})"));
                     }
                     size[a] = extent as u32;
                 }
@@ -911,17 +926,12 @@ impl Scene {
             }
             At::Map => {}
         }
+        let (lo, hi) = crate::select::bounds(cells.iter().copied()).expect("cells");
+        self.room_for(&[(lo, hi)]).map_err(|_| SplitError::TooBig)?;
         let before_at = self.at;
         let made = (self.world.is_none()).then(|| self.make_world());
         let At::Object(src) = self.at else { unreachable!("a model is edited") };
         let old_selection: Vec<[i32; 3]> = self.selection.iter().map(|&p| self.to_world(p)).collect();
-        let (mut lo, mut hi) = ([i32::MAX; 3], [i32::MIN; 3]);
-        for p in &cells {
-            for a in 0..3 {
-                lo[a] = lo[a].min(p[a]);
-                hi[a] = hi[a].max(p[a]);
-            }
-        }
         let mut rest = self.map.clone();
         let mut part = BrickMap::new(std::array::from_fn(|a| (hi[a] - lo[a] + 1) as u32));
         for p in &cells {
@@ -974,6 +984,29 @@ impl Scene {
         made
     }
 
+    /// Whether new objects whose models span map cells `lo` to `hi` (inclusive) each keep
+    /// the scene within its size limit ([`crate::world::Budget`]), or why not.
+    pub fn room_for(&self, parts: &[([i32; 3], [i32; 3])]) -> Result<(), String> {
+        let new = parts.iter().fold(Budget::default(), |b, (lo, hi)| {
+            b.plus(Budget::of(std::array::from_fn(|a| (hi[a] - lo[a] + 1) as u32)))
+        });
+        self.budget().plus(new).check()
+    }
+
+    /// What every model takes of the size limit ([`World::budget`]), the one being edited at
+    /// its size now.
+    fn budget(&self) -> Budget {
+        let here = Budget::of(self.map.size_voxels());
+        match (&self.world, self.at) {
+            (Some(w), At::Object(i)) => {
+                let stale = w.model_of(i).map_or(Budget::default(), |m| Budget::of(w.models[m].size_voxels()));
+                w.budget().minus(stale).plus(here)
+            }
+            (Some(w), _) => w.budget(),
+            (None, _) => here,
+        }
+    }
+
     /// Why the voxels `cells` (map cells) of the model being edited cannot become an object
     /// of their own: the world shows, there are none, they are every voxel, or the model is
     /// shared by linked copies.
@@ -1003,6 +1036,7 @@ impl Scene {
             return Err(e);
         }
         let (lo, hi) = crate::select::bounds(voxels.iter().map(|c| c.0)).expect("voxels");
+        self.room_for(&[(lo, hi)]).map_err(|_| SplitError::TooBig)?;
         let mut part = BrickMap::new(std::array::from_fn(|a| (hi[a] - lo[a] + 1) as u32));
         for &(p, v) in voxels {
             part.set(p[0] - lo[0], p[1] - lo[1], p[2] - lo[2], v);
@@ -1066,7 +1100,7 @@ impl Scene {
     /// editing a model. False if there is no world or `i` is not in it.
     pub fn set_node_name(&mut self, i: usize, name: Option<&str>) -> bool {
         if self.at == At::World {
-            return self.edit_world(|w| w.set_name(i, name)).is_some();
+            return self.edit_world(|w| w.set_name(i, name)).is_ok();
         }
         self.commit();
         self.store_model();
@@ -1092,28 +1126,33 @@ impl Scene {
 
     /// Change the model bounds to `size` voxels from world cell `lo`, as one undo step.
     /// Voxels outside the new bounds are erased; the ground stays where it is unless it would
-    /// fall outside. Returns how many voxels were erased, or None if a size is 0 or over
-    /// [`MAX_EXTENT`].
-    pub fn set_bounds(&mut self, lo: [i32; 3], size: [u32; 3]) -> Option<usize> {
+    /// fall outside. Returns how many voxels were erased, or why it cannot: a size is 0 or
+    /// over [`MAX_EXTENT`], or the models would go over the size limit.
+    pub fn set_bounds(&mut self, lo: [i32; 3], size: [u32; 3]) -> Result<usize, String> {
         self.commit();
         self.put_bounds(lo, size)?;
-        Some(self.commit())
+        Ok(self.commit())
     }
 
     /// Change the model bounds as [`Scene::set_bounds`] does, inside the open edit (opening
     /// one if needed), so a resize between other edits joins them in one undo step. Map cells
     /// move by the shift the result gives (new minus old). Returns how many voxels were
-    /// erased and that shift, or None, changing nothing, if a size is 0 or over
-    /// [`MAX_EXTENT`] or the scene shows the world.
-    pub fn put_bounds(&mut self, lo: [i32; 3], size: [u32; 3]) -> Option<(usize, [i32; 3])> {
-        if self.at == At::World || size.iter().any(|&s| s == 0 || s > MAX_EXTENT) {
-            return None;
+    /// erased and that shift, or why it cannot, changing nothing: the scene shows the world,
+    /// a size is 0 or over [`MAX_EXTENT`], or the models would go over the size limit
+    /// ([`crate::world::Budget`]).
+    pub fn put_bounds(&mut self, lo: [i32; 3], size: [u32; 3]) -> Result<(usize, [i32; 3]), String> {
+        if self.at == At::World {
+            return Err("the world shows: edit an object to change its bounds".into());
         }
+        if size.iter().any(|&s| s == 0 || s > MAX_EXTENT) {
+            return Err(format!("each side is 1 to {MAX_EXTENT}"));
+        }
+        self.budget().minus(Budget::of(self.map.size_voxels())).plus(Budget::of(size)).check()?;
         let old = self.bounds();
         let floor = old.floor.clamp(lo[1], lo[1] + size[1] as i32 - 1);
         let new = Bounds { lo, size, floor };
         if new == old {
-            return Some((0, [0; 3]));
+            return Ok((0, [0; 3]));
         }
         let inside = |w: [i32; 3]| (0..3).all(|a| w[a] >= lo[a] && w[a] < lo[a] + size[a] as i32);
         let mut outside = Vec::new();
@@ -1132,7 +1171,7 @@ impl Scene {
         if s.selection.is_none() && !self.selection.is_empty() {
             s.selection = Some(self.selection.iter().copied().collect());
         }
-        Some((n, self.reshape(new)))
+        Ok((n, self.reshape(new)))
     }
 
     /// Replace the map with one covering `b`, keeping every voxel inside it, and move every
@@ -1171,5 +1210,26 @@ impl Scene {
         }
         self.reshapes += 1;
         d
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Catches: a lossless save that failed fell back to a fresh file without the scene
+    /// graph (and with the hidden objects shown) instead of failing. Opening checks every
+    /// chunk, so a `MATL` chunk that does not parse is put into the opened document here.
+    #[test]
+    fn a_failed_lossless_save_is_an_error_not_a_flattened_file() {
+        let bytes =
+            vxr_vox::fixtures::all().into_iter().find(|f| f.name == "22-world").unwrap().builder.build().write();
+        let mut s = Scene::from_vox(&bytes).unwrap();
+        s.source.as_mut().unwrap().raw.chunks.push(vxr_vox::Chunk::new(vxr_vox::chunk::MATL, vec![1, 2]));
+        s.set_color(5, [1, 2, 3, 255]);
+
+        let e = s.to_vox().unwrap_err();
+        assert!(e.contains("MATL"), "{e}");
+        assert_eq!(crate::files::vox_bytes(&s).unwrap_err(), e);
     }
 }

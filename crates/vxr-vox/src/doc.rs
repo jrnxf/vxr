@@ -104,7 +104,9 @@ impl Document {
     }
 
     /// Recolour palette index `index` (1 to 255). Touches only the RGBA chunk; adds one
-    /// (from the default palette) after the last model if the file has none.
+    /// (from the default palette) after the last model if the file has none, and grows a
+    /// short one (which other tools write) to 256 entries with the default colours the
+    /// reader shows for its missing slots.
     pub fn set_palette(&mut self, index: u8, rgba: [u8; 4]) -> Result<usize> {
         if index == 0 {
             return Err(Error::new("palette index 0 is the empty voxel"));
@@ -113,7 +115,8 @@ impl Document {
         if let Some(i) = self.raw.chunks.iter().position(|c| c.is(chunk::RGBA)) {
             let Typed::Rgba(mut p) = Typed::parse(&self.raw.chunks[i])? else { unreachable!() };
             if slot >= p.colors.len() {
-                return Err(Error::new(format!("RGBA chunk has only {} entries", p.colors.len())));
+                let n = p.colors.len();
+                p.colors.extend_from_slice(&DEFAULT_PALETTE[n..]);
             }
             p.colors[slot] = rgba;
             self.raw.chunks[i].content = p.encode();

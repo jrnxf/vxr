@@ -268,6 +268,38 @@ fn builds_a_scene_from_an_empty_file() {
     assert!(!dir.0.join("house/cottage.vox.tmp").exists());
 }
 
+/// Catches: an agent's save replaced a file the user had saved in vxr since the agent
+/// opened it, and the `.bak` (made once per session) still held the older original, so the
+/// user's edits were gone.
+#[test]
+fn a_save_refuses_to_replace_a_file_changed_on_disk_since_it_was_opened() {
+    let dir = Dir::new("changed");
+    let path = dir.0.join("world.vox");
+    std::fs::write(&path, fixture()).unwrap();
+    let mut c = Client::new(&dir.0);
+    c.ok("open", json!({"path": "world.vox"}));
+    c.ok("save", json!({}));
+    let bak = std::fs::read(dir.0.join("world.vox.bak")).unwrap();
+
+    // The user saves their own edit.
+    let mut theirs = vxr_core::Scene::from_vox(&fixture()).unwrap();
+    theirs.set_color(9, [1, 2, 3, 255]);
+    let theirs = theirs.to_vox().unwrap();
+    std::fs::write(&path, &theirs).unwrap();
+
+    let e = c.err("save", json!({}));
+    assert!(e.contains("world.vox changed on disk since it was opened"), "{e}");
+    assert_eq!(std::fs::read(&path).unwrap(), theirs, "refused: the file is the user's");
+    assert_eq!(std::fs::read(dir.0.join("world.vox.bak")).unwrap(), bak);
+
+    // overwrite replaces it, keeping the user's version as the .bak.
+    c.ok("save", json!({"overwrite": true}));
+    assert_ne!(std::fs::read(&path).unwrap(), theirs);
+    assert_eq!(std::fs::read(dir.0.join("world.vox.bak")).unwrap(), theirs);
+    // Saved here, the file is this session's again.
+    c.ok("save", json!({}));
+}
+
 /// The chunks of a file by position, as `(id, bytes)`.
 fn chunks(bytes: &[u8]) -> Vec<(String, Vec<u8>)> {
     RawFile::parse(bytes).unwrap().chunks.iter().map(|c| (vxr_vox::id_str(&c.id), c.content.clone())).collect()
