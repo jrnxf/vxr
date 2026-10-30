@@ -80,7 +80,7 @@ pub const HUNG_UP: &str = "vxr bridge hung up before pairing: connect again.";
 pub const LOST: &str =
     "vxr bridge stopped, so agents can no longer edit this tab. Run it again and connect with its new code.";
 
-/// Text from the bridge, shown in the UI: no control characters, cut short.
+/// Text from the bridge, shown in the UI: no invisible characters, cut short.
 fn shown(s: &str, max: usize) -> String {
     vxr_ops::sanitize(s).chars().take(max).collect::<String>().trim().to_string()
 }

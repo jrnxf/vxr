@@ -404,7 +404,7 @@ mod server {
         matches!(e, tungstenite::Error::Io(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut))
     }
 
-    /// Text from the other side, shown in the terminal: no control characters (so no escape
+    /// Text from the other side, shown in the terminal: no invisible characters (so no escape
     /// sequences), cut short.
     fn shown(s: &str) -> String {
         let c: String = vxr_ops::sanitize(s);
