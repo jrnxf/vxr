@@ -372,7 +372,6 @@ fn output_text(output: &[Value]) -> String {
         .collect()
 }
 
-/// A provider's error as one line: its message, else its type or code.
 /// The most blocks, output items or tool calls one answer may index. The provider names the
 /// index and the lists grow up to it, so a broken or hostile endpoint could ask for billions.
 const MAX_INDEX: usize = 64;
@@ -385,6 +384,7 @@ fn check_index(i: usize) -> Result<(), String> {
     }
 }
 
+/// A provider's error as one line: its message, else its type or code.
 pub fn error_text(e: &Value) -> String {
     let msg = e["message"].as_str().or(e["error"]["message"].as_str());
     let kind = e["type"].as_str().or(e["code"].as_str());
