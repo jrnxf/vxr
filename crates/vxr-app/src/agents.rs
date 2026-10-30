@@ -296,14 +296,15 @@ impl Agents {
 
     /// The user applied the agents' change under review: each edit kept lands as one undo
     /// step named after its agent, as without review, listed in the Agents tab, and
-    /// each agent hears what became of its edits. Returns how many steps landed.
-    pub fn apply_review(&mut self, scene: &mut Scene, review: Review) -> usize {
+    /// each agent hears what became of its edits. Returns how many steps landed, or why a
+    /// staged object could not be made (the rest still landed).
+    pub fn apply_review(&mut self, scene: &mut Scene, review: Review) -> Result<usize, String> {
         let names = review.agents.clone().unwrap_or_default();
         let name_of =
             |lane: u64| names.iter().find(|(c, _)| *c == lane).map_or("Agent".to_string(), |(_, n)| n.clone());
         let counts = Self::counts(&review);
         let mut labels = HashMap::new();
-        let landed = review.session.apply_steps(scene, |i, st, c| {
+        let (landed, failed) = review.session.apply_steps(scene, |i, st, c| {
             let l = label(&name_of(st.lane), st.tool, c);
             labels.insert(i, (st.lane, l.clone()));
             l
@@ -330,7 +331,7 @@ impl Agents {
             self.notify(conn, text);
         }
         self.version += 1;
-        landed.len()
+        failed.map_or(Ok(landed.len()), Err)
     }
 
     /// The user discarded the agents' change under review: the scene is as it was, and each
@@ -468,14 +469,14 @@ impl Agents {
                 }
                 let label = label(client, name, &session.changes(scene));
                 let before = scene.history().position();
-                session.apply_named(scene, &label);
+                let made = session.apply_named(scene, &label);
                 let step = scene.history().position();
                 if step != before {
                     self.edits.push(AgentEdit { conn, client: client.to_string(), label, step, undone_by: None });
                     self.undone.remove(&conn);
                     self.version += 1;
                 }
-                Ok(text)
+                made.map(|_| text)
             }
             Err(e) => {
                 session.discard(scene);
@@ -740,7 +741,7 @@ mod tests {
         );
         // Apply: one undo step per edit kept, named as without review.
         let n = a.apply_review(&mut s, r.take().unwrap());
-        assert_eq!(n, 3);
+        assert_eq!(n, Ok(3));
         let labels: Vec<&str> = a.edits.iter().map(|e| e.label.as_str()).collect();
         assert_eq!(labels, ["Claude Code: box 16 voxels", "Codex: place 1 voxel", "Claude Code: paint 2 voxels"]);
         assert_eq!(s.history().position(), position + 3);
@@ -837,7 +838,7 @@ mod tests {
             .unwrap();
         assert_eq!(s.history().position(), position, "nothing lands while it waits");
         assert!(a.status(1, r.as_ref()).starts_with("4 edits of yours wait"));
-        assert_eq!(a.apply_review(&mut s, r.take().unwrap()), 4);
+        assert_eq!(a.apply_review(&mut s, r.take().unwrap()), Ok(4));
         let labels: Vec<&str> = a.edits[4..].iter().map(|e| e.label.as_str()).collect();
         assert_eq!(
             labels,
@@ -868,7 +869,7 @@ mod tests {
         staged(&mut a, &mut s, &mut r, 1, "Claude Code", "box", json!({"from": [0, 0, 0], "to": [1, 0, 0], "slot": 5}))
             .unwrap();
         staged(&mut a, &mut s, &mut r, 2, "Codex", "place", json!({"cells": [[5, 0, 5]], "slot": 7})).unwrap();
-        assert_eq!(a.apply_review(&mut s, r.take().unwrap()), 3);
+        assert_eq!(a.apply_review(&mut s, r.take().unwrap()), Ok(3));
         let edits: Vec<(u64, &str)> = a.edits.iter().map(|e| (e.conn, e.label.as_str())).collect();
         assert_eq!(
             edits,
@@ -904,7 +905,7 @@ mod tests {
         let all = json!({"from": lo, "to": [x + 63, lo[1] + 63, z + 63], "mode": "erase"});
         let e = staged(&mut a, &mut s, &mut r, 1, "Claude Code", "box", all).unwrap_err();
         assert!(e.contains("the limit is 200000 per call"), "{e}");
-        assert_eq!(a.apply_review(&mut s, r.take().unwrap()), 2);
+        assert_eq!(a.apply_review(&mut s, r.take().unwrap()), Ok(2));
         assert_eq!(s.history().position(), position + 2);
         let labels: Vec<&str> = a.edits.iter().map(|e| e.label.as_str()).collect();
         assert_eq!(labels, ["Claude Code: box 131,072 voxels", "Codex: box 131,072 voxels"]);
@@ -944,7 +945,7 @@ mod tests {
         assert!(staged(&mut a, &mut s, &mut r, 1, "Claude Code", "show_world", json!({})).is_ok());
         let e = staged(&mut a, &mut s, &mut r, 1, "Claude Code", "edit_object", json!({"node": 1})).unwrap_err();
         assert!(e.contains("wait for the user's review"), "{e}");
-        assert_eq!(a.apply_review(&mut s, r.take().unwrap()), 2);
+        assert_eq!(a.apply_review(&mut s, r.take().unwrap()), Ok(2));
         let labels: Vec<&str> = a.edits.iter().map(|e| e.label.as_str()).collect();
         assert_eq!(labels, ["Claude Code: move_object 1 object", "Claude Code: duplicate 5 objects"]);
         // Without review, show_world brings the world back after edit_object.

@@ -942,40 +942,42 @@ impl Session {
     }
 
     /// Apply: erase the removed cells and close the edit as one undo step. Returns how many
-    /// voxels changed.
-    pub fn apply(self, scene: &mut Scene) -> usize {
+    /// voxels changed, or why a staged object could not be made (the rest is still applied).
+    pub fn apply(self, scene: &mut Scene) -> Result<usize, String> {
         self.apply_as(scene, None)
     }
 
     /// Apply as one undo step called `label` ("AI: make the roof red").
-    pub fn apply_named(self, scene: &mut Scene, label: &str) -> usize {
+    pub fn apply_named(self, scene: &mut Scene, label: &str) -> Result<usize, String> {
         self.apply_as(scene, Some(label))
     }
 
-    fn apply_as(mut self, scene: &mut Scene, label: Option<&str>) -> usize {
+    fn apply_as(mut self, scene: &mut Scene, label: Option<&str>) -> Result<usize, String> {
         self.show_before(scene, false);
         if !self.open {
-            return 0;
+            return Ok(0);
         }
-        self.flush(scene);
-        match label {
+        let made = self.flush(scene);
+        let n = match label {
             Some(l) => scene.commit_named(l),
             None => scene.commit(),
-        }
+        };
+        made.map(|()| n)
     }
 
     /// Apply each kept step as an undo step of its own, called `label(index, step, what it
     /// changed)` ("Claude Code: box 8 voxels"): the change runs again from the scene as it
     /// was, one step at a time, each with its own lane's selection. Returns each step that changed
-    /// something, by index, with the history position right after it.
+    /// something, by index, with the history position right after it, and the first staged
+    /// object that could not be made, if any (the rest is still applied).
     pub fn apply_steps(
         mut self,
         scene: &mut Scene,
         mut label: impl FnMut(usize, &Step, &Changes) -> String,
-    ) -> Vec<(usize, u64)> {
+    ) -> (Vec<(usize, u64)>, Option<String>) {
         self.show_before(scene, false);
         if !self.open {
-            return Vec::new();
+            return (Vec::new(), None);
         }
         self.revert(scene);
         // Nothing is left in the open edit: closing it leaves no step.
@@ -983,13 +985,15 @@ impl Session {
         self.open = false;
         self.replaying = true;
         let me = self.lane;
-        let mut out = Vec::new();
+        let (mut out, mut failed) = (Vec::new(), None);
         for i in 0..self.steps.len() {
             if !self.replay(scene, i) || !self.open {
                 continue;
             }
             let changes = self.changes(scene);
-            self.flush(scene);
+            if let Err(e) = self.flush(scene) {
+                failed.get_or_insert(e);
+            }
             let before = scene.history().position();
             scene.commit_named(&label(i, &self.steps[i], &changes));
             if scene.history().position() != before {
@@ -1008,7 +1012,7 @@ impl Session {
         }
         self.replaying = false;
         self.switch(me);
-        out
+        (out, failed)
     }
 
     /// Show the scene as it was before the change (true) or with it again (false), for the
@@ -1602,6 +1606,18 @@ impl Session {
                 "{this} is a linked copy, sharing its model with other objects: its voxels would leave every copy. The user can make it its own object first (Cmd-D duplicates it with a model of its own)"
             )));
         }
+        let parts: Vec<_> = self
+            .pending
+            .iter()
+            .filter_map(|p| match p {
+                Pending::Object { voxels, .. } => bounds(voxels.iter().map(|c| c.0)),
+                Pending::Name { .. } => None,
+            })
+            .chain(bounds(voxels.iter().map(|c| c.0)))
+            .collect();
+        if let Err(e) = scene.room_for(&parts) {
+            return Err(invalid(format!("nothing staged: {e}")));
+        }
         let node = self.next_node(scene);
         let k = self.pending.len();
         for &(p, _) in &voxels {
@@ -1684,8 +1700,10 @@ impl Session {
     }
 
     /// Make what the change staged: erase the removed cells, then make the new objects and
-    /// names in the world, in order, inside the open edit.
-    fn flush(&mut self, scene: &mut Scene) {
+    /// names in the world, in order, inside the open edit. An object that cannot be made
+    /// leaves its voxels in the model; the rest is still made, and the first such error is
+    /// returned.
+    fn flush(&mut self, scene: &mut Scene) -> Result<(), String> {
         for &p in &self.removed {
             scene.put(p, 0);
         }
@@ -1699,13 +1717,22 @@ impl Session {
             })
             .collect();
         let mut nodes: HashMap<usize, usize> = HashMap::new();
+        let mut failed = None;
         for (k, p) in std::mem::take(&mut self.pending).into_iter().enumerate() {
             match p {
                 Pending::Object { node, name, voxels } => {
                     let kept: Vec<(Cell, u8)> =
                         voxels.into_iter().filter(|(c, _)| self.moved.get(c) == Some(&k)).collect();
-                    if let Ok(n) = scene.put_object(&kept, name.as_deref()) {
-                        nodes.insert(node, n);
+                    if kept.is_empty() {
+                        continue;
+                    }
+                    match scene.put_object(&kept, name.as_deref()) {
+                        Ok(n) => {
+                            nodes.insert(node, n);
+                        }
+                        Err(e) => {
+                            failed.get_or_insert(format!("new object {node} was not made: {e}"));
+                        }
                     }
                 }
                 Pending::Name { node, name } => {
@@ -1717,6 +1744,7 @@ impl Session {
             }
         }
         self.moved.clear();
+        failed.map_or(Ok(()), Err)
     }
 
     /// The face at world cell `c` on `side`, as map cells: the voxels of its colour connected

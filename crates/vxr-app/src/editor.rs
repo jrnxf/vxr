@@ -1267,20 +1267,19 @@ impl Editor {
         self.assistant.stop_ask = false;
         let Some(r) = self.review.take() else { return };
         if r.agents.is_some() {
-            let n = self.agents.apply_review(&mut self.scene, r);
-            let msg = match n {
-                0 => "Nothing to apply".to_string(),
-                1 => "Applied 1 agent edit".to_string(),
-                n => format!("Applied {n} agent edits"),
+            let msg = match self.agents.apply_review(&mut self.scene, r) {
+                Ok(0) => "Nothing to apply".to_string(),
+                Ok(1) => "Applied 1 agent edit".to_string(),
+                Ok(n) => format!("Applied {n} agent edits"),
+                Err(e) => format!("Applied, but {e}"),
             };
             return self.ui.toast(&self.ctx, msg);
         }
         let label = r.label();
-        let n = r.session.apply_named(&mut self.scene, &label);
-        let msg = if n > 0 || self.scene.history().undo_label() == Some(label.as_str()) {
-            format!("Applied {label}")
-        } else {
-            "Nothing to apply".to_string()
+        let msg = match r.session.apply_named(&mut self.scene, &label) {
+            Err(e) => format!("Applied {label}, but {e}"),
+            Ok(n) if n > 0 || self.scene.history().undo_label() == Some(label.as_str()) => format!("Applied {label}"),
+            Ok(_) => "Nothing to apply".to_string(),
         };
         self.ui.toast(&self.ctx, msg);
     }

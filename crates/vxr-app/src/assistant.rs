@@ -868,7 +868,7 @@ mod tests {
         // Applied: one undo step, every voxel in exactly one object, the model's names.
         let position = s.history().position();
         let label = r.label();
-        r.session.apply_named(&mut s, &label);
+        r.session.apply_named(&mut s, &label).unwrap();
         assert_eq!(s.history().position(), position + 1);
         let w = s.world().unwrap();
         let names: Vec<Option<&[u8]>> = w.objects().into_iter().map(|i| w.tree.nodes[i].name.as_deref()).collect();

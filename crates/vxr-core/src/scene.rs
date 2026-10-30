@@ -21,7 +21,7 @@ use crate::history::{
     WorldChange,
 };
 use crate::select::Clip;
-use crate::world::World;
+use crate::world::{Budget, World};
 
 /// Largest scene extent per axis, in voxels. The brick grid for 2048^3 is 64 MiB.
 pub const MAX_EXTENT: u32 = 2048;
@@ -107,8 +107,20 @@ pub enum SplitError {
     /// The model is shared by linked copies, so the voxels would leave every copy.
     Linked,
     /// The new object's model would put the scene over its size limit
-    /// ([`crate::world::check_cells`]).
+    /// ([`crate::world::Budget`]).
     TooBig,
+}
+
+impl std::fmt::Display for SplitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            SplitError::World => "the world shows, not a model",
+            SplitError::NothingSelected => "no voxels to take",
+            SplitError::Everything => "those are every voxel of the model",
+            SplitError::Linked => "the model is shared by linked copies",
+            SplitError::TooBig => "the scene would be over its size limit",
+        })
+    }
 }
 
 /// The changes of the edit in progress: one entry per cell or palette slot, first old value
@@ -285,7 +297,7 @@ impl Scene {
     /// A world edit as one undo step, in world mode: `f` may change the tree (move, copy,
     /// group, hide, rename, layers) and add models (a duplicate's own). An error outside
     /// world mode, or if the result would be over [`MAX_EXTENT`] on an axis or its models
-    /// over the size limit ([`crate::world::check_cells`]); then nothing changes.
+    /// over the size limit ([`crate::world::Budget`]); then nothing changes.
     pub fn edit_world<R>(&mut self, f: impl FnOnce(&mut World) -> R) -> Result<R, String> {
         self.commit();
         let r = self.put_world(f);
@@ -308,7 +320,7 @@ impl Scene {
         if w.tree == tree && w.models.len() == models {
             return Ok(r);
         }
-        if let Err(e) = crate::world::check_cells(w.cells()).and_then(|()| self.load(At::World)) {
+        if let Err(e) = w.budget().check().and_then(|()| self.load(At::World)) {
             let w = self.world.as_mut().expect("a world");
             w.tree = tree;
             w.models.truncate(models);
@@ -915,7 +927,7 @@ impl Scene {
             At::Map => {}
         }
         let (lo, hi) = crate::select::bounds(cells.iter().copied()).expect("cells");
-        self.room_for(lo, hi)?;
+        self.room_for(&[(lo, hi)]).map_err(|_| SplitError::TooBig)?;
         let before_at = self.at;
         let made = (self.world.is_none()).then(|| self.make_world());
         let At::Object(src) = self.at else { unreachable!("a model is edited") };
@@ -972,22 +984,25 @@ impl Scene {
         made
     }
 
-    /// Whether a new object's model spanning map cells `lo` to `hi` (inclusive) keeps the
-    /// scene within its size limit ([`crate::world::check_cells`]).
-    fn room_for(&self, lo: [i32; 3], hi: [i32; 3]) -> Result<(), SplitError> {
-        let part = crate::world::cells(std::array::from_fn(|a| (hi[a] - lo[a] + 1) as u32));
-        crate::world::check_cells(self.model_cells() + part).map_err(|_| SplitError::TooBig)
+    /// Whether new objects whose models span map cells `lo` to `hi` (inclusive) each keep
+    /// the scene within its size limit ([`crate::world::Budget`]), or why not.
+    pub fn room_for(&self, parts: &[([i32; 3], [i32; 3])]) -> Result<(), String> {
+        let new = parts.iter().fold(Budget::default(), |b, (lo, hi)| {
+            b.plus(Budget::of(std::array::from_fn(|a| (hi[a] - lo[a] + 1) as u32)))
+        });
+        self.budget().plus(new).check()
     }
 
-    /// The cells of every model ([`World::cells`]), the one being edited at its size now.
-    fn model_cells(&self) -> u64 {
-        let here = crate::world::cells(self.map.size_voxels());
+    /// What every model takes of the size limit ([`World::budget`]), the one being edited at
+    /// its size now.
+    fn budget(&self) -> Budget {
+        let here = Budget::of(self.map.size_voxels());
         match (&self.world, self.at) {
             (Some(w), At::Object(i)) => {
-                let stale = w.model_of(i).map_or(0, |m| crate::world::cells(w.models[m].size_voxels()));
-                w.cells() - stale + here
+                let stale = w.model_of(i).map_or(Budget::default(), |m| Budget::of(w.models[m].size_voxels()));
+                w.budget().minus(stale).plus(here)
             }
-            (Some(w), _) => w.cells(),
+            (Some(w), _) => w.budget(),
             (None, _) => here,
         }
     }
@@ -1021,7 +1036,7 @@ impl Scene {
             return Err(e);
         }
         let (lo, hi) = crate::select::bounds(voxels.iter().map(|c| c.0)).expect("voxels");
-        self.room_for(lo, hi)?;
+        self.room_for(&[(lo, hi)]).map_err(|_| SplitError::TooBig)?;
         let mut part = BrickMap::new(std::array::from_fn(|a| (hi[a] - lo[a] + 1) as u32));
         for &(p, v) in voxels {
             part.set(p[0] - lo[0], p[1] - lo[1], p[2] - lo[2], v);
@@ -1124,7 +1139,7 @@ impl Scene {
     /// move by the shift the result gives (new minus old). Returns how many voxels were
     /// erased and that shift, or why it cannot, changing nothing: the scene shows the world,
     /// a size is 0 or over [`MAX_EXTENT`], or the models would go over the size limit
-    /// ([`crate::world::check_cells`]).
+    /// ([`crate::world::Budget`]).
     pub fn put_bounds(&mut self, lo: [i32; 3], size: [u32; 3]) -> Result<(usize, [i32; 3]), String> {
         if self.at == At::World {
             return Err("the world shows: edit an object to change its bounds".into());
@@ -1132,9 +1147,7 @@ impl Scene {
         if size.iter().any(|&s| s == 0 || s > MAX_EXTENT) {
             return Err(format!("each side is 1 to {MAX_EXTENT}"));
         }
-        crate::world::check_cells(
-            self.model_cells() - crate::world::cells(self.map.size_voxels()) + crate::world::cells(size),
-        )?;
+        self.budget().minus(Budget::of(self.map.size_voxels())).plus(Budget::of(size)).check()?;
         let old = self.bounds();
         let floor = old.floor.clamp(lo[1], lo[1] + size[1] as i32 - 1);
         let new = Bounds { lo, size, floor };

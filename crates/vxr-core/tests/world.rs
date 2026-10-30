@@ -756,7 +756,7 @@ fn a_few_bytes_cannot_ask_for_gigabytes_of_models() {
     assert!(Scene::from_vox(&empty_models(1, 257)).is_err());
     assert!(Scene::from_vox(&empty_models(1, 256)).is_ok());
     let e = Scene::from_vox(&empty_models(MAX_MODELS + 1, 1)).err().unwrap();
-    assert!(e.contains("models; the limit is"), "{e}");
+    assert!(e.contains("over 65536 models"), "{e}");
     let n = (MAX_CELLS / (256u64 * 256 * 256)) as usize;
     assert!(Scene::from_vox(&empty_models(n, 256)).is_ok(), "the budget fits {n} full-size models");
     let e = Scene::from_vox(&empty_models(n + 1, 256)).err().unwrap();
@@ -780,13 +780,42 @@ fn edits_cannot_grow_the_world_past_the_cell_budget() {
     s.resize([2048, 1024, 2048]).unwrap();
     assert!(s.show_world());
     s.edit_world(|w| w.set_hidden(slab, true)).unwrap();
-    let before = s.world().unwrap().cells();
+    let before = s.world().unwrap().budget().cells;
     assert!(before <= MAX_CELLS && 2 * before > MAX_CELLS);
 
     let e = s.edit_world(|w| w.duplicate(slab, false)).unwrap_err();
     assert!(e.contains("size limit"), "{e}");
-    assert_eq!(s.world().unwrap().cells(), before, "nothing changed");
+    assert_eq!(s.world().unwrap().budget().cells, before, "nothing changed");
     s.edit_world(|w| w.duplicate(slab, true)).unwrap().unwrap();
+
+    let saved = vxr_core::files::vox_bytes(&s).unwrap();
+    assert_eq!(Scene::from_vox(&saved).unwrap().world_voxels(false), s.world_voxels(false));
+}
+
+/// Catches: no edit kept to the open-time model count either, so duplicating a group of
+/// own-model objects over and over built a world of more models than a file may hold,
+/// whose save was refused every time. A model over 256 on an axis counts as the blocks it
+/// is saved as, so 4,096 copies of a 2048-long one reach the limit in a few presses.
+#[test]
+fn duplicates_cannot_grow_the_world_past_the_model_limit() {
+    use vxr_core::Scene;
+    use vxr_core::world::MAX_MODELS;
+    let mut s = Scene::from_vox(&fixture("22-world")).unwrap();
+    let slab = find(s.world().unwrap(), "slab");
+    assert!(s.edit_object(slab));
+    s.resize([2048, 1, 1]).unwrap();
+    assert!(s.show_world());
+    s.edit_world(|w| w.set_hidden(slab, true)).unwrap();
+    let mut node = slab;
+    let e = loop {
+        match s.edit_world(|w| w.duplicate(node, false)) {
+            Ok(c) => node = s.edit_world(|w| w.group(&[node, c.unwrap()])).unwrap().unwrap(),
+            Err(e) => break e,
+        }
+    };
+    assert!(e.contains("models, the size limit"), "{e}");
+    let budget = s.world().unwrap().budget();
+    assert!(budget.models <= MAX_MODELS as u64 && 2 * budget.models > MAX_MODELS as u64, "{budget:?}");
 
     let saved = vxr_core::files::vox_bytes(&s).unwrap();
     assert_eq!(Scene::from_vox(&saved).unwrap().world_voxels(false), s.world_voxels(false));

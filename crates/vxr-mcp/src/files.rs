@@ -626,9 +626,9 @@ impl Open {
                 let selection: Vec<[i32; 3]> = session.selection().collect();
                 self.clip = session.clipboard().cloned();
                 self.image = session.take_image();
-                session.apply(&mut self.scene);
+                let made = session.apply(&mut self.scene);
                 self.scene.select(selection, Mode::Replace);
-                Ok(text)
+                made.map(|_| text)
             }
             Err(e) => {
                 session.discard(&mut self.scene);

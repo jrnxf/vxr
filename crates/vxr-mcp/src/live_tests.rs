@@ -431,7 +431,7 @@ impl Window {
                 self.selection = o.selection().collect();
                 self.clip = o.clipboard().cloned();
                 *image = o.take_image();
-                o.apply(&mut self.scene);
+                o.apply(&mut self.scene).unwrap();
                 Ok(t)
             }
             Err(e) => {

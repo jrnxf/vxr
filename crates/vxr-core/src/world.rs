@@ -22,18 +22,43 @@ use crate::scene::{MAX_EXTENT, vox_to_world, world_to_vox};
 pub const MAX_MODELS: usize = 1 << 16;
 pub const MAX_CELLS: u64 = (MAX_EXTENT as u64).pow(3);
 
-/// Models of `cells` cells in all are within [`MAX_CELLS`]: a file over it does not open, so
-/// no edit may make a world over it either, or the file vxr saves would not open again.
-pub fn check_cells(cells: u64) -> Result<(), String> {
-    if cells > MAX_CELLS {
-        return Err(format!("the models would add up to over {MAX_CELLS} cells, the size limit of a scene"));
-    }
-    Ok(())
+/// What models take of a scene's size limit: the file models they are saved as and their
+/// cells. A file over [`MAX_MODELS`] or [`MAX_CELLS`] does not open, so no edit may make a
+/// world over either, or the file vxr saves would not open again.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Budget {
+    pub models: u64,
+    pub cells: u64,
 }
 
-/// The cells of a map of `size`, its sides multiplied out.
-pub fn cells(size: [u32; 3]) -> u64 {
-    size.iter().map(|&k| k as u64).product()
+impl Budget {
+    /// A model of `size`: saved as one file model, or over 256 on an axis as blocks of up
+    /// to 256 (at most that many per axis, rounded up).
+    pub fn of(size: [u32; 3]) -> Budget {
+        Budget {
+            models: size.iter().map(|&k| (k as u64).div_ceil(MAX_MODEL as u64)).product(),
+            cells: size.iter().map(|&k| k as u64).product(),
+        }
+    }
+
+    pub fn plus(self, o: Budget) -> Budget {
+        Budget { models: self.models + o.models, cells: self.cells + o.cells }
+    }
+
+    pub fn minus(self, o: Budget) -> Budget {
+        Budget { models: self.models.saturating_sub(o.models), cells: self.cells.saturating_sub(o.cells) }
+    }
+
+    /// Within the size limit, or why not.
+    pub fn check(self) -> Result<(), String> {
+        if self.models > MAX_MODELS as u64 {
+            return Err(format!("the scene would have over {MAX_MODELS} models, the size limit of a scene"));
+        }
+        if self.cells > MAX_CELLS {
+            return Err(format!("the models would add up to over {MAX_CELLS} cells, the size limit of a scene"));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -83,10 +108,8 @@ impl World {
     pub fn from_doc(doc: &Document) -> Result<World, String> {
         let s = doc.scene().map_err(|e| e.to_string())?;
         let tree = vxr_vox::Tree::read(&s);
-        if s.models.len() > MAX_MODELS {
-            return Err(format!("the file has {} models; the limit is {MAX_MODELS}", s.models.len()));
-        }
-        let mut cells = 0u64;
+        let mut budget = Budget { models: s.models.len() as u64, cells: 0 };
+        budget.check()?;
         for m in &s.models {
             if m.size.iter().any(|&k| k < 1 || k as u32 > MAX_EXTENT) {
                 return Err(format!("a model is {:?} voxels; each side must be 1 to {MAX_EXTENT}", m.size));
@@ -98,8 +121,8 @@ impl World {
                     m.size
                 ));
             }
-            cells += m.size.iter().map(|&k| k as u64).product::<u64>();
-            check_cells(cells)?;
+            budget.cells += m.size.iter().map(|&k| k as u64).product::<u64>();
+            budget.check()?;
         }
         let mut models = Vec::with_capacity(s.models.len());
         for m in &s.models {
@@ -113,9 +136,9 @@ impl World {
         Ok(World { tree, models, version: s.version })
     }
 
-    /// The cells of every model, linked copies counted once (see [`check_cells`]).
-    pub fn cells(&self) -> u64 {
-        self.models.iter().map(|m| cells(m.size_voxels())).sum()
+    /// What every model takes of the size limit, linked copies counted once.
+    pub fn budget(&self) -> Budget {
+        self.models.iter().fold(Budget::default(), |b, m| b.plus(Budget::of(m.size_voxels())))
     }
 
     /// Objects (tree nodes holding a model) in tree order.
