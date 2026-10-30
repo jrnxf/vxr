@@ -522,6 +522,29 @@ fn a_failed_save_keeps_the_scene_s_file() {
 }
 
 #[test]
+fn only_edits_leave_the_file_with_unsaved_changes() {
+    // Calls that do not change the scene must not make `open` and `new_scene` refuse; an
+    // edit and its undo do.
+    let dir = Dir::new("unsaved");
+    let mut c = Client::new(&dir.0);
+    let fresh = |c: &mut Client| c.ok("new_scene", json!({"path": "a.vox", "size": [8, 8, 8], "discard": true}));
+    fresh(&mut c);
+    c.ok("box", json!({"from": [0, 0, 0], "to": [1, 1, 1], "slot": 1}));
+    c.ok("save", json!({}));
+    c.ok("select", json!({"from": [0, 0, 0], "to": [1, 1, 1]}));
+    c.ok("copy", json!({}));
+    c.ok("scene_summary", json!({}));
+    c.ok("done", json!({"summary": "looked"}));
+    c.err("redo", json!({}));
+    c.ok("new_scene", json!({"path": "b.vox", "size": [4, 4, 4]}));
+    c.ok("box", json!({"from": [0, 0, 0], "to": [1, 1, 1], "slot": 1}));
+    assert!(c.err("new_scene", json!({"path": "c.vox", "size": [4, 4, 4]})).contains("unsaved"));
+    c.ok("save", json!({}));
+    c.ok("undo", json!({}));
+    assert!(c.err("new_scene", json!({"path": "c.vox", "size": [4, 4, 4]})).contains("unsaved"));
+}
+
+#[test]
 fn the_ui_s_other_actions_have_tools() {
     // The generated 22-world, edited and saved through the tools for the UI's housekeeping,
     // face, volume, invert, circle and palette actions; undone, the save is the file's bytes.

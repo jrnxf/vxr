@@ -21,6 +21,7 @@ use vxr_core::history::At;
 use vxr_core::material::{Kind, Material};
 use vxr_core::scene::MAX_EXTENT;
 use vxr_core::select::{Clip, bounds};
+use vxr_core::tools::{MAX_RADIUS, ball_cells, box_cells, line_cells, line_steps};
 use vxr_core::{Scene, World};
 use vxr_vox::chunk::{NOTE, Note};
 use vxr_vox::raw::RawFile;
@@ -65,7 +66,6 @@ impl Default for Limits {
     }
 }
 
-const MAX_RADIUS: i32 = 64;
 const MAX_LINE: i32 = 4096;
 const WORLD: &str = "the scene shows the world of several objects, where voxels cannot be edited; the user opens one object's model (Tab) to edit it";
 const NO_WORLD: &str =
@@ -123,6 +123,14 @@ pub struct Step {
     refs: Refs,
     /// The world nodes and layers the call made when it last ran.
     made: Made,
+}
+
+impl Step {
+    /// Whether the call succeeded and changed the scene: not a selection, a copy, `undo`,
+    /// `redo`, `done` or a call that failed.
+    pub fn is_edit(&self) -> bool {
+        self.op.as_ref().is_some_and(|op| op.kind() == OpKind::Edit)
+    }
 }
 
 /// A world node or layer a step names: one it found, or the `k`th one step `j` made.
@@ -412,46 +420,10 @@ impl Session {
         self.calls += 1;
         self.turn_calls += 1;
         let op = parsed.map_err(|e| invalid(format!("{tool}: {e}")))?;
-        let replay = matches!(
-            op,
-            Op::Place(_)
-                | Op::Erase(_)
-                | Op::Box(_)
-                | Op::Line(_)
-                | Op::Sphere(_)
-                | Op::Circle(_)
-                | Op::Face(_)
-                | Op::Fill(_)
-                | Op::Paint(_)
-                | Op::Select(_)
-                | Op::Transform(_)
-                | Op::Copy(_)
-                | Op::Cut(_)
-                | Op::Paste(_)
-                | Op::Delete(_)
-                | Op::Hollow(_)
-                | Op::FillInside(_)
-                | Op::Resize(_)
-                | Op::Crop(_)
-                | Op::PaletteSet(_)
-                | Op::PaletteSwap(_)
-                | Op::PaletteCopy(_)
-                | Op::MaterialSet(_)
-                | Op::MakeObject(_)
-                | Op::MoveObject(_)
-                | Op::Duplicate(_)
-                | Op::Group(_)
-                | Op::Ungroup(_)
-                | Op::Hide(_)
-                | Op::SetLayer(_)
-                | Op::DeleteObject(_)
-                | Op::Rename(_)
-                | Op::NewLayer(_)
-                | Op::HideLayer(_)
-        );
+        let kind = op.kind();
+        let replay = matches!(kind, OpKind::Selection | OpKind::Edit);
         let query = op.is_query();
         self.show_before(scene, false);
-        let edit = !matches!(op, Op::Select(_) | Op::Copy(_));
         let refs = self.refer(&mut op.clone());
         let mark = self.mark(scene);
         let r = self.run(scene, op.clone());
@@ -478,7 +450,7 @@ impl Session {
                 made: if replay && r.is_ok() { self.made_since(&mark, scene) } else { Made::default() },
             });
             // A new edit of this caller's: what its undo took back cannot come back.
-            if replay && edit && self.steps.last().is_some_and(|s| s.ok) {
+            if kind == OpKind::Edit && self.steps.last().is_some_and(|s| s.ok) {
                 let (steps, lane) = (&self.steps, self.lane);
                 self.undone.retain(|&j| steps[j].lane != lane);
             }
@@ -518,37 +490,15 @@ impl Session {
                 if volume > self.limits.box_cells {
                     return Err(invalid(format!("the box spans {volume} cells; at most {}", self.limits.box_cells)));
                 }
-                let mut cells = Vec::new();
-                for z in lo[2]..=hi[2] {
-                    for y in lo[1]..=hi[1] {
-                        for x in lo[0]..=hi[0] {
-                            let p = [x, y, z];
-                            if !a.hollow || (0..3).any(|k| p[k] == lo[k] || p[k] == hi[k]) {
-                                cells.push(p);
-                            }
-                        }
-                    }
-                }
+                let cells: Vec<Cell> = box_cells(lo, hi, a.hollow).collect();
                 self.edit(scene, cells, a.mode, slot, a.name.as_deref())
             }
             Op::Line(a) => {
                 let slot = shape_slot(a.mode, a.slot)?;
-                let steps = (0..3).map(|k| (a.to[k] as i64 - a.from[k] as i64).abs()).max().unwrap_or(0);
-                if steps > MAX_LINE as i64 {
+                if line_steps(a.from, a.to) > MAX_LINE as i64 {
                     return Err(invalid(format!("the line is over {MAX_LINE} cells")));
                 }
-                // As the line brush: equal steps, rounded.
-                let (f, t) = (a.from, a.to);
-                let cells: Vec<Cell> = (0..=steps)
-                    .map(|s| {
-                        if steps == 0 {
-                            return f;
-                        }
-                        std::array::from_fn(|k| {
-                            (f[k] as f64 + (t[k] as f64 - f[k] as f64) * s as f64 / steps as f64).round() as i32
-                        })
-                    })
-                    .collect();
+                let cells: Vec<Cell> = line_cells(a.from, a.to).collect();
                 self.edit(scene, cells, a.mode, slot, a.name.as_deref())
             }
             Op::Sphere(a) => {
@@ -846,9 +796,7 @@ impl Session {
             }
             Op::Undo(_) => {
                 let Some(i) = self.steps.iter().rposition(|s| {
-                    !s.dropped
-                        && s.lane == self.lane
-                        && s.op.as_ref().is_some_and(|o| !matches!(o, Op::Select(_) | Op::Copy(_)))
+                    !s.dropped && s.lane == self.lane && s.op.as_ref().is_some_and(|o| o.kind() == OpKind::Edit)
                 }) else {
                     return Err(invalid("nothing of yours to undo"));
                 };
@@ -2114,25 +2062,12 @@ fn node_text(w: &World, i: usize) -> String {
 }
 
 /// The cells of a ball of radius `r` around `c`, or a disc flat across `flat`, as the center
-/// brush draws them: within r^2 + r/2 of the centre.
+/// brush draws them.
 fn round(c: Cell, r: i32, flat: Option<Axis>) -> Result<Vec<Cell>, Error> {
     if !(1..=MAX_RADIUS).contains(&r) {
         return Err(invalid(format!("radius {r}: 1 to {MAX_RADIUS}")));
     }
-    let flat = flat.map(Axis::index);
-    let reach = (r * r) as f32 + r as f32 / 2.0;
-    let span = |k: usize| if flat == Some(k) { 0 } else { r };
-    let mut cells = Vec::new();
-    for z in -span(2)..=span(2) {
-        for y in -span(1)..=span(1) {
-            for x in -span(0)..=span(0) {
-                if ((x * x + y * y + z * z) as f32) <= reach {
-                    cells.push([c[0] + x, c[1] + y, c[2] + z]);
-                }
-            }
-        }
-    }
-    Ok(cells)
+    Ok(ball_cells(c, r, flat.map(Axis::index), None).collect())
 }
 
 /// "1 node", "2 layers", "1 node and 1 layer".

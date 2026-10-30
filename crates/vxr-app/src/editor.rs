@@ -802,7 +802,7 @@ impl Editor {
         let mut offset: [i32; 3] = std::array::from_fn(|a| q[a] - g.start[a]);
         offset[g.axis] = 0;
         let step: [i32; 3] = std::array::from_fn(|a| offset[a] - g.offset[a]);
-        if step == [0; 3] || self.scene.put_world(|w| w.move_by(g.object, step)).is_none() {
+        if step == [0; 3] || self.scene.move_in_world(g.object, step).is_none() {
             return;
         }
         self.world_drag = Some(WorldDrag { offset, ..g });

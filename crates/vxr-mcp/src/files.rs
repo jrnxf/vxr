@@ -606,9 +606,9 @@ impl Open {
                 self.query("scene_summary")
             }
             _ => {
-                let query = READ_ONLY.contains(&name);
+                let edit = vxr_ops::Op::parse(name, args.clone()).is_ok_and(|op| op.kind() == vxr_ops::OpKind::Edit);
                 let r = self.run(name, args);
-                if r.is_ok() && !query && name != "select" && name != "copy" {
+                if r.is_ok() && edit {
                     self.unsaved = true;
                 }
                 r

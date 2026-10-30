@@ -21,7 +21,7 @@ mod tests;
 mod text;
 mod view;
 
-pub use args::{Op, Tool, tools};
+pub use args::{Op, OpKind, Tool, tools};
 pub use look::Camera;
 pub use session::{Changes, Error, ErrorKind, Ghost, Limits, NewObject, Session, Step, notes_of};
 pub use text::{MAX_NAME, clean, sanitize};

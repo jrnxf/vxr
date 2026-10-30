@@ -22,6 +22,8 @@ pub mod files;
 pub mod fonts;
 #[cfg(all(unix, not(target_arch = "wasm32")))]
 pub mod live;
+#[cfg(test)]
+mod parity;
 pub mod render;
 pub mod review;
 pub mod theme;
