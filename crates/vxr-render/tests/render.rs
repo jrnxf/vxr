@@ -1,5 +1,5 @@
 //! Renders small scenes on the real GPU and checks every pixel against the CPU ray cast.
-//! Skips (passes with a note) when the machine has no GPU adapter.
+//! Skips (passes with a note) when the machine has no GPU adapter, unless `VXR_REQUIRE_GPU` is set.
 
 use vxr_core::{BrickMap, Scene};
 use vxr_render::{Gpu, GpuMap, OrbitCamera, Renderer, brickmap_layout, gpu::read_texture};
@@ -12,6 +12,11 @@ fn gpu() -> Option<Gpu> {
     match pollster::block_on(Gpu::new(instance, None)) {
         Ok(g) => Some(g),
         Err(e) => {
+            // CI sets this so a runner without a (software) GPU fails instead of passing vacuously.
+            assert!(
+                std::env::var_os("VXR_REQUIRE_GPU").is_none(),
+                "VXR_REQUIRE_GPU is set but there is no GPU adapter: {e}"
+            );
             eprintln!("skipping GPU test: {e}");
             None
         }

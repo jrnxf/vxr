@@ -15,6 +15,9 @@ name: Release
 # - v0.1.0, a full release: Cargo.toml must say 0.1.0.
 # The formula follows every full release, and pre-releases only until the first full one.
 #
+# A tag builds only a commit that passed ci.yml's checks and is on main: the `checks` job calls
+# that workflow and the `main` job fails a tag whose commit is not an ancestor of origin/main.
+#
 # Pull requests that touch the build, and a manual run, build and check the same archive, kept
 # as a workflow artifact only: they never make a release or a tag.
 #
@@ -54,8 +57,29 @@ env:
   CARGO_ABOUT_SHA256: ae72f0df0c399a1e96336f696fa55b1b28679fd725632eba8cf8e4568467cc3e
 
 jobs:
+  checks:
+    name: Checks
+    uses: ./.github/workflows/ci.yml
+
+  main:
+    name: Tag is on main
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check the tag's commit is on main
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        run: |
+          git init --quiet
+          git fetch --quiet "https://github.com/$GITHUB_REPOSITORY" "+refs/heads/main:refs/remotes/origin/main"
+          git fetch --quiet --no-tags "https://github.com/$GITHUB_REPOSITORY" "$GITHUB_SHA"
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || {
+            echo "::error::$GITHUB_REF_NAME points at $GITHUB_SHA, which is not on main"
+            exit 1
+          }
+
   binary:
     name: Build vxr.app
+    needs: [checks, main]
     runs-on: macos-15
     timeout-minutes: 60
     outputs:
