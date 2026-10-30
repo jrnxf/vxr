@@ -285,8 +285,11 @@ impl Gesture {
         if self.brush.shape == Shape::Voxel {
             let l = self.last;
             let steps = if self.on_plane() { line_steps(l, p) } else { 1 };
-            for q in line(l, p, steps).skip(1) {
-                scene.stamp(&self.brush, q, self.normal);
+            let (lo, hi) = self.reach(scene);
+            let n = self.brush.size.clamp(1, MAX_SIZE) as i32;
+            let r = steps_near(l, p, steps, lo.map(|k| k - n), hi.map(|k| k + n));
+            for s in (*r.start()).max(1)..=*r.end() {
+                scene.stamp(&self.brush, line_cell(l, p, steps, s), self.normal);
             }
         }
         self.end = p;
@@ -370,19 +373,29 @@ impl Gesture {
         }
     }
 
-    /// [`Gesture::extent`] cut to the cells a brush can change: the map's and, on a mirrored
-    /// axis, their mirror images'. None when nothing is left. A box dragged toward the
-    /// horizon reaches tens of thousands of cells out, and visiting each one froze the app.
-    fn drawn_extent(&self, scene: &Scene) -> Option<([i32; 3], [i32; 3])> {
-        let (mut lo, mut hi) = self.extent();
+    /// The cells a brush can change, inclusive: the map's and, on a mirrored axis, their
+    /// mirror images'. A drag toward the horizon reaches tens of thousands of cells out, and
+    /// visiting each one froze the app, so every drawn shape and stroke is cut to these.
+    fn reach(&self, scene: &Scene) -> ([i32; 3], [i32; 3]) {
         let size = scene.map.size_voxels();
+        let (mut lo, mut hi) = ([0; 3], [0; 3]);
         for a in 0..3 {
             let (mut min, mut max) = (0, size[a] as i32 - 1);
             if self.brush.mirror[a] {
                 let (m0, m1) = (scene.mirror([0; 3], a)[a], scene.mirror([max; 3], a)[a]);
                 (min, max) = (min.min(m0).min(m1), max.max(m0).max(m1));
             }
-            (lo[a], hi[a]) = (lo[a].max(min), hi[a].min(max));
+            (lo[a], hi[a]) = (min, max);
+        }
+        (lo, hi)
+    }
+
+    /// [`Gesture::extent`] cut to [`Gesture::reach`]. None when nothing is left.
+    fn drawn_extent(&self, scene: &Scene) -> Option<([i32; 3], [i32; 3])> {
+        let (mut lo, mut hi) = self.extent();
+        let (min, max) = self.reach(scene);
+        for a in 0..3 {
+            (lo[a], hi[a]) = (lo[a].max(min[a]), hi[a].min(max[a]));
             if lo[a] > hi[a] {
                 return None;
             }
@@ -401,8 +414,9 @@ impl Gesture {
                 }
             }
             Shape::Line => {
-                for q in line_cells(s, self.end) {
-                    scene.apply_voxel(b, q);
+                let (steps, (lo, hi)) = (line_steps(s, self.end), self.reach(scene));
+                for k in steps_near(s, self.end, steps, lo, hi) {
+                    scene.apply_voxel(b, line_cell(s, self.end, steps, k));
                 }
             }
             Shape::Circle | Shape::Sphere => self.draw_round(scene, None),
@@ -467,21 +481,39 @@ pub fn line_steps(a: [i32; 3], b: [i32; 3]) -> i64 {
 /// The cells of the line brush from `a` to `b`, both ends included: [`line_steps`] equal
 /// steps, rounded half up. The brush and the agents' `line` tool both draw these.
 pub fn line_cells(a: [i32; 3], b: [i32; 3]) -> impl Iterator<Item = [i32; 3]> {
-    line(a, b, line_steps(a, b))
+    let steps = line_steps(a, b);
+    (0..=steps).map(move |s| line_cell(a, b, steps, s))
 }
 
-/// The cells from `a` to `b` in `steps` equal steps, rounded, both ends included.
-fn line(a: [i32; 3], b: [i32; 3], steps: i64) -> impl Iterator<Item = [i32; 3]> {
-    (0..=steps.max(0)).map(move |s| {
-        if steps == 0 {
-            return a;
+/// Step `s` of the cells from `a` to `b` in `steps` equal steps, rounded.
+fn line_cell(a: [i32; 3], b: [i32; 3], steps: i64, s: i64) -> [i32; 3] {
+    if steps == 0 {
+        return a;
+    }
+    // Half up, not `round`'s half away from zero: the same line in map cells (never
+    // negative) and in world cells (which are) must come out the same.
+    std::array::from_fn(|k| (a[k] as f64 + (b[k] as f64 - a[k] as f64) * s as f64 / steps as f64 + 0.5).floor() as i32)
+}
+
+/// The steps of [`line_cell`] from `a` to `b` whose cells can fall between `lo` and `hi`
+/// (inclusive; a step or so more on each end), so a far line visits only those.
+fn steps_near(a: [i32; 3], b: [i32; 3], steps: i64, lo: [i32; 3], hi: [i32; 3]) -> std::ops::RangeInclusive<i64> {
+    let steps = steps.max(0);
+    let (mut from, mut to) = (0, steps);
+    for k in 0..3 {
+        let d = b[k] as f64 - a[k] as f64;
+        let (l, h) = (lo[k] as f64 - 1.0 - a[k] as f64, hi[k] as f64 + 1.0 - a[k] as f64);
+        if d == 0.0 || steps == 0 {
+            if l > 0.0 || h < 0.0 {
+                from = steps + 1;
+            }
+            continue;
         }
-        // Half up, not `round`'s half away from zero: the same line in map cells (never
-        // negative) and in world cells (which are) must come out the same.
-        std::array::from_fn(|k| {
-            (a[k] as f64 + (b[k] as f64 - a[k] as f64) * s as f64 / steps as f64 + 0.5).floor() as i32
-        })
-    })
+        let (s0, s1) = (l * steps as f64 / d, h * steps as f64 / d);
+        from = from.max(s0.min(s1).floor() as i64);
+        to = to.min(s0.max(s1).ceil() as i64);
+    }
+    from..=to
 }
 
 /// The cells of the box brush between corners `lo` and `hi` (inclusive, `lo <= hi` on every

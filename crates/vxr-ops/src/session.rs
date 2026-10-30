@@ -1385,9 +1385,7 @@ impl Session {
         let outside = self.voxels_where(scene, |w, _| !inside(w));
         let st = self.stage(scene, outside.into_iter().map(|w| (w, 0)).collect(), false)?;
         self.open(scene);
-        let (_, d) = scene
-            .put_bounds(lo, size)
-            .ok_or_else(|| invalid(format!("size {size:?}: each side is 1 to {MAX_EXTENT}")))?;
+        let (_, d) = scene.put_bounds(lo, size).map_err(|e| invalid(format!("size {size:?}: {e}")))?;
         if d != [0; 3] {
             let mv = |p: Cell| add(p, d);
             self.base = self.base.drain().map(|(p, b)| (mv(p), b)).collect();
@@ -1496,9 +1494,7 @@ impl Session {
     fn world_edit<R>(&mut self, scene: &mut Scene, f: impl FnOnce(&mut World) -> R) -> Result<(R, String), Error> {
         self.open(scene);
         let old = scene.world().expect("a world").tree.clone();
-        let r = scene.put_world(f).ok_or_else(|| {
-            invalid(format!("nothing changed: the world would be over {MAX_EXTENT} voxels on an axis"))
-        })?;
+        let r = scene.put_world(f).map_err(|e| invalid(format!("nothing changed: {e}")))?;
         // The map holds the world again: what shows picked is what shows selected.
         self.selection = scene.selection().collect();
         let tree = &scene.world().expect("a world").tree;

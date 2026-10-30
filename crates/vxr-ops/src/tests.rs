@@ -783,7 +783,7 @@ fn named_parts_keep_their_ids_across_replay() {
 /// to compare.
 fn opened() -> Scene {
     let mut s = Scene::from_vox(&small().to_vox().unwrap()).unwrap();
-    s.set_bounds([-16, 0, -16], [32, 32, 32]);
+    s.set_bounds([-16, 0, -16], [32, 32, 32]).unwrap();
     let s = Scene::from_vox(&s.to_vox().unwrap()).unwrap();
     assert_eq!((s.bounds().lo, s.bounds().size), ([-16, 0, -16], [32, 32, 32]));
     s

@@ -22,6 +22,20 @@ use crate::scene::{MAX_EXTENT, vox_to_world, world_to_vox};
 pub const MAX_MODELS: usize = 1 << 16;
 pub const MAX_CELLS: u64 = (MAX_EXTENT as u64).pow(3);
 
+/// Models of `cells` cells in all are within [`MAX_CELLS`]: a file over it does not open, so
+/// no edit may make a world over it either, or the file vxr saves would not open again.
+pub fn check_cells(cells: u64) -> Result<(), String> {
+    if cells > MAX_CELLS {
+        return Err(format!("the models would add up to over {MAX_CELLS} cells, the size limit of a scene"));
+    }
+    Ok(())
+}
+
+/// The cells of a map of `size`, its sides multiplied out.
+pub fn cells(size: [u32; 3]) -> u64 {
+    size.iter().map(|&k| k as u64).product()
+}
+
 #[derive(Clone)]
 pub struct World {
     pub tree: Tree,
@@ -85,9 +99,7 @@ impl World {
                 ));
             }
             cells += m.size.iter().map(|&k| k as u64).product::<u64>();
-            if cells > MAX_CELLS {
-                return Err(format!("the models add up to over {MAX_CELLS} cells"));
-            }
+            check_cells(cells)?;
         }
         let mut models = Vec::with_capacity(s.models.len());
         for m in &s.models {
@@ -99,6 +111,11 @@ impl World {
             models.push(map);
         }
         Ok(World { tree, models, version: s.version })
+    }
+
+    /// The cells of every model, linked copies counted once (see [`check_cells`]).
+    pub fn cells(&self) -> u64 {
+        self.models.iter().map(|m| cells(m.size_voxels())).sum()
     }
 
     /// Objects (tree nodes holding a model) in tree order.

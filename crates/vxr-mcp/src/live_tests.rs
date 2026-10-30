@@ -472,7 +472,7 @@ fn the_edit_tools_change_the_window_and_undo_gives_the_file_back() {
     cells.extend((1..4).map(|y| (s.to_map([1, y, 1]), 20)));
     s.edit(cells);
     let mut opened = vxr_core::Scene::from_vox(&s.to_vox().unwrap()).unwrap();
-    opened.set_bounds([-16, 0, -16], [32, 32, 32]);
+    opened.set_bounds([-16, 0, -16], [32, 32, 32]).unwrap();
     let bytes = vxr_core::Scene::from_vox(&opened.to_vox().unwrap()).unwrap().to_vox().unwrap();
     let mut w = Window { scene: vxr_core::Scene::from_vox(&bytes).unwrap(), selection: Vec::new(), clip: None };
     assert_eq!(w.scene.bounds().size, [32, 32, 32]);

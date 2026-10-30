@@ -822,27 +822,28 @@ impl Editor {
                 s.pick(None);
             }
             (Action::Transform(Transform::Move(d)), Some(i)) => {
-                if s.edit_world(|w| w.move_by(i, d)).is_none() {
+                if s.edit_world(|w| w.move_by(i, d)).is_err() {
                     self.ui.toast(&self.ctx, "No room in the scene for that");
                 }
             }
             (Action::DeleteSelection, Some(i)) => {
                 let name = node_name(s.world().unwrap(), i);
-                if s.edit_world(|w| w.remove(i)) == Some(true) {
+                if s.edit_world(|w| w.remove(i)) == Ok(true) {
                     self.ui.toast(&self.ctx, format!("Deleted {name}"));
                 }
             }
-            (Action::Duplicate { linked }, Some(i)) => match s.edit_world(|w| w.duplicate(i, linked)).flatten() {
-                Some(c) => {
+            (Action::Duplicate { linked }, Some(i)) => match s.edit_world(|w| w.duplicate(i, linked)) {
+                Ok(Some(c)) => {
                     s.pick(Some(c));
                     let name = node_name(s.world().unwrap(), i);
                     let what = if linked { "Linked copy of" } else { "Duplicated" };
                     self.ui.toast(&self.ctx, format!("{what} {name}"));
                 }
-                None => self.ui.toast(&self.ctx, "No room in the scene for that"),
+                Ok(None) => {}
+                Err(e) => self.ui.toast(&self.ctx, format!("Not copied: {e}")),
             },
             (Action::Group, Some(i)) => {
-                if let Some(g) = s.edit_world(|w| w.group(&[i])).flatten() {
+                if let Ok(Some(g)) = s.edit_world(|w| w.group(&[i])) {
                     s.pick(Some(g));
                     let msg =
                         format!("Grouped {} as {}", node_name(s.world().unwrap(), i), node_name(s.world().unwrap(), g));
@@ -854,7 +855,7 @@ impl Editor {
                 let (name, first) = (node_name(w, g), w.tree.children(g).first().copied());
                 if w.model_of(g).is_some() {
                     self.ui.toast(&self.ctx, "Pick a group to ungroup it");
-                } else if s.edit_world(|w| w.ungroup(g)) == Some(true) {
+                } else if s.edit_world(|w| w.ungroup(g)) == Ok(true) {
                     s.pick(first);
                     self.ui.toast(&self.ctx, format!("Ungrouped {name}"));
                 }
@@ -990,14 +991,12 @@ impl Editor {
                 self.ui.toast(&self.ctx, msg);
             }
             Action::Resize(size) => match s.resize(size) {
-                Some(n) => {
+                Ok(n) => {
                     let msg = format!("Bounds {}×{}×{}", size[0], size[1], size[2]);
                     let msg = if n > 0 { format!("{msg}: erased {n} voxels outside") } else { msg };
                     self.ui.toast(&self.ctx, msg);
                 }
-                None => self
-                    .ui
-                    .toast(&self.ctx, format!("Bounds go from 1 to {} on each axis", vxr_core::scene::MAX_EXTENT)),
+                Err(e) => self.ui.toast(&self.ctx, format!("Bounds not changed: {e}")),
             },
             Action::Crop => {
                 let msg = if s.crop() {
@@ -1048,6 +1047,7 @@ impl Editor {
             Err(SplitError::Everything) => "The whole model is selected: it is its own object already".into(),
             Err(SplitError::NothingSelected) => "Select voxels to make an object of them".into(),
             Err(SplitError::World) => "Tab into an object to edit its voxels".into(),
+            Err(SplitError::TooBig) => "Not made: the scene would be over its size limit".into(),
         };
         self.ui.toast(&self.ctx, msg);
     }
@@ -1937,7 +1937,7 @@ impl Editor {
     pub fn set_hidden(&mut self, i: usize, hidden: bool) {
         let Some(w) = self.scene.world() else { return };
         let name = node_name(w, i);
-        let msg = if self.scene.edit_world(|w| w.set_hidden(i, hidden)).is_none() {
+        let msg = if self.scene.edit_world(|w| w.set_hidden(i, hidden)).is_err() {
             "Tab to the world to hide objects".to_string()
         } else if hidden {
             format!("Hid {name}")
@@ -1968,7 +1968,7 @@ impl Editor {
             Some(i) if w.tree.nodes[i].layer == id => return,
             Some(i) => {
                 let name = node_name(w, i);
-                self.scene.edit_world(|w| w.put_on_layer(i, id));
+                let _ = self.scene.edit_world(|w| w.put_on_layer(i, id));
                 format!("Moved {name} to {}", layer_name(self.scene.world().unwrap(), id))
             }
             None => "Pick an object to move it to a layer".into(),
@@ -1980,7 +1980,7 @@ impl Editor {
     pub fn set_layer_hidden(&mut self, id: i32, hidden: bool) {
         let Some(w) = self.scene.world() else { return };
         let name = layer_name(w, id);
-        let msg = if self.scene.edit_world(|w| w.set_layer_hidden(id, hidden)).is_none() {
+        let msg = if self.scene.edit_world(|w| w.set_layer_hidden(id, hidden)).is_err() {
             "Tab to the world to hide layers".to_string()
         } else if hidden {
             format!("Hid layer {name}")
@@ -1995,8 +1995,8 @@ impl Editor {
         let Some(w) = self.scene.world() else { return };
         let name = format!("layer {}", w.layers().iter().map(|l| l.id + 1).max().unwrap_or(0));
         let msg = match self.scene.edit_world(|w| w.add_layer(&name)) {
-            Some(_) => format!("Added {name}"),
-            None => "Tab to the world to add layers".into(),
+            Ok(_) => format!("Added {name}"),
+            Err(_) => "Tab to the world to add layers".into(),
         };
         self.ui.toast(&self.ctx, msg);
     }
@@ -2009,7 +2009,7 @@ impl Editor {
         if w.layers().iter().find(|l| l.id == id).is_none_or(|l| l.name.as_deref() == new.map(str::as_bytes)) {
             return;
         }
-        if self.scene.edit_world(|w| w.set_layer_name(id, new)).is_some() {
+        if self.scene.edit_world(|w| w.set_layer_name(id, new)).is_ok() {
             let msg = format!("Renamed layer to {}", layer_name(self.scene.world().unwrap(), id));
             self.ui.toast(&self.ctx, msg);
         }
@@ -2401,13 +2401,14 @@ mod tests {
             w.set_hidden(trees, true);
             w.set_name(trees, None);
             w.set_name(slab, None);
-        });
+        })
+        .unwrap();
         let rows = tree_rows(&s);
         assert!(!row(&rows, "tree a").shown && !row(&rows, "group 1").shown);
         assert_eq!(rows[0].name, "object 1");
         // The model being edited reports the scene's bounds.
         assert!(s.edit_object(slab));
-        s.set_bounds([0, 0, 0], [8, 3, 8]);
+        s.set_bounds([0, 0, 0], [8, 3, 8]).unwrap();
         assert_eq!(tree_rows(&s)[0].size, [8, 3, 8]);
     }
 
@@ -2422,7 +2423,7 @@ mod tests {
         );
         // A layer an object is on without a LAYR entry is listed by its id.
         let gem = tree_rows(&s).into_iter().find(|r| r.name == "gem").unwrap().node;
-        s.edit_world(|w| w.put_on_layer(gem, 5));
+        s.edit_world(|w| w.put_on_layer(gem, 5)).unwrap();
         let last = layer_rows(&s).pop().unwrap();
         assert_eq!((last.id, last.name.as_str(), last.objects), (5, "layer 5", 1));
         assert_eq!(tree_rows(&s).iter().find(|r| r.node == gem).unwrap().layer, 5);

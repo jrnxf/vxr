@@ -367,3 +367,24 @@ fn a_sphere_dragged_far_off_the_map_draws_at_the_largest_radius() {
     assert!(!far.is_empty());
     assert_eq!((r, far), sphere([16 + MAX_RADIUS, 0, 16]));
 }
+
+/// Catches: a voxel stroke and the line brush visited every step out to the pointer, inside
+/// the map or not: a size-16 stroke toward the horizon stamped a 4,096-cell cube at each of
+/// 100,000 steps on one move, which froze the app as the far box did.
+#[test]
+fn a_stroke_or_line_dragged_far_off_the_map_changes_only_the_map_and_stays_fast() {
+    let run = |b: Brush, to: [i32; 3]| {
+        let mut s = Scene::new([32, 32, 32]);
+        let t = std::time::Instant::now();
+        drag(&mut s, b, ground([0, -1, 0]), &[to]);
+        assert!(t.elapsed().as_secs_f32() < 1.0, "{:?}", t.elapsed());
+        cells(&s)
+    };
+    let line = run(brush(Tool::Add, Shape::Line), [100_000, 0, 100_000]);
+    assert_eq!(line, (0..32).map(|k| ([k, 0, k], 7)).collect::<Vec<_>>(), "the diagonal across the map");
+
+    let stroke = Brush { size: 16, ..brush(Tool::Add, Shape::Voxel) };
+    let far = run(stroke, [100_000, 0, 100_000]);
+    assert_eq!(far, run(stroke, [40, 0, 40]), "past 40 no 16-cube reaches the map");
+    assert!(far.len() > 32 * 16);
+}

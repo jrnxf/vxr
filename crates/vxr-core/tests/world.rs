@@ -762,3 +762,32 @@ fn a_few_bytes_cannot_ask_for_gigabytes_of_models() {
     let e = Scene::from_vox(&empty_models(n + 1, 256)).err().unwrap();
     assert!(e.contains("cells"), "{e}");
 }
+
+/// Catches: no edit kept to the open-time cell budget, so growing one object's bounds and
+/// duplicating it built a world whose save was refused every time (the saved file would
+/// not have opened again). Edits that would go over it are refused; a linked copy, which
+/// shares its model, is not.
+#[test]
+fn edits_cannot_grow_the_world_past_the_cell_budget() {
+    use vxr_core::Scene;
+    use vxr_core::world::MAX_CELLS;
+    let mut s = Scene::from_vox(&fixture("22-world")).unwrap();
+    let slab = find(s.world().unwrap(), "slab");
+    assert!(s.edit_object(slab));
+    let e = s.resize([2048, 2048, 2048]).unwrap_err();
+    assert!(e.contains("size limit"), "{e}");
+    assert_eq!(s.bounds().size, [8, 1, 8], "nothing changed");
+    s.resize([2048, 1024, 2048]).unwrap();
+    assert!(s.show_world());
+    s.edit_world(|w| w.set_hidden(slab, true)).unwrap();
+    let before = s.world().unwrap().cells();
+    assert!(before <= MAX_CELLS && 2 * before > MAX_CELLS);
+
+    let e = s.edit_world(|w| w.duplicate(slab, false)).unwrap_err();
+    assert!(e.contains("size limit"), "{e}");
+    assert_eq!(s.world().unwrap().cells(), before, "nothing changed");
+    s.edit_world(|w| w.duplicate(slab, true)).unwrap().unwrap();
+
+    let saved = vxr_core::files::vox_bytes(&s).unwrap();
+    assert_eq!(Scene::from_vox(&saved).unwrap().world_voxels(false), s.world_voxels(false));
+}

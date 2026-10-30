@@ -130,13 +130,13 @@ fn resize_keeps_the_bottom_and_centre_and_drops_what_falls_outside() {
     s.edit([([0, 0, 0], 1), ([8, 3, 8], 2), ([15, 15, 15], 3)]);
     s.select_all();
     let (cells, version) = (world(&s), s.reshapes());
-    assert_eq!(s.resize([20, 16, 24]), Some(0));
+    assert_eq!(s.resize([20, 16, 24]), Ok(0));
     let b = s.bounds();
     assert_eq!((b.lo, b.size), ([lo[0] - 2, lo[1], lo[2] - 4], [20, 16, 24]));
     assert_eq!((world(&s), s.reshapes()), (cells.clone(), version + 1));
     assert_eq!(s.selected_count(), 3, "the selection moves with the map");
     // Shrinking by an odd amount takes the extra cell from the high side.
-    assert_eq!(s.resize([9, 9, 9]), Some(2), "two corners fall outside");
+    assert_eq!(s.resize([9, 9, 9]), Ok(2), "two corners fall outside");
     let b = s.bounds();
     assert_eq!((b.lo, b.size), ([lo[0] + 3, lo[1], lo[2] + 3], [9, 9, 9]));
     assert_eq!(world(&s), vec![([lo[0] + 8, lo[1] + 3, lo[2] + 8], 2)]);
@@ -145,8 +145,8 @@ fn resize_keeps_the_bottom_and_centre_and_drops_what_falls_outside() {
     assert_eq!((world(&s), s.selected_count()), (cells.clone(), 3), "resize is one undo step");
     assert!(s.undo());
     assert_eq!((s.bounds().lo, s.bounds().size, world(&s)), (lo, [16, 16, 16], cells));
-    assert_eq!(s.resize([0, 4, 4]), None);
-    assert_eq!(s.resize([16, 16, 16]), Some(0), "same size is no step");
+    assert!(s.resize([0, 4, 4]).is_err());
+    assert_eq!(s.resize([16, 16, 16]), Ok(0), "same size is no step");
     assert!(s.redo(), "the redo stack survives a no-op");
 }
 
@@ -168,10 +168,10 @@ fn a_resize_inside_an_open_edit_is_one_step_with_its_edits() {
     s.begin();
     s.put([1, 0, 0], 2);
     // Taller: nothing moves, and a voxel goes above the old top.
-    assert_eq!(s.put_bounds(lo, [16, 24, 16]), Some((0, [0, 0, 0])));
+    assert_eq!(s.put_bounds(lo, [16, 24, 16]), Ok((0, [0, 0, 0])));
     assert!(s.put([1, 20, 0], 3));
     // One narrower from the low x side: map cells move one down x and (0, 0, 0) falls out.
-    assert_eq!(s.put_bounds([lo[0] + 1, lo[1], lo[2]], [15, 24, 16]), Some((1, [-1, 0, 0])));
+    assert_eq!(s.put_bounds([lo[0] + 1, lo[1], lo[2]], [15, 24, 16]), Ok((1, [-1, 0, 0])));
     assert_eq!((s.map.get(0, 0, 0), s.map.get(0, 20, 0)), (2, 3), "the open edit's cells moved with the map");
     assert_eq!(s.selected_count(), 1);
     let after = world(&s);
@@ -183,9 +183,9 @@ fn a_resize_inside_an_open_edit_is_one_step_with_its_edits() {
     // voxel above the old top included.
     let position = s.history().position();
     s.put([1, 0, 0], 2);
-    s.put_bounds(lo, [16, 24, 16]);
+    s.put_bounds(lo, [16, 24, 16]).unwrap();
     s.put([1, 20, 0], 3);
-    s.put_bounds([lo[0] + 1, lo[1], lo[2]], [15, 24, 16]);
+    s.put_bounds([lo[0] + 1, lo[1], lo[2]], [15, 24, 16]).unwrap();
     assert_eq!(s.commit(), 3);
     assert_eq!(s.history().position(), position + 1);
     let b = s.bounds();

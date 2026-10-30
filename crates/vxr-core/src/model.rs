@@ -133,7 +133,7 @@ impl Scene {
     /// Resize the model bounds to `size`, keeping the bottom and the centre on X and Z (an
     /// odd change goes to the low side when growing and the high side when shrinking), as
     /// [`Scene::set_bounds`].
-    pub fn resize(&mut self, size: [u32; 3]) -> Option<usize> {
+    pub fn resize(&mut self, size: [u32; 3]) -> Result<usize, String> {
         self.set_bounds(self.resized_lo(size), size)
     }
 
@@ -160,7 +160,6 @@ impl Scene {
         }
         let size = std::array::from_fn(|a| (hi[a] - lo[a] + 1) as u32);
         let before = self.bounds();
-        self.set_bounds(self.to_world(lo), size);
-        self.bounds() != before
+        self.set_bounds(self.to_world(lo), size).is_ok() && self.bounds() != before
     }
 }
