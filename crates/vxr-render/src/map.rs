@@ -251,8 +251,6 @@ impl GpuMap {
             capacity: u64::MAX,
             page,
         };
-        let mut bytes: Vec<u8> = Vec::new();
-        let mut tmp = Vec::with_capacity(BRICK_VOXELS);
         for b in 0..slots as usize {
             let n = brick_popcount(map, b);
             if n == 0 {
@@ -263,12 +261,6 @@ impl GpuMap {
             heap.offsets[b * 2] = off;
             heap.offsets[b * 2 + 1] = brick_prefix(map, b);
             heap.caps[b] = cap;
-            pack_brick(map, b, &mut tmp);
-            let end = off as usize + cap as usize;
-            if bytes.len() < end {
-                bytes.resize(end, 0);
-            }
-            bytes[off as usize..off as usize + tmp.len()].copy_from_slice(&tmp);
         }
         // Headroom for edits that grow bricks: an eighth of the heap, at least 64 KiB (or a page).
         heap.capacity = (heap.top + (heap.top / 8).max(MIN_HEAP_HEADROOM.min(page))).div_ceil(4) * 4;
@@ -278,6 +270,16 @@ impl GpuMap {
                 "the scene's {} heap bytes need more than {MAX_PAGES} pages of {} bytes",
                 heap.capacity, page
             ));
+        }
+        let mut bytes = vec![0u8; heap.top as usize];
+        let mut tmp = Vec::with_capacity(BRICK_VOXELS);
+        for b in 0..slots as usize {
+            if heap.caps[b] == 0 {
+                continue;
+            }
+            pack_brick(map, b, &mut tmp);
+            let off = heap.offsets[b * 2] as usize;
+            bytes[off..off + tmp.len()].copy_from_slice(&tmp);
         }
 
         let storage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;

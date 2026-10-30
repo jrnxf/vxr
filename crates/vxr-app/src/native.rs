@@ -138,6 +138,7 @@ impl App {
             color_space: wgpu::SurfaceColorSpace::Auto,
         };
         surface.configure(&gpu.device, &config);
+        gpu.report_problems();
         let ppp = window.scale_factor() as f32;
         let max_tex = gpu.device.limits().max_texture_dimension_2d as usize;
         let mut editor = Editor::new(gpu, scene, &name, format, (config.width, config.height), ppp, fonts())?;
@@ -186,8 +187,17 @@ impl State {
     /// Run what agents asked. Apart from [`State::redraw`], which needs a surface to draw
     /// into, so a hidden window still answers them.
     fn serve_agents(&mut self) {
-        #[cfg(unix)]
-        self.live.tick(&mut self.editor);
+        loop {
+            #[cfg(unix)]
+            self.live.tick(&mut self.editor);
+            let host = self.editor.take_host_actions();
+            if host.is_empty() {
+                break;
+            }
+            for a in host {
+                self.act(a);
+            }
+        }
     }
 
     fn redraw(&mut self) -> Drawn {
@@ -327,9 +337,18 @@ impl ApplicationHandler<Wake> for App {
     /// Sleep between events, waking for the next one, for an agent's request, or for the
     /// moment [`Editor::repaint_after`] names after a draw.
     fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
-        event_loop.set_control_flow(ControlFlow::Wait);
-        if let (StartCause::ResumeTimeReached { .. }, Some(s)) = (cause, &self.state) {
-            s.window.request_redraw();
+        match cause {
+            // Woken early by an event that may not draw: keep the wake already owed.
+            StartCause::WaitCancelled { requested_resume: Some(t), .. } => {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(t));
+            }
+            StartCause::ResumeTimeReached { .. } => {
+                event_loop.set_control_flow(ControlFlow::Wait);
+                if let Some(s) = &self.state {
+                    s.window.request_redraw();
+                }
+            }
+            _ => event_loop.set_control_flow(ControlFlow::Wait),
         }
     }
 
@@ -432,7 +451,7 @@ impl ApplicationHandler<Wake> for App {
                 match wait {
                     Some(d) if d.is_zero() => s.window.request_redraw(),
                     Some(d) => event_loop.set_control_flow(ControlFlow::WaitUntil(std::time::Instant::now() + d)),
-                    None => {}
+                    None => event_loop.set_control_flow(ControlFlow::Wait),
                 }
             }
             _ => {}

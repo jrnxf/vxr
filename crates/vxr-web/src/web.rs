@@ -85,6 +85,7 @@ pub async fn start(
         color_space: wgpu::SurfaceColorSpace::Auto,
     };
     surface.configure(&gpu.device, &config);
+    gpu.report_problems();
     let fonts =
         [&sans_regular, &sans_medium, &sans_semibold, &mono_regular, &mono_medium, &mono_ultrablack, &symbols, &icons]
             .iter()

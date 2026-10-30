@@ -233,7 +233,6 @@ impl Editor {
         fonts: Option<FontBytes>,
     ) -> Result<Self, String> {
         let layout = brickmap_layout(&gpu.device);
-        gpu.report_problems();
         let mut scene = scene;
         scene.map.track_dirty(true);
         let map = GpuMap::new(&gpu.device, &gpu.queue, &layout, &scene.map, &scene.palette)?;
@@ -1648,6 +1647,12 @@ impl Editor {
         (self.egui_delay != std::time::Duration::MAX).then_some(self.egui_delay)
     }
 
+    /// What agents asked of the host (a save, a new scene's window title), for a window to
+    /// run while it draws nothing.
+    pub fn take_host_actions(&mut self) -> Vec<Action> {
+        std::mem::take(&mut self.agent_host)
+    }
+
     /// Whether an agent's call has to wait: the user is in the middle of a drag, a box or a
     /// colour or material slider.
     pub fn agent_busy(&self) -> bool {
@@ -2164,12 +2169,24 @@ impl Editor {
         }
         let edit = self.scene.map.take_dirty_box().map(|(lo, hi)| EditBox::voxels(lo, hi));
         let was_stale = self.map.stale();
-        if let Err(e) = self.map.upload_dirty(dev, queue, &mut self.scene.map, &self.scene.palette) {
-            // Said once, when the view first stops matching the scene, not on every edit after.
-            if !was_stale {
-                self.ui
-                    .alert(&self.ctx, format!("The view cannot show this scene any more: {e}. Undo to bring it back."));
+        match self.map.upload_dirty(dev, queue, &mut self.scene.map, &self.scene.palette) {
+            Err(e) => {
+                // Said once, when the view first stops matching the scene, not on every edit after.
+                if !was_stale {
+                    self.ui.alert(
+                        &self.ctx,
+                        format!("The view cannot show this scene any more: {e}. Undo to bring it back."),
+                    );
+                }
             }
+            // Every edit while stale sampled the old buffers, not just the last one's box.
+            Ok(_) if was_stale && !self.map.stale() => {
+                self.preview.restart();
+                if self.export.take().is_some() {
+                    self.ui.toast(&self.ctx, "Export cancelled: the scene changed");
+                }
+            }
+            Ok(_) => {}
         }
         for problem in self.gpu.take_problems() {
             eprintln!("vxr: {problem}");
