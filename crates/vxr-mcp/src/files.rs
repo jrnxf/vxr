@@ -70,7 +70,7 @@ fn own_tools() -> Vec<(&'static str, String, Value)> {
             "Write the scene to its file (or to path), losslessly: materials, layers, cameras, names and every chunk the edits did not touch keep their bytes. The first overwrite of a file in this session keeps the old one as <name>.vox.bak. Refuses when the file changed on disk since it was opened or saved here (the user saved it in vxr, say) unless overwrite is true, which keeps that version as the .bak.".into(),
             json!({"type": "object", "properties": {
                 "path": path,
-                "overwrite": {"type": "boolean", "description": "replace the file even though it changed on disk since it was opened"},
+                "overwrite": {"type": "boolean", "description": "replace the file even though it changed on disk since this session opened or saved it"},
             }, "additionalProperties": false}),
         ),
     ]
