@@ -391,12 +391,8 @@ impl Agents {
                 self.redo_edit(scene, i).map(|l| format!("brought back {l}"))
             }
             "done" => {
-                let s: String = args
-                    .get("summary")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
+                let s: String = vxr_ops::sanitize(args.get("summary").and_then(Value::as_str).unwrap_or(""))
                     .chars()
-                    .filter(|c| !c.is_control())
                     .take(500)
                     .collect();
                 Ok(format!("noted: {s}"))

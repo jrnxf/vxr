@@ -239,12 +239,8 @@ impl Files {
             "save" => self.save(args),
             "export" => self.export(args),
             "done" => {
-                let s: String = args
-                    .get("summary")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
+                let s: String = vxr_ops::sanitize(args.get("summary").and_then(Value::as_str).unwrap_or(""))
                     .chars()
-                    .filter(|c| !c.is_control())
                     .take(500)
                     .collect();
                 let unsaved = self.open.as_ref().is_some_and(|o| o.unsaved);

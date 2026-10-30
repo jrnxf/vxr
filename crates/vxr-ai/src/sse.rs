@@ -10,6 +10,10 @@ pub struct Event {
     pub data: String,
 }
 
+/// The most bytes held while waiting for a blank line. A real event is a few KiB; a broken or
+/// hostile endpoint that never sends one must not fill memory.
+pub const MAX_BUFFERED: usize = 4 << 20;
+
 #[derive(Default)]
 pub struct Sse {
     buf: Vec<u8>,
@@ -18,8 +22,9 @@ pub struct Sse {
 }
 
 impl Sse {
-    /// Take the next bytes of the stream and return the events they complete.
-    pub fn push(&mut self, bytes: &[u8]) -> Vec<Event> {
+    /// Take the next bytes of the stream and return the events they complete, or an error when
+    /// more than [`MAX_BUFFERED`] bytes arrived without one finishing.
+    pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<Event>, String> {
         self.buf.extend_from_slice(bytes);
         let mut out = Vec::new();
         // A blank line may straddle the old end: search again from 3 bytes before it.
@@ -31,7 +36,10 @@ impl Sse {
             }
         }
         self.searched = self.buf.len();
-        out
+        if self.buf.len() > MAX_BUFFERED {
+            return Err("the provider sent an event too large to read".into());
+        }
+        Ok(out)
     }
 
     /// The stream ended: a last block without its blank line still counts.
@@ -85,27 +93,42 @@ mod tests {
 
     #[test]
     fn events_come_out_whole_however_the_bytes_are_cut() {
-        let whole = Sse::default().push(STREAM);
+        let whole = Sse::default().push(STREAM).unwrap();
         assert_eq!(whole.len(), 3);
         assert_eq!(whole[0], Event { event: "a".into(), data: "{\"x\":\"é\"}".into() });
         assert_eq!(whole[1], Event { event: "message".into(), data: "one\ntwo".into() });
         assert_eq!(whole[2].data, "[DONE]");
         for cut in 1..STREAM.len() {
             let mut s = Sse::default();
-            let mut got = s.push(&STREAM[..cut]);
-            got.extend(s.push(&STREAM[cut..]));
+            let mut got = s.push(&STREAM[..cut]).unwrap();
+            got.extend(s.push(&STREAM[cut..]).unwrap());
             assert_eq!(got, whole, "cut at {cut}");
         }
         let mut s = Sse::default();
-        let one_by_one: Vec<Event> = STREAM.iter().flat_map(|b| s.push(&[*b])).collect();
+        let one_by_one: Vec<Event> = STREAM.iter().flat_map(|b| s.push(&[*b]).unwrap()).collect();
         assert_eq!(one_by_one, whole);
     }
 
     #[test]
     fn a_last_block_without_its_blank_line_counts() {
         let mut s = Sse::default();
-        assert!(s.push(b"data: end").is_empty());
+        assert!(s.push(b"data: end").unwrap().is_empty());
         assert_eq!(s.finish().map(|e| e.data), Some("end".into()));
         assert_eq!(s.finish(), None);
+    }
+
+    #[test]
+    fn an_event_that_never_ends_is_refused() {
+        let mut s = Sse::default();
+        let chunk = vec![b'x'; 64 << 10];
+        let mut fed = 0;
+        let err = loop {
+            match s.push(&chunk) {
+                Ok(_) => fed += chunk.len(),
+                Err(e) => break e,
+            }
+            assert!(fed <= MAX_BUFFERED, "kept buffering past the cap");
+        };
+        assert!(err.contains("too large"), "{err}");
     }
 }

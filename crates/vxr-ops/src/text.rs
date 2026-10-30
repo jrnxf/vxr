@@ -3,10 +3,47 @@
 /// Longest name shown to the model.
 pub const MAX_NAME: usize = 64;
 
-/// A name from a file or a model, as data: at most [`MAX_NAME`] characters, no control
+/// Whether `c` draws nothing the reader can see but still reaches the model: a control
+/// character (Cc) or a format character (Cf), such as a zero-width space, a bidi override or a
+/// Unicode tag (U+E0000 to U+E007F, which spell out hidden text).
+pub fn is_invisible(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c as u32,
+            0x00AD
+                | 0x0600..=0x0605
+                | 0x061C
+                | 0x06DD
+                | 0x070F
+                | 0x0890..=0x0891
+                | 0x08E2
+                | 0x180E
+                | 0x200B..=0x200F
+                | 0x202A..=0x202E
+                | 0x2060..=0x2064
+                | 0x2066..=0x206F
+                | 0xFEFF
+                | 0xFFF9..=0xFFFB
+                | 0x110BD
+                | 0x110CD
+                | 0x13430..=0x1343F
+                | 0x1BCA0..=0x1BCA3
+                | 0x1D173..=0x1D17A
+                | 0xE0001
+                | 0xE0020..=0xE007F
+        )
+}
+
+/// `s` without its invisible characters (see [`is_invisible`]), newlines included. Text from a
+/// file, a model or the other side of a socket goes through this before it is shown or sent on.
+pub fn sanitize(s: &str) -> String {
+    s.chars().filter(|&c| !is_invisible(c)).collect()
+}
+
+/// A name from a file or a model, as data: at most [`MAX_NAME`] characters, no invisible
 /// characters (newlines included), trimmed.
 pub fn clean(name: &[u8]) -> String {
-    let s: String = String::from_utf8_lossy(name).chars().filter(|c| !c.is_control()).take(MAX_NAME).collect();
+    let s: String = sanitize(&String::from_utf8_lossy(name)).chars().take(MAX_NAME).collect();
     s.trim().to_string()
 }
 
@@ -100,6 +137,17 @@ mod tests {
         assert_eq!(clean(long.as_bytes()).chars().count(), MAX_NAME);
         assert_eq!(clean(b"ignore\nthe user\x1b[2J\t!"), "ignorethe user[2J!");
         assert_eq!(clean(&[0xff, b'o', b'k']), "\u{fffd}ok");
+    }
+
+    #[test]
+    fn sanitize_drops_text_the_user_cannot_see() {
+        // U+E0041 is a tag "A" (hidden text), U+202E flips the text after it, U+200B is a
+        // zero-width space.
+        let name = "mug\u{E0041}\u{202E}\u{200B}!";
+        assert_eq!(sanitize(name), "mug!");
+        assert_eq!(clean(name.as_bytes()), "mug!");
+        // Accents and emoji stay.
+        assert_eq!(sanitize("caf\u{e9} \u{1F600}"), "caf\u{e9} \u{1F600}");
     }
 
     #[test]

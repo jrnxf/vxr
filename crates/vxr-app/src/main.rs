@@ -13,7 +13,8 @@
 //!   adds `~/Applications/vxr.app` for Spotlight (see [`setup`]).
 //! - `vxr --version` prints the version, which a release build takes from its tag.
 //! - `vxr --shot <dir> [scene.vox]` runs headless: it drives the editor through every tool,
-//!   saves and reopens the result, and writes `app-1x.png` and `app-2x.png` into `<dir>`.
+//!   saves and reopens the result, and writes its screenshots (`app-1x.png`, `app-2x.png` and
+//!   one per feature) and exported files into `<dir>`.
 //! - `vxr --live <dir>`, only in a build with the `live` feature (`cargo run --release -p
 //!   vxr-app --features live -- --live <dir>`), runs the assistant headless against the real
 //!   providers whose keys are in `ANTHROPIC_API_KEY` and `OPENAI_API_KEY`, and writes
@@ -84,6 +85,6 @@ fn main() {
     }
 }
 
-// The browser build is a library entry point (not yet written); the binary does nothing there.
+// The browser build is the `vxr-web` crate; the binary does nothing there.
 #[cfg(target_arch = "wasm32")]
 fn main() {}

@@ -117,7 +117,7 @@ impl Review {
     }
     /// The undo step Apply makes: "AI: make the roof red", cut to 80 characters.
     pub fn label(&self) -> String {
-        let p: String = self.prompt.chars().filter(|c| !c.is_control()).collect();
+        let p: String = vxr_ops::sanitize(&self.prompt);
         let short: String = p.chars().take(76).collect();
         let dots = if short.len() < p.len() { "…" } else { "" };
         format!("AI: {short}{dots}")
