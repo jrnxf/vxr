@@ -312,3 +312,58 @@ fn box_height_lifts_the_base_along_the_drag_axis_as_one_step() {
     g.lift_to(&mut s, 5);
     assert_eq!(g.extent(), ([1, 1, 1], [1, 1, 1]));
 }
+
+fn ground(voxel: [i32; 3]) -> Target {
+    Target { voxel, normal: [0, 1, 0], value: 0, ground: true }
+}
+
+/// The filled cells, as (cell, slot).
+fn cells(s: &Scene) -> Vec<([i32; 3], u8)> {
+    let mut out = Vec::new();
+    s.for_each_voxel(|p, c| out.push((p, c)));
+    out.sort();
+    out
+}
+
+/// Catches: a box dragged toward the horizon visited every cell out to the pointer, inside
+/// the map or not, on each move: 3.4 s a move at 16,000 cells out, which froze the app.
+#[test]
+fn a_box_dragged_far_off_the_map_fills_only_the_map_and_stays_fast() {
+    let mut s = Scene::new([32, 32, 32]);
+    let t = std::time::Instant::now();
+    let n = drag(&mut s, brush(Tool::Add, Shape::Box), ground([0, -1, 0]), &[[100_000, 0, 100_000]]);
+    assert!(t.elapsed().as_secs_f32() < 1.0, "{:?}", t.elapsed());
+    assert_eq!(n, 32 * 32, "the whole ground layer, nothing else");
+
+    // Mirrored, the cells off the map whose images land on it still count: with the mirror
+    // plane at map x = 3.5, x = -1 to -24 mirror to 8 to 31.
+    let run = |to: i32| {
+        let mut s = Scene::new([32, 32, 32]);
+        s.origin = [-4, 0, 0];
+        let b = Brush { mirror: [true, false, false], ..brush(Tool::Add, Shape::Box) };
+        drag(&mut s, b, ground([0, -1, 0]), &[[to, 0, 0]]);
+        cells(&s)
+    };
+    let near = run(-24);
+    assert_eq!(near.len(), 26, "x = 0 and 7 to 31");
+    assert_eq!(run(-100_000), near);
+}
+
+/// Catches: the radius summed squared offsets in i32, which overflowed past about 46,341
+/// cells: a panic in a debug build, and in release a radius of 0, so the sphere vanished.
+#[test]
+fn a_sphere_dragged_far_off_the_map_draws_at_the_largest_radius() {
+    use vxr_core::tools::MAX_RADIUS;
+    let sphere = |to: [i32; 3]| {
+        let mut s = Scene::new([32, 32, 32]);
+        let Press::Drag(mut g) = s.press(brush(Tool::Add, Shape::Sphere), ground([16, -1, 16])) else { panic!() };
+        g.move_to(&mut s, to);
+        let r = g.radius();
+        g.release(&mut s);
+        (r, cells(&s))
+    };
+    let (r, far) = sphere([50_000, 0, 16]);
+    assert_eq!(r, MAX_RADIUS);
+    assert!(!far.is_empty());
+    assert_eq!((r, far), sphere([16 + MAX_RADIUS, 0, 16]));
+}

@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use vxr_app::Editor;
 use vxr_app::editor::{Button, Finger, NEW_SIZE};
-use vxr_app::files::{obj_files, slices_png};
+use vxr_app::files::{obj_files, save_atomic, slices_png, vox_bytes};
 use vxr_app::theme::ThemeChoice;
 use vxr_app::ui::Action;
 use vxr_core::Scene;
@@ -222,7 +222,9 @@ impl State {
                         None => return,
                     },
                 };
-                match std::fs::write(&path, self.editor.scene.to_vox()) {
+                // Through a symbolic link, the file it points at is the one replaced.
+                let target = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+                match vox_bytes(&self.editor.scene).and_then(|bytes| save_atomic(&target, &bytes)) {
                     Ok(()) => {
                         let name = file_name(&path);
                         self.editor.ui.scene_name = name.clone();

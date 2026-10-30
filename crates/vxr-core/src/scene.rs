@@ -187,18 +187,17 @@ impl Scene {
     /// materials through [`Document::set_palette`] and [`Document::set_material`], and the
     /// cameras through [`Document::set_camera`], so every chunk they do not touch keeps its
     /// bytes. A new scene is written as a fresh version 200 file, split into models of at
-    /// most 256^3.
-    pub fn to_vox(&self) -> Vec<u8> {
-        if let (Some(doc), Some(world)) = (&self.source, &self.world)
-            && let Some(bytes) = self.save_into(doc.clone(), world.clone())
-        {
-            return bytes;
+    /// most 256^3. An opened file that cannot be written this way is an error, never a fresh
+    /// file: that would drop its names, groups, layers and hidden flags.
+    pub fn to_vox(&self) -> Result<Vec<u8>, String> {
+        if let (Some(doc), Some(world)) = (&self.source, &self.world) {
+            return self.save_into(doc.clone(), world.clone());
         }
         let world: BTreeMap<[i32; 3], u8> =
             self.world_voxels(false).into_iter().map(|(p, c)| (world_to_vox(p), c)).collect();
         let mut b = self.builder();
         b.add_world(&world);
-        b.build().write()
+        Ok(b.build().write())
     }
 
     /// A fresh version 200 file with the palette, materials and cameras and no voxels.
@@ -213,26 +212,26 @@ impl Scene {
         b
     }
 
-    fn save_into(&self, mut doc: Document, mut world: World) -> Option<Vec<u8>> {
-        let file = doc.scene().ok()?;
+    fn save_into(&self, mut doc: Document, mut world: World) -> Result<Vec<u8>, String> {
+        let file = doc.scene().map_err(|e| e.to_string())?;
         for i in 1..=255u8 {
             if file.color(i) != self.palette[i as usize] {
-                doc.set_palette(i, self.palette[i as usize]).ok()?;
+                doc.set_palette(i, self.palette[i as usize]).map_err(|e| format!("colour {i}: {e}"))?;
             }
             if doc.material(i) != self.materials[i as usize] {
-                doc.set_material(i, &self.materials[i as usize]).ok()?;
+                doc.set_material(i, &self.materials[i as usize]).map_err(|e| format!("material {i}: {e}"))?;
             }
         }
         for c in &self.cameras {
             if doc.camera(c.id) != Some(*c) {
-                doc.set_camera(c).ok()?;
+                doc.set_camera(c).map_err(|e| format!("camera {}: {e}", c.id))?;
             }
         }
         if let At::Object(i) = self.at {
             world.store(i, &self.map, self.origin);
         }
-        world.save_into(&mut doc).ok()?;
-        Some(doc.write())
+        world.save_into(&mut doc)?;
+        Ok(doc.write())
     }
 
     /// Every voxel of the scene by world cell: every object's (only shown ones with

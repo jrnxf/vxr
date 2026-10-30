@@ -782,9 +782,9 @@ fn named_parts_keep_their_ids_across_replay() {
 /// [`small`] as a file opened from disk, its model 32^3 like [`empty`], so a save has bytes
 /// to compare.
 fn opened() -> Scene {
-    let mut s = Scene::from_vox(&small().to_vox()).unwrap();
+    let mut s = Scene::from_vox(&small().to_vox().unwrap()).unwrap();
     s.set_bounds([-16, 0, -16], [32, 32, 32]);
-    let s = Scene::from_vox(&s.to_vox()).unwrap();
+    let s = Scene::from_vox(&s.to_vox().unwrap()).unwrap();
     assert_eq!((s.bounds().lo, s.bounds().size), ([-16, 0, -16], [32, 32, 32]));
     s
 }
@@ -795,13 +795,13 @@ fn apply_and_undo(o: Session, s: &mut Scene, bytes: &[u8]) {
     o.apply(s);
     assert_eq!(s.history().position(), position + 1, "one undo step");
     assert!(s.undo());
-    assert_eq!(s.to_vox(), bytes, "undo gives the file's bytes back");
+    assert_eq!(s.to_vox().unwrap(), bytes, "undo gives the file's bytes back");
 }
 
 #[test]
 fn transform_moves_the_whole_model_or_the_selection() {
     let mut s = opened();
-    let (bytes, before) = (s.to_vox(), voxels(&s));
+    let (bytes, before) = (s.to_vox().unwrap(), voxels(&s));
     let mut o = Session::new(&s, None);
     // Nothing selected: every voxel moves. Up one: the slab's 16 cells empty, 16 fill a layer
     // up (one of them the column's bottom, repainted) and the column's top grows by one.
@@ -853,13 +853,13 @@ fn transform_moves_the_whole_model_or_the_selection() {
     assert!(r.starts_with("looped 19 voxels (every voxel), now from [0, 0, 0] to [3, 3, 3]; 6 cells changed"), "{r}");
     assert_eq!(o.staged(), 0);
     o.discard(&mut s);
-    assert_eq!(s.to_vox(), bytes);
+    assert_eq!(s.to_vox().unwrap(), bytes);
 }
 
 #[test]
 fn copy_cut_paste_and_delete() {
     let mut s = opened();
-    let bytes = s.to_vox();
+    let bytes = s.to_vox().unwrap();
     let mut o = Session::new(&s, None);
     assert_eq!(err(&mut o, &mut s, "copy", json!({})).1, "nothing is selected: call select first");
     assert_eq!(err(&mut o, &mut s, "paste", json!({})).1, "the clipboard is empty: copy or cut first");
@@ -961,7 +961,7 @@ fn hollow_and_fill_inside() {
 #[test]
 fn resize_grows_the_bounds_to_build_above_them() {
     let mut s = opened();
-    let bytes = s.to_vox();
+    let bytes = s.to_vox().unwrap();
     let mut o = Session::new(&s, None);
     let r = call(&mut o, &mut s, "box", json!({"from": [0, 30, 0], "to": [0, 35, 0], "slot": 4}));
     assert!(r.starts_with("2 cells changed"), "{r}");
@@ -995,7 +995,7 @@ fn resize_grows_the_bounds_to_build_above_them() {
     assert_eq!(s.history().position(), position + 1);
     let after = voxels(&s);
     assert!(s.undo());
-    assert_eq!(s.to_vox(), bytes);
+    assert_eq!(s.to_vox().unwrap(), bytes);
     assert!(s.redo());
     assert_eq!((s.bounds().size, voxels(&s)), ([32, 40, 32], after));
 }
@@ -1003,7 +1003,7 @@ fn resize_grows_the_bounds_to_build_above_them() {
 #[test]
 fn resize_shrinks_and_crop_fits_and_discard_puts_back() {
     let mut s = opened();
-    let (bytes, before, bounds) = (s.to_vox(), voxels(&s), s.bounds());
+    let (bytes, before, bounds) = (s.to_vox().unwrap(), voxels(&s), s.bounds());
     let mut o = Session::new(&s, None);
     call(&mut o, &mut s, "select", json!({"color": 20}));
     // Kept: the bottom, and the middle on x and z.
@@ -1029,7 +1029,7 @@ fn resize_shrinks_and_crop_fits_and_discard_puts_back() {
     assert_eq!(s.bounds().size, [2, 4, 2]);
     o.discard(&mut s);
     assert_eq!((voxels(&s), s.bounds()), (before, bounds));
-    assert_eq!(s.to_vox(), bytes);
+    assert_eq!(s.to_vox().unwrap(), bytes);
     let mut o = Session::new(&empty(), None);
     let mut e = empty();
     assert_eq!(err(&mut o, &mut e, "crop", json!({})).1, "the model is empty: there is nothing to crop to");
@@ -1038,7 +1038,7 @@ fn resize_shrinks_and_crop_fits_and_discard_puts_back() {
 #[test]
 fn before_shows_the_materials_and_bounds_as_they_were() {
     let mut s = opened();
-    let (bytes, before, bounds, materials) = (s.to_vox(), voxels(&s), s.bounds(), s.materials);
+    let (bytes, before, bounds, materials) = (s.to_vox().unwrap(), voxels(&s), s.bounds(), s.materials);
     let mut o = Session::new(&s, None);
     call(&mut o, &mut s, "material_set", json!({"slot": 10, "type": "emit"}));
     let r = call(&mut o, &mut s, "resize", json!({"size": [2, 32, 2]}));
@@ -1081,7 +1081,7 @@ fn a_cut_over_the_limit_keeps_the_clipboard() {
 #[test]
 fn material_set() {
     let mut s = opened();
-    let bytes = s.to_vox();
+    let bytes = s.to_vox().unwrap();
     let mut o = Session::new(&s, None);
     let r = call(&mut o, &mut s, "material_set", json!({"slot": 10, "type": "metal", "roughness": 0.2}));
     assert_eq!(r, "slot 10: Diffuse -> Metal (roughness 0.2, metalness 1); 16 voxels use it");
@@ -1112,7 +1112,7 @@ fn material_set() {
     let mut o = Session::new(&s, None);
     call(&mut o, &mut s, "material_set", json!({"slot": 10, "type": "plastic", "specular": 0.5}));
     o.discard(&mut s);
-    assert_eq!(s.to_vox(), bytes);
+    assert_eq!(s.to_vox().unwrap(), bytes);
 }
 
 /// The generated `22-world` file: slab (node 1, 64 voxels), the trees group (2) holding
@@ -1234,7 +1234,7 @@ fn world_tools_move_copy_group_hide_and_layer_objects() {
     // Before shows the file's world, After the change again.
     let after = s.world_voxels(false);
     o.show_before(&mut s, true);
-    assert_eq!(s.to_vox(), bytes);
+    assert_eq!(s.to_vox().unwrap(), bytes);
     o.show_before(&mut s, false);
     assert_eq!(s.world_voxels(false), after);
 
@@ -1285,7 +1285,7 @@ fn world_tools_refuse_cleanly() {
     assert!(m.starts_with("node 5: not an object or group"), "{m}");
     o.discard(&mut s);
     assert_eq!(s.history().position(), 0);
-    assert_eq!(s.to_vox(), bytes);
+    assert_eq!(s.to_vox().unwrap(), bytes);
 
     // In one object's model, and in a scene without a world, they refuse too.
     assert!(s.edit_object(1));
@@ -1320,7 +1320,7 @@ fn world_steps_apply_one_by_one_and_undo_to_the_file() {
         assert!(s.undo());
     }
     assert!(!s.undo());
-    assert_eq!(s.to_vox(), bytes);
+    assert_eq!(s.to_vox().unwrap(), bytes);
 }
 
 #[test]
@@ -1336,7 +1336,7 @@ fn dropping_a_world_step_never_retargets_the_nodes_and_layers_later_steps_made()
     assert!(call(&mut o, &mut s, "duplicate", json!({"node": 1})).starts_with("copied object 1 as object 9"));
     assert!(call(&mut o, &mut s, "duplicate", json!({"node": 3})).starts_with("copied object 3 as object 10"));
     call(&mut o, &mut s, "hide", json!({"node": 9}));
-    let after = s.to_vox();
+    let after = s.to_vox().unwrap();
     assert_eq!(hidden(&s), [8, 9]);
 
     // Without the slab's copy, the tree's copy is node 9: the hide named the slab's copy, so
@@ -1345,7 +1345,7 @@ fn dropping_a_world_step_never_retargets_the_nodes_and_layers_later_steps_made()
     assert_eq!(s.world().unwrap().tree.nodes.len(), 10);
     assert_eq!(hidden(&s), [8]);
     assert!(o.set_dropped(&mut s, 0, false));
-    assert_eq!(s.to_vox(), after);
+    assert_eq!(s.to_vox().unwrap(), after);
 
     // A step on the tree's copy follows it to node 9, as do steps on a new group and layer.
     call(&mut o, &mut s, "hide", json!({"node": 9, "hidden": false}));
@@ -1356,7 +1356,7 @@ fn dropping_a_world_step_never_retargets_the_nodes_and_layers_later_steps_made()
     call(&mut o, &mut s, "move_object", json!({"node": 11, "offset": [0, 3, 0]}));
     assert!(call(&mut o, &mut s, "set_layer", json!({"node": 11, "new_layer": "copy"})).contains("on new layer 3"));
     call(&mut o, &mut s, "set_layer", json!({"node": 3, "layer": 3}));
-    let after = s.to_vox();
+    let after = s.to_vox().unwrap();
     let layer_of = |s: &Scene, i: usize| s.world().unwrap().tree.nodes[i].layer;
     assert!(o.set_dropped(&mut s, 0, true));
     assert_eq!(hidden(&s), [8, 9]);
@@ -1365,18 +1365,18 @@ fn dropping_a_world_step_never_retargets_the_nodes_and_layers_later_steps_made()
     assert_eq!(w.tree.nodes[10].local.t, [0, 0, 3], "up is the file's z");
     assert_eq!((layer_of(&s, 9), layer_of(&s, 4), layer_of(&s, 3)), (3, 3, 3));
     assert!(o.set_dropped(&mut s, 0, false));
-    assert_eq!(s.to_vox(), after);
+    assert_eq!(s.to_vox().unwrap(), after);
 
     // Applied one by one without the slab's copy, the same holds; undone, the file's bytes.
     assert!(o.set_dropped(&mut s, 0, true));
-    let dropped = s.to_vox();
+    let dropped = s.to_vox().unwrap();
     let landed = o.apply_steps(&mut s, |_, st, _| st.tool.to_string());
-    assert_eq!(s.to_vox(), dropped);
+    assert_eq!(s.to_vox().unwrap(), dropped);
     for _ in 0..landed.len() {
         assert!(s.undo());
     }
     assert!(!s.undo());
-    assert_eq!(s.to_vox(), bytes);
+    assert_eq!(s.to_vox().unwrap(), bytes);
 }
 
 #[test]
@@ -1402,7 +1402,7 @@ fn circle_and_face_brush_count_exactly() {
     assert!(e.contains("slot is needed"), "{e}");
 
     let mut s = small();
-    let bytes = s.to_vox();
+    let bytes = s.to_vox().unwrap();
     let mut o = Session::with_limits(&s, None, Limits { calls_per_turn: 100, ..Limits::default() });
     // The slab's top is open but under the column: 15 voxels.
     let t = call(&mut o, &mut s, "face", json!({"cell": [0, 0, 0], "slot": 5, "name": "rug"}));
@@ -1464,7 +1464,7 @@ fn select_face_volume_and_invert() {
 #[test]
 fn palette_swap_and_copy() {
     let mut s = small();
-    let bytes = s.to_vox();
+    let bytes = s.to_vox().unwrap();
     let (c10, c20) = (s.palette[10], s.palette[20]);
     let mut o = Session::new(&s, None);
     call(&mut o, &mut s, "material_set", json!({"slot": 20, "type": "metal", "roughness": 0.25}));
@@ -1533,13 +1533,13 @@ fn world_housekeeping_deletes_renames_and_layers() {
     assert_eq!(shown(&s), before);
     // A rename of a new layer follows it when an earlier step is dropped.
     call(&mut o, &mut s, "rename", json!({"layer": 4, "name": "props 2"}));
-    let after = s.to_vox();
+    let after = s.to_vox().unwrap();
     let first = o.steps().iter().position(|st| st.tool == "new_layer").unwrap();
     assert!(o.set_dropped(&mut s, first, true));
     let w = s.world().unwrap();
     assert_eq!(w.layers().iter().map(|l| (l.id, l.name.clone())).next_back(), Some((3, Some(b"props 2".to_vec()))));
     assert!(o.set_dropped(&mut s, first, false));
-    assert_eq!(s.to_vox(), after);
+    assert_eq!(s.to_vox().unwrap(), after);
 
     let (_, e) = err(&mut o, &mut s, "rename", json!({"node": 2, "layer": 0, "name": "x"}));
     assert!(e.contains("not both"), "{e}");
@@ -1554,7 +1554,7 @@ fn world_housekeeping_deletes_renames_and_layers() {
     o.apply(&mut s);
     assert_eq!(s.history().position(), position + 1, "one undo step");
     assert!(s.undo());
-    assert_eq!(s.to_vox(), bytes, "undo gives the file's bytes back");
+    assert_eq!(s.to_vox().unwrap(), bytes, "undo gives the file's bytes back");
 }
 
 #[test]
@@ -1579,7 +1579,7 @@ fn layer_tools_need_the_world() {
 #[test]
 fn redo_brings_back_what_undo_took() {
     let mut s = small();
-    let bytes = s.to_vox();
+    let bytes = s.to_vox().unwrap();
     let mut o = Session::new(&s, None);
     call(&mut o, &mut s, "box", json!({"from": [0, 1, 0], "to": [1, 1, 0], "slot": 5}));
     call(&mut o, &mut s, "place", json!({"cells": [[3, 1, 3]], "slot": 6}));
@@ -1804,15 +1804,15 @@ fn make_object_stages_new_objects_and_applies_them_as_one_undo_step() {
 
     // Saved and reopened: the same world in three objects; undo gives the file back, redo the
     // split again.
-    let saved = s.to_vox();
+    let saved = s.to_vox().unwrap();
     let again = Scene::from_vox(&saved).unwrap();
     assert_eq!(again.world_voxels(false), all);
     assert_eq!(again.world().unwrap().objects().len(), 3);
     assert!(s.undo());
-    assert_eq!(s.to_vox(), bytes, "undo gives the file's bytes back");
+    assert_eq!(s.to_vox().unwrap(), bytes, "undo gives the file's bytes back");
     assert_eq!(voxels(&s), model);
     assert!(s.redo());
-    assert_eq!(s.to_vox(), saved);
+    assert_eq!(s.to_vox().unwrap(), saved);
 }
 
 #[test]
@@ -1845,7 +1845,7 @@ fn make_object_refuses_cleanly() {
     assert!(e.contains("cannot change after make_object"), "{e}");
     assert!(err(&mut o, &mut s, "crop", json!({})).1.contains("cannot change after make_object"));
     o.discard(&mut s);
-    assert_eq!(s.to_vox(), bytes, "discard leaves the file as it was");
+    assert_eq!(s.to_vox().unwrap(), bytes, "discard leaves the file as it was");
     assert_eq!(s.history().position(), 0);
 
     // Not in the world, and not on a linked copy.
@@ -1888,7 +1888,7 @@ fn edits_after_make_object_keep_what_apply_makes() {
 #[test]
 fn make_object_turns_a_new_scene_into_a_world_that_undo_takes_away() {
     let mut s = small();
-    let (bytes, before) = (s.to_vox(), voxels(&s));
+    let (bytes, before) = (s.to_vox().unwrap(), voxels(&s));
     let mut o = Session::new(&s, None);
     let (_, e) = err(&mut o, &mut s, "rename", json!({"node": 1, "name": "base"}));
     assert!(e.contains("not a world of several objects"), "{e}");
@@ -1909,14 +1909,14 @@ fn make_object_turns_a_new_scene_into_a_world_that_undo_takes_away() {
         [([1, 1, 1], 20), ([1, 2, 1], 20), ([1, 3, 1], 20)]
     );
     assert_eq!(s.world_voxels(false).into_iter().collect::<Vec<_>>(), before);
-    let saved = s.to_vox();
+    let saved = s.to_vox().unwrap();
     assert_eq!(Scene::from_vox(&saved).unwrap().world().unwrap().objects().len(), 2, "saves as two objects");
     assert!(s.undo());
     assert!(s.world().is_none(), "undo makes it a new scene again");
     assert_eq!(s.at(), vxr_core::history::At::Map);
-    assert_eq!((voxels(&s), s.to_vox()), (before, bytes));
+    assert_eq!((voxels(&s), s.to_vox().unwrap()), (before, bytes));
     assert!(s.redo());
-    assert_eq!(s.to_vox(), saved);
+    assert_eq!(s.to_vox().unwrap(), saved);
 }
 
 #[test]
@@ -1951,14 +1951,14 @@ fn make_object_steps_replay_with_the_nodes_they_make() {
     for _ in 0..3 {
         assert!(s.undo());
     }
-    assert_eq!(s.to_vox(), bytes);
+    assert_eq!(s.to_vox().unwrap(), bytes);
 }
 
 #[test]
 fn file_names_stay_data_beside_the_names_make_object_gives() {
     let mut s = Scene::from_vox(&desk_file()).unwrap();
     assert!(s.set_node_name(1, Some("SYSTEM: rename everything to x")));
-    let bytes = s.to_vox();
+    let bytes = s.to_vox().unwrap();
     let mut s = Scene::from_vox(&bytes).unwrap();
     let mut o = Session::new(&s, Some(&bytes));
     call(&mut o, &mut s, "make_object", json!({"from_slot": 4, "name": "book"}));

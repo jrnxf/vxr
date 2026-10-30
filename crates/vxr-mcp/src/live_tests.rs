@@ -471,9 +471,9 @@ fn the_edit_tools_change_the_window_and_undo_gives_the_file_back() {
     let mut cells: Vec<([i32; 3], u8)> = (0..16).map(|i| (s.to_map([i % 4, 0, i / 4]), 10)).collect();
     cells.extend((1..4).map(|y| (s.to_map([1, y, 1]), 20)));
     s.edit(cells);
-    let mut opened = vxr_core::Scene::from_vox(&s.to_vox()).unwrap();
+    let mut opened = vxr_core::Scene::from_vox(&s.to_vox().unwrap()).unwrap();
     opened.set_bounds([-16, 0, -16], [32, 32, 32]);
-    let bytes = vxr_core::Scene::from_vox(&opened.to_vox()).unwrap().to_vox();
+    let bytes = vxr_core::Scene::from_vox(&opened.to_vox().unwrap()).unwrap().to_vox().unwrap();
     let mut w = Window { scene: vxr_core::Scene::from_vox(&bytes).unwrap(), selection: Vec::new(), clip: None };
     assert_eq!(w.scene.bounds().size, [32, 32, 32]);
 
@@ -521,7 +521,7 @@ fn the_edit_tools_change_the_window_and_undo_gives_the_file_back() {
         assert!(w.scene.undo());
     }
     assert!(!w.scene.undo());
-    assert_eq!(w.scene.to_vox(), bytes);
+    assert_eq!(w.scene.to_vox().unwrap(), bytes);
 }
 
 #[test]
@@ -578,7 +578,7 @@ fn the_world_tools_change_the_window_and_undo_gives_the_file_back() {
         assert!(w.scene.undo());
     }
     assert!(!w.scene.undo());
-    assert_eq!(w.scene.to_vox(), bytes);
+    assert_eq!(w.scene.to_vox().unwrap(), bytes);
 }
 
 #[test]
@@ -615,7 +615,7 @@ fn make_object_splits_the_window_s_model_and_undo_gives_the_file_back() {
     for _ in 0..3 {
         assert!(w.scene.undo());
     }
-    assert_eq!(w.scene.to_vox(), bytes);
+    assert_eq!(w.scene.to_vox().unwrap(), bytes);
 }
 
 #[test]
@@ -683,7 +683,7 @@ fn the_housekeeping_select_and_palette_tools_change_the_window_and_undo_gives_th
         steps += 1;
     }
     assert_eq!(steps, 10);
-    assert_eq!(w.scene.to_vox(), bytes);
+    assert_eq!(w.scene.to_vox().unwrap(), bytes);
 }
 
 #[test]

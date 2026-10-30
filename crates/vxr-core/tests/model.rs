@@ -111,7 +111,7 @@ fn crop_fits_the_bounds_to_the_voxels_and_undo_restores_them() {
     assert_eq!(b.floor, b.lo[1], "the ground moves up to the cropped bottom");
     assert!(!s.map.set(0, 5, 0, 1), "no cell outside the bounds");
     assert!(!s.crop(), "already cropped");
-    let back = Scene::from_vox(&s.to_vox()).unwrap();
+    let back = Scene::from_vox(&s.to_vox().unwrap()).unwrap();
     assert_eq!(world(&back), cells, "a cropped scene saves and opens the same");
     // An edit after the crop, in the new map's cells, undoes and redoes in place.
     s.edit([([16, 0, 0], 9)]);

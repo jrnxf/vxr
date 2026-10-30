@@ -285,7 +285,8 @@ function agentDownloads() {
 }
 
 function save() {
-  download(app.save(), /\.vox$/i.test(app.name()) ? app.name() : 'scene.vox', 'application/octet-stream');
+  const vox = app.save();
+  if (vox.length) download(vox, /\.vox$/i.test(app.name()) ? app.name() : 'scene.vox', 'application/octet-stream');
 }
 
 const THEME_KEY = 'vxr-theme';

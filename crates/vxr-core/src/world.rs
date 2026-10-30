@@ -9,11 +9,18 @@
 //! byte-identical and every other chunk keeps its bytes.
 
 use vxr_vox::scene::Affine;
-use vxr_vox::tree::{Kind, LayerInfo, ModelEdits, Tree, TreeNode};
+use vxr_vox::tree::{Kind, LayerInfo, MAX_MODEL, ModelEdits, Tree, TreeNode};
 use vxr_vox::{Document, WorldSave};
 
 use crate::brickmap::BrickMap;
 use crate::scene::{MAX_EXTENT, vox_to_world, world_to_vox};
+
+/// Most models a file may hold, and most cells (their sizes multiplied out) across them.
+/// Each model is a dense grid of brick slots over its size, so a few bytes of `SIZE` chunk
+/// would otherwise ask for 64 MiB, and each costs about a kilobyte however small. The
+/// budget is one scene of [`MAX_EXTENT`] on every axis, more than MagicaVoxel can make.
+pub const MAX_MODELS: usize = 1 << 16;
+pub const MAX_CELLS: u64 = (MAX_EXTENT as u64).pow(3);
 
 #[derive(Clone)]
 pub struct World {
@@ -62,11 +69,28 @@ impl World {
     pub fn from_doc(doc: &Document) -> Result<World, String> {
         let s = doc.scene().map_err(|e| e.to_string())?;
         let tree = vxr_vox::Tree::read(&s);
-        let mut models = Vec::with_capacity(s.models.len());
+        if s.models.len() > MAX_MODELS {
+            return Err(format!("the file has {} models; the limit is {MAX_MODELS}", s.models.len()));
+        }
+        let mut cells = 0u64;
         for m in &s.models {
             if m.size.iter().any(|&k| k < 1 || k as u32 > MAX_EXTENT) {
                 return Err(format!("a model is {:?} voxels; each side must be 1 to {MAX_EXTENT}", m.size));
             }
+            // XYZI holds byte coordinates, so no voxel of it can be past 256.
+            if !m.compressed && m.size.iter().any(|&k| k > MAX_MODEL) {
+                return Err(format!(
+                    "a model is {:?} voxels; each side of an XYZI model must be 1 to {MAX_MODEL}",
+                    m.size
+                ));
+            }
+            cells += m.size.iter().map(|&k| k as u64).product::<u64>();
+            if cells > MAX_CELLS {
+                return Err(format!("the models add up to over {MAX_CELLS} cells"));
+            }
+        }
+        let mut models = Vec::with_capacity(s.models.len());
+        for m in &s.models {
             let mut map = BrickMap::new([m.size[0] as u32, m.size[2] as u32, m.size[1] as u32]);
             for v in m.effective_voxels() {
                 let u = vox_to_local(m.size, [v[0] as i32, v[1] as i32, v[2] as i32]);

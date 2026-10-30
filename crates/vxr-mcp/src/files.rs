@@ -66,8 +66,11 @@ fn own_tools() -> Vec<(&'static str, String, Value)> {
         ),
         (
             "save",
-            "Write the scene to its file (or to path), losslessly: materials, layers, cameras, names and every chunk the edits did not touch keep their bytes. The first overwrite of a file in this session keeps the old one as <name>.vox.bak.".into(),
-            json!({"type": "object", "properties": {"path": path}, "additionalProperties": false}),
+            "Write the scene to its file (or to path), losslessly: materials, layers, cameras, names and every chunk the edits did not touch keep their bytes. The first overwrite of a file in this session keeps the old one as <name>.vox.bak. Refuses when the file changed on disk since it was opened or saved here (the user saved it in vxr, say) unless overwrite is true, which keeps that version as the .bak.".into(),
+            json!({"type": "object", "properties": {
+                "path": path,
+                "overwrite": {"type": "boolean", "description": "replace the file even though it changed on disk since it was opened"},
+            }, "additionalProperties": false}),
         ),
     ]
 }
@@ -405,12 +408,17 @@ impl Files {
         {
             return Err(format!("{}: not a regular file", clean(rel.as_bytes())));
         }
-        let bytes = o.scene.to_vox();
-        // The file must read back as the same cells before it replaces anything.
-        let again = Scene::from_vox(&bytes).map_err(|e| format!("not saved, the result does not read back: {e}"))?;
-        if again.world_voxels(false) != o.scene.world_voxels(false) {
-            return Err("not saved: the result reads back with different cells".into());
+        // Another program (the user's vxr) may have saved the file since this session read
+        // or wrote it: replacing it would lose that version.
+        let on_disk = if path == o.path && !o.bytes.is_empty() { std::fs::read(&path).ok() } else { None };
+        let changed = on_disk.as_ref().is_some_and(|b| *b != o.bytes);
+        if changed && args.get("overwrite").and_then(Value::as_bool) != Some(true) {
+            return Err(format!(
+                "not saved: {} changed on disk since it was opened; open it again, or pass overwrite: true to replace it",
+                clean(rel.as_bytes())
+            ));
         }
+        let bytes = vxr_core::files::vox_bytes(&o.scene).map_err(|e| format!("not saved: {e}"))?;
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
             // The folder, made now, must still be inside the root.
@@ -419,24 +427,16 @@ impl Files {
                 return Err("not saved: the folder is outside the root".into());
             }
         }
-        let beside = |ext: &str| {
-            let mut p = path.clone().into_os_string();
-            p.push(ext);
-            PathBuf::from(p)
-        };
-        if path.exists() && !self.backed_up.contains(&path) {
+        if path.exists() && (changed || !self.backed_up.contains(&path)) {
+            let mut bak = path.clone().into_os_string();
+            bak.push(".bak");
             let old = std::fs::read(&path).map_err(|e| format!("could not keep the .bak: {e}"))?;
-            write_new(&beside(".bak"), &old).map_err(|e| format!("could not keep the .bak: {e}"))?;
+            write_new(Path::new(&bak), &old).map_err(|e| format!("could not keep the .bak: {e}"))?;
             self.backed_up.insert(path.clone());
         }
-        let tmp = beside(".tmp");
-        write_new(&tmp, &bytes)?;
-        if let Err(e) = std::fs::rename(&tmp, &path) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(e.to_string());
-        }
+        vxr_core::files::save_atomic(&path, &bytes).map_err(|e| format!("not saved: {e}"))?;
         let voxels = o.scene.world_voxels(false).len();
-        let objects = again.world().map_or(1, |w| w.objects().len());
+        let objects = o.scene.world().map_or(1, |w| w.objects().len());
         o.rel = rel;
         o.path = path;
         o.bytes = bytes;
@@ -543,20 +543,11 @@ pub fn palette_text(scene: &Scene, bytes: &[u8]) -> String {
     out.to_string()
 }
 
-/// Write `bytes` to a new file at `path`, replacing a regular file there but never
-/// following a symbolic link (or writing through anything else).
+/// Write `bytes` to a new file at `path`, as [`vxr_core::files::write_new`], with the file's
+/// name in the error.
 fn write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    use std::io::Write;
     let name = path.file_name().map(|n| clean(n.as_encoded_bytes())).unwrap_or_default();
-    match std::fs::symlink_metadata(path) {
-        Ok(m) if m.is_file() => std::fs::remove_file(path).map_err(|e| format!("{name}: {e}"))?,
-        Ok(_) => return Err(format!("{name}: not a regular file")),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(format!("{name}: {e}")),
-    }
-    let mut f =
-        std::fs::OpenOptions::new().write(true).create_new(true).open(path).map_err(|e| format!("{name}: {e}"))?;
-    f.write_all(bytes).map_err(|e| format!("{name}: {e}"))
+    vxr_core::files::write_new(path, bytes).map_err(|e| format!("{name}: {e}"))
 }
 
 /// `show_world`: the world of every object, or why not.

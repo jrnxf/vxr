@@ -155,7 +155,7 @@ fn every_vox_fixture_opens_and_saves_with_the_same_voxels_and_palette() {
         }
         let s = Scene::from_vox(&bytes).unwrap_or_else(|e| panic!("{}: {e}", f.name));
         assert_eq!(world_voxels(&s), expect, "{}", f.name);
-        let again = Scene::from_vox(&s.to_vox()).unwrap();
+        let again = Scene::from_vox(&s.to_vox().unwrap()).unwrap();
         assert_eq!(world_voxels(&again), expect, "{} after save", f.name);
         assert_eq!(again.palette, s.palette, "{}", f.name);
     }
@@ -176,7 +176,7 @@ fn a_new_scene_saves_as_one_object_and_reopens_in_model_mode() {
     }
     s.edit(cells);
     let expect = world_voxels(&s);
-    let again = Scene::from_vox(&s.to_vox()).unwrap();
+    let again = Scene::from_vox(&s.to_vox().unwrap()).unwrap();
     let objects = again.world().unwrap().objects();
     assert_eq!(objects.len(), 1, "one object");
     assert_eq!(again.at(), At::Object(objects[0]), "opens in model mode");
@@ -193,7 +193,7 @@ fn a_new_scene_wider_than_256_keeps_every_voxel_in_place() {
     }
     s.edit(cells);
     let expect = world_voxels(&s);
-    let again = Scene::from_vox(&s.to_vox()).unwrap();
+    let again = Scene::from_vox(&s.to_vox().unwrap()).unwrap();
     assert_eq!(again.world().unwrap().objects().len(), 2, "cut once along x, from the voxels' low corner");
     assert_eq!(again.at(), At::World);
     assert_eq!(world_voxels(&again), expect, "every voxel where it was");
@@ -218,7 +218,7 @@ fn prototype_island_opens_and_saves() {
     };
     let s = Scene::from_vox(&bytes).unwrap();
     assert!(s.map.voxels > 10_000);
-    let again = Scene::from_vox(&s.to_vox()).unwrap();
+    let again = Scene::from_vox(&s.to_vox().unwrap()).unwrap();
     assert_eq!(world_voxels(&again), world_voxels(&s));
     assert_eq!(again.palette, s.palette);
 }
@@ -241,7 +241,7 @@ fn files() -> Vec<(String, Vec<u8>)> {
 fn saving_an_opened_file_without_edits_writes_it_back_byte_for_byte() {
     for (name, bytes) in files() {
         let s = Scene::from_vox(&bytes).unwrap();
-        assert!(s.to_vox() == bytes, "{name}");
+        assert!(s.to_vox().unwrap() == bytes, "{name}");
     }
 }
 
@@ -262,7 +262,7 @@ fn open_edit_save_keeps_every_untouched_chunk() {
         s.set_color(33, [1, 2, 3, 255]);
         let expect = (world_voxels(&s), s.palette);
 
-        let saved = s.to_vox();
+        let saved = s.to_vox().unwrap();
         let again = Scene::from_vox(&saved).unwrap();
         assert_eq!((world_voxels(&again), again.palette), expect, "{name}");
 
@@ -305,7 +305,7 @@ proptest! {
         prop_assert_eq!(total as u64, s.map.voxels);
         prop_assert_eq!(before.len() as u64, s.map.voxels);
         if !before.is_empty() {
-            let again = Scene::from_vox(&s.to_vox()).unwrap();
+            let again = Scene::from_vox(&s.to_vox().unwrap()).unwrap();
             prop_assert_eq!(world_voxels(&again), before);
         }
         while s.undo() {}
@@ -366,12 +366,12 @@ fn materials_open_and_save_as_matl() {
     assert_eq!(s.materials[YELLOW as usize].kind, Kind::Metal);
     assert_eq!((s.materials[CYAN as usize].kind, s.materials[CYAN as usize].ior), (Kind::Glass, 1.5));
     assert_eq!(s.materials[ORANGE as usize].kind, Kind::Emit);
-    assert!(s.to_vox() == bytes, "unedited: byte-identical");
+    assert!(s.to_vox().unwrap() == bytes, "unedited: byte-identical");
 
     // Edit one slot: only its MATL chunk changes, and the other keys in it stay.
     let glass = Material { kind: Kind::Glass, rough: 0.05, ior: 1.6, trans: 0.7, ..Material::default() };
     s.set_material(YELLOW, glass);
-    let saved = s.to_vox();
+    let saved = s.to_vox().unwrap();
     assert_eq!(Scene::from_vox(&saved).unwrap().materials, s.materials);
     let (a, b) = (vxr_vox::RawFile::parse(&bytes).unwrap(), vxr_vox::RawFile::parse(&saved).unwrap());
     assert_eq!(a.chunks.len(), b.chunks.len());
@@ -380,13 +380,13 @@ fn materials_open_and_save_as_matl() {
     let d = vxr_vox::chunk::IdDict::parse(vxr_vox::chunk::MATL, &b.chunks[changed[0]].content).unwrap();
     assert_eq!((d.id, d.dict.get_str("_type"), d.dict.get_str("_spec")), (YELLOW as i32, Some("_glass"), Some("1")));
     assert!(s.undo());
-    assert!(s.to_vox() == bytes, "undone: byte-identical again");
+    assert!(s.to_vox().unwrap() == bytes, "undone: byte-identical again");
 
     // A new scene writes MATL chunks for the slots that are not plain diffuse.
     let mut n = Scene::new([8, 8, 8]);
     n.edit([([0, 0, 0], 5)]);
     n.set_material(5, Material { kind: Kind::Emit, emit: 0.5, flux: 2.0, ..Material::default() });
-    let back = Scene::from_vox(&n.to_vox()).unwrap();
+    let back = Scene::from_vox(&n.to_vox().unwrap()).unwrap();
     assert_eq!(back.materials, n.materials);
 }
 
@@ -416,7 +416,7 @@ fn cameras_open_edit_undo_and_save_as_rcam() {
     }
     assert_eq!(fresh.cameras[2], old);
     assert!(!fresh.undo(), "no undo step was pushed");
-    assert!(fresh.to_vox() == bytes, "nothing written");
+    assert!(fresh.to_vox().unwrap() == bytes, "nothing written");
 
     // A dragged value is one undo step.
     s.put_camera(Camera { radius: 20.0, ..old });
@@ -428,7 +428,7 @@ fn cameras_open_edit_undo_and_save_as_rcam() {
     assert!(s.set_camera(new), "unchanged: no step");
 
     // Saved: only camera 2's rCAM changes, chunk for chunk (the spike's chunkdiff).
-    let saved = s.to_vox();
+    let saved = s.to_vox().unwrap();
     let (a, b) = (vxr_vox::RawFile::parse(&bytes).unwrap(), vxr_vox::RawFile::parse(&saved).unwrap());
     assert_eq!(a.chunks.len(), b.chunks.len());
     let changed: Vec<usize> = (0..a.chunks.len()).filter(|&i| a.chunks[i] != b.chunks[i]).collect();
@@ -440,19 +440,19 @@ fn cameras_open_edit_undo_and_save_as_rcam() {
     // Undo gives the file's bytes, redo the edit again.
     assert!(s.undo());
     assert_eq!(s.cameras[2], old);
-    assert!(s.to_vox() == bytes, "undone: byte-identical again");
+    assert!(s.to_vox().unwrap() == bytes, "undone: byte-identical again");
     assert!(s.redo());
-    assert!(s.to_vox() == saved);
+    assert!(s.to_vox().unwrap() == saved);
 
     // A camera edit and a voxel edit undo in order.
     s.edit([([0, 0, 0], 7)]);
     assert!(s.undo() && s.undo());
-    assert!(s.to_vox() == bytes);
+    assert!(s.to_vox().unwrap() == bytes);
 
     // A new scene has no cameras and writes none.
     let n = Scene::new([4, 4, 4]);
     assert!(n.cameras.is_empty());
-    assert!(vxr_vox::Document::read(&n.to_vox()).unwrap().cameras().is_empty());
+    assert!(vxr_vox::Document::read(&n.to_vox().unwrap()).unwrap().cameras().is_empty());
 }
 
 #[test]
@@ -461,8 +461,69 @@ fn opened_files_keep_their_cameras_and_rcam_chunks_on_save() {
         let s = Scene::from_vox(&bytes).unwrap();
         let doc = vxr_vox::Document::read(&bytes).unwrap();
         assert_eq!(s.cameras, doc.cameras(), "{name}");
-        let saved = vxr_vox::RawFile::parse(&s.to_vox()).unwrap();
+        let saved = vxr_vox::RawFile::parse(&s.to_vox().unwrap()).unwrap();
         let rcam = |c: &[vxr_vox::Chunk]| c.iter().filter(|c| c.is(vxr_vox::chunk::RCAM)).cloned().collect::<Vec<_>>();
         assert_eq!(rcam(&saved.chunks), rcam(&doc.raw.chunks), "{name}");
     }
+}
+
+fn fixture(name: &str) -> Vec<u8> {
+    vxr_vox::fixtures::all().into_iter().find(|f| f.name == name).unwrap().builder.build().write()
+}
+
+/// Names and hidden flags in tree order, and the layers: what a save must not drop.
+type Outline = (Vec<(Option<Vec<u8>>, bool)>, Vec<vxr_vox::LayerInfo>);
+
+fn outline(bytes: &[u8]) -> Outline {
+    let w = vxr_core::World::from_doc(&vxr_vox::Document::read(bytes).unwrap()).unwrap();
+    let nodes = w.tree.order().into_iter().map(|i| (w.tree.nodes[i].name.clone(), w.tree.nodes[i].hidden)).collect();
+    (nodes, w.layers())
+}
+
+/// Catches: a recolour past the end of a short `RGBA` chunk (other tools write them) made
+/// the lossless save fail, and the save fell back to a fresh file that dropped every name,
+/// group, layer and hidden flag and showed the hidden objects.
+#[test]
+fn a_colour_past_a_short_palette_saves_without_losing_the_scene_graph() {
+    let mut raw = vxr_vox::RawFile::parse(&fixture("22-world")).unwrap();
+    let i = raw.chunks.iter().position(|c| c.is(vxr_vox::chunk::RGBA)).unwrap();
+    raw.chunks[i].content.truncate(4 * 64);
+    let bytes = raw.write();
+    let mut s = Scene::from_vox(&bytes).unwrap();
+    assert!(s.to_vox().unwrap() == bytes, "unedited: byte-identical");
+    let shown = s.world_voxels(true);
+    s.set_color(200, [1, 2, 3, 255]);
+
+    let saved = s.to_vox().unwrap();
+    assert_eq!(outline(&saved), outline(&bytes));
+    let again = Scene::from_vox(&saved).unwrap();
+    assert_eq!((again.palette, again.world_voxels(true)), (s.palette, shown));
+}
+
+/// Catches: the desktop save truncated the file and then wrote it, so a failed write left
+/// a broken `.vox`. A failed save must leave the old bytes in place.
+#[test]
+fn a_failed_atomic_save_leaves_the_old_file() {
+    use vxr_core::files::save_atomic;
+    let dir = std::env::temp_dir().join(format!("vxr-save-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("a.vox");
+    save_atomic(&path, b"old").unwrap();
+    #[cfg(unix)]
+    std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+    save_atomic(&path, b"new").unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"new");
+    #[cfg(unix)]
+    assert_eq!(
+        std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&path).unwrap().permissions()) & 0o777,
+        0o600
+    );
+    assert!(!dir.join("a.vox.tmp").exists(), "the temporary file is renamed into place");
+
+    // Something that is not a file where the temporary file goes: the write fails first.
+    std::fs::create_dir(dir.join("a.vox.tmp")).unwrap();
+    assert!(save_atomic(&path, b"newer").is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), b"new");
+    std::fs::remove_dir_all(&dir).unwrap();
 }

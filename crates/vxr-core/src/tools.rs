@@ -347,8 +347,9 @@ impl Gesture {
 
     /// Radius of a circle or sphere: the distance from the press to the pointer, rounded.
     pub fn radius(&self) -> i32 {
-        let d2: i32 = (0..3).map(|a| (self.end[a] - self.start[a]).pow(2)).sum();
-        ((d2 as f32).sqrt().round() as i32).min(MAX_RADIUS)
+        // In i64: a pointer far out on the ground plane overflows the squares in i32.
+        let d2: i64 = (0..3).map(|a| (self.end[a] as i64 - self.start[a] as i64).pow(2)).sum();
+        ((d2 as f64).sqrt().round() as i64).min(MAX_RADIUS as i64) as i32
     }
 
     /// The bounds of what the drag draws, inclusive.
@@ -369,12 +370,32 @@ impl Gesture {
         }
     }
 
+    /// [`Gesture::extent`] cut to the cells a brush can change: the map's and, on a mirrored
+    /// axis, their mirror images'. None when nothing is left. A box dragged toward the
+    /// horizon reaches tens of thousands of cells out, and visiting each one froze the app.
+    fn drawn_extent(&self, scene: &Scene) -> Option<([i32; 3], [i32; 3])> {
+        let (mut lo, mut hi) = self.extent();
+        let size = scene.map.size_voxels();
+        for a in 0..3 {
+            let (mut min, mut max) = (0, size[a] as i32 - 1);
+            if self.brush.mirror[a] {
+                let (m0, m1) = (scene.mirror([0; 3], a)[a], scene.mirror([max; 3], a)[a]);
+                (min, max) = (min.min(m0).min(m1), max.max(m0).max(m1));
+            }
+            (lo[a], hi[a]) = (lo[a].max(min), hi[a].min(max));
+            if lo[a] > hi[a] {
+                return None;
+            }
+        }
+        Some((lo, hi))
+    }
+
     /// Apply a span shape from the press to the current end.
     fn draw(&self, scene: &mut Scene) {
         let (s, b) = (self.start, &self.brush);
         match b.shape {
             Shape::Box => {
-                let (lo, hi) = self.extent();
+                let Some((lo, hi)) = self.drawn_extent(scene) else { return };
                 for p in box_cells(lo, hi, false) {
                     scene.apply_voxel(b, p);
                 }
@@ -392,9 +413,12 @@ impl Gesture {
     /// Apply a circle or sphere at the current radius, leaving out the cells of radius
     /// `inside` when it is already drawn ([`ball_cells`]).
     fn draw_round(&self, scene: &mut Scene, inside: Option<i32>) {
+        let Some((lo, hi)) = self.drawn_extent(scene) else { return };
         let flat = (self.brush.shape == Shape::Circle).then_some(self.axis);
         for p in ball_cells(self.start, self.radius(), flat, inside) {
-            scene.apply_voxel(&self.brush, p);
+            if (0..3).all(|a| (lo[a]..=hi[a]).contains(&p[a])) {
+                scene.apply_voxel(&self.brush, p);
+            }
         }
     }
 

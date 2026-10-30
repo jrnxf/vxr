@@ -1,7 +1,11 @@
 //! Model exports as files: OBJ with its `.mtl` and palette texture, PNG slices, and a
-//! stored (not compressed) zip to hand several files to a browser as one download.
+//! stored (not compressed) zip to hand several files to a browser as one download. And the
+//! `.vox` save: bytes checked to read back as the scene, written so a failure mid-write
+//! never leaves a part-written file.
 
 use std::collections::BTreeMap;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use crate::Scene;
 use crate::export::{TEXTURE_W, obj, slices};
@@ -63,6 +67,74 @@ pub fn png(w: u32, h: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
     e.set_depth(png::BitDepth::Eight);
     e.write_header().and_then(|mut wr| wr.write_image_data(rgba)).map_err(|e| e.to_string())?;
     Ok(out)
+}
+
+/// The scene as `.vox` bytes, checked to read back as the same scene: every voxel, the
+/// shown ones, and for an opened file the names of its objects and groups and its layers.
+/// A save that would lose any of them is an error, not a file.
+pub fn vox_bytes(scene: &Scene) -> Result<Vec<u8>, String> {
+    let bytes = scene.to_vox()?;
+    let again = Scene::from_vox(&bytes).map_err(|e| format!("the result does not read back: {e}"))?;
+    if again.world_voxels(false) != scene.world_voxels(false) || again.world_voxels(true) != scene.world_voxels(true) {
+        return Err("the result reads back with different voxels".into());
+    }
+    if let Some(w) = scene.world()
+        && again.world().map(outline) != Some(outline(w))
+    {
+        return Err("the result reads back with different names or layers".into());
+    }
+    Ok(bytes)
+}
+
+/// What a save must keep of a world besides its voxels: the names in tree order and the
+/// layers. Not the tree's shape: a model over 256 on an axis is saved as a group of blocks
+/// under the object's name.
+fn outline(w: &crate::World) -> (Vec<Vec<u8>>, Vec<vxr_vox::LayerInfo>) {
+    let names = w.tree.order().into_iter().filter_map(|i| w.tree.nodes[i].name.clone()).collect();
+    (names, w.layers())
+}
+
+/// Replace `path` with `bytes` so that it holds either its old bytes or all of the new
+/// ones, whatever happens mid-write: they go to `<path>.tmp`, are flushed and read back,
+/// and only then is that file renamed over `path`, keeping its permissions. A symbolic
+/// link at `path` is replaced, not followed.
+pub fn save_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    write_new(&tmp, bytes).map_err(|e| e.to_string())?;
+    let back = match std::fs::read(&tmp) {
+        Ok(back) if back == bytes => Ok(()),
+        Ok(_) => Err("the written file reads back different".to_string()),
+        Err(e) => Err(e.to_string()),
+    }
+    .and_then(|()| match std::fs::symlink_metadata(path) {
+        Ok(m) if m.is_file() => std::fs::set_permissions(&tmp, m.permissions()).map_err(|e| e.to_string()),
+        _ => Ok(()),
+    });
+    if let Err(e) = back.and_then(|()| std::fs::rename(&tmp, path).map_err(|e| e.to_string())) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// Write `bytes` to a new file at `path`, flushed to disk. An earlier regular file there is
+/// replaced; anything else (a symlink, a folder) is refused, so the write cannot be sent
+/// elsewhere.
+pub fn write_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.is_file() => std::fs::remove_file(path)?,
+        Ok(_) => return Err(std::io::Error::other("not a regular file")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(path)?;
+    let written = f.write_all(bytes).and_then(|()| f.sync_all());
+    if written.is_err() {
+        let _ = std::fs::remove_file(path);
+    }
+    written
 }
 
 /// CRC-32 (IEEE), as zip stores it.

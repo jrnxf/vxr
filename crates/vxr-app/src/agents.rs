@@ -639,14 +639,14 @@ mod tests {
         let (mut a, mut s) = (Agents::default(), scene());
         ok(&mut a, &mut s, 1, "Claude Code", "place", json!({"cells": [[0, 0, 0], [1, 0, 0]], "slot": 3}));
         ok(&mut a, &mut s, 1, "Claude Code", "place", json!({"cells": [[5, 0, 5]], "slot": 4}));
-        let after = s.to_vox();
+        let after = s.to_vox().unwrap();
         // The last step, undone as Cmd-Z does, comes back as Cmd-Shift-Z does.
         ok(&mut a, &mut s, 1, "Claude Code", "undo", json!({}));
         ok(&mut a, &mut s, 1, "Claude Code", "undo", json!({}));
         assert_eq!(s.map.voxels, 0);
         assert_eq!(ok(&mut a, &mut s, 1, "Claude Code", "redo", json!({})), "brought back Claude Code: place 2 voxels");
         assert_eq!(ok(&mut a, &mut s, 1, "Claude Code", "redo", json!({})), "brought back Claude Code: place 1 voxel");
-        assert_eq!(s.to_vox(), after);
+        assert_eq!(s.to_vox().unwrap(), after);
         assert!(a.call(&mut s, 1, "Claude Code", "redo", &json!({})).unwrap_err().contains("nothing of yours to redo"));
         // Another agent's redo is its own.
         ok(&mut a, &mut s, 1, "Claude Code", "undo", json!({}));
@@ -787,7 +787,7 @@ mod tests {
     fn each_agent_copies_and_pastes_its_own_and_resize_keeps_its_selection() {
         let (mut a, mut s, mut r) = (Agents::default(), scene(), None);
         by_hand(&mut s, &[([0, 0, 0], 5), ([0, 1, 0], 5), ([3, 0, 3], 6)]);
-        let (bytes, position) = (s.to_vox(), s.history().position());
+        let (bytes, position) = (s.to_vox().unwrap(), s.history().position());
         // A copy in one call pastes in the next; another agent's clipboard is its own.
         ok(&mut a, &mut s, 1, "Claude Code", "select", json!({"color": 5}));
         assert_eq!(
@@ -820,7 +820,7 @@ mod tests {
         for _ in 0..4 {
             assert!(s.undo());
         }
-        assert_eq!(s.to_vox(), bytes);
+        assert_eq!(s.to_vox().unwrap(), bytes);
 
         // With review on, the edits wait and land one undo step each; a copy is not an edit.
         a.review = true;
@@ -853,7 +853,7 @@ mod tests {
         for _ in 0..4 {
             assert!(s.undo());
         }
-        assert_eq!(s.to_vox(), bytes);
+        assert_eq!(s.to_vox().unwrap(), bytes);
     }
 
     #[test]
@@ -956,7 +956,7 @@ mod tests {
         ok(&mut a, &mut s, 1, "Claude Code", "hide", json!({"node": 1}));
         assert_eq!(s.history().undo_label(), Some("Claude Code: hide 1 object"));
         while s.undo() {}
-        assert!(s.to_vox() == bytes);
+        assert!(s.to_vox().unwrap() == bytes);
     }
 
     #[test]

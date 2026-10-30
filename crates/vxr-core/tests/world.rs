@@ -270,7 +270,7 @@ fn scenes_open_as_objects_and_switching_modes_keeps_saves_byte_identical() {
             assert_eq!(s.world_voxels(false), all, "{name}");
         }
         assert!(s.show_world() || objects.len() <= 1, "{name}");
-        assert!(s.to_vox() == bytes, "{name}: still byte-identical");
+        assert!(s.to_vox().unwrap() == bytes, "{name}: still byte-identical");
     }
 }
 
@@ -288,7 +288,7 @@ fn growing_and_cropping_a_model_keeps_every_object_in_place() {
             s.show_world();
             assert_eq!(s.world_voxels(false), all, "{name}: object {i} grown, in world mode");
         }
-        let grown = s.to_vox();
+        let grown = s.to_vox().unwrap();
         let again = vxr_core::Scene::from_vox(&grown).unwrap();
         assert_eq!(again.world_voxels(false), all, "{name}: grown models saved");
         for i in s.world().unwrap().objects() {
@@ -301,11 +301,11 @@ fn growing_and_cropping_a_model_keeps_every_object_in_place() {
             }
         }
         assert_eq!(s.world_voxels(false), all, "{name}: cropped");
-        let again = vxr_core::Scene::from_vox(&s.to_vox()).unwrap();
+        let again = vxr_core::Scene::from_vox(&s.to_vox().unwrap()).unwrap();
         assert_eq!(again.world_voxels(false), all, "{name}: cropped models saved");
         // Every step undoes, across modes, back to the opened file.
         while s.undo() {}
-        assert!(s.to_vox() == bytes, "{name}: undone to the file");
+        assert!(s.to_vox().unwrap() == bytes, "{name}: undone to the file");
     }
 }
 
@@ -346,7 +346,7 @@ fn world_edits_and_model_edits_undo_in_order_across_modes() {
     let models = w.models.len();
     let done = (s.world_voxels(false), s.world_voxels(true));
     assert!(!done.1.keys().any(|p| opened.contains_key(p) && !done.0.contains_key(p)));
-    let saved = s.to_vox();
+    let saved = s.to_vox().unwrap();
     let again = vxr_core::Scene::from_vox(&saved).unwrap();
     assert_eq!((again.world_voxels(false), again.world_voxels(true)), done, "saved and reopened");
     assert_eq!(again.world().unwrap().models.len(), models);
@@ -361,14 +361,14 @@ fn world_edits_and_model_edits_undo_in_order_across_modes() {
     assert!(s.undo());
     assert_eq!(s.at(), At::Object(tree_a), "undo goes back to the model it edits");
     assert_eq!(s.map.voxels, n);
-    assert!(s.to_vox() == bytes, "undone: byte-identical");
+    assert!(s.to_vox().unwrap() == bytes, "undone: byte-identical");
     assert!(!s.undo());
 
     // Redo all of it, across modes again.
     while s.redo() {}
     assert_eq!(s.at(), At::World);
     assert_eq!((s.world_voxels(false), s.world_voxels(true)), done);
-    assert!(s.to_vox() == saved, "redone: the same file");
+    assert!(s.to_vox().unwrap() == saved, "redone: the same file");
 }
 
 #[test]
@@ -431,7 +431,7 @@ fn objects_are_picked_dragged_duplicated_linked_and_deleted_in_world_mode() {
     assert!(s.world().unwrap().object_at(s.to_world(cell)).is_none_or(|i| i != dup));
 
     // Saved and reopened: the moved slab, the linked copy, no duplicate.
-    let saved = s.to_vox();
+    let saved = s.to_vox().unwrap();
     let again = vxr_core::Scene::from_vox(&saved).unwrap();
     assert_eq!(again.world_voxels(false), s.world_voxels(false));
     let w2 = again.world().unwrap();
@@ -441,7 +441,7 @@ fn objects_are_picked_dragged_duplicated_linked_and_deleted_in_world_mode() {
 
     // Everything undone is the original file again.
     while s.undo() {}
-    assert!(s.to_vox() == bytes);
+    assert!(s.to_vox().unwrap() == bytes);
 }
 
 #[test]
@@ -519,11 +519,11 @@ fn groups_are_picked_moved_duplicated_grouped_and_ungrouped_in_world_mode() {
     let moved = s.world_voxels(false);
     assert!(s.edit_world(|w| w.ungroup(trees)).unwrap());
     assert_eq!(s.world_voxels(false), moved);
-    let again = vxr_core::Scene::from_vox(&s.to_vox()).unwrap();
+    let again = vxr_core::Scene::from_vox(&s.to_vox().unwrap()).unwrap();
     assert_eq!(again.world_voxels(false), moved);
 
     while s.undo() {}
-    assert!(s.to_vox() == bytes);
+    assert!(s.to_vox().unwrap() == bytes);
 }
 
 #[test]
@@ -570,13 +570,13 @@ fn layers_are_shown_hidden_named_added_and_assigned_in_world_mode() {
 
     // Everything survives save and reopen.
     let want = layers(&s);
-    let again = vxr_core::Scene::from_vox(&s.to_vox()).unwrap();
+    let again = vxr_core::Scene::from_vox(&s.to_vox().unwrap()).unwrap();
     assert_eq!(layers(&again), want);
     assert_eq!(outline(again.world().unwrap()), outline(s.world().unwrap()));
     assert_eq!(again.world_voxels(true), s.world_voxels(true));
 
     while s.undo() {}
-    assert!(s.to_vox() == bytes);
+    assert!(s.to_vox().unwrap() == bytes);
 }
 
 #[test]
@@ -611,7 +611,7 @@ fn a_world_change_inside_an_open_edit_reverts_and_commits_with_its_colours() {
     let moved = s.world_voxels(false);
     assert_ne!(moved, before);
     assert!(s.undo());
-    assert!(s.to_vox() == bytes, "one undo puts back the world and the colour");
+    assert!(s.to_vox().unwrap() == bytes, "one undo puts back the world and the colour");
     assert!(s.redo());
     assert_eq!((s.world_voxels(false), s.palette[9]), (moved, [1, 2, 3, 255]));
 }
@@ -729,5 +729,36 @@ fn a_drag_tick_leaves_the_map_as_a_full_compose_of_the_world() {
     assert_eq!(s.history().position(), 1);
     assert!(s.undo());
     assert_eq!(map_cells(&s), start);
-    assert!(s.to_vox() == bytes);
+    assert!(s.to_vox().unwrap() == bytes);
+}
+
+/// A version 150 file of `n` models of `size`, each an empty `XYZI`.
+fn empty_models(n: usize, size: i32) -> Vec<u8> {
+    let mut chunks = Vec::new();
+    for _ in 0..n {
+        let c = [size; 3].iter().flat_map(|v| v.to_le_bytes()).collect();
+        chunks.push(vxr_vox::Chunk::new(chunk::SIZE, c));
+        chunks.push(vxr_vox::Chunk::new(chunk::XYZI, 0i32.to_le_bytes().to_vec()));
+    }
+    vxr_vox::RawFile { version: 150, main_content: vec![], chunks, trailing: vec![] }.write()
+}
+
+/// Catches: each model is a dense grid over its size, so a 2.5 KB file of 64 empty
+/// 2048^3 models made the editor allocate 4 GB (a browser tab's whole memory), and a 40 MB
+/// file of a million 1^3 models 1.3 GB. Both must be refused before anything is allocated.
+#[test]
+fn a_few_bytes_cannot_ask_for_gigabytes_of_models() {
+    use vxr_core::Scene;
+    use vxr_core::world::{MAX_CELLS, MAX_MODELS};
+    let e = Scene::from_vox(&empty_models(64, 2048)).err().unwrap();
+    assert!(e.contains("XYZI model must be 1 to 256"), "{e}");
+    // An XYZI model holds byte coordinates: over 256 it can only be empty space.
+    assert!(Scene::from_vox(&empty_models(1, 257)).is_err());
+    assert!(Scene::from_vox(&empty_models(1, 256)).is_ok());
+    let e = Scene::from_vox(&empty_models(MAX_MODELS + 1, 1)).err().unwrap();
+    assert!(e.contains("models; the limit is"), "{e}");
+    let n = (MAX_CELLS / (256u64 * 256 * 256)) as usize;
+    assert!(Scene::from_vox(&empty_models(n, 256)).is_ok(), "the budget fits {n} full-size models");
+    let e = Scene::from_vox(&empty_models(n + 1, 256)).err().unwrap();
+    assert!(e.contains("cells"), "{e}");
 }
