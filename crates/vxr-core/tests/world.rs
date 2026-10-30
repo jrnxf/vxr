@@ -756,11 +756,11 @@ fn a_few_bytes_cannot_ask_for_gigabytes_of_models() {
     assert!(Scene::from_vox(&empty_models(1, 257)).is_err());
     assert!(Scene::from_vox(&empty_models(1, 256)).is_ok());
     let e = Scene::from_vox(&empty_models(MAX_MODELS + 1, 1)).err().unwrap();
-    assert!(e.contains("over 65536 models"), "{e}");
+    assert!(e.contains("over 65,536 models"), "{e}");
     let n = (MAX_CELLS / (256u64 * 256 * 256)) as usize;
     assert!(Scene::from_vox(&empty_models(n, 256)).is_ok(), "the budget fits {n} full-size models");
     let e = Scene::from_vox(&empty_models(n + 1, 256)).err().unwrap();
-    assert!(e.contains("cells"), "{e}");
+    assert!(e.contains("over 8.6 billion cells"), "{e}");
 }
 
 /// Catches: no edit kept to the open-time cell budget, so growing one object's bounds and
