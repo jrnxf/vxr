@@ -70,28 +70,44 @@ pub fn png(w: u32, h: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 /// The scene as `.vox` bytes, checked to read back as the same scene: every voxel, the
-/// shown ones, and for an opened file the names of its objects and groups and its layers.
+/// shown ones, and for an opened file the names, hidden flags and layers of its objects
+/// and groups and its layers.
 /// A save that would lose any of them is an error, not a file.
 pub fn vox_bytes(scene: &Scene) -> Result<Vec<u8>, String> {
     let bytes = scene.to_vox()?;
-    let again = Scene::from_vox(&bytes).map_err(|e| format!("the result does not read back: {e}"))?;
+    reads_back_as(&bytes, scene)?;
+    Ok(bytes)
+}
+
+fn reads_back_as(bytes: &[u8], scene: &Scene) -> Result<(), String> {
+    let again = Scene::from_vox(bytes).map_err(|e| format!("the result does not read back: {e}"))?;
     if again.world_voxels(false) != scene.world_voxels(false) || again.world_voxels(true) != scene.world_voxels(true) {
         return Err("the result reads back with different voxels".into());
     }
     if let Some(w) = scene.world()
         && again.world().map(outline) != Some(outline(w))
     {
-        return Err("the result reads back with different names or layers".into());
+        return Err("the result reads back with different names, hidden flags or layers".into());
     }
-    Ok(bytes)
+    Ok(())
 }
 
-/// What a save must keep of a world besides its voxels: the names in tree order and the
-/// layers. Not the tree's shape: a model over 256 on an axis is saved as a group of blocks
-/// under the object's name.
-fn outline(w: &crate::World) -> (Vec<Vec<u8>>, Vec<vxr_vox::LayerInfo>) {
-    let names = w.tree.order().into_iter().filter_map(|i| w.tree.nodes[i].name.clone()).collect();
-    (names, w.layers())
+/// What a save must keep of a world besides its voxels: each node's name, hidden flag and
+/// layer in tree order, and the layers. Not the tree's shape: a model over 256 on an axis is
+/// saved as a group of blocks under the object's name, each block an unnamed shown node on
+/// layer 0, so such nodes are left out.
+type Outline = (Vec<(Option<Vec<u8>>, bool, i32)>, Vec<vxr_vox::LayerInfo>);
+
+fn outline(w: &crate::World) -> Outline {
+    let nodes = w
+        .tree
+        .order()
+        .into_iter()
+        .map(|i| &w.tree.nodes[i])
+        .filter(|n| n.name.is_some() || n.hidden || n.layer != 0)
+        .map(|n| (n.name.clone(), n.hidden, n.layer))
+        .collect();
+    (nodes, w.layers())
 }
 
 /// Replace `path` with `bytes` so that it holds either its old bytes or all of the new
@@ -206,6 +222,31 @@ mod tests {
         let info = r.next_frame(&mut buf).unwrap();
         assert_eq!((info.width, info.height), (3, 2));
         assert_eq!(&buf[..info.buffer_size()], &rgba[..]);
+    }
+
+    fn fixture(name: &str) -> Vec<u8> {
+        vxr_vox::fixtures::all().into_iter().find(|f| f.name == name).unwrap().builder.build().write()
+    }
+
+    /// Catches: a save that read back with an object moved to another shown layer (the
+    /// same shown voxels), or with other voxels, was written as if nothing had changed.
+    #[test]
+    fn a_save_that_reads_back_different_is_refused() {
+        let bytes = fixture("22-world");
+        let scene = Scene::from_vox(&bytes).unwrap();
+        assert_eq!(vox_bytes(&scene).unwrap(), bytes);
+
+        let mut doc = vxr_vox::Document::read(&bytes).unwrap();
+        let mut w = crate::World::from_doc(&doc).unwrap();
+        let slab = (0..w.tree.nodes.len()).find(|&i| w.tree.nodes[i].name.as_deref() == Some(b"slab")).unwrap();
+        assert_eq!(w.tree.nodes[slab].layer, 0);
+        w.tree.nodes[slab].layer = 1;
+        w.save_into(&mut doc).unwrap();
+        let relayered = doc.write();
+        assert_eq!(Scene::from_vox(&relayered).unwrap().world_voxels(true), scene.world_voxels(true));
+        assert!(reads_back_as(&relayered, &scene).unwrap_err().contains("layers"));
+
+        assert!(reads_back_as(&fixture("12-layers"), &scene).unwrap_err().contains("voxels"));
     }
 
     #[test]

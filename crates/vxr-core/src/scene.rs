@@ -1172,3 +1172,24 @@ impl Scene {
         d
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Catches: a lossless save that failed fell back to a fresh file without the scene
+    /// graph (and with the hidden objects shown) instead of failing. Opening checks every
+    /// chunk, so a `MATL` chunk that does not parse is put into the opened document here.
+    #[test]
+    fn a_failed_lossless_save_is_an_error_not_a_flattened_file() {
+        let bytes =
+            vxr_vox::fixtures::all().into_iter().find(|f| f.name == "22-world").unwrap().builder.build().write();
+        let mut s = Scene::from_vox(&bytes).unwrap();
+        s.source.as_mut().unwrap().raw.chunks.push(vxr_vox::Chunk::new(vxr_vox::chunk::MATL, vec![1, 2]));
+        s.set_color(5, [1, 2, 3, 255]);
+
+        let e = s.to_vox().unwrap_err();
+        assert!(e.contains("MATL"), "{e}");
+        assert_eq!(crate::files::vox_bytes(&s).unwrap_err(), e);
+    }
+}
