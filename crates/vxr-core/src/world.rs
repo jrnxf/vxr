@@ -52,11 +52,16 @@ impl Budget {
     /// Within the size limit, or why not.
     pub fn check(self) -> Result<(), String> {
         if self.models > MAX_MODELS as u64 {
-            return Err(format!("the scene would have over {} models, the size limit of a scene", grouped(MAX_MODELS as u64)));
+            return Err(format!(
+                "the scene would have over {} models, the size limit of a scene",
+                grouped(MAX_MODELS as u64)
+            ));
         }
         if self.cells > MAX_CELLS {
             let billions = MAX_CELLS as f64 / 1e9;
-            return Err(format!("the models would add up to over {billions:.1} billion cells, the size limit of a scene"));
+            return Err(format!(
+                "the models would add up to over {billions:.1} billion cells, the size limit of a scene"
+            ));
         }
         Ok(())
     }
@@ -67,7 +72,7 @@ fn grouped(n: u64) -> String {
     let d = n.to_string();
     let mut s = String::new();
     for (i, c) in d.chars().enumerate() {
-        if i > 0 && (d.len() - i) % 3 == 0 {
+        if i > 0 && (d.len() - i).is_multiple_of(3) {
             s.push(',');
         }
         s.push(c);
