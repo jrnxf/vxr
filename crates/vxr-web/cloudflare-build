@@ -8,7 +8,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/../.." && pwd)"
 tools="$root/target/tools"
 
-rust=1.99.1         # rust-overlay's stable in nix/flake.lock
+rust=1.99.1         # rust-overlay's stable in nix/flake.lock, and RUST in .github/workflows/ci.yml and release.yml
 rustup=1.29.2
 wasm_bindgen=0.2.129 # the wasm-bindgen crate in Cargo.lock
 binaryen=133         # nixpkgs' binaryen in nix/flake.lock
@@ -38,6 +38,14 @@ locked="$(grep -A1 '^name = "wasm-bindgen"$' "$root/Cargo.lock" | sed -n 's/^ver
   echo "cloudflare-build: Cargo.lock has wasm-bindgen $locked, this script pins $wasm_bindgen" >&2
   exit 1
 }
+
+for workflow in ci release; do
+  pinned="$(sed -n 's/^  RUST: \(.*\)$/\1/p' "$root/.github/workflows/$workflow.yml")"
+  [ "$pinned" = "$rust" ] || {
+    echo "cloudflare-build: $workflow.yml pins Rust ${pinned:-nothing}, this script pins $rust" >&2
+    exit 1
+  }
+done
 
 # fetch <url> <sha256> <file>
 fetch() {

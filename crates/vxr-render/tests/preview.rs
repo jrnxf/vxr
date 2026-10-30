@@ -1,16 +1,23 @@
 //! The path-traced preview on the real GPU: it sees the same geometry as the CPU ray cast,
 //! converges, follows edits and recolours without a restart, and restarts on light changes.
-//! Skips (passes with a note) when the machine has no GPU adapter.
+//! Skips (passes with a note) when the machine has no GPU adapter, unless `VXR_REQUIRE_GPU` is set.
 
 use vxr_core::{BrickMap, Scene};
 use vxr_render::preview::{PREVIEW_H, PREVIEW_W};
 use vxr_render::{EditBox, Gpu, GpuMap, OrbitCamera, Preview, brickmap_layout};
 
 fn gpu() -> Option<Gpu> {
+    // One full sample a frame, whatever the GPU: the asserts below count frames, not GPU speed.
+    vxr_render::preview::fix_samples_per_frame(Some(1));
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     match pollster::block_on(Gpu::new(instance, None)) {
         Ok(g) => Some(g),
         Err(e) => {
+            // CI sets this so a runner without a (software) GPU fails instead of passing vacuously.
+            assert!(
+                std::env::var_os("VXR_REQUIRE_GPU").is_none(),
+                "VXR_REQUIRE_GPU is set but there is no GPU adapter: {e}"
+            );
             eprintln!("skipping GPU test: {e}");
             None
         }
@@ -450,16 +457,15 @@ fn an_export_sized_preview_matches_geometry() {
     let mut p = Preview::sized(&g.device, &g.queue, &layout, &scene.palette, g.timestamps, (w, h));
     p.max_spp = 4;
     let cam = camera_for(&scene.map);
-    for _ in 0..400 {
+    // One sample a frame traces every one of the 720 rows, however slow the GPU, so 4 frames
+    // converge (a band size from the GPU's timing left a software GPU short of the slots).
+    for _ in 0..4 {
         let mut enc = g.device.create_command_encoder(&Default::default());
         p.encode_budget(&g.queue, &mut enc, &map, &cam, None, 12.0);
         g.queue.submit([enc.finish()]);
         p.after_submit(&g.device);
-        if p.converged() {
-            break;
-        }
     }
-    assert!(p.converged(), "{} spp after 400 frames", p.samples());
+    assert!(p.converged(), "{} spp after 4 frames", p.samples());
     let img = pollster::block_on(p.read(&g.device, &g.queue));
     assert_eq!(img.len(), (w * h * 4) as usize);
     let mut cpu = Vec::with_capacity((w * h) as usize);
