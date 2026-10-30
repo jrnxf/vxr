@@ -97,7 +97,12 @@ impl World {
 
     /// Node `i`'s transform in the world (file axes): its parents' then its own.
     pub fn world_transform(&self, i: usize) -> Affine {
-        let parents = self.tree.parents();
+        self.transform_in(&self.tree.parents(), i)
+    }
+
+    /// [`World::world_transform`] with the tree's `parents` taken once by the caller, so a
+    /// pass over every object costs the tree's size once, not once per object.
+    fn transform_in(&self, parents: &[Option<usize>], i: usize) -> Affine {
         let mut chain = vec![i];
         while let Some(p) = parents[*chain.last().unwrap()] {
             chain.push(p);
@@ -111,7 +116,10 @@ impl World {
 
     /// Whether node `i` shows: neither it nor a group above it is hidden or on a hidden layer.
     pub fn shown(&self, i: usize) -> bool {
-        let parents = self.tree.parents();
+        self.shown_in(&self.tree.parents(), i)
+    }
+
+    fn shown_in(&self, parents: &[Option<usize>], i: usize) -> bool {
         let mut k = Some(i);
         while let Some(n) = k {
             let node = &self.tree.nodes[n];
@@ -127,21 +135,31 @@ impl World {
     /// world cell, palette index), objects in the order that wins overlaps: the first call
     /// for a cell is the one that shows.
     pub fn for_each_voxel(&self, shown_only: bool, mut f: impl FnMut(usize, [i32; 3], u8)) {
-        let mut objects = self.objects();
-        if self.version < 200 {
-            objects.reverse();
-        }
-        for i in objects {
-            if !shown_only || self.shown(i) {
-                self.for_each_object_voxel(i, |p, c| f(i, p, c));
+        let parents = self.tree.parents();
+        for i in self.priority_order() {
+            if !shown_only || self.shown_in(&parents, i) {
+                self.for_each_object_voxel_in(&parents, i, |p, c| f(i, p, c));
             }
         }
     }
 
+    /// Objects in the order that wins overlaps: the first one with a voxel at a cell shows it.
+    pub(crate) fn priority_order(&self) -> Vec<usize> {
+        let mut objects = self.objects();
+        if self.version < 200 {
+            objects.reverse();
+        }
+        objects
+    }
+
     /// Every voxel of object `i` as (vxr world cell, palette index), hidden or not.
-    pub fn for_each_object_voxel(&self, i: usize, mut f: impl FnMut([i32; 3], u8)) {
+    pub fn for_each_object_voxel(&self, i: usize, f: impl FnMut([i32; 3], u8)) {
+        self.for_each_object_voxel_in(&self.tree.parents(), i, f);
+    }
+
+    fn for_each_object_voxel_in(&self, parents: &[Option<usize>], i: usize, mut f: impl FnMut([i32; 3], u8)) {
         let Some(m) = self.model_of(i) else { return };
-        let w = self.world_transform(i);
+        let w = self.transform_in(parents, i);
         let map = &self.models[m];
         let size = vox_size(map);
         map.for_each(|u, c| {
@@ -162,9 +180,13 @@ impl World {
     /// Where object `i`'s model lands in the world: the vxr cell of its low corner and its
     /// size in vxr axes. None for a group.
     pub fn placement(&self, i: usize) -> Option<([i32; 3], [u32; 3])> {
+        self.placement_in(&self.tree.parents(), i)
+    }
+
+    fn placement_in(&self, parents: &[Option<usize>], i: usize) -> Option<([i32; 3], [u32; 3])> {
         let m = self.model_of(i)?;
         let size = vox_size(&self.models[m]);
-        let w = self.world_transform(i);
+        let w = self.transform_in(parents, i);
         let a = vox_to_world(vxr_vox::Scene::world_cell(&w, size, [0, 0, 0]));
         let b = vox_to_world(vxr_vox::Scene::world_cell(&w, size, size.map(|k| k - 1)));
         Some((std::array::from_fn(|k| a[k].min(b[k])), std::array::from_fn(|k| (a[k] - b[k]).unsigned_abs() + 1)))
@@ -223,22 +245,37 @@ impl World {
 
     /// The shown object whose voxel shows at vxr world cell `q`, with the overlap rule.
     pub fn object_at(&self, q: [i32; 3]) -> Option<usize> {
-        let mut objects = self.objects();
-        if self.version < 200 {
-            objects.reverse();
-        }
-        let v = world_to_vox(q);
-        objects.into_iter().find(|&i| {
-            let Some(m) = self.model_of(i).filter(|_| self.shown(i)) else { return false };
-            let (map, w) = (&self.models[m], self.world_transform(i));
-            let size = vox_size(map);
-            let l = local_of(&w, size, v);
-            if (0..3).any(|a| l[a] < 0 || l[a] >= size[a]) {
-                return false;
+        self.stack().object_at(self, q)
+    }
+
+    /// The shown objects in overlap order with where each lands, for looking up cells.
+    pub(crate) fn stack(&self) -> Stack {
+        let parents = self.tree.parents();
+        let placed = self
+            .priority_order()
+            .into_iter()
+            .filter(|&i| self.shown_in(&parents, i))
+            .filter_map(|i| {
+                let (lo, size) = self.placement_in(&parents, i)?;
+                let m = self.model_of(i)?;
+                let hi = std::array::from_fn(|a| lo[a] + size[a] as i32 - 1);
+                Some(Placed { object: i, model: m, at: self.transform_in(&parents, i), lo, hi })
+            })
+            .collect();
+        Stack { placed }
+    }
+
+    /// The box the shown objects fill in the world (vxr axes): low and high corner, both
+    /// inclusive; (0, 0, 0) twice when nothing shows.
+    pub(crate) fn shown_box(&self) -> ([i32; 3], [i32; 3]) {
+        let (mut lo, mut hi) = ([i32::MAX; 3], [i32::MIN; 3]);
+        for p in &self.stack().placed {
+            for a in 0..3 {
+                lo[a] = lo[a].min(p.lo[a]);
+                hi[a] = hi[a].max(p.hi[a]);
             }
-            let u = vox_to_local(size, l);
-            map.get(u[0], u[1], u[2]) != 0
-        })
+        }
+        if lo[0] > hi[0] { ([0; 3], [0; 3]) } else { (lo, hi) }
     }
 
     /// The objects showing model `m`: more than one means linked copies.
@@ -490,5 +527,59 @@ impl World {
             }
         }
         doc.set_tree(&self.tree, &edits).map_err(|e| e.to_string())
+    }
+}
+
+/// One shown object placed in the world: its model, transform and the box it fills.
+pub(crate) struct Placed {
+    object: usize,
+    model: usize,
+    at: Affine,
+    lo: [i32; 3],
+    hi: [i32; 3],
+}
+
+/// The shown objects in the order that wins overlaps (see [`World::stack`]).
+pub(crate) struct Stack {
+    placed: Vec<Placed>,
+}
+
+impl Stack {
+    /// The first object with a voxel at vxr world cell `q`, and its palette index.
+    fn hit(&self, w: &World, q: [i32; 3]) -> Option<(usize, u8)> {
+        let v = world_to_vox(q);
+        self.placed.iter().find_map(|p| {
+            if (0..3).any(|a| q[a] < p.lo[a] || q[a] > p.hi[a]) {
+                return None;
+            }
+            let map = &w.models[p.model];
+            let size = vox_size(map);
+            let l = local_of(&p.at, size, v);
+            if (0..3).any(|a| l[a] < 0 || l[a] >= size[a]) {
+                return None;
+            }
+            let u = vox_to_local(size, l);
+            Some((p.object, map.get(u[0], u[1], u[2]))).filter(|&(_, c)| c != 0)
+        })
+    }
+
+    /// Only the objects whose box meets the box `lo` to `hi` (inclusive), for many lookups inside it.
+    pub(crate) fn within(mut self, lo: [i32; 3], hi: [i32; 3]) -> Stack {
+        self.placed.retain(|p| (0..3).all(|a| p.lo[a] <= hi[a] && p.hi[a] >= lo[a]));
+        self
+    }
+
+    /// Whether every object here is one of `objects`.
+    pub(crate) fn holds_only(&self, objects: &[usize]) -> bool {
+        self.placed.iter().all(|p| objects.contains(&p.object))
+    }
+
+    pub(crate) fn object_at(&self, w: &World, q: [i32; 3]) -> Option<usize> {
+        self.hit(w, q).map(|(o, _)| o)
+    }
+
+    /// The palette index showing at vxr world cell `q`, 0 for none.
+    pub(crate) fn color_at(&self, w: &World, q: [i32; 3]) -> u8 {
+        self.hit(w, q).map_or(0, |(_, c)| c)
     }
 }

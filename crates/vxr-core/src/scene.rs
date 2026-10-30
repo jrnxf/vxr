@@ -314,6 +314,81 @@ impl Scene {
         Some(r)
     }
 
+    /// Move node `i` by `d` (vxr axes) inside the open edit, shown at once: the drag tick.
+    /// While the shown objects still fill the same box, only the cells the moved objects
+    /// left and now cover change in the map (the cost of the moved voxels, not the world's,
+    /// and the renderer uploads just those bricks); otherwise the map is composed again, as
+    /// by [`Scene::put_world`]. None outside world mode, if `i` is not in the tree, or if
+    /// the result would be over [`MAX_EXTENT`] on an axis (then nothing changes).
+    pub fn move_in_world(&mut self, i: usize, d: [i32; 3]) -> Option<()> {
+        if self.at != At::World || !self.world.as_ref()?.in_tree(i) {
+            return None;
+        }
+        let w = self.world.as_mut()?;
+        self.world_stroke.get_or_insert_with(|| WorldStroke::of(w, At::World));
+        let tree = w.tree.clone();
+        // The shown objects that move, in the order that wins overlaps, and the cells they leave.
+        let under = w.objects_under(i);
+        let moved: Vec<usize> = w.priority_order().into_iter().filter(|o| under.contains(o) && w.shown(*o)).collect();
+        let mut cells = Vec::new();
+        for &o in &moved {
+            w.for_each_object_voxel(o, |p, _| cells.push(p));
+        }
+        w.move_by(i, d);
+        let (lo, hi) = w.shown_box();
+        let kept = lo == self.origin && (0..3).all(|a| hi[a] - lo[a] + 1 == self.map.size_voxels()[a] as i32);
+        // Past a third of the world's voxels the full compose costs less than patching.
+        if !kept || cells.len() * 3 > self.map.voxels as usize {
+            if self.load(At::World).is_err() {
+                self.world.as_mut()?.tree = tree;
+                return None;
+            }
+            return Some(());
+        }
+        let w = self.world.as_ref()?;
+        let (mut cl, mut ch) = ([i32::MAX; 3], [i32::MIN; 3]);
+        for &o in &moved {
+            let (l, s) = w.placement(o)?;
+            for a in 0..3 {
+                cl[a] = cl[a].min(l[a]);
+                ch[a] = ch[a].max(l[a] + s[a] as i32 - 1);
+            }
+        }
+        for p in &cells {
+            for a in 0..3 {
+                cl[a] = cl[a].min(p[a]);
+                ch[a] = ch[a].max(p[a]);
+            }
+        }
+        let (map, origin) = (&mut self.map, self.origin);
+        let at = |p: [i32; 3]| -> [i32; 3] { std::array::from_fn(|a| p[a] - origin[a]) };
+        let stack = w.stack().within(cl, ch);
+        if stack.holds_only(&moved) {
+            // Nothing else shows around the moved objects: clear what they left, paint what
+            // they cover now, lowest priority first.
+            for p in &cells {
+                let m = at(*p);
+                map.set(m[0], m[1], m[2], 0);
+            }
+            for &o in moved.iter().rev() {
+                w.for_each_object_voxel(o, |p, c| {
+                    let m = at(p);
+                    map.set(m[0], m[1], m[2], c);
+                });
+            }
+        } else {
+            for &o in &moved {
+                w.for_each_object_voxel(o, |p, _| cells.push(p));
+            }
+            for p in cells {
+                let m = at(p);
+                map.set(m[0], m[1], m[2], stack.color_at(w, p));
+            }
+        }
+        self.show_picked();
+        Some(())
+    }
+
     /// Close the open world edit: what it changed, if anything, for the undo step.
     fn commit_world(&mut self) -> Option<Box<WorldChange>> {
         let (Some(s), Some(w)) = (self.world_stroke.take(), &self.world) else { return None };
@@ -396,18 +471,7 @@ impl Scene {
         let (mut map, lo) = match at {
             At::Object(i) => w.object_map(i).ok_or("not an object")?,
             At::World => {
-                let (mut lo, mut hi) = ([i32::MAX; 3], [i32::MIN; 3]);
-                for i in w.objects() {
-                    if let (true, Some((l, size))) = (w.shown(i), w.placement(i)) {
-                        for a in 0..3 {
-                            lo[a] = lo[a].min(l[a]);
-                            hi[a] = hi[a].max(l[a] + size[a] as i32 - 1);
-                        }
-                    }
-                }
-                if lo[0] > hi[0] {
-                    (lo, hi) = ([0; 3], [0; 3]);
-                }
+                let (lo, hi) = w.shown_box();
                 let mut size = [0u32; 3];
                 for a in 0..3 {
                     let extent = hi[a] as i64 - lo[a] as i64 + 1;

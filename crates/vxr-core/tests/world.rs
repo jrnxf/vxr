@@ -615,3 +615,119 @@ fn a_world_change_inside_an_open_edit_reverts_and_commits_with_its_colours() {
     assert!(s.redo());
     assert_eq!((s.world_voxels(false), s.palette[9]), (moved, [1, 2, 3, 255]));
 }
+
+/// A 40 x 40 x 2 slab with small blocks around and over it: one before the slab in the tree
+/// (it covers the slab), one after (the slab covers it), a turned one, and a group of two
+/// overlapping blocks and a hidden one.
+fn crowded_world() -> Vec<u8> {
+    let mut b = Builder::new(200);
+    let fill = |size: [i32; 3], c: u8| -> Vec<[u8; 4]> {
+        (0..size[0] * size[1] * size[2])
+            .map(|i| [(i % size[0]) as u8, (i / size[0] % size[1]) as u8, (i / (size[0] * size[1])) as u8, c])
+            .collect()
+    };
+    let slab = b.model([40, 40, 2], fill([40, 40, 2], 1));
+    let cube = b.model([6, 6, 6], fill([6, 6, 6], 2));
+    let bar = b.model([5, 3, 2], fill([5, 3, 2], 3));
+    let tile = b.model([4, 4, 4], fill([4, 4, 4], 4));
+    let turn = [[0, -1, 0], [1, 0, 0], [0, 0, 1]];
+    b.root.push(SceneNode::shape(tile, None, [4, 4, 0]).named("top"));
+    b.root.push(SceneNode::shape(slab, None, [0, 0, 0]).named("slab"));
+    b.root.push(SceneNode::shape(cube, None, [-8, 0, 2]).named("under"));
+    b.root.push(SceneNode::shape(bar, Some(turn), [12, -6, 1]).named("turned"));
+    b.root.push(
+        SceneNode::group(
+            None,
+            [-10, 10, 3],
+            vec![
+                SceneNode::shape(tile, None, [0, 0, 0]).named("one"),
+                SceneNode::shape(bar, None, [2, 1, 0]).named("two"),
+                SceneNode::shape(cube, None, [0, 0, 0]).named("ghost").hidden(),
+            ],
+        )
+        .named("pair"),
+    );
+    b.build().write()
+}
+
+/// The map's voxels by world cell.
+fn map_cells(s: &vxr_core::Scene) -> BTreeMap<[i32; 3], u8> {
+    let mut out = BTreeMap::new();
+    s.for_each_voxel(|p, c| {
+        out.insert(s.to_world(p), c);
+    });
+    out
+}
+
+#[test]
+fn a_drag_tick_leaves_the_map_as_a_full_compose_of_the_world() {
+    let bytes = crowded_world();
+    let mut s = vxr_core::Scene::from_vox(&bytes).unwrap();
+    assert!(s.world().is_some() && s.picked().is_none());
+    let w = s.world().unwrap();
+    let (top, under, turned, pair) = (find(w, "top"), find(w, "under"), find(w, "turned"), find(w, "pair"));
+    let start = map_cells(&s);
+    assert_eq!(start, s.world().unwrap().world_voxels(true));
+
+    // Each tick moves an object or group. The paths cross the slab both ways, so cells it
+    // covered come back and cells it covers are hidden, the turned bar and the pair (which
+    // carries a hidden block that must stay out) move, and some ticks push past the box the
+    // objects fill. While that box holds, the map is patched in place and `reshapes` stays.
+    let ticks = [
+        (under, [3, 0, 0]),
+        (under, [3, 0, 0]),
+        (under, [3, 0, -2]),
+        (under, [-6, 0, 2]),
+        (top, [-2, 0, 0]),
+        (top, [0, -1, 0]),
+        (turned, [-3, 0, 2]),
+        (turned, [0, 1, 0]),
+        (pair, [4, 0, 0]),
+        (pair, [0, 0, -5]),
+        (pair, [0, -2, 0]),
+        (pair, [0, 30, 0]),
+        (pair, [0, -30, 0]),
+        (under, [-30, 0, 0]),
+        (under, [30, 0, 0]),
+    ];
+    let hull = |m: &BTreeMap<[i32; 3], u8>| -> ([i32; 3], [i32; 3]) {
+        (
+            std::array::from_fn(|a| m.keys().map(|p| p[a]).min().unwrap()),
+            std::array::from_fn(|a| m.keys().map(|p| p[a]).max().unwrap()),
+        )
+    };
+    let mut patched = 0;
+    for (n, (node, step)) in ticks.into_iter().enumerate() {
+        let (reshapes, before) = (s.reshapes(), hull(&map_cells(&s)));
+        assert!(s.pick(Some(node)));
+        s.move_in_world(node, step).unwrap();
+        let shown = s.world().unwrap().world_voxels(true);
+        let map = map_cells(&s);
+        let off: Vec<_> = map.iter().filter(|(p, c)| shown.get(*p) != Some(c)).map(|(p, _)| p).collect();
+        let gone: Vec<_> = shown.iter().filter(|(p, c)| map.get(*p) != Some(c)).map(|(p, _)| p).collect();
+        assert!(
+            off.is_empty() && gone.is_empty(),
+            "tick {n} (node {node}): {} stale or wrong like {:?}, {} missing like {:?}",
+            off.len(),
+            off.first(),
+            gone.len(),
+            gone.first()
+        );
+        if hull(&shown) == before {
+            assert_eq!(s.reshapes(), reshapes, "tick {n}: the box held, the map should be patched in place");
+            patched += 1;
+        }
+        // The pick follows the moved voxels: picking again on the settled map selects the same count.
+        let kept: std::collections::BTreeSet<_> = s.selection().collect();
+        assert!(s.pick(Some(node)));
+        assert_eq!(kept, s.selection().collect(), "tick {n}: the selection did not move with the object");
+    }
+    assert!((8..ticks.len()).contains(&patched), "{patched} of {} ticks patched in place", ticks.len());
+
+    // The whole drag is one undo step.
+    s.commit();
+    assert_eq!(s.history().position(), 1);
+    assert!(s.undo());
+    assert_eq!(map_cells(&s), start);
+    assert!(s.to_vox() == bytes);
+}
