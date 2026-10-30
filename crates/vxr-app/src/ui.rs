@@ -373,6 +373,8 @@ pub struct ReviewCard {
     pub counts: [usize; 3],
     /// World objects and groups the change adds, moves, hides or puts on another layer.
     pub objects: usize,
+    /// The new objects and names the change makes in the world while a model shows.
+    pub world: Vec<WorldLine>,
     /// Palette slots whose colour or material the change sets.
     pub slots: Vec<SlotChange>,
     pub steps: Vec<StepRow>,
@@ -382,6 +384,19 @@ pub struct ReviewCard {
     pub before: bool,
     /// The assistant is still working on it: what it is doing now.
     pub working: Option<String>,
+}
+
+/// The request Cmd-K "Organize into objects (AI)" sends the assistant.
+pub const ORGANIZE: &str = "Split this scene into one object per real-world thing, named, grouping parts that belong together (a cup and the coffee in it, a chair's legs and seat). Don't change any voxel.";
+
+/// A new object or a name the change makes in the world, as the card lists it: "NEW 2",
+/// "\"mug\"", "60 voxels".
+#[derive(Clone, Debug, PartialEq)]
+pub struct WorldLine {
+    pub node: usize,
+    pub label: String,
+    pub text: String,
+    pub detail: String,
 }
 
 /// A palette slot the change sets: its colour before and after, and its material change.
@@ -841,6 +856,7 @@ const COMMANDS: &[Command] = &[
     Command { label: "Export OBJ", keys: &[], run: |h| h.actions.push(Action::ExportObj) },
     Command { label: "Export PNG slices", keys: &[], run: |h| h.actions.push(Action::ExportSlices) },
     Command { label: "Ask AI…", keys: &["Tab"], run: |h| h.open_ask_bar("") },
+    Command { label: "Organize into objects (AI)", keys: &[], run: |h| h.organize() },
     Command { label: "Assistant panel", keys: &["⌘", "J"], run: |h| h.toggle_ai() },
     Command { label: "Assistant keys and model", keys: &[], run: |h| h.open_ai_setup(None) },
     Command { label: "Terminal agents (MCP)…", keys: &[], run: |h| h.open_agents() },
@@ -3258,6 +3274,9 @@ impl Hybrid {
         if !card.slots.is_empty() {
             h += 6.0 + card.slots.len() as f32 * slot_h;
         }
+        if !card.world.is_empty() {
+            h += 6.0 + card.world.len() as f32 * slot_h;
+        }
         if let Some(g) = &held_text {
             h += 10.0 + 12.0 + g.size().y + 10.0 + 26.0 + 12.0;
         }
@@ -3410,6 +3429,30 @@ impl Hybrid {
                         p.text(pos2(r.right(), cy), Align2::RIGHT_CENTER, m, sans(11.5), th().muted);
                     }
                     hits.push((format!("review-slot-{}", c.slot), r));
+                    y += slot_h;
+                }
+            }
+            // New objects, then names: "NEW 2  \"mug\"  60 voxels".
+            if !card.world.is_empty() {
+                y += 6.0;
+                for l in &card.world {
+                    let r = Rect::from_min_size(pos2(inner.left(), y), vec2(inner_w, slot_h));
+                    let cy = r.center().y;
+                    p.text(pos2(r.left() + 2.0, cy), Align2::LEFT_CENTER, &l.label, mono(10.0), th().faint);
+                    let d = p.text(pos2(r.right(), cy), Align2::RIGHT_CENTER, &l.detail, mono(11.0), th().muted);
+                    let mut job = LayoutJob::single_section(
+                        l.text.clone(),
+                        TextFormat { font_id: sans(12.0), color: th().text, ..Default::default() },
+                    );
+                    job.wrap = egui::text::TextWrapping {
+                        max_width: (d.left() - 8.0 - (r.left() + 62.0)).max(0.0),
+                        max_rows: 1,
+                        break_anywhere: true,
+                        overflow_character: Some('…'),
+                    };
+                    let g = ctx.fonts_mut(|f| f.layout_job(job));
+                    p.galley(pos2(r.left() + 62.0, cy - g.size().y / 2.0), g, th().text);
+                    hits.push((format!("review-object-{}", l.node), r));
                     y += slot_h;
                 }
             }
@@ -5033,12 +5076,28 @@ impl Hybrid {
             return;
         }
         ctx.request_repaint_after(std::time::Duration::from_secs_f64(until - now));
-        let g = ctx.fonts_mut(|f| f.layout_no_wrap(msg.clone(), sans(12.5), th().text));
+        let top = self.ai.bar_bottom.map_or(TOP, |b| b + 8.0);
+        // Clear of the scene tree, which sits under the top bar beside the rail too.
+        let left = if self.tree.is_empty() || top > TOP + 1.0 {
+            screen.left() + 8.0
+        } else {
+            (if self.touch { 12.0 } else { 12.0 + self.rail_w + 8.0 }) + TREE_W + 8.0
+        };
+        let mut job = LayoutJob::single_section(
+            msg.clone(),
+            TextFormat { font_id: sans(12.5), color: th().text, ..Default::default() },
+        );
+        job.wrap = egui::text::TextWrapping {
+            max_width: (screen.right() - 8.0 - left - 28.0).max(40.0),
+            max_rows: 1,
+            break_anywhere: true,
+            overflow_character: Some('…'),
+        };
+        let g = ctx.fonts_mut(|f| f.layout_job(job));
         let size = vec2(g.size().x + 28.0, g.size().y + 18.0);
         // Centred on the view, which the docked assistant leaves.
-        let cx = screen.center().x;
-        let top = self.ai.bar_bottom.map_or(TOP, |b| b + 8.0);
-        let rect = Rect::from_min_size(pos2((cx - size.x / 2.0).round(), top), size);
+        let x = (screen.center().x - size.x / 2.0).max(left).min(screen.right() - 8.0 - size.x);
+        let rect = Rect::from_min_size(pos2(x.round(), top), size);
         Self::panel(ctx, "toast", rect, Order::Foreground, |ui, rect| {
             ui.painter().galley(pos2(rect.left() + 14.0, rect.top() + 9.0), g, th().text);
         });

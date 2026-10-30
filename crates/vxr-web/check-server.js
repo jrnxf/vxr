@@ -66,6 +66,23 @@ function standIn(req, res, body) {
     chunk(res, {}, null, { choices: [], usage });
     return res.end('data: [DONE]\n\n');
   }
+  // Cmd-K "Organize into objects (AI)" on 23-desk: the cup and its coffee as a mug, the book,
+  // and the desk that is left named.
+  if (/one object per real-world thing/.test(last)) {
+    const calls = [
+      ['make_object', { parts: ['white', 'orange'], name: 'mug' }],
+      ['make_object', { from_slot: 4, name: 'book' }],
+      ['rename', { node: 1, name: 'desk' }],
+    ];
+    chunk(res, { role: 'assistant', content: 'A desk, a mug and a book. ' });
+    calls.forEach(([name, args], index) => {
+      chunk(res, { tool_calls: [{ index, id: `call_${index}`, type: 'function', function: { name, arguments: '' } }] });
+      chunk(res, { tool_calls: [{ index, function: { arguments: JSON.stringify(args) } }] });
+    });
+    chunk(res, {}, 'tool_calls');
+    chunk(res, {}, null, { choices: [], usage });
+    return res.end('data: [DONE]\n\n');
+  }
   // A 3x3x3 block in the top corner of the editable box, from the scene summary sent.
   const summary = JSON.parse(last.slice(last.indexOf('{'), last.lastIndexOf('\n\nRequest:')));
   const [lo, hi] = [summary.editable.from, summary.editable.to];

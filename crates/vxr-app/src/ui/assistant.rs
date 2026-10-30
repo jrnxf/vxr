@@ -292,6 +292,17 @@ impl Hybrid {
         true
     }
 
+    /// Cmd-K "Organize into objects (AI)": the assistant opens on [`ORGANIZE`]. Without a key
+    /// it opens on its key settings, the request waiting in the composer.
+    pub fn organize(&mut self) {
+        self.cmdk = None;
+        if self.ai_send(ORGANIZE) {
+            self.ai_open = true;
+        } else if self.ai.draft.trim().is_empty() {
+            self.ai.draft = ORGANIZE.to_string();
+        }
+    }
+
     /// What the composer holds.
     pub fn ai_draft(&self) -> &str {
         &self.ai.draft

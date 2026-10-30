@@ -69,8 +69,31 @@ pub struct Scene {
     at: At,
     /// The object picked in world mode, whose voxels show selected there.
     picked: Option<usize>,
-    /// The world edit in progress (a drag): the tree and model count before it.
-    world_stroke: Option<(vxr_vox::Tree, usize)>,
+    /// The world edit in progress (a drag, or an AI change's new objects).
+    world_stroke: Option<WorldStroke>,
+}
+
+/// What a world edit in progress started from, to close it as one step or put it back.
+struct WorldStroke {
+    tree: vxr_vox::Tree,
+    /// How many models there were.
+    models: usize,
+    /// Models changed in place, with what they held before.
+    replaced: Vec<(usize, BrickMap)>,
+    /// What the map held.
+    at: At,
+    /// The world made for a new scene by this edit, which putting it back takes away.
+    made: Option<Box<Made>>,
+}
+
+impl WorldStroke {
+    fn of(w: &World, at: At) -> WorldStroke {
+        WorldStroke { tree: w.tree.clone(), models: w.models.len(), replaced: Vec::new(), at, made: None }
+    }
+
+    fn changed(&self, w: &World) -> bool {
+        w.tree != self.tree || w.models.len() != self.models || !self.replaced.is_empty() || self.made.is_some()
+    }
 }
 
 /// Why Selection to new object cannot run.
@@ -277,7 +300,7 @@ impl Scene {
         }
         let w = self.world.as_mut()?;
         let (tree, models) = (w.tree.clone(), w.models.len());
-        self.world_stroke.get_or_insert_with(|| (tree.clone(), models));
+        self.world_stroke.get_or_insert_with(|| WorldStroke::of(w, At::World));
         let r = f(w);
         if w.tree == tree && w.models.len() == models {
             return Some(r);
@@ -293,11 +316,20 @@ impl Scene {
 
     /// Close the open world edit: what it changed, if anything, for the undo step.
     fn commit_world(&mut self) -> Option<Box<WorldChange>> {
-        let (Some((old, models)), Some(w)) = (self.world_stroke.take(), &self.world) else { return None };
-        if w.tree == old && w.models.len() == models {
+        let (Some(s), Some(w)) = (self.world_stroke.take(), &self.world) else { return None };
+        if !s.changed(w) {
             return None;
         }
-        Some(Box::new(WorldChange::tree(old, w.tree.clone(), models, w.models[models..].to_vec(), At::World)))
+        Some(Box::new(WorldChange {
+            new: w.tree.clone(),
+            added: w.models[s.models..].to_vec(),
+            replaced: s.replaced.into_iter().map(|(m, before)| (m, before, w.models[m].clone())).collect(),
+            old: s.tree,
+            models: s.models,
+            at: [s.at, self.at],
+            selection: None,
+            made: s.made,
+        }))
     }
 
     /// The object or group picked in world mode, if it is still in the world.
@@ -548,13 +580,21 @@ impl Scene {
     /// open (its colour and material changes stay). Shape drags redraw from scratch on each
     /// move this way.
     pub fn revert_voxels(&mut self) {
-        if let (Some((tree, models)), Some(w)) = (&self.world_stroke, &mut self.world)
-            && (w.tree != *tree || w.models.len() != *models)
+        if let (Some(s), Some(w)) = (&mut self.world_stroke, &mut self.world)
+            && s.changed(w)
         {
-            w.tree = tree.clone();
-            w.models.truncate(*models);
-            // It fitted when the edit began, so it fits again.
-            let _ = self.load(At::World);
+            w.tree = s.tree.clone();
+            w.models.truncate(s.models);
+            for (m, before) in s.replaced.drain(..) {
+                w.models[m] = before;
+            }
+            if s.made.take().is_some() {
+                // Back to a new scene: the map is its one model again, as it was.
+                (self.world, self.source, self.at, self.picked) = (None, None, At::Map, None);
+            } else if self.at == At::World {
+                // It fitted when the edit began, so it fits again.
+                let _ = self.load(At::World);
+            }
         }
         if let Some(b) = self.stroke.as_mut().and_then(|s| s.bounds.take()) {
             self.reshape(b.old);
@@ -584,7 +624,7 @@ impl Scene {
         let world = self.commit_world();
         let Some(mut s) = self.stroke.take() else {
             if world.is_some() {
-                self.history.push(Step { world, at: At::World, label, ..Step::default() });
+                self.history.push(Step { world, at: self.at, label, ..Step::default() });
             }
             return 0;
         };
@@ -868,6 +908,94 @@ impl Scene {
         let made = Box::new(Made { world: w.clone(), source: source.clone(), pivot: self.pivot, floor: self.floor });
         (self.world, self.source, self.at) = (Some(w), Some(source), At::Object(1));
         made
+    }
+
+    /// Why the voxels `cells` (map cells) of the model being edited cannot become an object
+    /// of their own: the world shows, there are none, they are every voxel, or the model is
+    /// shared by linked copies.
+    pub fn split_error(&self, cells: usize) -> Option<SplitError> {
+        match self.at {
+            At::World => Some(SplitError::World),
+            _ if cells == 0 => Some(SplitError::NothingSelected),
+            _ if cells as u64 >= self.map.voxels => Some(SplitError::Everything),
+            At::Object(i) => {
+                let w = self.world.as_ref().expect("an object is in the world");
+                w.model_of(i).is_some_and(|m| w.users(m) > 1).then_some(SplitError::Linked)
+            }
+            At::Map => None,
+        }
+    }
+
+    /// Selection to new object inside the open edit (opening one if needed), for a change
+    /// that closes as one step at [`Scene::commit`]: `voxels` (map cells and their slots)
+    /// become a new object right after the one being edited, named `name` or the first free
+    /// `object N`, each on its world cell, and the cells leave the map (after any object this
+    /// edit already made from it). Unlike
+    /// [`Scene::selection_to_object`] the map stays on the model being edited. A new scene
+    /// first becomes a world of one object, which undo (or [`Scene::revert_voxels`]) takes
+    /// away again. Returns the new object, or why it cannot run (nothing changes then).
+    pub fn put_object(&mut self, voxels: &[([i32; 3], u8)], name: Option<&str>) -> Result<usize, SplitError> {
+        if let Some(e) = self.split_error(voxels.len()) {
+            return Err(e);
+        }
+        let (lo, hi) = crate::select::bounds(voxels.iter().map(|c| c.0)).expect("voxels");
+        let mut part = BrickMap::new(std::array::from_fn(|a| (hi[a] - lo[a] + 1) as u32));
+        for &(p, v) in voxels {
+            part.set(p[0] - lo[0], p[1] - lo[1], p[2] - lo[2], v);
+        }
+        let part_lo = self.to_world(lo);
+        let at = self.at;
+        let made = (self.world.is_none()).then(|| self.make_world());
+        self.open_world_stroke(at, made);
+        let At::Object(src) = self.at else { unreachable!("a model is edited") };
+        for &(p, _) in voxels {
+            self.put(p, 0);
+        }
+        let base = self.world_stroke.as_ref().map_or(0, |s| s.tree.nodes.len());
+        let w = self.world.as_mut().expect("a world");
+        w.store(src, &self.map, self.origin);
+        // After the objects this edit already made from it, so they keep their order.
+        let mut after = src;
+        if let Some(p) = w.tree.parents()[src] {
+            let kids = w.tree.children(p);
+            let from = kids.iter().position(|&k| k == src).unwrap_or(0);
+            after = kids[from..].iter().take_while(|&&k| k == src || k >= base).last().copied().unwrap_or(src);
+        }
+        let new = w.add_object_after(after, &part, part_lo).expect("an object under the root");
+        if let Some(n) = name {
+            w.set_name(new, Some(n));
+        }
+        Ok(new)
+    }
+
+    /// Name tree node `i` (None clears the name) inside the open edit, in either mode, for a
+    /// change that closes as one step at [`Scene::commit`]. False if there is no world or
+    /// `i` is not in it.
+    pub fn put_node_name(&mut self, i: usize, name: Option<&str>) -> bool {
+        if !self.world.as_ref().is_some_and(|w| w.in_tree(i)) {
+            return false;
+        }
+        self.open_world_stroke(self.at, None);
+        self.world.as_mut().expect("a world").set_name(i, name);
+        true
+    }
+
+    /// Start the world edit in progress, if none is, from the world as it is, `at` being
+    /// what the map held. While a model is edited its world copy is stored first, and goes
+    /// back with the tree, so the tree and the copy always match.
+    fn open_world_stroke(&mut self, at: At, made: Option<Box<Made>>) {
+        if self.world_stroke.is_some() {
+            return;
+        }
+        self.store_model();
+        let w = self.world.as_ref().expect("a world");
+        let mut s = WorldStroke { made, ..WorldStroke::of(w, at) };
+        if let At::Object(i) = self.at
+            && let Some(m) = w.model_of(i)
+        {
+            s.replaced.push((m, w.models[m].clone()));
+        }
+        self.world_stroke = Some(s);
     }
 
     /// Name tree node `i` (None clears the name) as one undo step, in world mode or while

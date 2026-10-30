@@ -411,6 +411,27 @@ pub struct MaterialSet {
     pub power: Option<f32>,
 }
 
+/// Make voxels an object of their own, as the select flyout's To new object does: those of one or more parts, of slot from_slot, the selection, or those in a box (from, to). They leave this object's model and become a new object right after it, under the same group and on the same layer, each voxel on the world cell it was on, so nothing moves in the world. Not every voxel: what is left stays in this object, which rename names. Not on a linked copy, whose model other objects share. In a new scene the scene first becomes a world of one object. The new object is staged like every edit and made when the user applies the change; the result gives its node, for rename, and its voxels read as gone from this model.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MakeObject {
+    /// A part id or name.
+    pub part: Option<String>,
+    /// Several part ids or names.
+    #[serde(default)]
+    pub parts: Vec<String>,
+    /// Every voxel of this slot.
+    #[schemars(range(min = 1, max = 255))]
+    pub from_slot: Option<u8>,
+    /// The selected voxels.
+    #[serde(default)]
+    pub selection: bool,
+    pub from: Option<Cell>,
+    pub to: Option<Cell>,
+    /// What the object is ("mug"), at most 64 characters (default "object N").
+    pub name: Option<String>,
+}
+
 /// Move an object or group of the world by offset [dx, dy, dz] cells, as a drag in world mode does. node is its number from the summary's world list. A group moves with everything in it.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -472,7 +493,7 @@ pub struct DeleteObject {
     pub node: usize,
 }
 
-/// Rename an object or group of the world (node) or a layer (layer, an id from the summary's layers), as a double-click in the scene tree or the layer list does. An empty name clears it.
+/// Rename an object or group of the world (node) or a layer (layer, an id from the summary's layers), as a double-click in the scene tree or the layer list does. An empty name clears it. While one object's model shows, node may be any object of the world (this one, or one make_object staged).
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Rename {
@@ -654,6 +675,7 @@ ops! {
     "palette_swap" => PaletteSwap(PaletteSwap),
     "palette_copy" => PaletteCopy(PaletteCopy),
     "material_set" => MaterialSet(MaterialSet),
+    "make_object" => MakeObject(MakeObject),
     "move_object" => MoveObject(MoveObject),
     "duplicate" => Duplicate(Duplicate),
     "group" => Group(Group),
