@@ -1,0 +1,104 @@
+name: CI
+
+# What every pull request and every commit on main must pass before it merges, deploys or is
+# released: the repo's local gate (fmt, clippy, the wasm build, cargo test) with the GPU tests
+# running for real on Mesa's software Vulkan (lavapipe), and the headless `--shot` run of the
+# editor's UI. release.yml calls this workflow for a tag, so a release builds only a tested commit.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+
+# A newer push to a pull request replaces its run. github.workflow is the caller's name in a
+# called workflow, so a release's call never replaces the run of the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  # As release.yml and crates/vxr-web/cloudflare-build pin it (rust-overlay's stable in nix/flake.lock).
+  RUST: 1.99.1
+  CARGO_TERM_COLOR: always
+  # Lavapipe is the only adapter; without one a GPU test fails instead of passing by skipping.
+  VXR_REQUIRE_GPU: "1"
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the Rust toolchain
+        run: |
+          rustup toolchain install "$RUST" --profile minimal --component clippy,rustfmt --target wasm32-unknown-unknown
+          rustup default "$RUST"
+
+      - uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ env.RUST }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-${{ env.RUST }}-
+
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo build --target wasm32-unknown-unknown
+
+      - name: Install a software Vulkan driver
+        run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers
+
+      # The island is the scene the island tests and the --shot run load; without it they skip.
+      - name: Build the island scene
+        run: node prototype/src/build.mjs
+
+      - run: cargo test --workspace
+
+  # The editor's UI checks (every tool, flyout, Cmd-K command and world mode through the same
+  # pointer path as the window), headless, on lavapipe. Each path-traced frame is a set number of
+  # samples, so a slow software GPU takes longer and cannot fail a step on timing.
+  shot:
+    name: UI checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      VXR_SHOT_SAMPLES: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the Rust toolchain
+        run: |
+          rustup toolchain install "$RUST" --profile minimal
+          rustup default "$RUST"
+
+      - uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-shot-${{ runner.os }}-${{ env.RUST }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-shot-${{ runner.os }}-${{ env.RUST }}-
+
+      - name: Install a software Vulkan driver
+        run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers
+
+      - run: node prototype/src/build.mjs
+      - run: crates/vxr-app/fetch-fonts
+
+      - name: Run the UI checks
+        run: |
+          mkdir -p "$RUNNER_TEMP/shots"
+          cargo run --release -p vxr-app -- --shot "$RUNNER_TEMP/shots" prototype/demo/scene.vox | tee "$RUNNER_TEMP/shot.log"
+          echo "$(grep -c '^ok' "$RUNNER_TEMP/shot.log") steps ok"

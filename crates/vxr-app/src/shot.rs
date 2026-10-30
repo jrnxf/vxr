@@ -167,12 +167,49 @@ impl Shot {
     }
 }
 
+/// Every step that printed FAIL, so one failure does not hide the steps after it.
+static FAILED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Print a step as ok or FAIL and go on: the run reports every FAIL at its end (`finish`). A step
+/// that cannot go on without an earlier one still stops the run with its own error.
 fn check(ok: bool, what: String) -> Result<(), String> {
     println!("{} {what}", if ok { "ok  " } else { "FAIL" });
-    if ok { Ok(()) } else { Err(what) }
+    if !ok {
+        FAILED.lock().unwrap_or_else(|e| e.into_inner()).push(what);
+    }
+    Ok(())
+}
+
+/// The run's result: an error naming every step that failed, whether the run got to its end or
+/// stopped at an error of its own.
+fn finish(result: Result<(), String>) -> Result<(), String> {
+    let failed = std::mem::take(&mut *FAILED.lock().unwrap_or_else(|e| e.into_inner()));
+    if failed.is_empty() {
+        return result;
+    }
+    let mut report = format!("{} step(s) FAILED:", failed.len());
+    for what in &failed {
+        report.push_str(&format!("\n  FAIL {what}"));
+    }
+    if let Err(e) = result {
+        report.push_str(&format!("\nand the run stopped: {e}"));
+    }
+    Err(report)
 }
 
 pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
+    fixed_samples();
+    finish(run_steps(dir, scene))
+}
+
+/// `VXR_SHOT_SAMPLES=<n>`: trace n full samples a frame instead of what a GPU time budget allows,
+/// so the path-traced steps take a set number of frames on a software GPU too.
+fn fixed_samples() {
+    let n = std::env::var("VXR_SHOT_SAMPLES").ok().and_then(|v| v.parse().ok());
+    vxr_render::preview::fix_samples_per_frame(n);
+}
+
+fn run_steps(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     let path = scene;
     let source = scene;
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -4823,6 +4860,11 @@ fn ai_bar_failed() -> Result<(), String> {
 /// with the provider's thinking or reasoning), checked and applied. Keys stay in memory.
 #[cfg(feature = "live")]
 pub fn live(dir: &Path) -> Result<(), String> {
+    finish(live_steps(dir))
+}
+
+#[cfg(feature = "live")]
+fn live_steps(dir: &Path) -> Result<(), String> {
     use vxr_ai::Kind;
     use vxr_app::assistant::Progress;
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
@@ -5800,6 +5842,11 @@ fn agents_bridge(dir: &Path) -> Result<(), String> {
 /// writes `agents-live-done.png` and the scene as `agents-live.vox` and stops.
 #[cfg(all(feature = "live", unix))]
 pub fn agents(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
+    finish(agents_steps(dir, scene))
+}
+
+#[cfg(all(feature = "live", unix))]
+fn agents_steps(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let (scene, name) = match scene {
         Some(p) => crate::native::open(p)?,
@@ -5842,4 +5889,27 @@ pub fn agents(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     let labels: Vec<String> = s.ed.agents.edits.iter().map(|e| e.label.clone()).collect();
     println!("{} edits: {labels:?}", labels.len());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `check` no longer stops at a FAIL, so the run's exit code rests on `finish`: a failed step
+    /// with every later step passing must still fail the run, with each FAIL named.
+    #[test]
+    fn a_failed_step_fails_the_run_after_the_steps_that_follow_it() {
+        assert!(check(true, "first".into()).is_ok());
+        assert!(check(false, "second".into()).is_ok());
+        assert!(check(true, "third".into()).is_ok());
+        assert!(check(false, "fourth".into()).is_ok());
+        let err = finish(Ok(())).unwrap_err();
+        assert!(
+            err.contains("2 step(s) FAILED") && err.contains("FAIL second") && err.contains("FAIL fourth"),
+            "{err}"
+        );
+        assert!(!err.contains("first") && !err.contains("third"), "{err}");
+        // The list is taken: the next run starts clean.
+        assert!(finish(Ok(())).is_ok());
+    }
 }

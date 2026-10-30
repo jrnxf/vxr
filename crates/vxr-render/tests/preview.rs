@@ -1,16 +1,23 @@
 //! The path-traced preview on the real GPU: it sees the same geometry as the CPU ray cast,
 //! converges, follows edits and recolours without a restart, and restarts on light changes.
-//! Skips (passes with a note) when the machine has no GPU adapter.
+//! Skips (passes with a note) when the machine has no GPU adapter, unless `VXR_REQUIRE_GPU` is set.
 
 use vxr_core::{BrickMap, Scene};
 use vxr_render::preview::{PREVIEW_H, PREVIEW_W};
 use vxr_render::{EditBox, Gpu, GpuMap, OrbitCamera, Preview, brickmap_layout};
 
 fn gpu() -> Option<Gpu> {
+    // One full sample a frame, whatever the GPU: the asserts below count frames, not GPU speed.
+    vxr_render::preview::fix_samples_per_frame(Some(1));
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     match pollster::block_on(Gpu::new(instance, None)) {
         Ok(g) => Some(g),
         Err(e) => {
+            // CI sets this so a runner without a (software) GPU fails instead of passing vacuously.
+            assert!(
+                std::env::var_os("VXR_REQUIRE_GPU").is_none(),
+                "VXR_REQUIRE_GPU is set but there is no GPU adapter: {e}"
+            );
             eprintln!("skipping GPU test: {e}");
             None
         }
