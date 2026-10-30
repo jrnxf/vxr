@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use vxr_core::Scene;
 use vxr_core::history::At;
 use vxr_core::select::Clip;
-use vxr_ops::{Changes, Limits, Op, Session, clean};
+use vxr_ops::{Changes, Limits, Op, OpKind, Session, clean};
 
 use crate::review::Review;
 use crate::ui::group_thousands;
@@ -116,14 +116,7 @@ pub fn limits() -> Limits {
 /// Whether a call changes the scene, so with review on it waits for the user: an edit or a
 /// colour, not a query, a selection, a copy, `undo`, `redo` or `done`.
 pub fn edits(name: &str, args: &Value) -> bool {
-    matches!(Op::parse(name, args.clone()),
-        Ok(op) if !op.is_query() && !matches!(op, Op::Select(_) | Op::Copy(_) | Op::Undo(_) | Op::Redo(_) | Op::Done(_)))
-}
-
-/// Whether a step of a change under review is an edit (what Apply lands and the notices
-/// count), not a selection, a copy, an `undo`, a `redo`, `done` or a call that failed.
-fn is_edit(st: &vxr_ops::Step) -> bool {
-    st.ok && !matches!(st.tool, "select" | "copy" | "undo" | "redo" | "done")
+    matches!(Op::parse(name, args.clone()), Ok(op) if op.kind() == OpKind::Edit)
 }
 
 /// "1 edit", "3 edits".
@@ -211,7 +204,7 @@ impl Agents {
     pub fn status(&mut self, conn: u64, review: Option<&Review>) -> String {
         let mut out: Vec<String> = self.take_notices(conn).into_iter().collect();
         let mine = review
-            .map_or(0, |r| r.session.steps().iter().filter(|s| s.lane == conn && is_edit(s) && !s.dropped).count());
+            .map_or(0, |r| r.session.steps().iter().filter(|s| s.lane == conn && s.is_edit() && !s.dropped).count());
         out.push(match (mine, review.is_some(), self.review) {
             (0, true, _) => "Nothing of yours waits for review. The user is reviewing other agents' edits: your next edit joins that change and waits too.".into(),
             (0, false, true) => "Nothing of yours waits for review. Review is on: each edit waits for the user to apply or discard it.".into(),
@@ -266,7 +259,7 @@ impl Agents {
             }
             return self.stage(scene, review, conn, client, "scene_summary", &json!({}));
         }
-        let mine = |r: &Review| r.session.steps().iter().any(|s| s.lane == conn && is_edit(s) && !s.dropped);
+        let mine = |r: &Review| r.session.steps().iter().any(|s| s.lane == conn && s.is_edit() && !s.dropped);
         if name == "undo" && !mine(review) {
             return Err("nothing of yours waits for review to take back; your applied edits can be taken back once the user applies or discards the change under review".into());
         }
@@ -353,7 +346,7 @@ impl Agents {
     /// Each agent's edits in the change under review: connection, kept, all.
     fn counts(review: &Review) -> Vec<(u64, usize, usize)> {
         let mut out: Vec<(u64, usize, usize)> = Vec::new();
-        for st in review.session.steps().iter().filter(|s| is_edit(s)) {
+        for st in review.session.steps().iter().filter(|s| s.is_edit()) {
             let i = match out.iter().position(|c| c.0 == st.lane) {
                 Some(i) => i,
                 None => {

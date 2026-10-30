@@ -284,7 +284,7 @@ impl Gesture {
         }
         if self.brush.shape == Shape::Voxel {
             let l = self.last;
-            let steps = if self.on_plane() { (0..3).map(|a| (p[a] - l[a]).abs()).max().unwrap() } else { 1 };
+            let steps = if self.on_plane() { line_steps(l, p) } else { 1 };
             for q in line(l, p, steps).skip(1) {
                 scene.stamp(&self.brush, q, self.normal);
             }
@@ -375,17 +375,12 @@ impl Gesture {
         match b.shape {
             Shape::Box => {
                 let (lo, hi) = self.extent();
-                for z in lo[2]..=hi[2] {
-                    for y in lo[1]..=hi[1] {
-                        for x in lo[0]..=hi[0] {
-                            scene.apply_voxel(b, [x, y, z]);
-                        }
-                    }
+                for p in box_cells(lo, hi, false) {
+                    scene.apply_voxel(b, p);
                 }
             }
             Shape::Line => {
-                let steps = (0..3).map(|a| (self.end[a] - s[a]).abs()).max().unwrap();
-                for q in line(s, self.end, steps) {
+                for q in line_cells(s, self.end) {
                     scene.apply_voxel(b, q);
                 }
             }
@@ -395,24 +390,11 @@ impl Gesture {
     }
 
     /// Apply a circle or sphere at the current radius, leaving out the cells of radius
-    /// `inside` when it is already drawn. Cells within r^2 + r/2 of the press: radius 1 is a
-    /// plus, radius 2 a round disc.
+    /// `inside` when it is already drawn ([`ball_cells`]).
     fn draw_round(&self, scene: &mut Scene, inside: Option<i32>) {
-        let reach = |r: i32| (r * r) as f32 + r as f32 / 2.0;
-        let (s, b) = (self.start, &self.brush);
-        let r2 = reach(self.radius());
-        let skip = inside.map_or(-1.0, reach);
-        let (lo, hi) = self.extent();
-        for z in lo[2]..=hi[2] {
-            for y in lo[1]..=hi[1] {
-                for x in lo[0]..=hi[0] {
-                    let d = [x - s[0], y - s[1], z - s[2]];
-                    let d2 = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) as f32;
-                    if d2 <= r2 && d2 > skip {
-                        scene.apply_voxel(b, [x, y, z]);
-                    }
-                }
-            }
+        let flat = (self.brush.shape == Shape::Circle).then_some(self.axis);
+        for p in ball_cells(self.start, self.radius(), flat, inside) {
+            scene.apply_voxel(&self.brush, p);
         }
     }
 
@@ -453,13 +435,58 @@ pub fn face_cells(get: impl Fn([i32; 3]) -> u8, p: [i32; 3], n: [i32; 3]) -> Vec
     out
 }
 
+/// Equal steps from `a` to `b` along the longest axis: the number of cells after the first.
+pub fn line_steps(a: [i32; 3], b: [i32; 3]) -> i64 {
+    (0..3).map(|k| (b[k] as i64 - a[k] as i64).abs()).max().unwrap_or(0)
+}
+
+/// The cells of the line brush from `a` to `b`, both ends included: [`line_steps`] equal
+/// steps, rounded half up. The brush and the agents' `line` tool both draw these.
+pub fn line_cells(a: [i32; 3], b: [i32; 3]) -> impl Iterator<Item = [i32; 3]> {
+    line(a, b, line_steps(a, b))
+}
+
 /// The cells from `a` to `b` in `steps` equal steps, rounded, both ends included.
-fn line(a: [i32; 3], b: [i32; 3], steps: i32) -> impl Iterator<Item = [i32; 3]> {
+fn line(a: [i32; 3], b: [i32; 3], steps: i64) -> impl Iterator<Item = [i32; 3]> {
     (0..=steps.max(0)).map(move |s| {
         if steps == 0 {
             return a;
         }
-        std::array::from_fn(|k| (a[k] as f32 + (b[k] - a[k]) as f32 * s as f32 / steps as f32).round() as i32)
+        // Half up, not `round`'s half away from zero: the same line in map cells (never
+        // negative) and in world cells (which are) must come out the same.
+        std::array::from_fn(|k| {
+            (a[k] as f64 + (b[k] as f64 - a[k] as f64) * s as f64 / steps as f64 + 0.5).floor() as i32
+        })
+    })
+}
+
+/// The cells of the box brush between corners `lo` and `hi` (inclusive, `lo <= hi` on every
+/// axis): all of them, or with `hollow` only the ones on its surface.
+pub fn box_cells(lo: [i32; 3], hi: [i32; 3], hollow: bool) -> impl Iterator<Item = [i32; 3]> {
+    (lo[2]..=hi[2]).flat_map(move |z| {
+        (lo[1]..=hi[1]).flat_map(move |y| {
+            (lo[0]..=hi[0])
+                .map(move |x| [x, y, z])
+                .filter(move |p| !hollow || (0..3).any(|k| p[k] == lo[k] || p[k] == hi[k]))
+        })
+    })
+}
+
+/// The cells of the center brush around `c`: the ball of radius `r`, or with `flat` the disc
+/// across that axis. A cell is in when its squared distance from `c` is within r^2 + r/2
+/// (radius 1 is a plus, radius 2 a round disc); with `inside` the cells of that smaller
+/// radius, already drawn, are left out.
+pub fn ball_cells(c: [i32; 3], r: i32, flat: Option<usize>, inside: Option<i32>) -> impl Iterator<Item = [i32; 3]> {
+    let reach = |r: i32| (r * r) as f32 + r as f32 / 2.0;
+    let (r2, skip) = (reach(r), inside.map_or(-1.0, reach));
+    let span = move |k: usize| if flat == Some(k) { 0 } else { r };
+    (-span(2)..=span(2)).flat_map(move |z| {
+        (-span(1)..=span(1)).flat_map(move |y| {
+            (-span(0)..=span(0)).filter_map(move |x| {
+                let d2 = (x * x + y * y + z * z) as f32;
+                (d2 <= r2 && d2 > skip).then_some([c[0] + x, c[1] + y, c[2] + z])
+            })
+        })
     })
 }
 

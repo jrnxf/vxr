@@ -691,10 +691,33 @@ ops! {
     "done" => Done(Done),
 }
 
+/// What a call does, see [`Op::kind`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpKind {
+    /// Only reads the scene.
+    Query,
+    /// Changes the selection or the clipboard, not the scene: no undo step, nothing to save.
+    Selection,
+    /// Changes the scene: one undo step, and the file has unsaved edits.
+    Edit,
+    /// `undo`, `redo` and `done`: they act on the session's steps, not on the scene's cells.
+    Control,
+}
+
 impl Op {
+    /// What the call does to the session, the one place that says which calls are edits.
+    pub fn kind(&self) -> OpKind {
+        match self {
+            Op::SceneSummary(_) | Op::GetVoxels(_) | Op::Slice(_) | Op::FindParts(_) | Op::Look(_) => OpKind::Query,
+            Op::Select(_) | Op::Copy(_) => OpKind::Selection,
+            Op::Undo(_) | Op::Redo(_) | Op::Done(_) => OpKind::Control,
+            _ => OpKind::Edit,
+        }
+    }
+
     /// Whether the call only reads the scene.
     pub fn is_query(&self) -> bool {
-        matches!(self, Op::SceneSummary(_) | Op::GetVoxels(_) | Op::Slice(_) | Op::FindParts(_) | Op::Look(_))
+        self.kind() == OpKind::Query
     }
 
     /// Whether the call answers with a picture ([`crate::Session::take_image`]) besides its
