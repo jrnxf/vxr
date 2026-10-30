@@ -1,4 +1,4 @@
-//! Fixtures for the MagicaVoxel check (`voxtool fixtures <dir>`). Each one targets a
+//! Fixtures for the MagicaVoxel check (the `fixture` example writes one). Each one targets a
 //! corner of the format and says what MagicaVoxel should show.
 
 use std::collections::BTreeMap;

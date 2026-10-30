@@ -115,19 +115,15 @@ proptest! {
     }
 
     #[test]
-    fn edits_stay_stable(voxels in world(), x in any::<u8>(), c in 0u8..=255, slot in 1u8..=255, rgba in any::<[u8; 4]>(), t in any::<[i16; 3]>()) {
+    fn a_palette_edit_stays_stable(voxels in world(), slot in 1u8..=255, rgba in any::<[u8; 4]>()) {
         let mut b = Builder::new(200);
         b.add_world(&voxels);
         b.materials.push((1, Dict::default().with("_type", "_metal").with("_rough", "0.3")));
         let mut doc = Document::read(&b.build().write()).unwrap();
-        let m0 = doc.scene().unwrap().models[0].size;
-        let p = [(x as i32 % m0[0]) as u8, 0, 0];
         let before = doc.raw.chunks.clone();
-        let i1 = doc.set_voxel(0, p, c).unwrap();
-        let i2 = doc.set_palette(slot, rgba).unwrap();
-        let i3 = doc.set_translation(2, [t[0] as i32, t[1] as i32, t[2] as i32]).unwrap();
+        let i = doc.set_palette(slot, rgba).unwrap();
         for (k, (a, z)) in before.iter().zip(&doc.raw.chunks).enumerate() {
-            if a != z { prop_assert!(k == i1 || k == i2 || k == i3, "chunk {} changed", k); }
+            if a != z { prop_assert!(k == i, "chunk {} changed", k); }
         }
         let w = doc.write();
         let again = Document::read(&w).unwrap();

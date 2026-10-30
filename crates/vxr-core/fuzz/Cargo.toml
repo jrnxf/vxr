@@ -1,5 +1,5 @@
 [package]
-name = "vxr-vox-fuzz"
+name = "vxr-core-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2024"
@@ -9,15 +9,16 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-vxr-vox = { path = ".." }
+vxr-core = { path = ".." }
+vxr-vox = { path = "../../vxr-vox" }
 
 [[bin]]
-name = "read"
-path = "fuzz_targets/read.rs"
+name = "scene_from_vox"
+path = "fuzz_targets/scene_from_vox.rs"
 test = false
 doc = false
 bench = false
 
-# Keep the fuzz crate out of any parent workspace.
+# Keep the fuzz crate out of the repo workspace.
 [workspace]
 members = ["."]
