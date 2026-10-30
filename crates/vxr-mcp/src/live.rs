@@ -18,7 +18,7 @@
 //! `{"id": n, "text": ..., "isError": ...}`, with `"image"` (a base64 PNG) for a tool that
 //! makes a picture (or `"missing": true` for a uri that names nothing). The app may send `{"closed": "stopped" | "regenerated" | "off"}` and hang up.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde_json::{Value, json};
 use vxr_ops::clean;
@@ -216,11 +216,6 @@ pub trait LiveLink {
     fn set_client(&mut self, name: String);
 }
 
-/// The token file's path in `dir`.
-fn token_path(dir: &Path) -> PathBuf {
-    dir.join(TOKEN)
-}
-
 #[cfg(unix)]
 mod unix {
     use std::collections::HashMap;
@@ -283,6 +278,11 @@ mod unix {
         line.push('\n');
         w.write_all(line.as_bytes())?;
         w.flush()
+    }
+
+    /// The token file's path in `dir`.
+    fn token_path(dir: &Path) -> PathBuf {
+        dir.join(TOKEN)
     }
 
     /// Make `dir` if needed, and check it is a folder only this user can open: owned by
