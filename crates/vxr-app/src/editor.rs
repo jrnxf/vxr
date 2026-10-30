@@ -1634,10 +1634,11 @@ impl Editor {
     pub fn repaint_after(&self) -> Option<std::time::Duration> {
         let moving = self.export.is_some()
             || (self.preview_shown && !self.preview.converged())
-            || self.assistant.running()
+            || (self.assistant.running() && !self.assistant.held())
             || !self.agent_host.is_empty()
             || self.agent_render.is_some()
-            || self.agent_new.is_some()
+            || matches!(self.agent_new, Some((_, _, Some(_))))
+            || self.ui.toast_unshown()
             || self.scene.reshapes() != self.shape.0
             || !self.scene.map.dirty_bricks.is_empty()
             || !self.scene.map.dirty_cells.is_empty();

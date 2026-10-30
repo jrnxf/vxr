@@ -935,6 +935,26 @@ fn new_scene_command(dir: &Path) -> Result<(), String> {
     s.frames(2);
     check(!s.ed.ui.confirm_new && s.host.is_empty(), "Open behind the confirm closes it".into())?;
 
+    // An agent's New scene waits on the user's answer: the window sleeps until it comes, then draws to reply.
+    s.stroke(mid, &[]);
+    let corner = std::mem::replace(&mut s.ed.ui.show_render, false);
+    let asked = s.ed.agent_call(1, "agent", "new_scene", &serde_json::json!({})).is_none();
+    s.frames(60);
+    let idle = s.ed.repaint_after();
+    s.ui_click("new-cancel")?;
+    let answered = s.ed.repaint_after();
+    let reply = s.ed.agent_call(1, "agent", "new_scene", &serde_json::json!({}));
+    s.ed.ui.show_render = corner;
+    s.ed.undo();
+    s.frames(2);
+    check(
+        asked
+            && idle != Some(std::time::Duration::ZERO)
+            && answered == Some(std::time::Duration::ZERO)
+            && matches!(reply, Some(Err(_))),
+        format!("an agent's unanswered New scene confirm owes no frame ({idle:?}), its answer does ({answered:?})"),
+    )?;
+
     // Saved edits are not lost: New starts at once. An undo past the save is, so it asks.
     let path = dir.join("before-new.vox");
     s.stroke(mid, &[]);
@@ -2972,6 +2992,17 @@ fn render(s: &mut Shot, dir: &Path) -> Result<(), String> {
     check(
         s.ed.repaint_after().is_none(),
         format!("a still editor with the corner hidden owes no frame ({:?})", s.ed.repaint_after()),
+    )?;
+    // A toast set between frames (the window's answer to an agent's save) is drawn without waiting for input.
+    s.ed.ui.toast(&s.ed.ctx, "Saved");
+    check(
+        s.ed.repaint_after() == Some(std::time::Duration::ZERO),
+        format!("a toast set between frames asks for the frame that shows it ({:?})", s.ed.repaint_after()),
+    )?;
+    s.frames(3);
+    check(
+        s.ed.repaint_after() != Some(std::time::Duration::ZERO),
+        format!("a drawn toast only asks to be cleared when it ends ({:?})", s.ed.repaint_after()),
     )?;
     s.ed.ui.show_render = true;
     s.frames(2);
