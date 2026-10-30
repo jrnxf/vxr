@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 use vxr_mcp::Reply;
-use vxr_mcp::live::{Ask, EXPORT_TOOL, Host, Request};
+use vxr_mcp::live::{Ask, EXPORT_TOOL, Host, Request, Wake};
 
 use crate::Editor;
 use crate::ui::Action;
@@ -21,18 +21,27 @@ pub struct Live {
     waiting: Option<Request>,
     /// Where an agent's exports go: the user's Downloads folder.
     downloads: PathBuf,
+    /// Called from the host's threads when a request arrives, for a window that sleeps.
+    wake: Option<Wake>,
 }
 
 impl Live {
     /// Live mode in `dir` (normally [`vxr_mcp::live::dir`]), off until the user turns it on.
     pub fn new(dir: PathBuf) -> Live {
         let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-        Live { dir, host: None, pending: VecDeque::new(), waiting: None, downloads: home.join("Downloads") }
+        Live { dir, host: None, pending: VecDeque::new(), waiting: None, downloads: home.join("Downloads"), wake: None }
     }
 
     /// Put agents' exports in `dir` instead of Downloads.
     pub fn downloads_to(mut self, dir: PathBuf) -> Live {
         self.downloads = dir;
+        self
+    }
+
+    /// Call `wake` whenever an agent's request arrives, so a window that sleeps between
+    /// events can run [`Live::tick`] at once, even when it is hidden and draws nothing.
+    pub fn waking(mut self, wake: Wake) -> Live {
+        self.wake = Some(wake);
         self
     }
 
@@ -46,7 +55,10 @@ impl Live {
     pub fn act(&mut self, a: &Action, ed: &mut Editor) -> bool {
         let ctx = ed.ctx.clone();
         match a {
-            Action::AllowAgents(true) if self.host.is_none() => match Host::start(&self.dir) {
+            Action::AllowAgents(true) if self.host.is_none() => match match &self.wake {
+                Some(w) => Host::start_waking(&self.dir, w.clone()),
+                None => Host::start(&self.dir),
+            } {
                 Ok(h) => {
                     self.host = Some(h);
                     ed.agents.error = None;

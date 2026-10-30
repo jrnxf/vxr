@@ -986,6 +986,12 @@ impl Hybrid {
         self.toast = Some((msg.into(), ctx.input(|i| i.time) + 1.8));
     }
 
+    /// A toast that stays long enough to read, for what the user must not miss (the view no
+    /// longer matching the scene).
+    pub fn alert(&mut self, ctx: &Context, msg: impl Into<String>) {
+        self.toast = Some((msg.into(), ctx.input(|i| i.time) + 8.0));
+    }
+
     /// Whether Shift or Alt is held, as last seen by the UI.
     pub fn modifiers(&self) -> (bool, bool) {
         (self.shift, self.alt)

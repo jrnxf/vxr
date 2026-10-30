@@ -2966,8 +2966,19 @@ fn render(s: &mut Shot, dir: &Path) -> Result<(), String> {
     s.frames_with(1, vec![egui::Event::Text("render preview".into())]);
     s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
     check(!s.ed.ui.show_render && !s.ed.ui.hits.contains_key("render"), "Cmd-K hides the render corner".into())?;
+    // Nothing moves with the corner hidden, so the window may sleep until input once the toast is gone; sampling or a
+    // pending edit asks for the next frame at once.
+    s.frames(150);
+    check(
+        s.ed.repaint_after().is_none(),
+        format!("a still editor with the corner hidden owes no frame ({:?})", s.ed.repaint_after()),
+    )?;
     s.ed.ui.show_render = true;
     s.frames(2);
+    check(
+        s.ed.repaint_after() == Some(std::time::Duration::ZERO),
+        format!("the corner still sampling asks for the next frame ({:?})", s.ed.repaint_after()),
+    )?;
     Ok(())
 }
 

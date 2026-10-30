@@ -114,6 +114,28 @@ fn wait_for(mut f: impl FnMut() -> bool) {
 }
 
 #[test]
+fn a_request_wakes_an_app_that_sleeps_between_events() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let dir = Dir::new("wake");
+    let woke = Arc::new(AtomicUsize::new(0));
+    let w = woke.clone();
+    let host = Host::start_waking(&dir.0, Arc::new(move || _ = w.fetch_add(1, Ordering::SeqCst))).unwrap();
+    let mut a = Agent::new(&dir, "claude-code");
+    std::thread::scope(|s| {
+        let call = s.spawn(|| a.request("tools/call", json!({"name": "paint", "arguments": {"slot": 3}})));
+        // Nothing polls and nothing redraws: the host alone has to tell the app a request waits.
+        wait_for(|| woke.load(Ordering::SeqCst) > 0);
+        let reqs = host.poll();
+        assert_eq!(reqs.len(), 1, "the request the wake announced is queued");
+        for r in reqs {
+            r.answer(Ok("done".into()));
+        }
+        assert_eq!(call.join().unwrap()["result"]["content"][0]["text"], "done");
+    });
+}
+
+#[test]
 fn a_call_goes_over_the_socket_and_back() {
     let dir = Dir::new("round");
     let host = Host::start(&dir.0).unwrap();
