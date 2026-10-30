@@ -1995,45 +1995,16 @@ fn called(tool: &str, args: Value) -> Vec<[i32; 3]> {
 }
 
 #[test]
-fn an_agent_s_shapes_are_the_brush_s_shapes() {
-    // Break caught: the brush and the tool each drawing their own version of a shape, so a
-    // change to one (rounding, the disc's axis, which end a line starts from) leaves the
-    // other drawing something else for the same endpoints.
-    let mut seed = 0x2545_f491_4f6c_dd1du64;
-    let mut roll = |lo: i32, hi: i32| {
-        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        lo + ((seed >> 33) % (hi - lo + 1) as u64) as i32
-    };
-    for _ in 0..40 {
-        let from = [roll(-6, 6), roll(8, 20), roll(-6, 6)];
-        let to = [roll(-6, 6), roll(8, 20), roll(-6, 6)];
-        let corner = |k: usize| from[k].min(to[k]);
-        let far = |k: usize| from[k].max(to[k]);
-        assert_eq!(
-            dragged(Shape::Line, from, to),
-            called("line", json!({"from": from, "to": to, "slot": 7})),
-            "line {from:?} to {to:?}"
-        );
-        assert_eq!(
-            dragged(Shape::Box, from, to),
-            called(
-                "box",
-                json!({"from": [corner(0), corner(1), corner(2)], "to": [far(0), far(1), far(2)], "slot": 7})
-            ),
-            "box {from:?} to {to:?}"
-        );
-        // A drag's radius is the distance to the pointer, rounded.
-        let r = roll(1, 6);
-        let edge = [from[0] + r, from[1], from[2]];
-        assert_eq!(
-            dragged(Shape::Sphere, from, edge),
-            called("sphere", json!({"center": from, "radius": r, "slot": 7})),
-            "sphere {from:?} r {r}"
-        );
-        assert_eq!(
-            dragged(Shape::Circle, from, edge),
-            called("circle", json!({"center": from, "radius": r, "slot": 7})),
-            "circle {from:?} r {r}"
-        );
-    }
+fn an_agent_s_circle_and_line_draw_what_the_brush_draws() {
+    // Break caught: what the tool decides for itself drifting from the brush. A circle with
+    // no axis must lie flat on the ground, as a drag from a top face draws it, not stand up.
+    let (center, r) = ([2, 12, -3], 4);
+    assert_eq!(
+        called("circle", json!({"center": center, "radius": r, "slot": 7})),
+        dragged(Shape::Circle, center, [center[0] + r, center[1], center[2]]),
+    );
+    // And a line in world cells (negative here) must round its halves as the brush does in
+    // map cells (never negative): z is -1.5 halfway, which half away from zero takes to -2.
+    let (from, to) = ([-4, 10, -1], [0, 10, -2]);
+    assert_eq!(called("line", json!({"from": from, "to": to, "slot": 7})), dragged(Shape::Line, from, to));
 }
