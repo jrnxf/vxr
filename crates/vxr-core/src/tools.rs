@@ -350,9 +350,10 @@ impl Gesture {
 
     /// Radius of a circle or sphere: the distance from the press to the pointer, rounded.
     pub fn radius(&self) -> i32 {
-        // In i64: a pointer far out on the ground plane overflows the squares in i32.
-        let d2: i64 = (0..3).map(|a| (self.end[a] as i64 - self.start[a] as i64).pow(2)).sum();
-        ((d2 as f64).sqrt().round() as i64).min(MAX_RADIUS as i64) as i32
+        // In f64: a pointer saturated at the ends of i32 (a ray almost along the drag
+        // plane) overflows the summed squares even in i64.
+        let d2: f64 = (0..3).map(|a| (self.end[a] as f64 - self.start[a] as f64).powi(2)).sum();
+        d2.sqrt().round().min(MAX_RADIUS as f64) as i32
     }
 
     /// The bounds of what the drag draws, inclusive.

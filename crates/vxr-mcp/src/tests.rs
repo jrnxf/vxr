@@ -288,7 +288,7 @@ fn a_save_refuses_to_replace_a_file_changed_on_disk_since_it_was_opened() {
     std::fs::write(&path, &theirs).unwrap();
 
     let e = c.err("save", json!({}));
-    assert!(e.contains("world.vox changed on disk since it was opened"), "{e}");
+    assert!(e.contains("world.vox changed on disk since this session opened or saved it"), "{e}");
     assert_eq!(std::fs::read(&path).unwrap(), theirs, "refused: the file is the user's");
     assert_eq!(std::fs::read(dir.0.join("world.vox.bak")).unwrap(), bak);
 
@@ -298,6 +298,33 @@ fn a_save_refuses_to_replace_a_file_changed_on_disk_since_it_was_opened() {
     assert_eq!(std::fs::read(dir.0.join("world.vox.bak")).unwrap(), theirs);
     // Saved here, the file is this session's again.
     c.ok("save", json!({}));
+}
+
+/// Catches: the changed-on-disk check ran only for the open file, so after saving a copy
+/// to another path and opening something else, a second save to that copy replaced the
+/// user's edits to it with no check and no new `.bak`.
+#[test]
+fn a_save_to_another_path_refuses_a_copy_changed_since_this_session_wrote_it() {
+    let dir = Dir::new("changed-copy");
+    std::fs::write(dir.0.join("world.vox"), fixture()).unwrap();
+    std::fs::write(dir.0.join("other.vox"), fixture()).unwrap();
+    let copy = dir.0.join("copy.vox");
+    let mut c = Client::new(&dir.0);
+    c.ok("open", json!({"path": "world.vox"}));
+    c.ok("save", json!({"path": "copy.vox"}));
+    let ours = std::fs::read(&copy).unwrap();
+
+    let mut theirs = vxr_core::Scene::from_vox(&ours).unwrap();
+    theirs.set_color(9, [1, 2, 3, 255]);
+    let theirs = theirs.to_vox().unwrap();
+    std::fs::write(&copy, &theirs).unwrap();
+
+    c.ok("open", json!({"path": "other.vox"}));
+    let e = c.err("save", json!({"path": "copy.vox"}));
+    assert!(e.contains("copy.vox changed on disk"), "{e}");
+    assert_eq!(std::fs::read(&copy).unwrap(), theirs, "refused: the copy is the user's");
+    c.ok("save", json!({"path": "copy.vox", "overwrite": true}));
+    assert_eq!(std::fs::read(dir.0.join("copy.vox.bak")).unwrap(), theirs);
 }
 
 /// The chunks of a file by position, as `(id, bytes)`.
@@ -520,24 +547,25 @@ fn a_save_never_writes_through_a_planted_link() {
     let victim = outside.0.join("victim");
     std::fs::write(&victim, b"keep me").unwrap();
     let original = fixture();
-    for (name, beside) in [("a.vox", "a.vox.tmp"), ("b.vox", "b.vox.bak")] {
-        std::fs::write(dir.0.join(name), &original).unwrap();
-        std::os::unix::fs::symlink(&victim, dir.0.join(beside)).unwrap();
-        let mut c = Client::new(&dir.0);
-        c.ok("open", json!({"path": name}));
-        assert!(c.err("save", json!({})).contains("not a regular file"), "{name}");
-        assert_eq!(std::fs::read(&victim).unwrap(), b"keep me", "{name}");
-        assert_eq!(std::fs::read(dir.0.join(name)).unwrap(), original, "{name}");
-        assert!(std::fs::symlink_metadata(dir.0.join(beside)).unwrap().file_type().is_symlink());
-    }
-    // A stale regular .tmp left behind is replaced, not written through.
-    std::fs::write(dir.0.join("c.vox"), &original).unwrap();
-    std::fs::write(dir.0.join("c.vox.tmp"), b"stale").unwrap();
+    std::fs::write(dir.0.join("b.vox"), &original).unwrap();
+    std::os::unix::fs::symlink(&victim, dir.0.join("b.vox.bak")).unwrap();
     let mut c = Client::new(&dir.0);
-    c.ok("open", json!({"path": "c.vox"}));
+    c.ok("open", json!({"path": "b.vox"}));
+    assert!(c.err("save", json!({})).contains("not a regular file"));
+    assert_eq!(std::fs::read(&victim).unwrap(), b"keep me");
+    assert_eq!(std::fs::read(dir.0.join("b.vox")).unwrap(), original);
+    assert!(std::fs::symlink_metadata(dir.0.join("b.vox.bak")).unwrap().file_type().is_symlink());
+
+    // The temporary file is named for each save, so a link planted at `<name>.tmp` is never
+    // on the write's path: the save goes ahead and leaves it alone.
+    std::fs::write(dir.0.join("a.vox"), &original).unwrap();
+    std::os::unix::fs::symlink(&victim, dir.0.join("a.vox.tmp")).unwrap();
+    let mut c = Client::new(&dir.0);
+    c.ok("open", json!({"path": "a.vox"}));
     c.ok("save", json!({}));
-    assert_eq!(std::fs::read(dir.0.join("c.vox")).unwrap(), original);
-    assert!(!dir.0.join("c.vox.tmp").exists());
+    assert_eq!(std::fs::read(&victim).unwrap(), b"keep me");
+    assert_eq!(std::fs::read(dir.0.join("a.vox")).unwrap(), original);
+    assert!(std::fs::symlink_metadata(dir.0.join("a.vox.tmp")).unwrap().file_type().is_symlink());
 }
 
 #[test]

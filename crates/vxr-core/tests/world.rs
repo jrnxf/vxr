@@ -821,6 +821,35 @@ fn duplicates_cannot_grow_the_world_past_the_model_limit() {
     assert_eq!(Scene::from_vox(&saved).unwrap().world_voxels(false), s.world_voxels(false));
 }
 
+/// Catches: a model over 256 on an axis was saved as blocks on layer 0 whatever the
+/// object's layer, so with layer 0 hidden the reopened object (and its linked copies)
+/// showed nothing, and the read-back check refused the save with no way to tell why.
+/// Blocks keep the object's layer; the hidden flag and layer of the object stay its own.
+#[test]
+fn a_grown_object_keeps_its_layer_when_layer_0_is_hidden() {
+    use vxr_core::Scene;
+    let mut s = Scene::from_vox(&fixture("22-world")).unwrap();
+    let slab = find(s.world().unwrap(), "slab");
+    s.edit_world(|w| {
+        w.put_on_layer(slab, 1);
+        w.set_layer_hidden(0, true);
+    })
+    .unwrap();
+    s.edit_world(|w| w.duplicate(slab, true)).unwrap().unwrap();
+    assert!(s.edit_object(slab));
+    s.resize([300, 1, 8]).unwrap();
+    assert!(s.show_world());
+    let shown = s.world_voxels(true);
+    assert_eq!(shown.len(), 2 * 64, "the slab and its linked copy show");
+
+    let saved = vxr_core::files::vox_bytes(&s).unwrap();
+    let again = Scene::from_vox(&saved).unwrap();
+    assert_eq!(again.world_voxels(true), shown);
+    assert_eq!(again.world_voxels(false), s.world_voxels(false));
+    let w = again.world().unwrap();
+    assert_eq!(w.tree.nodes[find(w, "slab")].layer, 1);
+}
+
 #[test]
 fn editing_one_models_voxels_re_encodes_only_that_models_chunk() {
     let bytes = fixture("22-world");
