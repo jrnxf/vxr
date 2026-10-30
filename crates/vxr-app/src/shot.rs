@@ -273,6 +273,7 @@ pub fn run(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     scene_tree(dir)?;
     to_object(dir)?;
     organize(dir)?;
+    organize_island(file.as_deref())?;
     render(&mut s, dir)?;
     materials(&mut s, dir)?;
     export(&mut s, dir)?;
@@ -1933,6 +1934,71 @@ fn organize(dir: &Path) -> Result<(), String> {
     s.ed.undo();
     s.frames(2);
     check(s.ed.scene.to_vox() == bytes, "undo gives the file's bytes back".into())
+}
+
+/// Organize into objects (AI) on the opened file (the island), through the same scripted
+/// provider and review card: the model makes objects of its second and third most used
+/// colours, named; Apply leaves every voxel in exactly one object, the total unchanged, as one
+/// undo step, and undo gives the file's bytes back. Skipped without a file of three colours.
+fn organize_island(file: Option<&[u8]>) -> Result<(), String> {
+    use serde_json::json;
+    use vxr_app::assistant::Progress;
+    use vxr_app::assistant::fake::anthropic;
+    let Some(bytes) = file else {
+        println!("skip organize on the island: no file opened");
+        return Ok(());
+    };
+    let mut s = Shot::new(Scene::from_vox(bytes)?, "scene.vox", 2.0)?;
+    let mut slots: Vec<usize> = (1..256).filter(|&i| s.ed.scene.map.counts[i] > 0).collect();
+    slots.sort_by_key(|&i| std::cmp::Reverse(s.ed.scene.map.counts[i]));
+    if slots.len() < 3 {
+        println!("skip organize on the island: fewer than three colours");
+        return Ok(());
+    }
+    s.ed.ui.coach = false;
+    let fake = s.fake_assistant(0);
+    s.ed.assistant.set_key(vxr_ai::Kind::Anthropic, "sk-ant-test-not-a-real-key", false)?;
+    s.frames(3);
+    let (all, position) = (s.ed.scene.world_voxels(false), s.ed.scene.history().position());
+    fake.answer(anthropic(
+        "An island.",
+        &[
+            ("make_object", json!({"from_slot": slots[1], "name": "rocks"})),
+            ("make_object", json!({"from_slot": slots[2], "name": "trees"})),
+            ("done", json!({"summary": "Split the island into ground, rocks and trees"})),
+        ],
+    ));
+    let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("organize into objects".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    s.settle(600);
+    let a = s.last_answer().ok_or("no answer")?;
+    let card = s.ed.ui.review.clone().ok_or("no review card")?;
+    check(
+        a.progress == Progress::Done && card.counts == [0, 0, 0] && card.world.len() == 2,
+        format!("island: the card lists two new objects and no voxel changes: {:?} {}", card.counts, card.world.len()),
+    )?;
+    s.frames(40);
+    s.ui_click("review-apply")?;
+    s.frames(2);
+    let w = s.ed.scene.world().ok_or("no world")?;
+    let mut seen = std::collections::BTreeMap::new();
+    let mut twice = false;
+    for i in w.objects() {
+        w.for_each_object_voxel(i, |p, c| twice |= seen.insert(p, c).is_some());
+    }
+    let n = w.objects().len();
+    check(
+        n == 3 && !twice && seen.len() == all.len() && seen == all && s.ed.scene.history().position() == position + 1,
+        format!(
+            "island: Apply makes {n} objects as one undo step, every one of {} voxels in exactly one object",
+            all.len()
+        ),
+    )?;
+    s.ed.undo();
+    s.frames(2);
+    check(s.ed.scene.to_vox() == bytes, "island: undo gives the file's bytes back".into())
 }
 
 /// Selection to new object on the generated 23-desk, one model: the cup and the coffee are

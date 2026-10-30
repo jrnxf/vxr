@@ -1860,6 +1860,31 @@ fn make_object_refuses_cleanly() {
 }
 
 #[test]
+fn edits_after_make_object_keep_what_apply_makes() {
+    let bytes = desk_file();
+    let mut s = Scene::from_vox(&bytes).unwrap();
+    let mut o = Session::new(&s, Some(&bytes));
+    let model = voxels(&s);
+    let cup: Vec<[i32; 3]> = model.iter().filter(|c| c.1 == 1).map(|c| c.0).collect();
+    let lo: [i32; 3] = std::array::from_fn(|k| model.iter().map(|c| c.0[k]).min().unwrap());
+    let hi: [i32; 3] = std::array::from_fn(|k| model.iter().map(|c| c.0[k]).max().unwrap());
+    call(&mut o, &mut s, "make_object", json!({"from_slot": 1, "name": "mug"}));
+    // Erasing everything else would leave the model empty, so Apply could not make the mug.
+    let (_, e) = err(&mut o, &mut s, "box", json!({"from": lo, "to": hi, "mode": "erase"}));
+    assert!(e.starts_with("this would leave no voxel in this model"), "{e}");
+    assert_eq!(json(&o.summary(&s))["voxels"], 244, "nothing changed");
+    // Setting every cell the mug took gives them all back to the model.
+    let (_, e) = err(&mut o, &mut s, "place", json!({"cells": cup, "slot": 5}));
+    assert!(e.starts_with("this would take back every voxel of new object 2"), "{e}");
+    assert_eq!(o.changes(&s).objects[0].voxels, 52);
+    call(&mut o, &mut s, "place", json!({"cells": [cup[0]], "slot": 5}));
+    assert_eq!(o.changes(&s).objects[0].voxels, 51);
+    o.apply_named(&mut s, "AI: organize");
+    assert_eq!(object_cells(&s, node_named(&s, "mug")).len(), 51, "Apply makes what the card listed");
+    assert_eq!(voxels(&s).len(), 296 - 51);
+}
+
+#[test]
 fn make_object_turns_a_new_scene_into_a_world_that_undo_takes_away() {
     let mut s = small();
     let (bytes, before) = (s.to_vox(), voxels(&s));

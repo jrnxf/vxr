@@ -1265,6 +1265,7 @@ impl Session {
                 });
             }
         }
+        self.keeps_objects(scene, &plan)?;
         if !plan.is_empty() {
             self.open(scene);
         }
@@ -1272,6 +1273,36 @@ impl Session {
             self.set(scene, p, v);
         }
         Ok(Staged { changed: plan.len(), outside, made })
+    }
+
+    /// Whether `plan` (map cells to stage) leaves what Apply needs to make every staged new
+    /// object: a voxel of each, and one still in the model; or why not.
+    fn keeps_objects(&self, scene: &Scene, plan: &[(Cell, u8)]) -> Result<(), Error> {
+        if self.moved.is_empty() {
+            return Ok(());
+        }
+        let mut left = self.voxel_count(scene) as isize;
+        let mut lost: HashMap<usize, usize> = HashMap::new();
+        for &(p, v) in plan {
+            left += (v != 0) as isize - (self.get(scene, p) != 0) as isize;
+            if let Some(&k) = self.moved.get(&p) {
+                *lost.entry(k).or_default() += 1;
+            }
+        }
+        for (k, n) in lost {
+            if self.moved.values().filter(|&&j| j == k).count() == n {
+                let Pending::Object { node, .. } = &self.pending[k] else { continue };
+                return Err(invalid(format!(
+                    "this would take back every voxel of new object {node}, which make_object staged: nothing changed; leave some of its cells alone"
+                )));
+            }
+        }
+        if left <= 0 {
+            return Err(invalid(
+                "this would leave no voxel in this model outside the new objects make_object staged: nothing changed; the model keeps at least one voxel",
+            ));
+        }
+        Ok(())
     }
 
     /// "12 cells changed; staged so far: ...", and a warning when it clipped or did nothing.
