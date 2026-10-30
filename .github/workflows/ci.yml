@@ -20,6 +20,11 @@ concurrency:
 permissions:
   contents: read
 
+# An explicit bash adds -o pipefail, so a failing command piped into tee fails its step.
+defaults:
+  run:
+    shell: bash
+
 env:
   # As release.yml and crates/vxr-web/cloudflare-build pin it (rust-overlay's stable in nix/flake.lock).
   RUST: 1.99.1
