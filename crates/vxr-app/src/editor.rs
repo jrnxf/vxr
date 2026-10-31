@@ -112,6 +112,8 @@ pub struct Editor {
     /// The width in points the docked assistant takes from the right of the view, as the
     /// camera last allowed for: the scene stays centred in the space left over.
     ai_dock: f32,
+    /// How long egui said it can wait before the next frame, as of the last one.
+    egui_delay: std::time::Duration,
     gesture: Option<Gesture>,
     /// The selection being dragged, or a box being drawn, with the select tool.
     moving: Option<MoveDrag>,
@@ -264,6 +266,7 @@ impl Editor {
             ui_touch: None,
             touch_places: false,
             ai_dock: 0.0,
+            egui_delay: std::time::Duration::ZERO,
             gesture: None,
             moving: None,
             move_press: None,
@@ -1478,6 +1481,8 @@ impl Editor {
         let mut actions = Vec::new();
         let ui = &mut self.ui;
         let out = self.ctx.run_ui(input, |u| actions = ui.ui(u.ctx(), &stats));
+        self.egui_delay =
+            out.viewport_output.get(&egui::ViewportId::ROOT).map_or(std::time::Duration::ZERO, |v| v.repaint_delay);
         // The assistant docked or left: keep the scene centred in the space beside it.
         let dock = self.ui.ai_width();
         if dock != self.ai_dock {
@@ -1619,6 +1624,34 @@ impl Editor {
             host.push(done);
         }
         (host, out.platform_output)
+    }
+
+    /// When the window next has to draw if no input comes first: `Some(ZERO)` while something
+    /// is still moving (the render corner sampling, an export, the assistant's stream, an
+    /// agent's call, an edit not yet drawn), egui's own request (a toast fading) after that,
+    /// and None when nothing changes until input does, so the window can sleep instead of
+    /// drawing the same image at the display's refresh rate.
+    pub fn repaint_after(&self) -> Option<std::time::Duration> {
+        let moving = self.export.is_some()
+            || (self.preview_shown && !self.preview.converged())
+            || (self.assistant.running() && !self.assistant.held())
+            || !self.agent_host.is_empty()
+            || self.agent_render.is_some()
+            || matches!(self.agent_new, Some((_, _, Some(_))))
+            || self.ui.toast_unshown()
+            || self.scene.reshapes() != self.shape.0
+            || !self.scene.map.dirty_bricks.is_empty()
+            || !self.scene.map.dirty_cells.is_empty();
+        if moving {
+            return Some(std::time::Duration::ZERO);
+        }
+        (self.egui_delay != std::time::Duration::MAX).then_some(self.egui_delay)
+    }
+
+    /// What agents asked of the host (a save, a new scene's window title), for a window to
+    /// run while it draws nothing.
+    pub fn take_host_actions(&mut self) -> Vec<Action> {
+        std::mem::take(&mut self.agent_host)
     }
 
     /// Whether an agent's call has to wait: the user is in the middle of a drag, a box or a
@@ -2063,10 +2096,11 @@ impl Editor {
         self.shape = (self.scene.reshapes(), self.scene.origin);
         let d: [i32; 3] = std::array::from_fn(|a| old[a] - self.scene.origin[a]);
         self.cam.target += Vec3::new(d[0] as f32, d[1] as f32, d[2] as f32);
+        // A map too big to upload leaves the old buffers (stale, never partly written to) on
+        // screen until an edit or undo brings the scene back within reach.
         let (dev, queue) = (&self.gpu.device, &self.gpu.queue);
-        match GpuMap::new(dev, queue, &self.layout, &self.scene.map, &self.scene.palette) {
-            Ok(m) => self.map = m,
-            Err(e) => eprintln!("upload failed: {e}"),
+        if let Err(e) = self.map.reupload(dev, queue, &self.scene.map, &self.scene.palette) {
+            self.ui.alert(&self.ctx, format!("The view cannot show this scene any more: {e}"));
         }
         self.scene.map.take_dirty();
         self.scene.map.take_dirty_box();
@@ -2135,8 +2169,29 @@ impl Editor {
             }
         }
         let edit = self.scene.map.take_dirty_box().map(|(lo, hi)| EditBox::voxels(lo, hi));
-        if let Err(e) = self.map.upload_dirty(dev, queue, &mut self.scene.map, &self.scene.palette) {
-            eprintln!("upload failed: {e}");
+        let was_stale = self.map.stale();
+        match self.map.upload_dirty(dev, queue, &mut self.scene.map, &self.scene.palette) {
+            Err(e) => {
+                // Said once, when the view first stops matching the scene, not on every edit after.
+                if !was_stale {
+                    self.ui.alert(
+                        &self.ctx,
+                        format!("The view cannot show this scene any more: {e}. Undo to bring it back."),
+                    );
+                }
+            }
+            // Every edit while stale sampled the old buffers, not just the last one's box.
+            Ok(_) if was_stale && !self.map.stale() => {
+                self.preview.restart();
+                if self.export.take().is_some() {
+                    self.ui.toast(&self.ctx, "Export cancelled: the scene changed");
+                }
+            }
+            Ok(_) => {}
+        }
+        for problem in self.gpu.take_problems() {
+            eprintln!("vxr: {problem}");
+            self.ui.alert(&self.ctx, problem);
         }
         // The selection mask follows brick slots, which only move when cells fill or empty:
         // build it again then while something is selected, not on a repaint.

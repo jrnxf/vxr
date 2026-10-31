@@ -131,13 +131,14 @@ fn orthographic_and_snap_views_match_cpu_raycast() {
     }
 }
 
-#[test]
-fn partial_uploads_track_edits_undo_and_redo() {
+/// Edits, undo and redo uploaded in parts, in a heap of pages `1 << page_shift` bytes.
+fn partial_uploads(page_shift: u32) {
     let Some(g) = gpu() else { return };
     let v = View::new(&g);
     let mut scene = test_scene();
     scene.map.track_dirty(true);
-    let mut map = GpuMap::new(&g.device, &g.queue, &v.layout, &scene.map, &scene.palette).unwrap();
+    let mut map =
+        GpuMap::with_page_shift(&g.device, &g.queue, &v.layout, &scene.map, &scene.palette, page_shift).unwrap();
     let cam = camera_for(&scene.map);
     // A tower in a new colour, a hole through the ground, then a repaint.
     scene.edit((0..20).flat_map(|y| (20..26).map(move |x| ([x, 8 + y, 22], 9))));
@@ -158,6 +159,60 @@ fn partial_uploads_track_edits_undo_and_redo() {
         assert!(changed > 0, "{step}: the image did not change");
         last = now;
     }
+}
+
+#[test]
+fn partial_uploads_track_edits_undo_and_redo() {
+    partial_uploads(vxr_render::map::PAGE_SHIFT);
+}
+
+/// The shader picks the heap page from the byte offset, and an edit that moves a brick's block
+/// to another page writes to the right buffer. With 128 MiB pages no test scene leaves page 0.
+#[test]
+fn partial_uploads_across_small_heap_pages() {
+    partial_uploads(13);
+}
+
+/// An edit that outgrows the heap cannot be uploaded. The view keeps the last scene that fit
+/// instead of mixing it with the new brick layout, and shows the edits again once they fit.
+#[test]
+fn an_edit_past_the_heap_leaves_the_last_view_until_the_scene_fits_again() {
+    let Some(g) = gpu() else { return };
+    let v = View::new(&g);
+    let mut scene = Scene::new([48, 32, 48]);
+    scene.map.track_dirty(true);
+    scene.edit((8..24).flat_map(|x| (8..24).flat_map(move |z| (0..2).map(move |y| ([x, y, z], 2)))));
+    let mut map = GpuMap::with_page_shift(&g.device, &g.queue, &v.layout, &scene.map, &scene.palette, 11).unwrap();
+    let cam = camera_for(&scene.map);
+    let before = cpu_values(&scene.map, &cam);
+    assert_matches(&v.values(&g, &map, &cam), &before, "first upload");
+    // A solid block of ~38 KB cannot fit four 2 KiB pages.
+    scene.edit((4..44).flat_map(|x| (4..44).flat_map(move |z| (2..26).map(move |y| ([x, y, z], 5)))));
+    let err = map.upload_dirty(&g.device, &g.queue, &mut scene.map, &scene.palette).expect_err("too big");
+    assert!(err.contains("pages"), "{err}");
+    assert!(map.stale());
+    assert_matches(&v.values(&g, &map, &cam), &before, "after the failed upload");
+    // A further edit while stale does not index the old buffers with the new layout.
+    scene.edit([([30, 30, 30], 3)]);
+    assert!(map.upload_dirty(&g.device, &g.queue, &mut scene.map, &scene.palette).is_err());
+    assert_matches(&v.values(&g, &map, &cam), &before, "after a second failed upload");
+    assert!(scene.undo() && scene.undo());
+    let st = map.upload_dirty(&g.device, &g.queue, &mut scene.map, &scene.palette).unwrap();
+    assert!(st.rebuilt && !map.stale());
+    assert_matches(&v.values(&g, &map, &cam), &cpu_values(&scene.map, &cam), "after undoing back to a scene that fits");
+}
+
+/// A heap that outgrows its four pages is an error and leaves the map as it was, so the editor
+/// can keep showing the last scene it could upload.
+#[test]
+fn a_heap_past_four_pages_is_refused() {
+    let Some(g) = gpu() else { return };
+    let v = View::new(&g);
+    let scene = test_scene();
+    let err = GpuMap::with_page_shift(&g.device, &g.queue, &v.layout, &scene.map, &scene.palette, 11)
+        .err()
+        .expect("a 2 KiB page cannot hold the scene in four pages");
+    assert!(err.contains("pages"), "{err}");
 }
 
 #[test]

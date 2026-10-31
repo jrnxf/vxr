@@ -38,6 +38,12 @@ pub struct App {
     bridge: Page,
     /// Files agents exported, waiting for the page to download them.
     downloads: Vec<vxr_app::files::File>,
+    /// Something outside a frame changed what the next one draws (any call in, other than
+    /// the page's polling): see [`App::wants_frame`].
+    woken: bool,
+    /// The time (seconds) of the next frame owed with no input: the render corner sampling,
+    /// a toast fading. Infinite when the view only changes with input.
+    due: f64,
 }
 
 /// Start the editor on `canvas` with the `.vox` bytes (an empty array opens a new scene).
@@ -79,6 +85,7 @@ pub async fn start(
         color_space: wgpu::SurfaceColorSpace::Auto,
     };
     surface.configure(&gpu.device, &config);
+    gpu.report_problems();
     let fonts =
         [&sans_regular, &sans_medium, &sans_semibold, &mono_regular, &mono_medium, &mono_ultrablack, &symbols, &icons]
             .iter()
@@ -111,6 +118,8 @@ pub async fn start(
         dark: true,
         bridge,
         downloads: Vec::new(),
+        woken: true,
+        due: 0.0,
     })
 }
 
@@ -118,6 +127,7 @@ pub async fn start(
 impl App {
     /// The canvas was resized to `width` x `height` device pixels.
     pub fn resize(&mut self, width: u32, height: u32, ppp: f32) {
+        self.woken = true;
         self.config.width = width.max(1);
         self.config.height = height.max(1);
         self.surface.configure(&self.editor.gpu.device, &self.config);
@@ -125,6 +135,7 @@ impl App {
     }
 
     pub fn set_modifiers(&mut self, shift: bool, alt: bool, ctrl: bool, meta: bool) {
+        self.woken = true;
         let m = egui::Modifiers { alt, ctrl, shift, mac_cmd: meta, command: meta || ctrl };
         if m != self.modifiers {
             self.modifiers = m;
@@ -134,12 +145,14 @@ impl App {
 
     /// The system went dark (true) or light: the System theme follows it.
     pub fn set_system_dark(&mut self, dark: bool) {
+        self.woken = true;
         self.dark = dark;
     }
 
     /// Pick a theme by its id (`system`, `neutral`, `paper`, `gruvbox`, `tokyo-night`,
     /// `kanagawa`, `nord`), as the page kept it. False for an unknown id.
     pub fn set_theme(&mut self, id: &str) -> bool {
+        self.woken = true;
         ThemeChoice::from_id(id).map(|c| self.editor.ui.theme = c).is_some()
     }
 
@@ -150,6 +163,7 @@ impl App {
 
     /// The window lost focus: release held keys so nothing sticks.
     pub fn blur(&mut self) {
+        self.woken = true;
         self.set_modifiers(false, false, false, false);
         self.editor.space = false;
         self.events.push(egui::Event::WindowFocused(false));
@@ -163,6 +177,7 @@ impl App {
     }
 
     pub fn pointer_move(&mut self, x: f32, y: f32) {
+        self.woken = true;
         self.events.push(egui::Event::PointerMoved(self.pt(x, y)));
         let ppp = self.editor.native_ppp;
         self.editor.pointer_moved(Some([x * ppp, y * ppp]));
@@ -171,12 +186,14 @@ impl App {
     /// Use the touch layout (a bottom dock, larger targets and touch gestures) or the mouse
     /// layout: the page asks for it on a touch-first screen, a finger, or a mouse press.
     pub fn set_touch(&mut self, on: bool) {
+        self.woken = true;
         self.editor.set_touch(on);
     }
 
     /// Finger `id` touched down (`phase` 0), moved (1) or lifted (2) at (x, y). The view takes
     /// it as a gesture, or egui as the pointer when it landed on the UI.
     pub fn touch(&mut self, id: u32, phase: u8, x: f32, y: f32) {
+        self.woken = true;
         self.editor.set_touch(true);
         let phase = match phase {
             0 => Finger::Down,
@@ -204,12 +221,14 @@ impl App {
     }
 
     pub fn pointer_leave(&mut self) {
+        self.woken = true;
         self.events.push(egui::Event::PointerGone);
         self.editor.pointer_moved(None);
     }
 
     /// A DOM `button` (0 left, 1 middle, 2 right) went down or up at (x, y).
     pub fn pointer_button(&mut self, x: f32, y: f32, button: i16, pressed: bool) {
+        self.woken = true;
         let (b, eb) = match button {
             0 => (Button::Left, egui::PointerButton::Primary),
             1 => (Button::Middle, egui::PointerButton::Middle),
@@ -225,6 +244,7 @@ impl App {
 
     /// Wheel in pixels (`dy` positive scrolls down). Scrolls a panel under the pointer, or zooms.
     pub fn wheel(&mut self, dx: f32, dy: f32) {
+        self.woken = true;
         if self.editor.ctx.is_pointer_over_egui() {
             self.events.push(egui::Event::MouseWheel {
                 unit: egui::MouseWheelUnit::Point,
@@ -241,6 +261,7 @@ impl App {
     /// A trackpad pinch: `delta` is the change in magnification (positive zooms in). Chrome
     /// and Firefox send it as a wheel with Ctrl held, Safari as gesture events.
     pub fn pinch(&mut self, delta: f32) {
+        self.woken = true;
         if !self.editor.ctx.is_pointer_over_egui() {
             self.editor.pinch(delta);
         }
@@ -251,6 +272,7 @@ impl App {
     /// Cmd-C, Cmd-X and Cmd-V return false and reach egui as the browser's copy, cut and paste
     /// events instead (`copy`, `cut`, `paste`): a prevented keydown never fires them.
     pub fn key(&mut self, key: &str, pressed: bool, repeat: bool) -> bool {
+        self.woken = true;
         let typing = self.editor.ctx.egui_wants_keyboard_input();
         if typing && self.modifiers.command && ["c", "x", "v"].iter().any(|k| key.eq_ignore_ascii_case(k)) {
             return false;
@@ -270,12 +292,14 @@ impl App {
 
     /// Text pasted while a text field has focus.
     pub fn paste(&mut self, text: &str) {
+        self.woken = true;
         self.events.push(egui::Event::Paste(text.into()));
     }
 
     /// Copy (`cut` false) or cut the focused text field's selection. The text comes back from
     /// `take_copied` after the next frame.
     pub fn copy(&mut self, cut: bool) {
+        self.woken = true;
         self.events.push(if cut { egui::Event::Cut } else { egui::Event::Copy });
     }
 
@@ -297,6 +321,7 @@ impl App {
 
     /// IME composition from the page's hidden text field: `commit` false is a preedit update.
     pub fn ime(&mut self, text: &str, commit: bool) {
+        self.woken = true;
         let ev = if commit {
             egui::ImeEvent::Commit(text.into())
         } else {
@@ -330,6 +355,9 @@ impl App {
     /// "obj" (download `export_obj`), "slices" (download `export_slices`), "exported" (a render export is ready: `take_export`)
     /// or "theme" (a theme was picked: keep `theme`).
     pub fn frame(&mut self, time: f64) -> Vec<String> {
+        // A frame that cannot draw (the surface is not ready) is tried again on the next tick.
+        self.woken = false;
+        self.due = time;
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
@@ -355,6 +383,7 @@ impl App {
         self.downloads.extend(self.bridge.take_downloads());
         let (actions, platform) = self.editor.frame(input, &view);
         self.editor.gpu.queue.present(frame);
+        self.due = self.editor.repaint_after().map_or(f64::INFINITY, |d| time + d.as_secs_f64());
         self.cursor = platform.cursor_icon;
         self.copied = platform.commands.into_iter().rev().find_map(|c| match c {
             egui::OutputCommand::CopyText(text) => Some(text),
@@ -374,6 +403,14 @@ impl App {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Whether the next animation frame has anything to draw: input or a call from the page
+    /// since the last frame, or the time `frame` said it owes one. An idle editor draws
+    /// nothing, so the tab does not run the GPU at the display's refresh rate for the same
+    /// image.
+    pub fn wants_frame(&self, time: f64) -> bool {
+        self.woken || !self.events.is_empty() || time >= self.due
     }
 
     /// Where the page's WebSocket to `vxr bridge` connects.
@@ -408,12 +445,14 @@ impl App {
 
     /// The WebSocket to `vxr bridge` opened.
     pub fn bridge_open(&mut self) {
+        self.woken = true;
         self.bridge.opened();
     }
 
     /// A message from `vxr bridge`. An agent's request runs at once, unless the user is in
     /// the middle of a drag (then the next frame runs it).
     pub fn bridge_message(&mut self, text: &str) {
+        self.woken = true;
         self.bridge.message(text, &mut self.editor);
         self.bridge.tick(&mut self.editor);
         self.downloads.extend(self.bridge.take_downloads());
@@ -423,11 +462,13 @@ impl App {
     /// local network permission is denied), "blocked" (the browser refused to open it),
     /// "safari", "brave" or "" (nothing answered), as the page could tell.
     pub fn bridge_closed(&mut self, why: &str) {
+        self.woken = true;
         self.bridge.closed(why, &mut self.editor);
     }
 
     /// Replace the scene with the `.vox` bytes the page read from a file.
     pub fn open(&mut self, vox: &[u8], name: &str) {
+        self.woken = true;
         let ctx = self.editor.ctx.clone();
         match Scene::from_vox(vox).map_err(|e| e.to_string()).and_then(|s| self.editor.load(s, name)) {
             Ok(()) => self.editor.ui.toast(&ctx, format!("Opened {name}")),
@@ -438,6 +479,7 @@ impl App {
     /// The scene as a `.vox` file, for the page to download; New then has nothing to lose.
     /// Empty, with a toast, when the scene cannot be saved.
     pub fn save(&mut self) -> Vec<u8> {
+        self.woken = true;
         match vox_bytes(&self.editor.scene) {
             Ok(bytes) => {
                 self.editor.mark_saved();
@@ -459,6 +501,7 @@ impl App {
     /// The OBJ export (`.obj`, `.mtl` and palette `.png`) zipped into one download, or empty
     /// with a toast when there is nothing to export.
     pub fn export_obj(&mut self) -> Vec<u8> {
+        self.woken = true;
         let ctx = self.editor.ctx.clone();
         match obj_files(&self.editor.scene, &self.editor.export_stem()) {
             Ok((files, _)) => zip(&files),
@@ -476,6 +519,7 @@ impl App {
 
     /// The PNG slices export, or empty with a toast when there is nothing to export.
     pub fn export_slices(&mut self) -> Vec<u8> {
+        self.woken = true;
         let ctx = self.editor.ctx.clone();
         match slices_png(&self.editor.scene) {
             Ok((png, _, _)) => png,
@@ -658,6 +702,7 @@ impl App {
     /// the card and the ghost show it until Apply or Discard. Returns each call's answer by
     /// turn as JSON (`{"ok": text}`, `{"error": text}` or `"held"`), or the script's error.
     pub fn stage(&mut self, script: &str) -> Result<String, JsValue> {
+        self.woken = true;
         use vxr_app::review::Answer;
         let turns = self.editor.stage_json(script).map_err(err)?;
         let answer = |a: &Answer| match a {
@@ -707,6 +752,7 @@ impl App {
     /// A key the page read back from the browser's encrypted store (`vxrKeys.load`) at start:
     /// `kind` is "anthropic", "openai" or "compatible".
     pub fn restore_key(&mut self, kind: &str, key: &str) {
+        self.woken = true;
         if let Some(k) = vxr_ai::Kind::from_id(kind) {
             self.keys.borrow_mut().restore(k, key);
             self.editor.assistant.keys_changed();
@@ -762,6 +808,7 @@ impl App {
 
     /// Show a short message in the editor.
     pub fn toast(&mut self, msg: &str) {
+        self.woken = true;
         let ctx = self.editor.ctx.clone();
         self.editor.ui.toast(&ctx, msg);
     }

@@ -8,6 +8,8 @@ pub struct Gpu {
     pub queue: wgpu::Queue,
     /// The device has `TIMESTAMP_QUERY`.
     pub timestamps: bool,
+    /// What the device reported through [`Gpu::report_problems`], oldest first.
+    problems: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl Gpu {
@@ -38,7 +40,30 @@ impl Gpu {
             })
             .await
             .map_err(|e| format!("no device: {e}"))?;
-        Ok(Self { instance, adapter, device, queue, timestamps })
+        Ok(Self { instance, adapter, device, queue, timestamps, problems: Default::default() })
+    }
+
+    /// Collect the device's errors that nothing handles (a validation or out-of-memory error
+    /// in a pass) and its loss, for [`Gpu::take_problems`], instead of wgpu's default of
+    /// panicking, which on the web freezes the canvas with nothing on screen. Tests leave
+    /// this off so the same errors still fail them.
+    pub fn report_problems(&self) {
+        let sink = self.problems.clone();
+        self.device.on_uncaptured_error(std::sync::Arc::new(move |e: wgpu::Error| {
+            sink.lock().unwrap().push(format!("GPU error: {e}"));
+        }));
+        let sink = self.problems.clone();
+        self.device.set_device_lost_callback(move |reason, message| {
+            // Destroying the device on the way out is not a problem.
+            if reason != wgpu::DeviceLostReason::Destroyed {
+                sink.lock().unwrap().push(format!("The GPU device was lost ({message}). Restart vxr."));
+            }
+        });
+    }
+
+    /// The problems reported since the last call.
+    pub fn take_problems(&self) -> Vec<String> {
+        std::mem::take(&mut *self.problems.lock().unwrap())
     }
 }
 

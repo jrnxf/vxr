@@ -4,8 +4,10 @@
 use vxr_core::brickmap::{BRICK_VOXELS, BrickMap, EMPTY, MASK_WORDS, MAX_PAGES};
 use wgpu::util::DeviceExt;
 
-/// One heap page: 128 MiB, the default max storage binding.
-const HEAP_PAGE: u64 = 1 << 27;
+/// One heap page is 128 MiB, the default max storage binding: `1 << PAGE_SHIFT` bytes.
+pub const PAGE_SHIFT: u32 = 27;
+/// The smallest page, so a brick's biggest block (one byte per voxel) fits in one.
+pub const MIN_PAGE_SHIFT: u32 = 9;
 /// Heap allocation unit in bytes.
 const BLOCK: u32 = 16;
 const NO_BLOCK: u32 = u32::MAX;
@@ -82,6 +84,8 @@ struct Heap {
     free: Vec<Vec<u32>>,
     top: u64,
     capacity: u64,
+    /// Bytes per page: blocks never cross one.
+    page: u64,
 }
 
 impl Heap {
@@ -90,8 +94,8 @@ impl Heap {
             return Some(o);
         }
         let mut start = self.top;
-        if start / HEAP_PAGE != (start + cap as u64 - 1) / HEAP_PAGE {
-            start = (start / HEAP_PAGE + 1) * HEAP_PAGE;
+        if start / self.page != (start + cap as u64 - 1) / self.page {
+            start = (start / self.page + 1) * self.page;
         }
         if start + cap as u64 > self.capacity {
             return None;
@@ -189,6 +193,10 @@ pub struct GpuMap {
     lo: [u32; 3],
     hi: [u32; 3],
     heap: Heap,
+    /// Heap pages are `1 << page_shift` bytes; the shader reads it from the map's info.
+    page_shift: u32,
+    /// An upload failed, so the buffers show an older map than the one they were made for.
+    stale: bool,
     scratch: Vec<u8>,
 }
 
@@ -201,6 +209,23 @@ impl GpuMap {
         map: &BrickMap,
         palette: &[[u8; 4]; 256],
     ) -> Result<Self, String> {
+        Self::with_page_shift(device, queue, layout, map, palette, PAGE_SHIFT)
+    }
+
+    /// [`GpuMap::new`] with heap pages of `1 << page_shift` bytes (at least
+    /// [`MIN_PAGE_SHIFT`], at most [`PAGE_SHIFT`]), which the shader reads from the map's
+    /// info. Small pages let a test make a small scene span every page; the editor keeps the
+    /// default.
+    pub fn with_page_shift(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        layout: &wgpu::BindGroupLayout,
+        map: &BrickMap,
+        palette: &[[u8; 4]; 256],
+        page_shift: u32,
+    ) -> Result<Self, String> {
+        assert!((MIN_PAGE_SHIFT..=PAGE_SHIFT).contains(&page_shift), "page shift {page_shift} out of range");
+        let page = 1u64 << page_shift;
         let slots = map.brick_slots() as u32;
         let capacity = slots + (slots / 8).max(512);
         let bdims = map.dims;
@@ -224,9 +249,8 @@ impl GpuMap {
             free: vec![Vec::new(); (BRICK_VOXELS as u32 / BLOCK + 1) as usize],
             top: 0,
             capacity: u64::MAX,
+            page,
         };
-        let mut bytes: Vec<u8> = Vec::new();
-        let mut tmp = Vec::with_capacity(BRICK_VOXELS);
         for b in 0..slots as usize {
             let n = brick_popcount(map, b);
             if n == 0 {
@@ -237,18 +261,25 @@ impl GpuMap {
             heap.offsets[b * 2] = off;
             heap.offsets[b * 2 + 1] = brick_prefix(map, b);
             heap.caps[b] = cap;
-            pack_brick(map, b, &mut tmp);
-            let end = off as usize + cap as usize;
-            if bytes.len() < end {
-                bytes.resize(end, 0);
-            }
-            bytes[off as usize..off as usize + tmp.len()].copy_from_slice(&tmp);
         }
-        // Headroom for edits that grow bricks: an eighth of the heap, at least 64 KiB.
-        heap.capacity = (heap.top + (heap.top / 8).max(MIN_HEAP_HEADROOM)).div_ceil(4) * 4;
-        let n_pages = heap.capacity.div_ceil(HEAP_PAGE);
+        // Headroom for edits that grow bricks: an eighth of the heap, at least 64 KiB (or a page).
+        heap.capacity = (heap.top + (heap.top / 8).max(MIN_HEAP_HEADROOM.min(page))).div_ceil(4) * 4;
+        let n_pages = heap.capacity.div_ceil(page);
         if n_pages > MAX_PAGES as u64 {
-            return Err(format!("the scene's {} heap bytes need more than four 128 MiB pages", heap.capacity));
+            return Err(format!(
+                "the scene's {} heap bytes need more than {MAX_PAGES} pages of {} bytes",
+                heap.capacity, page
+            ));
+        }
+        let mut bytes = vec![0u8; heap.top as usize];
+        let mut tmp = Vec::with_capacity(BRICK_VOXELS);
+        for b in 0..slots as usize {
+            if heap.caps[b] == 0 {
+                continue;
+            }
+            pack_brick(map, b, &mut tmp);
+            let off = heap.offsets[b * 2] as usize;
+            bytes[off..off + tmp.len()].copy_from_slice(&tmp);
         }
 
         let storage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
@@ -273,9 +304,9 @@ impl GpuMap {
         let mut pages = Vec::new();
         for p in 0..MAX_PAGES as u64 {
             if p < n_pages || p == 0 {
-                let size = (heap.capacity - p * HEAP_PAGE).min(HEAP_PAGE);
+                let size = (heap.capacity - p * page).min(page);
                 let buf = mk("heap page", size);
-                let lo_b = (p * HEAP_PAGE) as usize;
+                let lo_b = (p * page) as usize;
                 let hi_b = (lo_b + size as usize).min(bytes.len());
                 if lo_b < hi_b {
                     queue.write_buffer(&buf, 0, &bytes[lo_b..hi_b]);
@@ -320,15 +351,48 @@ impl GpuMap {
             lo,
             hi,
             heap,
+            page_shift,
+            stale: false,
             scratch: Vec::with_capacity(BRICK_VOXELS),
         };
         me.write_info(queue);
         Ok(me)
     }
 
+    /// Upload the whole of `map` again into new buffers of the same page size, for a map that
+    /// outgrew these or was replaced (a resize or crop). If it does not fit, the buffers stay
+    /// as they were, still showing the last map they could, and the map is [`stale`]
+    /// until a later upload fits: partial uploads would otherwise index buffers made for
+    /// another layout.
+    ///
+    /// [`stale`]: GpuMap::stale
+    pub fn reupload(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        map: &BrickMap,
+        palette: &[[u8; 4]; 256],
+    ) -> Result<(), String> {
+        match Self::with_page_shift(device, queue, &self.layout, map, palette, self.page_shift) {
+            Ok(new) => {
+                *self = new;
+                Ok(())
+            }
+            Err(e) => {
+                self.stale = true;
+                Err(e)
+            }
+        }
+    }
+
+    /// The last upload failed: what this draws is an older map than the scene's.
+    pub fn stale(&self) -> bool {
+        self.stale
+    }
+
     fn write_info(&self, queue: &wgpu::Queue) {
         let info = MapInfo {
-            bdims: [self.bdims[0], self.bdims[1], self.bdims[2], 0],
+            bdims: [self.bdims[0], self.bdims[1], self.bdims[2], self.page_shift],
             sdims: [self.sdims[0], self.sdims[1], self.sdims[2], self.capacity * MASK_WORDS as u32],
             lo: [self.lo[0] as f32, self.lo[1] as f32, self.lo[2] as f32, 0.0],
             hi: [self.hi[0] as f32, self.hi[1] as f32, self.hi[2] as f32, 0.0],
@@ -343,7 +407,9 @@ impl GpuMap {
 
     /// Upload only the bricks and grid cells changed since the last upload. If the brick pool
     /// or the heap is full, everything is uploaded again into bigger buffers (and the bind
-    /// group replaced). The map must have dirty tracking on.
+    /// group replaced). The map must have dirty tracking on. When that does not fit, the
+    /// buffers keep the last map and the error repeats, without the dirty lists (they are
+    /// emptied), on every later call that has an edit to upload, until one fits.
     pub fn upload_dirty(
         &mut self,
         device: &wgpu::Device,
@@ -356,8 +422,8 @@ impl GpuMap {
         if bricks.is_empty() && cells.is_empty() {
             return Ok(st);
         }
-        if map.brick_slots() as u32 > self.capacity {
-            *self = Self::new(device, queue, &self.layout.clone(), map, palette)?;
+        if self.stale || map.brick_slots() as u32 > self.capacity {
+            self.reupload(device, queue, map, palette)?;
             st.rebuilt = true;
             return Ok(st);
         }
@@ -365,6 +431,11 @@ impl GpuMap {
         bricks.dedup();
         cells.sort_unstable();
         cells.dedup();
+        if self.upload_heap(queue, map, &bricks, &mut st).is_none() {
+            self.reupload(device, queue, map, palette)?;
+            st.rebuilt = true;
+            return Ok(st);
+        }
         // Masks, merged into runs of consecutive ids.
         for &(a, n) in &runs(&bricks) {
             let (a, n) = (a as usize, n as usize);
@@ -372,11 +443,6 @@ impl GpuMap {
             queue.write_buffer(&self.masks, (a * MASK_WORDS * 4) as u64, bytemuck::cast_slice(src));
             st.bytes += (n * MASK_WORDS * 4) as u64;
             st.writes += 1;
-        }
-        if self.upload_heap(queue, map, &bricks, &mut st).is_none() {
-            *self = Self::new(device, queue, &self.layout.clone(), map, palette)?;
-            st.rebuilt = true;
-            return Ok(st);
         }
         // Grid cells and the coarse bits above them.
         let mut coarse_dirty = Vec::new();
@@ -423,11 +489,17 @@ impl GpuMap {
     }
 
     /// Re-pack the touched bricks into the heap, moving any whose block no longer fits.
-    /// Returns None when the heap is full.
+    /// Returns None when the heap is full, with the heap's bookkeeping as it was and nothing
+    /// written, so the buffers still show the map they had.
     fn upload_heap(&mut self, queue: &wgpu::Queue, map: &BrickMap, bricks: &[u32], st: &mut UploadStats) -> Option<()> {
         let h = &mut self.heap;
+        // Plan every block first. `undo` has each touched brick's entries before the change.
+        let (free, top) = (h.free.clone(), h.top);
+        let mut undo: Vec<(usize, u32, u32, u32)> = Vec::with_capacity(bricks.len());
+        let mut moved = 0;
         for &b in bricks {
             let bi = b as usize;
+            undo.push((bi, h.offsets[bi * 2], h.offsets[bi * 2 + 1], h.caps[bi]));
             let n = brick_popcount(map, bi);
             if n == 0 {
                 h.release(bi);
@@ -436,16 +508,29 @@ impl GpuMap {
             let need = n.div_ceil(BLOCK) * BLOCK;
             if need > h.caps[bi] || need * 2 < h.caps[bi] {
                 h.release(bi);
-                let off = h.alloc(need)?;
+                let Some(off) = h.alloc(need) else {
+                    for &(bi, off, prefix, cap) in undo.iter().rev() {
+                        (h.offsets[bi * 2], h.offsets[bi * 2 + 1], h.caps[bi]) = (off, prefix, cap);
+                    }
+                    (h.free, h.top) = (free, top);
+                    return None;
+                };
                 h.offsets[bi * 2] = off;
                 h.caps[bi] = need;
-                st.reallocs += 1;
+                moved += 1;
             }
             h.offsets[bi * 2 + 1] = brick_prefix(map, bi);
+        }
+        st.reallocs += moved;
+        for &b in bricks {
+            let bi = b as usize;
+            if brick_popcount(map, bi) == 0 {
+                continue;
+            }
             pack_brick(map, bi, &mut self.scratch);
             let off = h.offsets[bi * 2] as u64;
-            let page = (off / HEAP_PAGE) as usize;
-            queue.write_buffer(&self.pages[page], off % HEAP_PAGE, &self.scratch);
+            let page = (off >> self.page_shift) as usize;
+            queue.write_buffer(&self.pages[page], off & ((1 << self.page_shift) - 1), &self.scratch);
             st.bytes += self.scratch.len() as u64;
             st.writes += 1;
         }

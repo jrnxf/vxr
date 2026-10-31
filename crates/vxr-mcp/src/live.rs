@@ -27,7 +27,7 @@ use crate::files::{edit_object_tool, export_tool, scene_resources, show_world_to
 use crate::protocol::{Backend, PALETTE_URI, Reply, SUMMARY_URI, is_base64};
 
 #[cfg(unix)]
-pub use unix::{Ask, Host, Remote, Request};
+pub use unix::{Ask, Host, Remote, Request, Wake};
 #[cfg(unix)]
 pub(crate) use unix::{random, same};
 
@@ -414,6 +414,9 @@ mod unix {
         }
     }
 
+    /// What the host calls when a request is queued.
+    pub type Wake = Arc<dyn Fn() + Send + Sync>;
+
     /// The app's end: the socket and the agents connected to it. Requests wait in a queue
     /// for the app's own thread ([`Host::poll`]); dropping the host closes every connection
     /// and removes the socket.
@@ -428,6 +431,13 @@ mod unix {
         /// Listen in `dir` (see [`dir`]): make the folder and the token if needed, and refuse
         /// if another window already listens there.
         pub fn start(dir: &Path) -> Result<Host, String> {
+            Host::start_waking(dir, Arc::new(|| {}))
+        }
+
+        /// [`Host::start`], calling `wake` from the connection's thread each time a request
+        /// is queued, so an app that sleeps between events can run [`Host::poll`] at once
+        /// instead of when its next frame happens to come.
+        pub fn start_waking(dir: &Path, wake: Wake) -> Result<Host, String> {
             ensure_dir(dir)?;
             let token = match read_token(dir) {
                 Some(t) => t,
@@ -456,7 +466,7 @@ mod unix {
             let s = shared.clone();
             std::thread::Builder::new()
                 .name("vxr-live".into())
-                .spawn(move || accept(listener, s, tx))
+                .spawn(move || accept(listener, s, tx, wake))
                 .map_err(|e| e.to_string())?;
             Ok(Host { sock, dir: dir.to_path_buf(), shared, rx })
         }
@@ -498,13 +508,14 @@ mod unix {
         }
     }
 
-    fn accept(listener: UnixListener, shared: Arc<Shared>, tx: Sender<Request>) {
+    fn accept(listener: UnixListener, shared: Arc<Shared>, tx: Sender<Request>, wake: Wake) {
         while !shared.quit.load(Ordering::SeqCst) {
             match listener.accept() {
                 Ok((stream, _)) => {
-                    let (s, tx) = (shared.clone(), tx.clone());
-                    let _ =
-                        std::thread::Builder::new().name("vxr-live-conn".into()).spawn(move || serve(stream, s, tx));
+                    let (s, tx, wake) = (shared.clone(), tx.clone(), wake.clone());
+                    let _ = std::thread::Builder::new()
+                        .name("vxr-live-conn".into())
+                        .spawn(move || serve(stream, s, tx, wake));
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(25)),
                 Err(_) => std::thread::sleep(Duration::from_millis(100)),
@@ -513,7 +524,7 @@ mod unix {
     }
 
     /// One connection: the token first, then requests until either side hangs up.
-    fn serve(stream: UnixStream, shared: Arc<Shared>, tx: Sender<Request>) {
+    fn serve(stream: UnixStream, shared: Arc<Shared>, tx: Sender<Request>, wake: Wake) {
         let _ = stream.set_nonblocking(false);
         let _ = stream.set_read_timeout(Some(HELLO_WAIT));
         let _ = stream.set_write_timeout(Some(WRITE_WAIT));
@@ -567,6 +578,7 @@ mod unix {
             if tx.send(Request { conn: id, client: client.clone(), ask, reply: rtx }).is_err() {
                 break;
             }
+            wake();
             let Ok(mut reply) = rrx.recv() else { break };
             reply["id"] = n;
             // Stop may have closed the connection meanwhile; then the answer goes nowhere.

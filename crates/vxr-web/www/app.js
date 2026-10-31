@@ -314,12 +314,21 @@ function step(now) {
 }
 
 function tick(now) {
-  step(now);
-  const c = app.cursor();
-  if (c !== cursor) canvas.style.cursor = cursor = c;
-  // Keep the hidden field focused while egui is typing so the OS IME targets it.
-  if (!fingers.size) focusIme();
-  if (!app.wants_keyboard() && document.activeElement === ime) canvas.focus();
+  try {
+    // An idle editor owes no frame: input, a call into the app or its own timer asks for one.
+    if (app.wants_frame(now / 1000)) step(now);
+    const c = app.cursor();
+    if (c !== cursor) canvas.style.cursor = cursor = c;
+    // Keep the hidden field focused while egui is typing so the OS IME targets it.
+    if (!fingers.size) focusIme();
+    if (!app.wants_keyboard() && document.activeElement === ime) canvas.focus();
+  } catch (e) {
+    // A frame that throws (a Rust panic included) leaves the module unfit to run another, so
+    // the loop ends here: say so instead of leaving a canvas that no longer answers.
+    console.error(e);
+    show('vxr stopped.', `${e} Reload the page to start again.`);
+    return;
+  }
   requestAnimationFrame(tick);
 }
 

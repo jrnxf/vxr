@@ -668,6 +668,8 @@ pub struct Hybrid {
     /// Arrow keys pressed this frame with a selection, for the editor to move it.
     pub arrows: Vec<Key>,
     toast: Option<(String, f64)>,
+    /// The toast was set since it was last drawn.
+    toast_new: bool,
     /// The AI change under review, if any (set by the editor).
     pub review: Option<ReviewCard>,
     /// The review card's "Ask for changes" text, whether it had focus last frame, and the
@@ -955,6 +957,7 @@ impl Hybrid {
             actions: Vec::new(),
             arrows: Vec::new(),
             toast: None,
+            toast_new: false,
             review: None,
             review_ask: String::new(),
             ask_focus: false,
@@ -984,6 +987,20 @@ impl Hybrid {
     /// Show a short message under the top bar for 1.8 s (#toast).
     pub fn toast(&mut self, ctx: &Context, msg: impl Into<String>) {
         self.toast = Some((msg.into(), ctx.input(|i| i.time) + 1.8));
+        self.toast_new = true;
+    }
+
+    /// A toast that stays long enough to read, for what the user must not miss (the view no
+    /// longer matching the scene).
+    pub fn alert(&mut self, ctx: &Context, msg: impl Into<String>) {
+        self.toast = Some((msg.into(), ctx.input(|i| i.time) + 8.0));
+        self.toast_new = true;
+    }
+
+    /// Whether a toast was set that no frame has drawn yet (one set after the UI ran, by the
+    /// editor's draw or the window between frames).
+    pub fn toast_unshown(&self) -> bool {
+        self.toast_new
     }
 
     /// Whether Shift or Alt is held, as last seen by the UI.
@@ -5069,6 +5086,7 @@ impl Hybrid {
 
     // #toast
     fn toast_panel(&mut self, ctx: &Context, screen: Rect) {
+        self.toast_new = false;
         let Some((msg, until)) = &self.toast else { return };
         let now = ctx.input(|i| i.time);
         if now > *until {

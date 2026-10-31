@@ -12,8 +12,9 @@ use vxr_app::ui::Action;
 use vxr_core::Scene;
 use vxr_render::Gpu;
 use winit::application::ApplicationHandler;
+use winit::event::StartCause;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
@@ -27,8 +28,8 @@ pub fn run(path: Option<PathBuf>, stage: Option<PathBuf>) -> Result<(), String> 
         }
         None => None,
     };
-    let event_loop = EventLoop::new().map_err(|e| e.to_string())?;
-    let mut app = App { path, stage, state: None, error: None };
+    let event_loop = EventLoop::<Wake>::with_user_event().build().map_err(|e| e.to_string())?;
+    let mut app = App { path, stage, state: None, error: None, proxy: event_loop.create_proxy() };
     event_loop.run_app(&mut app).map_err(|e| e.to_string())?;
     app.error.map_or(Ok(()), Err)
 }
@@ -82,7 +83,11 @@ fn save_theme(theme: ThemeChoice) -> Result<(), String> {
     std::fs::write(dir.join("theme"), format!("{}\n", theme.id())).map_err(|e| e.to_string())
 }
 
+/// Sent to the event loop by the live host's threads when an agent's request arrives.
+struct Wake;
+
 struct App {
+    proxy: EventLoopProxy<Wake>,
     path: Option<PathBuf>,
     stage: Option<vxr_app::review::Script>,
     state: Option<State>,
@@ -133,6 +138,7 @@ impl App {
             color_space: wgpu::SurfaceColorSpace::Auto,
         };
         surface.configure(&gpu.device, &config);
+        gpu.report_problems();
         let ppp = window.scale_factor() as f32;
         let max_tex = gpu.device.limits().max_texture_dimension_2d as usize;
         let mut editor = Editor::new(gpu, scene, &name, format, (config.width, config.height), ppp, fonts())?;
@@ -158,25 +164,54 @@ impl App {
             egui,
             editor,
             #[cfg(unix)]
-            live: vxr_app::live::Live::new(vxr_mcp::live::dir()),
+            live: {
+                let proxy = self.proxy.clone();
+                vxr_app::live::Live::new(vxr_mcp::live::dir()).waking(Arc::new(move || _ = proxy.send_event(Wake)))
+            },
         })
     }
 }
 
+/// How a redraw ended.
+enum Drawn {
+    /// A frame was presented.
+    Yes,
+    /// The window has nothing to draw into (minimised or covered): the next draw waits for
+    /// the window to be shown again, which arrives as an event.
+    Hidden,
+    /// The surface was not ready: try again shortly.
+    Retry,
+}
+
 impl State {
-    fn redraw(&mut self) {
+    /// Run what agents asked. Apart from [`State::redraw`], which needs a surface to draw
+    /// into, so a hidden window still answers them.
+    fn serve_agents(&mut self) {
+        loop {
+            #[cfg(unix)]
+            self.live.tick(&mut self.editor);
+            let host = self.editor.take_host_actions();
+            if host.is_empty() {
+                break;
+            }
+            for a in host {
+                self.act(a);
+            }
+        }
+    }
+
+    fn redraw(&mut self) -> Drawn {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 self.surface.configure(&self.editor.gpu.device, &self.config);
-                return;
+                return Drawn::Retry;
             }
-            _ => return,
+            wgpu::CurrentSurfaceTexture::Occluded => return Drawn::Hidden,
+            _ => return Drawn::Retry,
         };
         let view = frame.texture.create_view(&Default::default());
         let input = self.egui.take_egui_input(&self.window);
-        #[cfg(unix)]
-        self.live.tick(&mut self.editor);
         let (actions, platform) = self.editor.frame(input, &view);
         self.window.pre_present_notify();
         self.editor.gpu.queue.present(frame);
@@ -184,6 +219,7 @@ impl State {
         for a in actions {
             self.act(a);
         }
+        Drawn::Yes
     }
 
     fn act(&mut self, a: Action) {
@@ -297,7 +333,32 @@ impl State {
     }
 }
 
-impl ApplicationHandler for App {
+impl ApplicationHandler<Wake> for App {
+    /// Sleep between events, waking for the next one, for an agent's request, or for the
+    /// moment [`Editor::repaint_after`] names after a draw.
+    fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
+        match cause {
+            // Woken early by an event that may not draw: keep the wake already owed.
+            StartCause::WaitCancelled { requested_resume: Some(t), .. } => {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(t));
+            }
+            StartCause::ResumeTimeReached { .. } => {
+                event_loop.set_control_flow(ControlFlow::Wait);
+                if let Some(s) = &self.state {
+                    s.window.request_redraw();
+                }
+            }
+            _ => event_loop.set_control_flow(ControlFlow::Wait),
+        }
+    }
+
+    /// An agent's request arrived: answer it now, whether or not the window can draw.
+    fn user_event(&mut self, _: &ActiveEventLoop, _: Wake) {
+        let Some(s) = &mut self.state else { return };
+        s.serve_agents();
+        s.window.request_redraw();
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.state.is_some() {
             return;
@@ -318,6 +379,11 @@ impl ApplicationHandler for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         let Some(s) = &mut self.state else { return };
         let response = s.egui.on_window_event(&s.window, &event);
+        // Input, a resize or the window coming back changes what to draw; an idle window draws
+        // nothing (see `RedrawRequested`).
+        if !matches!(event, WindowEvent::RedrawRequested) {
+            s.window.request_redraw();
+        }
         let ed = &mut s.editor;
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
@@ -376,8 +442,17 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::RedrawRequested => {
-                s.redraw();
-                s.window.request_redraw();
+                s.serve_agents();
+                let wait = match s.redraw() {
+                    Drawn::Yes => s.editor.repaint_after(),
+                    Drawn::Hidden => None,
+                    Drawn::Retry => Some(std::time::Duration::from_millis(50)),
+                };
+                match wait {
+                    Some(d) if d.is_zero() => s.window.request_redraw(),
+                    Some(d) => event_loop.set_control_flow(ControlFlow::WaitUntil(std::time::Instant::now() + d)),
+                    None => event_loop.set_control_flow(ControlFlow::Wait),
+                }
             }
             _ => {}
         }

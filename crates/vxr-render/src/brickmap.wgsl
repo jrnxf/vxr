@@ -6,13 +6,13 @@
 // Layout: a dense grid of brick slots (EMPTY or a brick id), 16 mask words per brick
 // (512 bits, local index x | y << 3 | z << 6), and a coarse level of 64 bits per 4x4x4
 // bricks (32^3 voxels) so empty space is skipped 32 voxels at a time. Palette bytes are
-// stored for occupied voxels only, in a heap of up to four 128 MiB pages. After the masks
+// stored for occupied voxels only, in a heap of up to four pages (128 MiB, or fewer bytes in tests). After the masks
 // come two words per brick (masks[map_info.sdims.w + brick * 2]): the byte offset of the
 // brick's bytes in the heap, and set-bit counts of the first 4, 8 and 12 mask words. A
 // voxel's byte is at the offset plus the set bits below it.
 
 struct MapInfo {
-    bdims: vec4<u32>, // bricks per axis; w unused
+    bdims: vec4<u32>, // bricks per axis; w = log2 of the heap page size in bytes
     sdims: vec4<u32>, // coarse cells per axis (4x4x4 bricks each); w = word index of the
                       // per-brick heap offsets inside `masks`
     lo: vec4<f32>,    // tight bounds of occupied bricks, voxel units
@@ -44,8 +44,9 @@ struct Hit {
 };
 
 fn heap_byte(pos: u32) -> u32 {
-    let page = pos >> 27u;
-    let word = (pos & 0x7ffffffu) >> 2u;
+    let shift = map_info.bdims.w;
+    let page = pos >> shift;
+    let word = (pos & ((1u << shift) - 1u)) >> 2u;
     var w: u32;
     switch page {
         case 0u: { w = pal0[word]; }
