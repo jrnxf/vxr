@@ -268,48 +268,34 @@ function wire() {
   new ResizeObserver(fit).observe(canvas);
 }
 
-function download(bytes, name, type, quiet) {
+// What the editor asks of the page (the Browser platform in crates/vxr-web/src/web.rs): its
+// file picker, downloads and the kept theme. The editor decides what to write and says so.
+const THEME_KEY = 'vxr-theme';
+function download(bytes, name, type) {
   const url = URL.createObjectURL(new Blob([bytes], { type }));
   const a = Object.assign(document.createElement('a'), { href: url, download: name });
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
-  if (!quiet) app.toast(`Downloaded ${name}`);
 }
+window.vxrHost = {
+  pickOpen: () => fileInput.click(),
+  download,
+  keepTheme(id) {
+    try { localStorage.setItem(THEME_KEY, id); } catch {}
+  },
+};
 
 // What terminal agents exported (the editor toasts who exported what).
 function agentDownloads() {
   for (let name; (name = app.agent_download_name()); ) {
     const type = name.endsWith('.zip') ? 'application/zip' : name.endsWith('.png') ? 'image/png' : 'application/octet-stream';
-    download(app.take_agent_download(), name, type, true);
+    download(app.take_agent_download(), name, type);
   }
 }
-
-function save() {
-  const vox = app.save();
-  if (vox.length) download(vox, /\.vox$/i.test(app.name()) ? app.name() : 'scene.vox', 'application/octet-stream');
-}
-
-const THEME_KEY = 'vxr-theme';
 
 let cursor = '';
 function step(now) {
-  for (const a of app.frame(now / 1000)) {
-    if (a === 'open') fileInput.click();
-    else if (a === 'save') save();
-    else if (a === 'embed') app.toast('The embed export is not built yet');
-    else if (a === 'obj') {
-      const zip = app.export_obj();
-      if (zip.length) download(zip, app.obj_name(), 'application/zip');
-    }
-    else if (a === 'slices') {
-      const png = app.export_slices();
-      if (png.length) download(png, app.slices_name(), 'image/png');
-    }
-    else if (a === 'exported') download(app.take_export(), app.export_name(), 'image/png');
-    else if (a === 'theme') {
-      try { localStorage.setItem(THEME_KEY, app.theme()); } catch {}
-    }
-  }
+  app.frame(now / 1000);
   bridgeFlush();
 }
 
