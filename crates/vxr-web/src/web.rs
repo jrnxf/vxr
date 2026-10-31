@@ -186,11 +186,6 @@ impl App {
         ThemeChoice::from_id(id).map(|c| self.host.editor.ui.theme = c).is_some()
     }
 
-    /// The picked theme's id, for the page to keep after a "theme" action.
-    pub fn theme(&self) -> String {
-        self.host.editor.ui.theme.id().into()
-    }
-
     /// The window lost focus: release held keys so nothing sticks.
     pub fn blur(&mut self) {
         self.woken = true;
@@ -408,7 +403,6 @@ impl App {
             || {},
         );
         let Drawn::Yes(actions, platform) = drawn else { return };
-        self.due = self.host.editor.repaint_after().map_or(f64::INFINITY, |d| time + d.as_secs_f64());
         self.cursor = platform.cursor_icon;
         self.copied = platform.commands.into_iter().rev().find_map(|c| match c {
             egui::OutputCommand::CopyText(text) => Some(text),
@@ -419,6 +413,7 @@ impl App {
                 run_action(&mut self.host.editor, &mut Browser, a);
             }
         }
+        self.due = self.host.editor.repaint_after().map_or(f64::INFINITY, |d| time + d.as_secs_f64());
     }
 
     /// Whether the next animation frame has anything to draw: input or a call from the page
@@ -505,11 +500,6 @@ impl App {
                 Vec::new()
             }
         }
-    }
-
-    /// The scene's file name.
-    pub fn name(&self) -> String {
-        self.host.editor.ui.scene_name.clone()
     }
 
     /// The editor's state as JSON, for the headless browser check (`crates/vxr-web/check`)
