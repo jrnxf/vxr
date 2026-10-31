@@ -1,14 +1,13 @@
 //! The native window: winit and egui-winit around the [`Editor`], with file dialogs for
 //! open and save.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use vxr_app::Editor;
 use vxr_app::editor::{Button, Finger, NEW_SIZE};
-use vxr_app::files::{obj_files, save_atomic, slices_png, vox_bytes};
+use vxr_app::files::{File, save_atomic};
+use vxr_app::host::{Drawn, Host, Opened, Platform, Saved, run_action};
 use vxr_app::theme::ThemeChoice;
-use vxr_app::ui::Action;
 use vxr_core::Scene;
 use vxr_render::Gpu;
 use winit::application::ApplicationHandler;
@@ -77,10 +76,10 @@ fn load_theme() -> ThemeChoice {
         .unwrap_or_default()
 }
 
-fn save_theme(theme: ThemeChoice) -> Result<(), String> {
+fn save_theme(id: &str) -> Result<(), String> {
     let dir = config_dir().ok_or("no config folder")?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    std::fs::write(dir.join("theme"), format!("{}\n", theme.id())).map_err(|e| e.to_string())
+    std::fs::write(dir.join("theme"), format!("{id}\n")).map_err(|e| e.to_string())
 }
 
 /// Sent to the event loop by the live host's threads when an agent's request arrives.
@@ -96,13 +95,88 @@ struct App {
 
 struct State {
     window: Arc<Window>,
-    surface: wgpu::Surface<'static>,
-    config: wgpu::SurfaceConfiguration,
     egui: egui_winit::State,
-    editor: Editor,
+    host: Host,
+    desktop: Desktop,
+}
+
+/// What a desktop does for [`run_action`]: file dialogs and files, the window's title.
+struct Desktop {
+    window: Arc<Window>,
     /// Terminal agents' socket, while the user allows them (`vxr mcp --live`).
     #[cfg(unix)]
     live: vxr_app::live::Live,
+}
+
+impl Platform for Desktop {
+    fn verb(&self) -> &'static str {
+        "Saved"
+    }
+
+    fn pick_open(&mut self) -> Result<Option<Opened>, String> {
+        let Some(path) = rfd::FileDialog::new().add_filter("MagicaVoxel", &["vox"]).pick_file() else {
+            return Ok(None);
+        };
+        let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(Some(Opened { name: file_name(&path), bytes, path: Some(path) }))
+    }
+
+    fn save_vox(&mut self, current: Option<&Path>, _name: &str, bytes: &[u8]) -> Result<Option<Saved>, String> {
+        let path = match current {
+            Some(p) => p.to_path_buf(),
+            None => {
+                match rfd::FileDialog::new().add_filter("MagicaVoxel", &["vox"]).set_file_name("scene.vox").save_file()
+                {
+                    Some(p) => p,
+                    None => return Ok(None),
+                }
+            }
+        };
+        // Through a symbolic link, the file it points at is the one replaced.
+        let target = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        save_atomic(&target, bytes)?;
+        Ok(Some(Saved { name: file_name(&path), path: Some(path) }))
+    }
+
+    fn save_png(&mut self, name: &str, bytes: &[u8]) -> Result<Option<String>, String> {
+        let Some(path) = rfd::FileDialog::new().add_filter("PNG", &["png"]).set_file_name(name).save_file() else {
+            return Ok(None);
+        };
+        std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+        Ok(Some(file_name(&path)))
+    }
+
+    fn save_all(
+        &mut self,
+        stem: &str,
+        make: &mut dyn FnMut(&str) -> Result<Vec<File>, String>,
+    ) -> Result<Option<String>, String> {
+        let Some(path) =
+            rfd::FileDialog::new().add_filter("OBJ", &["obj"]).set_file_name(format!("{stem}.obj")).save_file()
+        else {
+            return Ok(None);
+        };
+        let stem = path.file_stem().map_or("vxr".into(), |s| s.to_string_lossy().into_owned());
+        let dir = path.parent().map(|d| d.to_path_buf()).unwrap_or_default();
+        let files = make(&stem)?;
+        for (name, bytes) in &files {
+            std::fs::write(dir.join(name), bytes).map_err(|e| e.to_string())?;
+        }
+        Ok(files.first().map(|f| f.0.clone()))
+    }
+
+    fn persist_theme(&mut self, id: &str) -> Result<(), String> {
+        save_theme(id)
+    }
+
+    fn named(&mut self, name: &str) {
+        self.window.set_title(&format!("{name} - vxr"));
+    }
+
+    #[cfg(unix)]
+    fn intercept(&mut self, action: &vxr_app::ui::Action, editor: &mut vxr_app::Editor) -> bool {
+        self.live.act(action, editor)
+    }
 }
 
 impl App {
@@ -121,27 +195,20 @@ impl App {
         )));
         let surface = instance.create_surface(window.clone()).map_err(|e| e.to_string())?;
         let gpu = pollster::block_on(Gpu::new(instance, Some(&surface)))?;
-        let caps = surface.get_capabilities(&gpu.adapter);
-        // The march writes sRGB-encoded colour and egui blends in gamma space, as CSS does:
-        // present to a non-sRGB format.
-        let format = caps.formats.iter().copied().find(|f| !f.is_srgb()).unwrap_or(caps.formats[0]);
-        let size = window.inner_size();
-        let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format,
-            width: size.width.max(1),
-            height: size.height.max(1),
-            present_mode: wgpu::PresentMode::AutoVsync,
-            desired_maximum_frame_latency: 1,
-            alpha_mode: caps.alpha_modes[0],
-            view_formats: vec![],
-            color_space: wgpu::SurfaceColorSpace::Auto,
-        };
-        surface.configure(&gpu.device, &config);
-        gpu.report_problems();
-        let ppp = window.scale_factor() as f32;
         let max_tex = gpu.device.limits().max_texture_dimension_2d as usize;
-        let mut editor = Editor::new(gpu, scene, &name, format, (config.width, config.height), ppp, fonts())?;
+        let ppp = window.scale_factor() as f32;
+        let size = window.inner_size();
+        let mut host = Host::new(
+            gpu,
+            surface,
+            (size.width, size.height),
+            wgpu::PresentMode::AutoVsync,
+            scene,
+            &name,
+            ppp,
+            fonts(),
+        )?;
+        let editor = &mut host.editor;
         editor.ui.theme = load_theme();
         // The assistant reaches its provider from here, with keys from the OS keychain.
         editor.assistant =
@@ -157,30 +224,16 @@ impl App {
             window.theme(),
             Some(max_tex),
         );
-        Ok(State {
-            window,
-            surface,
-            config,
-            egui,
-            editor,
+        let desktop = Desktop {
+            window: window.clone(),
             #[cfg(unix)]
             live: {
                 let proxy = self.proxy.clone();
                 vxr_app::live::Live::new(vxr_mcp::live::dir()).waking(Arc::new(move || _ = proxy.send_event(Wake)))
             },
-        })
+        };
+        Ok(State { window, egui, host, desktop })
     }
-}
-
-/// How a redraw ended.
-enum Drawn {
-    /// A frame was presented.
-    Yes,
-    /// The window has nothing to draw into (minimised or covered): the next draw waits for
-    /// the window to be shown again, which arrives as an event.
-    Hidden,
-    /// The surface was not ready: try again shortly.
-    Retry,
 }
 
 impl State {
@@ -189,146 +242,33 @@ impl State {
     fn serve_agents(&mut self) {
         loop {
             #[cfg(unix)]
-            self.live.tick(&mut self.editor);
-            let host = self.editor.take_host_actions();
+            self.desktop.live.tick(&mut self.host.editor);
+            let host = self.host.editor.take_host_actions();
             if host.is_empty() {
                 break;
             }
             for a in host {
-                self.act(a);
+                run_action(&mut self.host.editor, &mut self.desktop, a);
             }
         }
     }
 
-    fn redraw(&mut self) -> Drawn {
-        let frame = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
-            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                self.surface.configure(&self.editor.gpu.device, &self.config);
-                return Drawn::Retry;
-            }
-            wgpu::CurrentSurfaceTexture::Occluded => return Drawn::Hidden,
-            _ => return Drawn::Retry,
-        };
-        let view = frame.texture.create_view(&Default::default());
-        let input = self.egui.take_egui_input(&self.window);
-        let (actions, platform) = self.editor.frame(input, &view);
-        self.window.pre_present_notify();
-        self.editor.gpu.queue.present(frame);
-        self.egui.handle_platform_output(&self.window, platform);
-        for a in actions {
-            self.act(a);
-        }
-        Drawn::Yes
-    }
-
-    fn act(&mut self, a: Action) {
-        #[cfg(unix)]
-        if self.live.act(&a, &mut self.editor) {
-            return;
-        }
-        let ctx = self.editor.ctx.clone();
-        match a {
-            Action::New => self.window.set_title("Untitled - vxr"),
-            Action::Theme => {
-                if let Err(e) = save_theme(self.editor.ui.theme) {
-                    self.editor.ui.toast(&ctx, format!("Could not keep the theme: {e}"));
+    /// Draw a frame and run what it asked of the host. Returns how long to wait before the
+    /// next draw: none when only an event can change the view.
+    fn redraw(&mut self) -> Option<std::time::Duration> {
+        let Self { window, egui, host, desktop } = self;
+        match host.frame(|_| egui.take_egui_input(window), || window.pre_present_notify()) {
+            Drawn::Yes(actions, platform) => {
+                egui.handle_platform_output(window, *platform);
+                for a in actions {
+                    run_action(&mut host.editor, desktop, a);
                 }
+                host.editor.repaint_after()
             }
-            Action::Open => {
-                let Some(path) = rfd::FileDialog::new().add_filter("MagicaVoxel", &["vox"]).pick_file() else { return };
-                match open(&path).and_then(|(scene, name)| self.editor.load(scene, &name).map(|_| name)) {
-                    Ok(name) => {
-                        self.window.set_title(&format!("{name} - vxr"));
-                        self.editor.ui.toast(&ctx, format!("Opened {name}"));
-                        self.editor.path = Some(path);
-                    }
-                    Err(e) => self.editor.ui.toast(&ctx, format!("Could not open: {e}")),
-                }
-            }
-            Action::Save => {
-                let path = match self.editor.path.clone() {
-                    Some(p) => p,
-                    None => match rfd::FileDialog::new()
-                        .add_filter("MagicaVoxel", &["vox"])
-                        .set_file_name("scene.vox")
-                        .save_file()
-                    {
-                        Some(p) => p,
-                        None => return,
-                    },
-                };
-                // Through a symbolic link, the file it points at is the one replaced.
-                let target = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
-                match vox_bytes(&self.editor.scene).and_then(|bytes| save_atomic(&target, &bytes)) {
-                    Ok(()) => {
-                        let name = file_name(&path);
-                        self.editor.ui.scene_name = name.clone();
-                        self.window.set_title(&format!("{name} - vxr"));
-                        self.editor.ui.toast(&ctx, format!("Saved {name}"));
-                        self.editor.path = Some(path);
-                        self.editor.mark_saved();
-                    }
-                    Err(e) => self.editor.ui.toast(&ctx, format!("Could not save: {e}")),
-                }
-            }
-            Action::Embed => self.editor.ui.toast(&ctx, "The embed export is not built yet"),
-            Action::ExportObj => {
-                let Some(path) = rfd::FileDialog::new()
-                    .add_filter("OBJ", &["obj"])
-                    .set_file_name(format!("{}.obj", self.editor.export_stem()))
-                    .save_file()
-                else {
-                    return;
-                };
-                let stem = path.file_stem().map_or("vxr".into(), |s| s.to_string_lossy().into_owned());
-                let dir = path.parent().map(|d| d.to_path_buf()).unwrap_or_default();
-                let written = obj_files(&self.editor.scene, &stem).and_then(|(files, quads)| {
-                    for (name, bytes) in &files {
-                        std::fs::write(dir.join(name), bytes).map_err(|e| e.to_string())?;
-                    }
-                    Ok((files[0].0.clone(), quads))
-                });
-                match written {
-                    Ok((obj, quads)) => {
-                        self.editor.ui.toast(&ctx, format!("Exported {obj}, .mtl and .png ({quads} quads)"))
-                    }
-                    Err(e) => self.editor.ui.toast(&ctx, format!("Could not export: {e}")),
-                }
-            }
-            Action::ExportSlices => {
-                let Some(path) = rfd::FileDialog::new()
-                    .add_filter("PNG", &["png"])
-                    .set_file_name(self.editor.slices_name())
-                    .save_file()
-                else {
-                    return;
-                };
-                let written = slices_png(&self.editor.scene).and_then(|(png, size, layers)| {
-                    std::fs::write(&path, png).map(|_| (size, layers)).map_err(|e| e.to_string())
-                });
-                match written {
-                    Ok(([w, h], layers)) => {
-                        self.editor.ui.toast(&ctx, format!("Exported {} ({layers} layers, {w}×{h})", file_name(&path)))
-                    }
-                    Err(e) => self.editor.ui.toast(&ctx, format!("Could not export: {e}")),
-                }
-            }
-            Action::Exported => {
-                let Some((png, (w, h))) = self.editor.exported.take() else { return };
-                let Some(path) = rfd::FileDialog::new()
-                    .add_filter("PNG", &["png"])
-                    .set_file_name(self.editor.export_name())
-                    .save_file()
-                else {
-                    return;
-                };
-                match std::fs::write(&path, png) {
-                    Ok(()) => self.editor.ui.toast(&ctx, format!("Saved {} ({w}×{h})", file_name(&path))),
-                    Err(e) => self.editor.ui.toast(&ctx, format!("Could not save: {e}")),
-                }
-            }
-            _ => {}
+            // Nothing to draw into: the next draw waits for the window to be shown again,
+            // which arrives as an event.
+            Drawn::Hidden => None,
+            Drawn::Retry => Some(std::time::Duration::from_millis(50)),
         }
     }
 }
@@ -365,7 +305,7 @@ impl ApplicationHandler<Wake> for App {
         }
         match self.start(event_loop) {
             Ok(mut s) => {
-                s.editor.path = self.path.take();
+                s.host.editor.path = self.path.take();
                 s.window.request_redraw();
                 self.state = Some(s);
             }
@@ -384,18 +324,11 @@ impl ApplicationHandler<Wake> for App {
         if !matches!(event, WindowEvent::RedrawRequested) {
             s.window.request_redraw();
         }
-        let ed = &mut s.editor;
+        let ed = &mut s.host.editor;
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(size) => {
-                s.config.width = size.width.max(1);
-                s.config.height = size.height.max(1);
-                s.surface.configure(&ed.gpu.device, &s.config);
-                ed.resize(s.config.width, s.config.height, s.window.scale_factor() as f32);
-            }
-            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                ed.resize(s.config.width, s.config.height, scale_factor as f32);
-            }
+            WindowEvent::Resized(size) => s.host.resize(size.width, size.height, s.window.scale_factor() as f32),
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => s.host.rescale(scale_factor as f32),
             WindowEvent::CursorMoved { position, .. } => ed.pointer_moved(Some([position.x as f32, position.y as f32])),
             WindowEvent::CursorLeft { .. } => ed.pointer_moved(None),
             // A finger brings the touch layout and its gestures; egui-winit gives one on the UI
@@ -419,36 +352,22 @@ impl ApplicationHandler<Wake> for App {
                     MouseButton::Middle => Button::Middle,
                     _ => return,
                 };
-                let over_ui = ed.ctx.is_pointer_over_egui() || ed.ctx.egui_wants_pointer_input();
-                ed.button(b, state == ElementState::Pressed, over_ui);
+                s.host.button(b, state == ElementState::Pressed);
             }
-            WindowEvent::MouseWheel { delta, .. } => {
-                if !ed.ctx.is_pointer_over_egui() {
-                    ed.scroll(match delta {
-                        MouseScrollDelta::LineDelta(_, y) => y,
-                        MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
-                    });
-                }
-            }
+            WindowEvent::MouseWheel { delta, .. } => s.host.scroll(match delta {
+                MouseScrollDelta::LineDelta(_, y) => y,
+                MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
+            }),
             // A trackpad pinch (macOS) zooms like the wheel, toward the pointer.
-            WindowEvent::PinchGesture { delta, .. } => {
-                if !ed.ctx.is_pointer_over_egui() {
-                    ed.pinch(delta as f32);
-                }
-            }
+            WindowEvent::PinchGesture { delta, .. } => s.host.pinch(delta as f32),
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.physical_key == PhysicalKey::Code(KeyCode::Space) && !response.consumed {
-                    ed.space = event.state == ElementState::Pressed;
+                    s.host.editor.space = event.state == ElementState::Pressed;
                 }
             }
             WindowEvent::RedrawRequested => {
                 s.serve_agents();
-                let wait = match s.redraw() {
-                    Drawn::Yes => s.editor.repaint_after(),
-                    Drawn::Hidden => None,
-                    Drawn::Retry => Some(std::time::Duration::from_millis(50)),
-                };
-                match wait {
+                match s.redraw() {
                     Some(d) if d.is_zero() => s.window.request_redraw(),
                     Some(d) => event_loop.set_control_flow(ControlFlow::WaitUntil(std::time::Instant::now() + d)),
                     None => event_loop.set_control_flow(ControlFlow::Wait),

@@ -9,6 +9,8 @@
 //! - [`color`]: hex, RGB and HSV for the palette editor.
 //! - [`files`]: OBJ export files, and a zip to download several files at once.
 //! - [`fonts`]: loading the UI fonts.
+//! - [`host`]: what the native window and the browser page share: the surface, pointer routing
+//!   and Open, Save and the exports, with a `Platform` for what differs.
 //! - [`render`]: the Render panel's settings and the PNG render export.
 //! - [`review`]: the review step of an AI change, and scripts that drive it.
 //! - [`theme`]: the UI themes' colour tokens and the editor view's colours.
@@ -20,6 +22,7 @@ pub mod color;
 pub mod editor;
 pub mod files;
 pub mod fonts;
+pub mod host;
 #[cfg(all(unix, not(target_arch = "wasm32")))]
 pub mod live;
 #[cfg(test)]

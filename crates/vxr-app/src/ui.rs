@@ -997,6 +997,11 @@ impl Hybrid {
         self.toast_new = true;
     }
 
+    /// The message a toast is showing or waiting to show.
+    pub fn toast_text(&self) -> Option<&str> {
+        self.toast.as_ref().map(|(m, _)| m.as_str())
+    }
+
     /// Whether a toast was set that no frame has drawn yet (one set after the UI ran, by the
     /// editor's draw or the window between frames).
     pub fn toast_unshown(&self) -> bool {
