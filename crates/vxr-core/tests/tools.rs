@@ -350,7 +350,8 @@ fn a_box_dragged_far_off_the_map_fills_only_the_map_and_stays_fast() {
 }
 
 /// Catches: the radius summed squared offsets in i32, which overflowed past about 46,341
-/// cells: a panic in a debug build, and in release a radius of 0, so the sphere vanished.
+/// cells (and in i64 at a pointer saturated to i32::MIN): a panic in a debug build, and in
+/// release a radius of 0, so the sphere vanished.
 #[test]
 fn a_sphere_dragged_far_off_the_map_draws_at_the_largest_radius() {
     use vxr_core::tools::MAX_RADIUS;
@@ -365,7 +366,11 @@ fn a_sphere_dragged_far_off_the_map_draws_at_the_largest_radius() {
     let (r, far) = sphere([50_000, 0, 16]);
     assert_eq!(r, MAX_RADIUS);
     assert!(!far.is_empty());
-    assert_eq!((r, far), sphere([16 + MAX_RADIUS, 0, 16]));
+    assert_eq!((r, far.clone()), sphere([16 + MAX_RADIUS, 0, 16]));
+    // A ray almost along the ground from a zoomed-out camera saturates the cell to i32::MIN,
+    // where two squared offsets overflow even i64.
+    assert_eq!(sphere([i32::MIN, 0, i32::MIN]).0, MAX_RADIUS);
+    assert_eq!(sphere([i32::MAX, 0, i32::MAX]).0, MAX_RADIUS);
 }
 
 /// Catches: a voxel stroke and the line brush visited every step out to the pointer, inside
@@ -382,6 +387,9 @@ fn a_stroke_or_line_dragged_far_off_the_map_changes_only_the_map_and_stays_fast(
     };
     let line = run(brush(Tool::Add, Shape::Line), [100_000, 0, 100_000]);
     assert_eq!(line, (0..32).map(|k| ([k, 0, k], 7)).collect::<Vec<_>>(), "the diagonal across the map");
+    // Saturated pointer cells (a ray almost along the ground) on both ends of i32.
+    assert_eq!(run(brush(Tool::Add, Shape::Line), [i32::MAX, 0, i32::MAX]), line);
+    assert_eq!(run(brush(Tool::Add, Shape::Line), [i32::MIN, 0, 0]), [([0, 0, 0], 7)]);
 
     let stroke = Brush { size: 16, ..brush(Tool::Add, Shape::Voxel) };
     let far = run(stroke, [100_000, 0, 100_000]);

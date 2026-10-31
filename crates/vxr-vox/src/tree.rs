@@ -653,7 +653,9 @@ fn emit_tree(tree: &Tree, i: usize, placed: &[Placed], next: &mut i32, out: &mut
                     let (bt_id, bs_id) = (*next, *next + 1);
                     *next += 2;
                     ids.push(bt_id);
-                    let block = TreeNode::new(Kind::Object(fm), Affine { r: IDENTITY_R, t: bt });
+                    let mut block = TreeNode::new(Kind::Object(fm), Affine { r: IDENTITY_R, t: bt });
+                    // On the object's layer, so hiding another layer (layer 0) does not hide it.
+                    block.layer = n.layer;
                     out.push(Chunk::new(chunk::NTRN, new_trn(bt_id, bs_id, &block).encode()));
                     let shp = Nshp {
                         id: bs_id,

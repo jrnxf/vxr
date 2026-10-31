@@ -10,6 +10,7 @@
 //! composed into one map (world mode, where voxels cannot be edited and world edits move,
 //! copy, group and hide objects). A new scene has no world: the map is its one model.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use vxr_vox::build::Builder;
@@ -205,8 +206,8 @@ impl Scene {
     /// most 256^3. An opened file that cannot be written this way is an error, never a fresh
     /// file: that would drop its names, groups, layers and hidden flags.
     pub fn to_vox(&self) -> Result<Vec<u8>, String> {
-        if let (Some(doc), Some(world)) = (&self.source, &self.world) {
-            return self.save_into(doc.clone(), world.clone());
+        if let (Some(doc), Some(world)) = (&self.source, self.world_now()) {
+            return self.save_into(doc.clone(), world.into_owned());
         }
         let world: BTreeMap<[i32; 3], u8> =
             self.world_voxels(false).into_iter().map(|(p, c)| (world_to_vox(p), c)).collect();
@@ -227,7 +228,7 @@ impl Scene {
         b
     }
 
-    fn save_into(&self, mut doc: Document, mut world: World) -> Result<Vec<u8>, String> {
+    fn save_into(&self, mut doc: Document, world: World) -> Result<Vec<u8>, String> {
         let file = doc.scene().map_err(|e| e.to_string())?;
         for i in 1..=255u8 {
             if file.color(i) != self.palette[i as usize] {
@@ -242,9 +243,6 @@ impl Scene {
                 doc.set_camera(c).map_err(|e| format!("camera {}: {e}", c.id))?;
             }
         }
-        if let At::Object(i) = self.at {
-            world.store(i, &self.map, self.origin);
-        }
         world.save_into(&mut doc)?;
         Ok(doc.write())
     }
@@ -252,21 +250,28 @@ impl Scene {
     /// Every voxel of the scene by world cell: every object's (only shown ones with
     /// `shown_only`) with the overlap rule, the current model's edits included.
     pub fn world_voxels(&self, shown_only: bool) -> BTreeMap<[i32; 3], u8> {
-        let Some(w) = &self.world else {
+        let Some(w) = self.world_now() else {
             let mut out = BTreeMap::new();
             self.for_each_voxel(|p, c| {
                 out.insert(self.to_world(p), c);
             });
             return out;
         };
-        match self.at {
+        w.world_voxels(shown_only)
+    }
+
+    /// The objects of the opened file with the model being edited put back, as the scene
+    /// shows them; None for a new scene.
+    pub fn world_now(&self) -> Option<Cow<'_, World>> {
+        let w = self.world.as_ref()?;
+        Some(match self.at {
             At::Object(i) => {
                 let mut w = w.clone();
                 w.store(i, &self.map, self.origin);
-                w.world_voxels(shown_only)
+                Cow::Owned(w)
             }
-            _ => w.world_voxels(shown_only),
-        }
+            _ => Cow::Borrowed(w),
+        })
     }
 
     /// The objects of the opened file, or None for a new scene. While an object's model

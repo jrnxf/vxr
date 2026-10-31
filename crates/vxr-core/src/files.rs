@@ -6,6 +6,7 @@
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::Scene;
 use crate::export::{TEXTURE_W, obj, slices};
@@ -70,9 +71,10 @@ pub fn png(w: u32, h: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 /// The scene as `.vox` bytes, checked to read back as the same scene: every voxel, the
-/// shown ones, and for an opened file the names, hidden flags and layers of its objects
-/// and groups and its layers.
-/// A save that would lose any of them is an error, not a file.
+/// shown ones, the palette, and for an opened file the names, hidden flags and layers of
+/// its objects and groups and its layers.
+/// A save that would lose any of them is an error naming the first thing it would lose,
+/// not a file.
 pub fn vox_bytes(scene: &Scene) -> Result<Vec<u8>, String> {
     let bytes = scene.to_vox()?;
     reads_back_as(&bytes, scene)?;
@@ -81,42 +83,119 @@ pub fn vox_bytes(scene: &Scene) -> Result<Vec<u8>, String> {
 
 fn reads_back_as(bytes: &[u8], scene: &Scene) -> Result<(), String> {
     let again = Scene::from_vox(bytes).map_err(|e| format!("the result does not read back: {e}"))?;
-    if again.world_voxels(false) != scene.world_voxels(false) || again.world_voxels(true) != scene.world_voxels(true) {
-        return Err("the result reads back with different voxels".into());
+    for shown in [true, false] {
+        let (want, got) = (scene.world_voxels(shown), again.world_voxels(shown));
+        if want != got {
+            let which = if shown { "shown voxels" } else { "voxels" };
+            return Err(format!("the result reads back with different {which}: {}", voxel_change(&want, &got, scene)));
+        }
     }
-    if let Some(w) = scene.world()
-        && again.world().map(outline) != Some(outline(w))
-    {
-        return Err("the result reads back with different names, hidden flags or layers".into());
+    if let Some(slot) = (1..256).find(|&i| scene.palette[i] != again.palette[i]) {
+        return Err(format!("the result reads back with a different colour {slot}"));
+    }
+    if let Some(w) = scene.world() {
+        let (want, got) = (outline(w), again.world().map(outline).unwrap_or_default());
+        if want != got {
+            return Err(format!("the result reads back with {}", outline_change(&want, &got)));
+        }
     }
     Ok(())
+}
+
+/// The first cell that differs between `want` and `got`, what it would become, and the
+/// scene's object there, if any.
+fn voxel_change(want: &BTreeMap<[i32; 3], u8>, got: &BTreeMap<[i32; 3], u8>, scene: &Scene) -> String {
+    let cell = want
+        .iter()
+        .find(|&(p, c)| got.get(p) != Some(c))
+        .map(|(p, _)| *p)
+        .or_else(|| got.keys().find(|&p| !want.contains_key(p)).copied())
+        .unwrap_or_default();
+    let say = |c: Option<&u8>| c.map_or("empty".to_string(), |c| format!("colour {c}"));
+    let object =
+        scene.world_now().and_then(|w| object_name_at(&w, cell)).map(|n| format!(" in \"{n}\"")).unwrap_or_default();
+    format!("[{}, {}, {}]{object} is {}, not {}", cell[0], cell[1], cell[2], say(got.get(&cell)), say(want.get(&cell)))
+}
+
+/// The name of the object with a voxel at vxr world cell `q`, or of its nearest named
+/// group (a block of a model over 256 is an unnamed object in the object's group).
+fn object_name_at(w: &crate::World, q: [i32; 3]) -> Option<String> {
+    let mut found = None;
+    w.for_each_voxel(false, |i, p, _| {
+        if p == q && found.is_none() {
+            found = Some(i);
+        }
+    });
+    let parents = w.tree.parents();
+    let mut k = found;
+    while let Some(i) = k {
+        if let Some(name) = &w.tree.nodes[i].name {
+            return Some(String::from_utf8_lossy(name).into_owned());
+        }
+        k = parents[i];
+    }
+    None
 }
 
 /// What a save must keep of a world besides its voxels: each node's name, hidden flag and
 /// layer in tree order, and the layers. Not the tree's shape: a model over 256 on an axis is
 /// saved as a group of blocks under the object's name, each block an unnamed shown node on
-/// layer 0, so such nodes are left out.
+/// the object's layer, so nodes that say nothing their parent does not are left out.
 type Outline = (Vec<(Option<Vec<u8>>, bool, i32)>, Vec<vxr_vox::LayerInfo>);
 
 fn outline(w: &crate::World) -> Outline {
+    let parents = w.tree.parents();
     let nodes = w
         .tree
         .order()
         .into_iter()
-        .map(|i| &w.tree.nodes[i])
-        .filter(|n| n.name.is_some() || n.hidden || n.layer != 0)
-        .map(|n| (n.name.clone(), n.hidden, n.layer))
+        .filter(|&i| {
+            let n = &w.tree.nodes[i];
+            n.name.is_some() || n.hidden || n.layer != parents[i].map_or(0, |p| w.tree.nodes[p].layer)
+        })
+        .map(|i| {
+            let n = &w.tree.nodes[i];
+            (n.name.clone(), n.hidden, n.layer)
+        })
         .collect();
     (nodes, w.layers())
 }
 
+/// The first node or layer that differs between two outlines, as the one the scene has.
+fn outline_change(want: &Outline, got: &Outline) -> String {
+    let name = |n: &Option<Vec<u8>>| n.as_ref().map(|n| format!("\"{}\"", String::from_utf8_lossy(n)));
+    if let Some(i) = (0..want.0.len().max(got.0.len())).find(|&i| want.0.get(i) != got.0.get(i)) {
+        return match want.0.get(i) {
+            Some((n, hidden, layer)) => {
+                let node = name(n).unwrap_or_else(|| "an unnamed node".into());
+                let flag = if *hidden { "hidden" } else { "shown" };
+                format!("a different name, hidden flag or layer on {node} ({flag}, on layer {layer})")
+            }
+            None => "a node the scene does not have".into(),
+        };
+    }
+    match (0..want.1.len().max(got.1.len())).find(|&i| want.1.get(i) != got.1.get(i)).and_then(|i| want.1.get(i)) {
+        Some(l) => format!("a different name or hidden flag on layer {}", l.id),
+        None => "a layer the scene does not have".into(),
+    }
+}
+
 /// Replace `path` with `bytes` so that it holds either its old bytes or all of the new
-/// ones, whatever happens mid-write: they go to `<path>.tmp`, are flushed and read back,
-/// and only then is that file renamed over `path`, keeping its permissions. A symbolic
-/// link at `path` is replaced, not followed.
+/// ones, whatever happens mid-write: they go to a temporary file beside it, named for this
+/// save alone so two programs saving the same file at once cannot touch each other's, are
+/// flushed and read back, and only then is that file renamed over `path`, keeping its
+/// permissions. A symbolic link at `path` is replaced, not followed. A read-only file is
+/// refused, as a plain write would be. Being a new file, the result does not keep the old
+/// one's extended attributes (Finder tags) or creation date, and other hard links to the
+/// old file keep its old bytes.
 pub fn save_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let old = std::fs::symlink_metadata(path).ok().filter(|m| m.is_file());
+    if old.as_ref().is_some_and(|m| m.permissions().readonly()) {
+        return Err("the file is read-only".into());
+    }
+    static SAVES: AtomicU64 = AtomicU64::new(0);
     let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
+    tmp.push(format!(".{}-{}.tmp", std::process::id(), SAVES.fetch_add(1, Ordering::Relaxed)));
     let tmp = PathBuf::from(tmp);
     write_new(&tmp, bytes).map_err(|e| e.to_string())?;
     let back = match std::fs::read(&tmp) {
@@ -124,9 +203,9 @@ pub fn save_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
         Ok(_) => Err("the written file reads back different".to_string()),
         Err(e) => Err(e.to_string()),
     }
-    .and_then(|()| match std::fs::symlink_metadata(path) {
-        Ok(m) if m.is_file() => std::fs::set_permissions(&tmp, m.permissions()).map_err(|e| e.to_string()),
-        _ => Ok(()),
+    .and_then(|()| match old {
+        Some(m) => std::fs::set_permissions(&tmp, m.permissions()).map_err(|e| e.to_string()),
+        None => Ok(()),
     });
     if let Err(e) = back.and_then(|()| std::fs::rename(&tmp, path).map_err(|e| e.to_string())) {
         let _ = std::fs::remove_file(&tmp);
@@ -229,7 +308,8 @@ mod tests {
     }
 
     /// Catches: a save that read back with an object moved to another shown layer (the
-    /// same shown voxels), or with other voxels, was written as if nothing had changed.
+    /// same shown voxels), with other voxels or with another colour in a slot was written
+    /// as if nothing had changed, or refused without saying what differs.
     #[test]
     fn a_save_that_reads_back_different_is_refused() {
         let bytes = fixture("22-world");
@@ -244,9 +324,19 @@ mod tests {
         w.save_into(&mut doc).unwrap();
         let relayered = doc.write();
         assert_eq!(Scene::from_vox(&relayered).unwrap().world_voxels(true), scene.world_voxels(true));
-        assert!(reads_back_as(&relayered, &scene).unwrap_err().contains("layers"));
+        assert_eq!(
+            reads_back_as(&relayered, &scene).unwrap_err(),
+            "the result reads back with a different name, hidden flag or layer on \"slab\" (shown, on layer 0)"
+        );
 
-        assert!(reads_back_as(&fixture("12-layers"), &scene).unwrap_err().contains("voxels"));
+        assert_eq!(
+            reads_back_as(&fixture("12-layers"), &scene).unwrap_err(),
+            "the result reads back with different shown voxels: [-4, 0, -3] in \"slab\" is empty, not colour 8"
+        );
+
+        let mut recoloured = Scene::from_vox(&bytes).unwrap();
+        recoloured.palette[5][1] ^= 1;
+        assert_eq!(reads_back_as(&bytes, &recoloured).unwrap_err(), "the result reads back with a different colour 5");
     }
 
     #[test]

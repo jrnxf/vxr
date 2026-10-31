@@ -519,11 +519,64 @@ fn a_failed_atomic_save_leaves_the_old_file() {
         std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&path).unwrap().permissions()) & 0o777,
         0o600
     );
-    assert!(!dir.join("a.vox.tmp").exists(), "the temporary file is renamed into place");
+    let names = || {
+        let mut n: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+        n.sort();
+        n
+    };
+    assert_eq!(names(), ["a.vox"], "the temporary file is renamed into place");
 
-    // Something that is not a file where the temporary file goes: the write fails first.
-    std::fs::create_dir(dir.join("a.vox.tmp")).unwrap();
-    assert!(save_atomic(&path, b"newer").is_err());
-    assert_eq!(std::fs::read(&path).unwrap(), b"new");
+    // A folder the temporary file cannot be made in: the write fails first.
+    #[cfg(unix)]
+    {
+        std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o500)).unwrap();
+        assert!(save_atomic(&path, b"newer").is_err());
+        std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        assert_eq!(names(), ["a.vox"]);
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Catches: every save went through the one temporary name `<path>.tmp`, deleting any file
+/// already there, so two programs saving the same file at once (the desktop app and a
+/// files-mode agent) deleted each other's half-written file and could rename it into place.
+#[test]
+fn an_atomic_save_leaves_another_writers_temporary_file_alone() {
+    use vxr_core::files::save_atomic;
+    let dir = std::env::temp_dir().join(format!("vxr-save-tmp-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("a.vox");
+    std::fs::write(dir.join("a.vox.tmp"), b"theirs, half written").unwrap();
+    save_atomic(&path, b"mine").unwrap();
+    save_atomic(&path, b"mine again").unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"mine again");
+    assert_eq!(std::fs::read(dir.join("a.vox.tmp")).unwrap(), b"theirs, half written");
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2, "none of this save's temporary files is left");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Catches: the atomic save renames over the file, which needs only the folder's
+/// permission, so a file the user made read-only was quietly replaced where the plain
+/// write before it was refused.
+#[test]
+fn an_atomic_save_refuses_a_read_only_file() {
+    use vxr_core::files::save_atomic;
+    let dir = std::env::temp_dir().join(format!("vxr-save-ro-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("a.vox");
+    std::fs::write(&path, b"kept").unwrap();
+    let mut p = std::fs::metadata(&path).unwrap().permissions();
+    p.set_readonly(true);
+    std::fs::set_permissions(&path, p.clone()).unwrap();
+    let e = save_atomic(&path, b"new").unwrap_err();
+    assert!(e.contains("read-only"), "{e}");
+    assert_eq!(std::fs::read(&path).unwrap(), b"kept");
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "no temporary file is left");
+    #[allow(clippy::permissions_set_readonly_false)]
+    p.set_readonly(false);
+    std::fs::set_permissions(&path, p).unwrap();
     std::fs::remove_dir_all(&dir).unwrap();
 }
