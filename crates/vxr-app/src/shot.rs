@@ -6,6 +6,7 @@ use std::path::Path;
 
 use vxr_app::Editor;
 use vxr_app::editor::{Button, NEW_SIZE};
+use vxr_app::host::{Opened, Platform, Saved, run_action};
 use vxr_app::ui::{Action, Region, Shape, Tool};
 use vxr_core::Scene;
 use vxr_render::Gpu;
@@ -306,6 +307,7 @@ fn run_steps(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     camera(dir, source)?;
     world(dir)?;
     new_scene_save(dir)?;
+    host_actions()?;
     new_scene_command(dir)?;
     scene_tree(dir)?;
     to_object(dir)?;
@@ -847,6 +849,112 @@ fn new_scene_save(dir: &Path) -> Result<(), String> {
     check(
         objects == 1 && matches!(s.ed.scene.at(), At::Object(_)) && same && tree_rows(&s.ed.scene).is_empty(),
         format!("the saved new scene reopens in model mode, every voxel in place ({objects} object(s))"),
+    )
+}
+
+/// What a platform records of the file actions [`run_action`] ran for the UI.
+#[derive(Default)]
+struct Fake {
+    /// The user cancels every dialog.
+    cancel: bool,
+    /// The stem the user types over the suggested one in the OBJ dialog.
+    stem: Option<&'static str>,
+    calls: Vec<String>,
+    vox: Vec<u8>,
+    obj: Vec<String>,
+}
+
+impl Platform for Fake {
+    fn verb(&self) -> &'static str {
+        "Saved"
+    }
+    fn pick_open(&mut self) -> Result<Option<Opened>, String> {
+        self.calls.push("open".into());
+        Ok(None)
+    }
+    fn save_vox(&mut self, current: Option<&Path>, name: &str, bytes: &[u8]) -> Result<Option<Saved>, String> {
+        self.calls.push(format!("save_vox {name} over {current:?}"));
+        if self.cancel {
+            return Ok(None);
+        }
+        self.vox = bytes.to_vec();
+        Ok(Some(Saved { name: "chosen.vox".into(), path: Some("chosen.vox".into()) }))
+    }
+    fn save_png(&mut self, name: &str, bytes: &[u8]) -> Result<Option<String>, String> {
+        self.calls.push(format!("save_png {name} {}", bytes.starts_with(b"\x89PNG")));
+        Ok((!self.cancel).then(|| name.to_string()))
+    }
+    fn save_all(
+        &mut self,
+        stem: &str,
+        make: &mut dyn FnMut(&str) -> Result<Vec<vxr_app::files::File>, String>,
+    ) -> Result<Option<String>, String> {
+        self.calls.push(format!("save_all {stem}"));
+        if self.cancel {
+            return Ok(None);
+        }
+        let files = make(self.stem.unwrap_or(stem))?;
+        self.obj = files.iter().map(|f| f.0.clone()).collect();
+        Ok(Some(files[0].0.clone()))
+    }
+    fn persist_theme(&mut self, id: &str) -> Result<(), String> {
+        self.calls.push(format!("theme {id}"));
+        Ok(())
+    }
+}
+
+/// The file actions the UI asks of a host, run by the one [`run_action`] both hosts use,
+/// against a platform that records what it is asked: a cancelled dialog changes nothing, a
+/// save hands over bytes that read back as the scene and the scene then takes the saved
+/// name and path, and the name the user types in the OBJ dialog is the one its files get.
+fn host_actions() -> Result<(), String> {
+    let mut s = Shot::new(house(), "house.vox", 2.0)?;
+    s.frames(2);
+    s.ed.scene.edit([([0, 7, 0], 3u8)]);
+    s.frames(2);
+    let mut p = Fake { cancel: true, ..Default::default() };
+    for a in [Action::Save, Action::ExportObj, Action::ExportSlices] {
+        run_action(&mut s.ed, &mut p, a);
+    }
+    s.frames(2);
+    check(
+        s.ed.ui.unsaved && s.ed.path.is_none() && s.ed.ui.scene_name == "house.vox" && p.vox.is_empty(),
+        format!("a cancelled save and exports change nothing: still unsaved ({:?})", p.calls),
+    )?;
+    p.cancel = false;
+    p.stem = Some("renamed");
+    run_action(&mut s.ed, &mut p, Action::Save);
+    s.frames(2);
+    let back = Scene::from_vox(&p.vox).map_err(|e| e.to_string())?;
+    check(
+        !s.ed.ui.unsaved
+            && s.ed.path.as_deref() == Some(Path::new("chosen.vox"))
+            && s.ed.ui.scene_name == "chosen.vox"
+            && back.world_voxels(false) == s.ed.scene.world_voxels(false)
+            && s.ed.ui.toast_text() == Some("Saved chosen.vox"),
+        format!("Save hands over the scene's bytes; it is then saved as chosen.vox ({:?})", s.ed.ui.toast_text()),
+    )?;
+    run_action(&mut s.ed, &mut p, Action::Save);
+    check(
+        p.calls.last().is_some_and(|c| c == "save_vox chosen.vox over Some(\"chosen.vox\")"),
+        format!("a second Save replaces that file without asking again ({:?})", p.calls.last()),
+    )?;
+    run_action(&mut s.ed, &mut p, Action::ExportObj);
+    check(
+        p.obj == ["renamed.obj", "renamed.mtl", "renamed.png"]
+            && p.calls.last().is_some_and(|c| c == "save_all chosen"),
+        format!("the OBJ dialog suggests the scene's name and its files take the name typed ({:?})", p.obj),
+    )?;
+    run_action(&mut s.ed, &mut p, Action::ExportSlices);
+    check(
+        p.calls.last().is_some_and(|c| c == "save_png chosen-slices.png true"),
+        format!("PNG slices go out as a PNG named for the scene ({:?})", p.calls.last()),
+    )?;
+    s.ed.ui.theme = vxr_app::theme::ThemeChoice::from_id("nord").unwrap_or_default();
+    run_action(&mut s.ed, &mut p, Action::Theme);
+    check(
+        p.calls.last().is_some_and(|c| c == "theme nord"),
+        format!("a picked theme is kept by id ({:?})", p.calls.last()),
     )
 }
 
