@@ -110,15 +110,34 @@ impl Hybrid {
         if self.agents.clients.is_empty() {
             return 0.0;
         }
-        let g = ctx.fonts_mut(|f| f.layout_no_wrap(self.agent_chip_text(), sans_medium(12.0), th().text));
+        let now = ctx.input(|i| i.time);
+        let g = ctx.fonts_mut(|f| f.layout_no_wrap(self.agent_chip_text(now), sans_medium(12.0), th().text));
         14.0 + g.size().x + 10.0 + 58.0 + 14.0
     }
 
-    fn agent_chip_text(&self) -> String {
+    /// How many connected agents called in the last seconds: the Agents tab's `editing`.
+    fn agents_editing(&self, now: f64) -> usize {
+        (0..self.agents.clients.len()).filter(|&i| editing(now, self.agents.times.get(i).and_then(|t| t.1))).count()
+    }
+
+    /// The chip's words, from the same state as the Agents tab's rows: "editing" while an agent
+    /// called in the last seconds, else "connected" with how long it has been idle.
+    pub fn agent_chip_text(&self, now: f64) -> String {
+        let editing_n = self.agents_editing(now);
         match self.agents.clients.as_slice() {
-            [(_, one)] => format!("{one} is editing"),
-            many => format!("{} agents are editing", many.len()),
+            [(_, one)] if editing_n == 1 => format!("{one} is editing"),
+            [(_, one)] => format!("{one} connected · idle {}", ago(now - self.agent_last_active(now, 0))),
+            many if editing_n == 0 => {
+                let last = (0..many.len()).map(|i| self.agent_last_active(now, i)).fold(f64::MIN, f64::max);
+                format!("{} agents connected · idle {}", many.len(), ago(now - last))
+            }
+            many => format!("{} agents, {editing_n} editing", many.len()),
         }
+    }
+
+    /// When agent `i` last called, else when it was first listed.
+    fn agent_last_active(&self, now: f64, i: usize) -> f64 {
+        self.agents.times.get(i).map_or(now, |t| t.1.unwrap_or(t.0))
     }
 
     /// Draw the chip into the hint panel's `ui`, starting at `x`.
@@ -129,10 +148,16 @@ impl Hybrid {
         let cy = rect.center().y;
         let x = rect.left() + 12.0;
         let t = ui.input(|i| i.time);
-        let pulse = 0.55 + 0.45 * (t * 3.0).sin().abs() as f32;
-        ui.painter().circle_filled(pos2(x + 3.5, cy), 3.5, th().ok.gamma_multiply(pulse));
-        ui.ctx().request_repaint();
-        let g = ui.painter().layout_no_wrap(self.agent_chip_text(), sans_medium(12.0), th().text);
+        if self.agents_editing(t) > 0 {
+            let pulse = 0.55 + 0.45 * (t * 3.0).sin().abs() as f32;
+            ui.painter().circle_filled(pos2(x + 3.5, cy), 3.5, th().ok.gamma_multiply(pulse));
+            ui.ctx().request_repaint();
+        } else {
+            ui.painter().circle_stroke(pos2(x + 3.5, cy), 3.0, Stroke::new(1.0, th().faint));
+            // The idle time ticks on, and the chip's width with it.
+            ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
+        }
+        let g = ui.painter().layout_no_wrap(self.agent_chip_text(t), sans_medium(12.0), th().text);
         let gw = g.size().x;
         ui.painter().galley(pos2(x + 13.0, cy - g.size().y / 2.0), g, th().text);
         let stop = Rect::from_min_size(pos2(x + 13.0 + gw + 10.0, cy - 11.0), vec2(56.0, 22.0));

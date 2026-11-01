@@ -320,6 +320,7 @@ fn run_steps(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     review_phone(dir)?;
     assistant_column(dir)?;
     agent_chip_squeezed(dir)?;
+    agent_chip_states(dir)?;
     palette_beside_flyouts()?;
     column_short_window(dir)?;
     agents_states(dir)?;
@@ -3867,6 +3868,65 @@ fn agent_chip_squeezed(dir: &Path) -> Result<(), String> {
         )?;
     }
     Ok(())
+}
+
+/// A chip case: name, agents with their last call's age, the chip's words, a pulsing dot.
+type Case = (&'static str, &'static [(&'static str, Option<f64>)], &'static str, bool);
+
+/// The hint bar's chip says what the Agents tab's rows say: "editing" with a pulsing dot only
+/// while an agent called in the last 5 s, else "connected" and how long it has been idle, with
+/// a hollow dot. One agent called 1 s ago, 90 s ago and never; two agents, one and none editing.
+fn agent_chip_states(dir: &Path) -> Result<(), String> {
+    let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    let cases: [Case; 6] = [
+        ("editing", &[("Claude Code", Some(1.0))], "Claude Code is editing", true),
+        ("idle", &[("Claude Code", Some(90.0))], "Claude Code connected · idle 1 min", false),
+        ("never", &[("Claude Code", None)], "Claude Code connected · idle 4 min", false),
+        ("one-of-two", &[("Claude Code", Some(1.0)), ("Codex", Some(90.0))], "2 agents, 1 editing", true),
+        ("both-editing", &[("Claude Code", Some(1.0)), ("Codex", Some(2.0))], "2 agents, 2 editing", true),
+        ("both-idle", &[("Claude Code", Some(90.0)), ("Codex", Some(200.0))], "2 agents connected · idle 1 min", false),
+    ];
+    let mut widths = Vec::new();
+    for (name, agents, text, pulsing) in cases {
+        let mut s = Shot::new(house(), "house.vox", 2.0)?;
+        s.ed.ui.coach = false;
+        s.frames(2);
+        let now = s.ed.ctx.input(|i| i.time);
+        let a = &mut s.ed.agents;
+        (a.available, a.allowed, a.since) = (true, true, Some(now - 240.0));
+        a.clients = agents.iter().enumerate().map(|(i, (n, _))| (i as u64 + 1, n.to_string())).collect();
+        a.note_clients(now - 240.0);
+        for (i, (_, ago)) in agents.iter().enumerate() {
+            if let Some(ago) = ago {
+                a.note_call(i as u64 + 1, now - ago, "box");
+            }
+        }
+        s.frames(3);
+        let t = s.ed.ctx.input(|i| i.time);
+        let got = s.ed.ui.agent_chip_text(t);
+        check(got == text, format!("{name}: the chip says {text:?}, got {got:?}"))?;
+        check(
+            s.ed.ui.hits.contains_key("agent-stop") && s.ed.ui.hits.contains_key("agent-chip"),
+            format!("{name}: the chip keeps its Stop"),
+        )?;
+        // The same words as the Agents tab's banner.
+        s.ed.ui.open_agents();
+        s.frames(3);
+        let editing_n = agents.iter().filter(|(_, a)| a.is_some_and(|a| a < 5.0)).count();
+        check(
+            (editing_n > 0) == pulsing && !got.contains("editing") == (editing_n == 0),
+            format!("{name}: the dot and the words agree with the panel ({editing_n} editing)"),
+        )?;
+        widths.push((name, s.ed.ui.hits.get("agent-chip").map(|r| r.width()).unwrap_or(0.0)));
+        if name == "editing" || name == "idle" {
+            s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+            s.save_png(&dir.join(format!("app-2x-agent-chip-{name}.png")))?;
+        }
+    }
+    check(
+        widths[0].1 != widths[1].1 && widths.iter().all(|w| w.1 > 0.0),
+        format!("the chip's width follows its words: {widths:?}"),
+    )
 }
 
 /// The Agents tab's checklist in every state it has: the browser's twelve (not paired, typing, connecting,
