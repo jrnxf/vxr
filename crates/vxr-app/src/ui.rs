@@ -76,6 +76,12 @@ fn brand_font(size: f32) -> FontId {
 fn icon_font(size: f32) -> FontId {
     FontId::new(size, family("icons"))
 }
+/// The icon before a button's label: Lucide draws in the middle three quarters of its
+/// 24-unit square, so at the label's own size the glyph is about the label's cap height
+/// (larger, a square such as Stop's outweighs the word).
+fn label_icon(label: f32) -> FontId {
+    icon_font(label)
+}
 
 /// Install Geist, Geist Mono and the Lucide icon font, and the dark style. Without the
 /// fonts, egui's built-in ones stand in (and the icons show as boxes).
@@ -5741,11 +5747,12 @@ fn small_button(ui: &mut Ui, r: Rect, glyph: char, label: &str, id: &str, on: bo
         (th().muted, th().line2)
     };
     p.rect_stroke(r, CornerRadius::same(7), Stroke::new(1.0, border), StrokeKind::Inside);
-    let g = p.layout_no_wrap(label.into(), sans(12.0), color);
-    let total = 14.0 + 6.0 + g.size().x;
+    const SIZE: f32 = 12.0;
+    let g = p.layout_no_wrap(label.into(), sans(SIZE), color);
+    let total = SIZE + 6.0 + g.size().x;
     let x = r.center().x - total / 2.0;
-    p.text(pos2(x + 7.0, r.center().y), Align2::CENTER_CENTER, glyph, icon_font(14.0), color);
-    p.galley(pos2(x + 20.0, r.center().y - g.size().y / 2.0), g, color);
+    p.text(pos2(x + SIZE / 2.0, r.center().y), Align2::CENTER_CENTER, glyph, label_icon(SIZE), color);
+    p.galley(pos2(x + SIZE + 6.0, r.center().y - g.size().y / 2.0), g, color);
     resp
 }
 
