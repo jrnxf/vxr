@@ -1,9 +1,16 @@
 // Albedo-demodulated A-trous denoise and resolve for the preview. Prepended with common.wgsl.
 //
 // init:   per-pixel mean demodulated radiance + variance of the mean, and world position.
+//         A pixel with no sample since the last restart (a coarse sample left it out, or the
+//         rows have not reached it yet) is a hole: variance -1.
 // atrous: 5x5 B-spline taps at a growing step, stopped at normal changes, plane distance
 //         (voxel units) and luminance differences scaled by the variance (SVGF style), so the
-//         filter fades out by itself as samples pile up.
+//         filter fades out by itself as samples pile up. Holes take the filtered value of the
+//         samples around them on the same face, so every pixel shows the current view.
+// fill:   after a coarse sample (one pixel of each k x k block, at `coarse_offset`), in place
+//         of the A-trous steps: each pixel takes the samples of the 3 x 3 blocks around it on
+//         the same face, weighted by a tent over two blocks. Cheap at any size. Only the block
+//         samples are read, so a coarse frame traces nothing else.
 // resolve: remodulate with the current palette, tonemap, write the preview texture.
 
 @group(0) @binding(0) var<uniform> frame: Frame;
@@ -33,15 +40,13 @@ fn init_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = index(p);
     let px = pixels[i];
     let d = camera_ray(vec2<f32>(p) + 0.5);
-    var code = 0.0;
-    if (px.n > 0.0) {
-        // Metal and glass faces (stored in colour) only filter with each other.
-        code = 1.0 + f32((px.info >> 8u) & 7u) + select(0.0, 16.0, (px.info & SPEC_BIT) != 0u);
-        if (px.t < 0.0) { code = 8.0; }
-    }
+    // The face from the restart's primary ray, so holes know where they are too. Metal and
+    // glass faces (stored in colour) only filter with each other.
+    var code = 1.0 + f32((px.info >> 8u) & 7u) + select(0.0, 16.0, (px.info & SPEC_BIT) != 0u);
+    if (px.t < 0.0) { code = 8.0; }
     aux[i] = vec4<f32>(camera_origin(vec2<f32>(p) + 0.5) + d * max(px.t, 0.0), code);
     if (px.n <= 0.0) {
-        dst[i] = vec4<f32>(0.0, 0.0, 0.0, 1e4);
+        dst[i] = vec4<f32>(0.0, 0.0, 0.0, -1.0);
         return;
     }
     let mean = px.sum / px.n;
@@ -67,6 +72,8 @@ fn init_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
         let m = s1 / c;
         var_mean = max(s2 / c - m * m, 0.0) / px.n + 0.01;
+        // No sampled neighbour (a coarse sample): as uncertain as one sample's own value.
+        if (c < 2.0) { var_mean = ml * ml / px.n + 0.01; }
     }
     dst[i] = vec4<f32>(mean, var_mean);
 }
@@ -80,12 +87,14 @@ fn atrous_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = index(p);
     let c = src[i];
     let a = aux[i];
-    // Sky pixels and empty pixels pass through.
-    if (a.w == 0.0 || a.w == 8.0) {
+    let hole = c.a < 0.0;
+    let sky = a.w == 8.0;
+    // Sky pixels pass through; sky holes fill from the sky around them.
+    if (sky && !hole) {
         dst[i] = c;
         return;
     }
-    let n = decode_normal((u32(a.w - 1.0) & 7u) << 8u);
+    let n = decode_normal(select(u32(a.w - 1.0) & 7u, 0u, sky) << 8u);
     let lc = luminance(c.rgb);
     let sl = SIGMA_L * sqrt(max(c.a, 0.0)) + 1e-4;
     var k = array<f32, 5>(1.0 / 16.0, 1.0 / 4.0, 3.0 / 8.0, 1.0 / 4.0, 1.0 / 16.0);
@@ -99,11 +108,13 @@ fn atrous_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             if (q.x < 0 || q.y < 0 || q.x >= w || q.y >= h) { continue; }
             let j = index(q);
             let aq = aux[j];
-            if (aq.w != a.w) { continue; }  // same face orientation only (and not empty/sky)
+            if (aq.w != a.w) { continue; }  // same face orientation only (or sky with sky)
             let s = src[j];
+            if (s.a < 0.0) { continue; }  // a hole has nothing to give
             let pd = dot(aq.xyz - a.xyz, n);
-            let wp = exp(-pd * pd / (SIGMA_P * SIGMA_P));
-            let wl = exp(-abs(luminance(s.rgb) - lc) / sl);
+            let wp = select(exp(-pd * pd / (SIGMA_P * SIGMA_P)), 1.0, sky);
+            // A hole has no value of its own to stop at.
+            let wl = select(exp(-abs(luminance(s.rgb) - lc) / sl), 1.0, hole);
             let wt = k[dx + 2] * k[dy + 2] * wp * wl;
             sum += s.rgb * wt;
             vsum += s.a * wt * wt;
@@ -112,6 +123,53 @@ fn atrous_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     if (wsum <= 0.0) {
         dst[i] = c;
+        return;
+    }
+    dst[i] = vec4<f32>(sum / wsum, vsum / (wsum * wsum));
+}
+
+@compute @workgroup_size(8, 8)
+fn fill_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let w = i32(frame.size.x);
+    let h = i32(frame.size.y);
+    let p = vec2<i32>(gid.xy);
+    if (p.x >= w || p.y >= h) { return; }
+    let i = index(p);
+    let a = aux[i];
+    let sky = a.w == 8.0;
+    // Sky samples pass through, as in the A-trous steps.
+    if (sky && src[i].a >= 0.0) {
+        dst[i] = src[i];
+        return;
+    }
+    let n = decode_normal(select(u32(a.w - 1.0) & 7u, 0u, sky) << 8u);
+    let k = i32(disp.step);
+    let o = vec2<i32>(coarse_offset(disp.step));
+    let b = p / k;
+    var sum = vec3<f32>(0.0);
+    var vsum = 0.0;
+    var wsum = 0.0;
+    for (var dy = -1; dy <= 1; dy++) {
+        for (var dx = -1; dx <= 1; dx++) {
+            let c = (b + vec2<i32>(dx, dy)) * k;
+            if (c.x < 0 || c.y < 0 || c.x >= w || c.y >= h) { continue; }
+            let q = min(c + o, vec2<i32>(w - 1, h - 1));
+            let j = index(q);
+            let s = src[j];
+            if (s.a < 0.0) { continue; }
+            let aq = aux[j];
+            if (aq.w != a.w) { continue; }
+            let pd = dot(aq.xyz - a.xyz, n);
+            let wp = select(exp(-pd * pd / (SIGMA_P * SIGMA_P)), 1.0, sky);
+            let t = abs(vec2<f32>(q - p)) / f32(k);
+            let wt = max(1.0 - 0.5 * t.x, 0.0) * max(1.0 - 0.5 * t.y, 0.0) * wp;
+            sum += s.rgb * wt;
+            vsum += s.a * wt * wt;
+            wsum += wt;
+        }
+    }
+    if (wsum <= 0.0) {
+        dst[i] = src[i];
         return;
     }
     dst[i] = vec4<f32>(sum / wsum, vsum / (wsum * wsum));
@@ -140,13 +198,17 @@ fn resolve_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gid.x >= w || gid.y >= h) { return; }
     let i = gid.y * w + gid.x;
     let px = pixels[i];
-    // No sample yet since the last restart: keep the previous image rather than a hole.
-    if (px.n <= 0.0) { return; }
-    var irr: vec3<f32>;
-    if (disp.step == 1u) {
-        irr = src[i].rgb;
-    } else {
+    let f = src[i];
+    // A hole the filter could not fill (no sample on its face nearby) shows its colour half
+    // lit rather than what an older view left there.
+    var irr = vec3<f32>(0.5);
+    if (disp.step == 1u && f.a >= 0.0) {
+        irr = f.rgb;
+    } else if (px.n > 0.0) {
         irr = px.sum / px.n;
+    }
+    if (px.n <= 0.0 && px.t < 0.0 && (frame.flags.w & SKY_BACKDROP) == 0u) {
+        irr = backdrop(vec2<f32>(gid.xy) + 0.5);
     }
     // The editor's backdrop uses its encoding (gamma 2.2, no tonemap) so the two match.
     // Hits and the sky backdrop are tonemapped; with depth of field the samples are already in

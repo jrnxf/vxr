@@ -32,7 +32,7 @@ struct Dispatch {
     row0: u32,  // first row of this trace dispatch
     rows: u32,
     seed: u32,
-    step: u32,  // A-trous step size
+    step: u32,  // A-trous step size; for a trace, the block size of a coarse sample (0, 1: none)
 };
 
 // One record per preview pixel. Radiance is stored demodulated (divided by the albedo of the
@@ -76,4 +76,21 @@ fn decode_normal(info: u32) -> vec3<f32> {
 
 fn luminance(c: vec3<f32>) -> f32 {
     return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+}
+
+// The editor view's background (march.wgsl), so the corner sits in the Hybrid UI like the
+// main view does. The sky still lights the scene.
+fn backdrop(px: vec2<f32>) -> vec3<f32> {
+    let uv = px * frame.size.zw - vec2<f32>(0.5, 0.35);
+    let k = clamp(length(uv / vec2<f32>(1.2, 0.9)) / 0.7, 0.0, 1.0);
+    return pow(mix(frame.backdrop[0].rgb, frame.backdrop[1].rgb, k), vec3<f32>(2.2));
+}
+
+// Where a coarse sample of block size k sits in each block this frame: the same pixel of
+// every block, so the fill pass knows where the samples are (preview_denoise.wgsl).
+fn coarse_offset(k: u32) -> vec2<u32> {
+    var h = frame.flags.z * 0x9e3779b9u + 0x7f4a7c15u;
+    h = (h ^ (h >> 16u)) * 0x85ebca6bu;
+    h = h ^ (h >> 13u);
+    return vec2<u32>(h % k, (h >> 8u) % k);
 }

@@ -4392,14 +4392,18 @@ fn review_times(scene: &Path) -> Result<(), String> {
 }
 
 /// Frame time of the island at full Retina (3024x1964), without and with the render corner,
-/// while editing (pointer moving every frame) and idle. Each frame waits for the GPU.
+/// while editing (pointer moving every frame), idle and orbiting (the camera moving every
+/// frame, when the corner and the full render view must show the whole new view each frame).
+/// Each frame waits for the GPU.
 fn frame_times(scene: &Path) -> Result<(), String> {
     let (sc, name) = crate::native::open(scene)?;
     let mut s = Shot::sized(sc, &name, 2.0, (1512, 982))?;
     s.ed.ui.coach = false;
     s.frames(4);
     let mid = [s.ed.width as f32 / 2.0, s.ed.height as f32 / 2.0];
-    let run = |s: &mut Shot, render: bool, editing: bool| {
+    // The least share of the render image showing the current view, over the orbiting frames.
+    let mut current = 1.0f32;
+    let mut run = |s: &mut Shot, render: bool, editing: bool, orbit: bool| {
         s.ed.ui.show_render = render;
         s.frames(4);
         if !editing {
@@ -4410,35 +4414,50 @@ fn frame_times(scene: &Path) -> Result<(), String> {
             if editing {
                 s.ed.pointer_moved(Some([mid[0] + (i % 7) as f32, mid[1]]));
             }
+            if orbit {
+                s.ed.cam.yaw += 0.03;
+            }
             let t0 = std::time::Instant::now();
             s.frames(1);
             let _ = s.ed.gpu.device.poll(wgpu::PollType::wait_indefinitely());
             t.push(t0.elapsed().as_secs_f64() * 1000.0);
+            if orbit {
+                current = current.min(s.ed.preview.current());
+            }
         }
         t.sort_by(f64::total_cmp);
         t[t.len() / 2]
     };
-    let off = run(&mut s, false, true);
-    let on = run(&mut s, true, true);
-    let idle = run(&mut s, true, false);
+    let off = run(&mut s, false, true, false);
+    let on = run(&mut s, true, true, false);
+    let idle = run(&mut s, true, false, false);
+    let orbit = run(&mut s, true, true, true);
     let (ms, measured) = s.ed.preview.sample_ms();
     // Every voxel selected, so every hit pixel looks up the selection mask.
     s.ed.scene.select_all();
-    let selected = run(&mut s, false, true);
+    let selected = run(&mut s, false, true, false);
     s.ed.scene.deselect();
     s.ed.cam.snap(vxr_render::View::Iso);
-    let iso = run(&mut s, true, true);
+    let iso = run(&mut s, true, true, false);
     s.ed.cam.ortho = false;
     s.ed.ui.full_render = true;
-    let full = run(&mut s, true, true);
+    let full = run(&mut s, true, true, false);
+    let full_orbit = run(&mut s, true, true, true);
     s.ed.ui.full_render = false;
     println!(
         "info frame time, island at 3024x1964 (median, CPU + GPU): {off:.2} ms without the render corner, \
-         {on:.2} ms with it while editing, {idle:.2} ms idle, {selected:.2} ms with every voxel selected, \
-         {iso:.2} ms isometric with the render corner, {full:.2} ms in the full render view while editing; one 640x360 sample {ms:.2} ms ({})",
+         {on:.2} ms with it while editing, {idle:.2} ms idle, {orbit:.2} ms orbiting, {selected:.2} ms with every voxel selected, \
+         {iso:.2} ms isometric with the render corner, {full:.2} ms in the full render view while editing, \
+         {full_orbit:.2} ms orbiting it; one 640x360 sample {ms:.2} ms ({})",
         if measured { "timestamps" } else { "assumed" }
     );
-    Ok(())
+    check(
+        current >= 1.0,
+        format!(
+            "orbiting, every frame of the render corner and the full render view shows only the new view ({:.0}% at least)",
+            current * 100.0
+        ),
+    )
 }
 
 /// The palette editor, through egui input on the drawn UI: live recolour, one undo step per

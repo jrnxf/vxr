@@ -508,7 +508,7 @@ impl App {
         let e = &self.host.editor;
         let (c, h) = (&e.cam, e.scene.history());
         format!(
-            r#"{{"voxels":{},"tool":"{:?}","shape":"{:?}","mirror":{},"mirrorAxes":[{},{},{}],"lock":{},"brushSize":{},"sizePanel":{},"lifting":{},"span":{},"selected":{},"region":"{:?}","hasClip":{},"bounds":[{},{},{}],"boundsPanel":{},"slot":{},"colorEdit":{},"slotOp":"{:?}","undo":{},"redo":{},"cmdk":{},"coach":{},"name":{:?},"size":[{},{}],"ppp":{},"cam":[{},{},{},{},{},{}],"ortho":{},"inView":[{},{}],"cameraHints":{},"view":{},"viewPanel":{},"exportMenu":{},"confirmNew":{},"theme":"{}","themeMenu":{},"touch":{},"paletteOpen":{},"themeShown":{:?},"guides":[{},{},{}],"mode":"{}","objects":{},"models":{},"picked":{},"tree":[{}],"treeOn":{},"renaming":{},"layers":[{}],"layerOn":{},"render":{{"shown":{},"spp":{},"rows":{},"restarts":{},"timestamps":{},"panel":{},"full":{},"size":[{},{}],"maxSpp":{},"exposure":{},"gamma":{},"vignette":{},"aperture":{},"sky":{},"physicalSky":{},"export":{}}},"review":{},"undoLabel":{},"asks":{:?},"agents":{{"panel":{},"available":{},"web":{},"allowed":{},"review":{},"connecting":{},"error":{},"fail":{},"code":{:?},"clients":[{}],"edits":[{}]}}}}"#,
+            r#"{{"voxels":{},"tool":"{:?}","shape":"{:?}","mirror":{},"mirrorAxes":[{},{},{}],"lock":{},"brushSize":{},"sizePanel":{},"lifting":{},"span":{},"selected":{},"region":"{:?}","hasClip":{},"bounds":[{},{},{}],"boundsPanel":{},"slot":{},"colorEdit":{},"slotOp":"{:?}","undo":{},"redo":{},"cmdk":{},"coach":{},"name":{:?},"size":[{},{}],"ppp":{},"cam":[{},{},{},{},{},{}],"ortho":{},"inView":[{},{}],"cameraHints":{},"view":{},"viewPanel":{},"exportMenu":{},"confirmNew":{},"theme":"{}","themeMenu":{},"touch":{},"paletteOpen":{},"themeShown":{:?},"guides":[{},{},{}],"mode":"{}","objects":{},"models":{},"picked":{},"tree":[{}],"treeOn":{},"renaming":{},"layers":[{}],"layerOn":{},"render":{{"shown":{},"spp":{},"rows":{},"current":{},"restarts":{},"timestamps":{},"panel":{},"full":{},"size":[{},{}],"maxSpp":{},"exposure":{},"gamma":{},"vignette":{},"aperture":{},"sky":{},"physicalSky":{},"export":{}}},"review":{},"undoLabel":{},"asks":{:?},"agents":{{"panel":{},"available":{},"web":{},"allowed":{},"review":{},"connecting":{},"error":{},"fail":{},"code":{:?},"clients":[{}],"edits":[{}]}}}}"#,
             e.scene.map.voxels,
             e.ui.tool,
             e.ui.shape,
@@ -594,6 +594,7 @@ impl App {
             e.ui.render_rect.is_some() && e.ui.show_render,
             e.preview.samples(),
             e.preview.last_rows,
+            e.preview.current(),
             e.preview.restarts,
             e.gpu.timestamps,
             e.ui.render_panel,

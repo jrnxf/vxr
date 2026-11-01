@@ -737,6 +737,30 @@ async () => {
       const fill = window.vxr.hit('render');
       const want = [Math.round(st().size[0] / st().ppp), Math.round(st().size[1] / st().ppp)];
       step('a click on the corner fills the view', full.full && full.size[0] === want[0] && full.size[1] === want[1] && Math.abs(fill[0] - want[0] / 2) <= 1 && Math.abs(fill[1] - want[1] / 2) <= 1, JSON.stringify({ full, want, fill }));
+      // Orbiting it shows the whole new view on every frame, never part old view and part new,
+      // then orbits back to where it was.
+      {
+        const r0 = st().render;
+        const seen = [];
+        const gaps = [];
+        ptr('pointermove', mx, my, 2); await frames();
+        ptr('pointerdown', mx, my, 2); await frames();
+        for (let i = 1; i <= 12; i++) {
+          const t0 = performance.now();
+          ptr('pointermove', mx + 6 * i, my, 2);
+          await frames(1);
+          gaps.push(performance.now() - t0);
+          seen.push(st().render.current);
+        }
+        for (let i = 11; i >= 0; i--) {
+          ptr('pointermove', mx + 6 * i, my, 2);
+          await frames(1);
+        }
+        ptr('pointerup', mx, my, 2); await frames();
+        const r1 = st().render;
+        const median = gaps.sort((x, y) => x - y)[gaps.length >> 1].toFixed(1);
+        step(`orbiting the full render view shows only the new view on every frame (${median} ms a frame)`, r1.restarts >= r0.restarts + 12 && seen.every((v) => v === 1), JSON.stringify({ seen, r0, r1 }));
+      }
       for (let i = 0; i < 300 && st().render.spp < 4; i++) await frames(1);
       step('the full view converges', st().render.spp >= 4, JSON.stringify(st().render));
       const chip = window.vxr.hit('render-full');
