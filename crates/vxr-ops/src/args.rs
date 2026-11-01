@@ -594,7 +594,7 @@ pub struct Undo {}
 #[serde(deny_unknown_fields)]
 pub struct Redo {}
 
-/// Finish: the change goes to the user for review. Give a one-line summary of what you changed.
+/// Finish: the change goes to the user for review. Give a one-line summary of what you changed. When you can predict the result of your last edits, call done in the same answer after them instead of waiting for their results.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Done {

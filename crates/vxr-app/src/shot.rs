@@ -5029,8 +5029,19 @@ fn live_steps(dir: &Path) -> Result<(), String> {
             println!("skip {} ({var} is not set)", kind.name());
             continue;
         };
+        // `VXR_LIVE_KINDS` ("anthropic", "openai") limits the run to those providers.
+        if std::env::var("VXR_LIVE_KINDS").is_ok_and(|v| !v.contains(kind.id())) {
+            continue;
+        }
         ran += 1;
-        let mut s = Shot::new(house(), "house.vox", 2.0)?;
+        // `VXR_LIVE_SCENE` (a `.vox` path) swaps in another scene for the house.
+        let mut s = match std::env::var("VXR_LIVE_SCENE") {
+            Ok(p) => {
+                let bytes = std::fs::read(&p).map_err(|e| format!("{p}: {e}"))?;
+                Shot::new(Scene::from_vox(&bytes).map_err(|e| e.to_string())?, "scene.vox", 2.0)?
+            }
+            Err(_) => Shot::new(house(), "house.vox", 2.0)?,
+        };
         s.ed.ui.coach = false;
         s.ed.cam.distance *= 2.6;
         let h = s.ed.height as f32;
@@ -5043,6 +5054,12 @@ fn live_steps(dir: &Path) -> Result<(), String> {
         vxr_ai::Keys::set(&mut keys, kind, &key, false)?;
         drop(key);
         s.ed.assistant = vxr_app::assistant::Assistant::new(Box::new(net), Box::new(keys), false);
+        // `VXR_LIVE_MODEL` picks another model of that provider.
+        if let Ok(m) = std::env::var("VXR_LIVE_MODEL") {
+            let mut st = vxr_ai::Settings::new(kind, false);
+            st.model = m;
+            s.ed.assistant.set_settings(st);
+        }
         s.ed.ui.ai_open = true;
         s.frames(2);
         let mut cost = 0.0;
@@ -5076,10 +5093,11 @@ fn live_steps(dir: &Path) -> Result<(), String> {
                     && s.ed.assistant.entries.len() == before + 2
                     && card.as_ref().is_some_and(|c| c.counts.iter().sum::<usize>() > 0 || !c.slots.is_empty()),
                 format!(
-                    "{} {}: \"{prompt}\" -> {:?}, {} calls ({}), card {:?} slots {:?}, ${:.3}, {:.1} s",
+                    "{} {}: \"{prompt}\" -> {:?}, {} requests, {} calls ({}), card {:?} slots {:?}, ${:.3}, {:.1} s",
                     kind.name(),
                     a.model,
                     a.progress,
+                    a.turns,
                     a.calls.len(),
                     a.calls.iter().map(|c| c.tool.as_str()).collect::<Vec<_>>().join(" "),
                     card.as_ref().map(|c| c.counts),

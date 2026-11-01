@@ -538,9 +538,12 @@ impl Assistant {
                 }
             }
         }
+        // done in the same answer as the edits finishes only when every call of it worked:
+        // otherwise the model gets the errors back and goes on.
+        let failed = results.iter().any(|r| r.error);
         self.items.push(Item::Results(results));
         let turns = self.run.as_ref().map_or(0, |r| r.turns);
-        if done {
+        if done && !failed {
             self.finish(Progress::Done, now)
         } else if turns >= MAX_TURNS {
             self.finish(Progress::Failed(format!("Stopped after {MAX_TURNS} answers")), now)
@@ -913,6 +916,44 @@ mod tests {
         let res = &second["messages"][2]["content"][0];
         assert_eq!(res["is_error"], true);
         assert!(res["content"].as_str().unwrap().contains("INVALID_JSON"), "{res}");
+    }
+
+    #[test]
+    fn done_in_the_same_answer_finishes_only_when_every_call_worked() {
+        // Edits and done in one answer: one request.
+        let (mut a, fake) = assistant(0);
+        fake.answer(anthropic(
+            "",
+            &[("palette_set", json!({"slot": 10, "hex": "#00ff00"})), ("done", json!({"summary": "Green floor"}))],
+        ));
+        let mut s = scene();
+        let mut r = Review::new(&s, "make the floor green");
+        a.send("make the floor green", &mut r, &s, 0.0).unwrap();
+        settle(&mut a, &mut r, &mut s, 50);
+        assert!(!a.running() && fake.requests().len() == 1);
+        assert_eq!(r.session.done(), Some("Green floor"));
+
+        // A failed call in that answer: the model gets the error back instead of finishing.
+        let (mut a, fake) = assistant(0);
+        fake.answer(anthropic(
+            "",
+            &[("palette_set", json!({"slot": 10, "hex": "green"})), ("done", json!({"summary": "Green floor"}))],
+        ));
+        fake.answer(anthropic(
+            "",
+            &[("palette_set", json!({"slot": 10, "hex": "#00ff00"})), ("done", json!({"summary": "Green floor"}))],
+        ));
+        let mut s = scene();
+        let mut r = Review::new(&s, "make the floor green");
+        a.send("make the floor green", &mut r, &s, 0.0).unwrap();
+        settle(&mut a, &mut r, &mut s, 50);
+        assert!(!a.running());
+        let reqs = fake.requests();
+        assert_eq!(reqs.len(), 2, "the failed call's error went back");
+        let res = &body(&reqs[1])["messages"][2]["content"];
+        assert_eq!((res[0]["is_error"].clone(), res[1]["is_error"].clone()), (json!(true), Value::Null));
+        let Some(Entry::Answer(v)) = a.entries.last() else { panic!() };
+        assert_eq!((v.progress.clone(), v.turns), (Progress::Done, 2));
     }
 
     #[test]
