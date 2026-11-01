@@ -4742,10 +4742,10 @@ impl Hybrid {
             };
             let color = if s.export.is_some() { th().text } else { ink };
             let g = p.layout_no_wrap(label, sans_semibold(13.0), color);
-            let total = 16.0 + 6.0 + g.size().x;
+            let total = 13.0 + 6.0 + g.size().x;
             let x0 = r.center().x - total / 2.0;
-            p.text(pos2(x0 + 8.0, r.center().y), Align2::CENTER_CENTER, icon::IMAGE_DOWN, icon_font(16.0), color);
-            p.galley(pos2(x0 + 22.0, r.center().y - g.size().y / 2.0), g, color);
+            p.text(pos2(x0 + 6.5, r.center().y), Align2::CENTER_CENTER, icon::IMAGE_DOWN, label_icon(13.0), color);
+            p.galley(pos2(x0 + 19.0, r.center().y - g.size().y / 2.0), g, color);
             export |= resp.clicked();
         });
         for (k, r) in hits {
