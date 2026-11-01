@@ -313,9 +313,11 @@ impl Decoder {
         }
         let u = &d["usage"];
         if u.is_object() {
+            // Prompt tokens count the cached ones and those written to the cache (OpenRouter).
             let cached = u["prompt_tokens_details"]["cached_tokens"].as_u64().unwrap_or(0);
-            self.usage.cache_read = cached;
-            self.usage.input = u["prompt_tokens"].as_u64().unwrap_or(0).saturating_sub(cached);
+            let written = u["prompt_tokens_details"]["cache_write_tokens"].as_u64().unwrap_or(0);
+            (self.usage.cache_read, self.usage.cache_write) = (cached, written);
+            self.usage.input = u["prompt_tokens"].as_u64().unwrap_or(0).saturating_sub(cached + written);
             self.usage.output = u["completion_tokens"].as_u64().unwrap_or(0);
             self.usage.cost = u["cost"].as_f64();
         }
@@ -443,6 +445,18 @@ mod tests {
         assert_eq!((u.input, u.cache_write, u.cache_write_1h, u.output), (4, 4330, 10378, 90));
         let want = (4.0 * 4.0 + 4330.0 * 5.0 + 10378.0 * 8.0 + 90.0 * 20.0) / 1e6;
         assert!((u.dollars("claude-opus-5-5").unwrap() - want).abs() < 1e-12);
+    }
+
+    #[test]
+    fn openrouter_cache_writes_are_counted_apart() {
+        let s = concat!(
+            "data: {\"model\":\"anthropic/claude-opus-5.5\",\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}],",
+            "\"usage\":{\"prompt_tokens\":10400,\"completion_tokens\":50,",
+            "\"prompt_tokens_details\":{\"cached_tokens\":0,\"cache_write_tokens\":10380}}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let u = decode(Kind::Compatible, s, 11).0.unwrap().usage;
+        assert_eq!((u.input, u.cache_read, u.cache_write, u.output, u.cost), (20, 0, 10380, 50, None));
     }
 
     #[test]
