@@ -14,6 +14,7 @@ use vxr_ai::net::{IDLE_SECS, KeyPlace, Keys, MemoryKeys, Piece, Stream, Transpor
 use vxr_ai::provider::{Kind, Settings, Usage, default_model};
 use vxr_ai::stream::{Decoder, Delta, error_text};
 use vxr_core::Scene;
+use vxr_core::history::At;
 
 use crate::review::{Answer, Call, Review};
 
@@ -22,10 +23,11 @@ pub const MAX_TURNS: usize = 30;
 /// Tries after the first for an overloaded provider or a dropped connection.
 const RETRIES: u32 = 3;
 
-/// The tools the assistant offers: every operation but those that answer with a picture,
-/// which its history does not carry to the model.
-fn tools() -> Vec<vxr_ops::Tool> {
-    vxr_ops::tools().into_iter().filter(|t| !vxr_ops::Op::has_image(t.name)).collect()
+/// The tools the assistant offers on the world of objects (`world`) or on one model: those
+/// that work there, but not those that answer with a picture, which its history does not
+/// carry to the model. Each set is the same every time, so the prompt cache keeps it.
+fn tools(world: bool) -> Vec<vxr_ops::Tool> {
+    vxr_ops::tools_for(world).into_iter().filter(|t| !vxr_ops::Op::has_image(t.name)).collect()
 }
 
 pub const NO_KEY: &str = "Add a key to use the assistant";
@@ -100,6 +102,8 @@ struct Run {
     retries: u32,
     /// The answer's text before the turn now streaming.
     text_before: String,
+    /// The scene showed the world of objects when the request was sent.
+    world: bool,
 }
 
 pub struct Assistant {
@@ -279,6 +283,7 @@ impl Assistant {
             model: self.settings.model.clone(),
             retries: 0,
             text_before: String::new(),
+            world: scene.at() == At::World,
         });
         self.request(now);
         Ok(())
@@ -292,7 +297,8 @@ impl Assistant {
             self.has[kind.index()] = Some(false);
             return self.finish(Progress::Failed(NO_KEY.into()), now);
         }
-        let req = vxr_ai::request(&self.settings, key.as_deref(), vxr_ops::SYSTEM_PROMPT, &tools(), &self.items);
+        let world = self.run.as_ref().is_some_and(|r| r.world);
+        let req = vxr_ai::request(&self.settings, key.as_deref(), vxr_ops::SYSTEM_PROMPT, &tools(world), &self.items);
         drop(key);
         let stream = self.transport.send(req);
         let model = self.settings.model.clone();
@@ -808,7 +814,8 @@ mod tests {
         let text = first["messages"][0]["content"][0]["text"].as_str().unwrap();
         assert!(text.starts_with("Scene summary:\n{") && text.ends_with("Request: make the floor red"), "{text}");
         assert_eq!(first["system"][0]["text"], vxr_ops::SYSTEM_PROMPT);
-        assert_eq!(first["tools"].as_array().unwrap().len(), vxr_ops::tools().len() - 1, "every tool but look");
+        assert_eq!(first["tools"], body(&reqs[1])["tools"], "the same tools every request");
+        assert_eq!(first["tools"].as_array().unwrap().len(), vxr_ops::tools_for(false).len() - 1, "all but look");
         assert!(first["tools"].as_array().unwrap().iter().all(|t| t["name"] != "look"));
         let second = body(&reqs[1]);
         let m = second["messages"].as_array().unwrap();
@@ -916,6 +923,110 @@ mod tests {
         let res = &second["messages"][2]["content"][0];
         assert_eq!(res["is_error"], true);
         assert!(res["content"].as_str().unwrap().contains("INVALID_JSON"), "{res}");
+    }
+
+    /// The tools part of a request body, as the bytes sent.
+    fn tools_bytes(r: &vxr_ai::Request) -> String {
+        let at = r.body.find("\"tools\":").unwrap();
+        let v: Value = serde_json::from_str(&r.body).unwrap();
+        let t = serde_json::to_string(&v["tools"]).unwrap();
+        assert_eq!(&r.body[at + 8..at + 8 + t.len()], t, "the body holds the tools as serialised alone");
+        t
+    }
+
+    #[test]
+    fn each_mode_sends_the_same_tool_bytes_every_time() {
+        // One request on `s`, after `history` earlier requests in the conversation: its tools.
+        let sent = |s: &mut Scene, history: usize| {
+            let (mut a, fake) = assistant(0);
+            for _ in 0..=history {
+                fake.answer(anthropic("Nothing to do.", &[]));
+            }
+            for k in 0..=history {
+                let mut r = Review::new(s, "look");
+                a.send(&format!("request {k}"), &mut r, s, k as f64 * 100.0).unwrap();
+                settle(&mut a, &mut r, s, 20);
+            }
+            tools_bytes(fake.requests().last().unwrap())
+        };
+        let f = |name: &str| vxr_vox::fixtures::all().into_iter().find(|f| f.name == name).unwrap();
+        let world = vxr_vox::Document { raw: f("22-world").builder.build() }.write();
+        let desk = vxr_vox::Document { raw: f("23-desk").builder.build() }.write();
+        let open = |b: &[u8]| Scene::from_vox(b).unwrap();
+        let mut in_object = open(&world);
+        assert!(in_object.edit_object(1));
+        // A new scene, a one-model file and one object of a world: one set, byte for byte.
+        let model = sent(&mut scene(), 0);
+        assert_eq!(sent(&mut open(&desk), 2), model);
+        assert_eq!(sent(&mut in_object, 1), model);
+        // The world: another set, the same on every request.
+        let w = sent(&mut open(&world), 0);
+        assert_eq!(sent(&mut open(&world), 2), w);
+        let names = |t: &str| -> Vec<String> {
+            serde_json::from_str::<Vec<Value>>(t).unwrap().iter().map(|t| t["name"].as_str().unwrap().into()).collect()
+        };
+        assert_eq!(
+            names(&model),
+            [
+                "scene_summary",
+                "get_voxels",
+                "slice",
+                "find_parts",
+                "place",
+                "erase",
+                "box",
+                "line",
+                "sphere",
+                "circle",
+                "face",
+                "fill",
+                "paint",
+                "select",
+                "transform",
+                "copy",
+                "cut",
+                "paste",
+                "delete",
+                "hollow",
+                "fill_inside",
+                "resize",
+                "crop",
+                "palette_set",
+                "palette_swap",
+                "palette_copy",
+                "material_set",
+                "make_object",
+                "rename",
+                "undo",
+                "redo",
+                "done"
+            ]
+        );
+        assert_eq!(
+            names(&w),
+            [
+                "scene_summary",
+                "get_voxels",
+                "slice",
+                "find_parts",
+                "palette_set",
+                "palette_copy",
+                "material_set",
+                "move_object",
+                "duplicate",
+                "group",
+                "ungroup",
+                "hide",
+                "set_layer",
+                "delete_object",
+                "rename",
+                "new_layer",
+                "hide_layer",
+                "undo",
+                "redo",
+                "done"
+            ]
+        );
     }
 
     #[test]

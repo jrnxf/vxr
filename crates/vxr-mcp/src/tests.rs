@@ -72,6 +72,20 @@ impl Client {
     }
 }
 
+/// A used slot's line of the summary ("slot 3 #aabbcc: 17 voxels, x 0..3, y 0..0, z 0..3") as
+/// its voxel count and bounds.
+fn slot_used(summary: &Value, slot: u64) -> Option<(u64, [i64; 3], [i64; 3])> {
+    let prefix = format!("slot {slot} #");
+    let line = summary["slots_used"].as_array()?.iter().filter_map(Value::as_str).find(|l| l.starts_with(&prefix))?;
+    let (_, rest) = line.split_once(": ")?;
+    let n: Vec<i64> = rest
+        .split(|c: char| !(c.is_ascii_digit() || c == '-'))
+        .filter(|w| !w.is_empty() && *w != "-")
+        .map(|w| w.parse().unwrap())
+        .collect();
+    Some((n[0] as u64, [n[1], n[3], n[5]], [n[2], n[4], n[6]]))
+}
+
 fn summary(c: &mut Client) -> Value {
     let t = c.ok("scene_summary", json!({}));
     serde_json::from_str(&t).unwrap()
@@ -367,9 +381,7 @@ fn a_save_keeps_every_chunk_the_edit_did_not_touch() {
 
     // Paint a square on the slab, and recolour a slot.
     let s = summary(&mut c);
-    let slab = s["slots_used"].as_array().unwrap().iter().find(|x| x["slot"] == GREY).map(|x| x["from"].clone());
-    let from = slab.expect("the grey slab");
-    let cell = [from[0].as_i64().unwrap(), from[1].as_i64().unwrap(), from[2].as_i64().unwrap()];
+    let (_, cell, _) = slot_used(&s, GREY as u64).expect("the grey slab");
     c.ok("paint", json!({"from": cell, "to": cell, "slot": 2}));
     c.ok("palette_set", json!({"slot": 20, "hex": "#123456"}));
     c.ok("save", json!({}));
@@ -415,9 +427,8 @@ fn make_object_saves_the_new_objects_losslessly() {
     assert!(c.err("make_object", json!({"from_slot": GREY})).contains("one object's model"));
     c.ok("edit_object", json!({"node": slab}));
     let s = summary(&mut c);
-    let grey = s["slots_used"].as_array().unwrap().iter().find(|x| x["slot"] == GREY).unwrap().clone();
-    let (from, to) = (grey["from"].clone(), grey["to"].clone());
-    let half = [from[0].as_i64().unwrap() + 3, to[1].as_i64().unwrap(), to[2].as_i64().unwrap()];
+    let (_, from, to) = slot_used(&s, GREY as u64).unwrap();
+    let half = [from[0] + 3, to[1], to[2]];
     let t = c.ok("make_object", json!({"from": from, "to": half, "name": "slab left"}));
     let node = s["world"]["nodes"].as_array().unwrap().iter().map(|n| n["node"].as_u64().unwrap()).max().unwrap() + 1;
     assert!(t.starts_with(&format!("new object {node} \"slab left\": 32 voxels")), "{t}");
@@ -532,9 +543,8 @@ fn the_selection_outlives_its_call() {
     c.ok("select", json!({"from": [-2, 1, -2], "to": [-2, 1, -2], "mode": "add"}));
     assert_eq!(summary(&mut c)["selection"]["count"], 17);
     c.ok("fill", json!({"slot": 3}));
-    let slots = summary(&mut c)["slots_used"].clone();
-    let count = |s: u64| slots.as_array().unwrap().iter().find(|x| x["slot"] == s).map(|x| x["voxels"].clone());
-    assert_eq!(count(3), Some(json!(17)), "{slots}");
+    let s = summary(&mut c);
+    assert_eq!(slot_used(&s, 3).map(|u| u.0), Some(17), "{}", s["slots_used"]);
     c.ok("select", json!({"none": true}));
     assert!(c.err("fill", json!({"slot": 2})).contains("nothing is selected"));
 }

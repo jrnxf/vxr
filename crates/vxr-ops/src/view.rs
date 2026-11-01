@@ -47,13 +47,25 @@ impl Session {
             let t = tops.entry(key).or_insert(i32::MIN);
             *t = (*t).max(w[1]);
         });
-        let slots: Vec<Value> = per
+        // One line a slot, as the parts are: a third of the tokens of an object a slot.
+        let slots: Vec<String> = per
             .iter()
-            .map(|(&v, (n, lo, hi))| json!({"slot": v, "hex": hex(scene.palette[v as usize]), "voxels": n, "from": lo, "to": hi}))
+            .map(|(&v, (n, lo, hi))| {
+                format!(
+                    "slot {v} {}: {n} voxels, x {}..{}, y {}..{}, z {}..{}",
+                    hex(scene.palette[v as usize]),
+                    lo[0],
+                    hi[0],
+                    lo[1],
+                    hi[1],
+                    lo[2],
+                    hi[2]
+                )
+            })
             .collect();
-        let recoloured: Vec<Value> = (1..=255usize)
+        let recoloured: Vec<String> = (1..=255usize)
             .filter(|&i| scene.palette[i] != self.palette_before[i] && !per.contains_key(&(i as u8)))
-            .map(|i| json!({"slot": i, "hex": hex(scene.palette[i]), "voxels": 0}))
+            .map(|i| format!("slot {i} {}: no voxels", hex(scene.palette[i])))
             .collect();
         // One character per HEIGHT_CELL x HEIGHT_CELL column: the top voxel's height above
         // the bottom in base 36 ('.' empty), rows from the back (low z) to the front.

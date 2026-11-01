@@ -96,7 +96,7 @@ pub enum SelectMode {
 #[serde(deny_unknown_fields)]
 pub struct SceneSummary {}
 
-/// Read exact cells. cells gives each listed cell's slot (0 is empty); columns gives the top voxel of each [x, z] column (its y and slot, or null when the column is empty), the cheap way to find the surface to build on; from and to list every filled cell in that box. At most 4096 cells or columns per call.
+/// Read exact cells: cells gives each cell's slot (0 is empty); columns gives each [x, z] column's top voxel (its y and slot, or null), the cheap way to find a surface to build on; from and to list the filled cells of a box. At most 4096 cells or columns per call.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GetVoxels {
@@ -208,7 +208,7 @@ pub struct Sphere {
     pub name: Option<String>,
 }
 
-/// A disc of radius 1 to 64 around a cell, flat across axis (default y: a horizontal disc), as the center brush's circle draws it.
+/// A disc of radius 1 to 64 around center, flat across axis (default y: horizontal).
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Circle {
@@ -220,13 +220,12 @@ pub struct Circle {
     pub slot: Option<u8>,
     #[serde(default)]
     pub mode: Mode,
-    /// The axis the disc is flat across (default y).
     pub axis: Option<Axis>,
     /// Name the voxels this makes as a part.
     pub name: Option<String>,
 }
 
-/// Work on one face, as the face brush does: the voxels of cell's colour connected to it in its layer whose side is open (up to 120,000). add puts a layer of slot on that side of them, erase clears them and paint recolours them.
+/// Work on one face: the voxels of cell's colour connected to it in its layer with side open (up to 120,000). add puts a layer of slot on that side, erase clears them, paint recolours them.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FaceShape {
@@ -251,7 +250,7 @@ pub struct Fill {
     pub slot: u8,
 }
 
-/// Recolour filled cells: those of one or more parts, of slot from_slot, the selection, or those in a box (from, to). Empty cells stay empty.
+/// Recolour filled cells: of parts, of slot from_slot, the selection, or in a box (from, to). Empty cells stay empty.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Paint {
@@ -273,7 +272,7 @@ pub struct Paint {
     pub to: Option<Cell>,
 }
 
-/// Select filled cells: in a box (from, to), of a palette slot (color), of one or more parts, the face of a voxel (face, with side: the connected voxels of its colour in its layer whose side is open, as a select click with Face does), the volume of a voxel (volume: every voxel connected to it through faces, whatever its colour), all, none, or invert (every voxel not selected, and none of those that are). The selection is the assistant's own; fill paints it.
+/// Select filled cells: in a box (from, to), of a slot (color), of parts, the face of a voxel (face and side: its colour's connected voxels in its layer with that side open), the volume of a voxel (volume: every voxel connected to it, any colour), all, none, or invert (swap selected and not; mode unused). The selection is your own; fill paints it.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Select {
@@ -296,7 +295,6 @@ pub struct Select {
     pub all: bool,
     #[serde(default)]
     pub none: bool,
-    /// Select every voxel that is not selected and drop those that are (with nothing selected, every voxel); mode is not used.
     #[serde(default)]
     pub invert: bool,
     #[serde(default)]
@@ -313,7 +311,7 @@ pub enum TransformKind {
     Loop,
 }
 
-/// Move, turn, mirror or wrap the selection, or every voxel when nothing is selected, as the select flyout does. move shifts by offset [dx, dy, dz]; rotate turns 90 degrees about axis (counter-clockwise looking down it) around the middle of what moves; flip mirrors across that middle on axis; loop shifts by steps cells along axis and wraps what leaves the moved voxels' box round to its other side. The selection moves with the voxels. If any voxel would land outside the editable bounds nothing moves and the call fails: resize first.
+/// Move, rotate, flip or loop the selection, or every voxel when none is selected. move: by offset; rotate: 90 degrees about axis (counter-clockwise looking down it) around the middle; flip: mirror across the middle on axis; loop: shift steps cells along axis, wrapping round within the moved box. The selection follows. If a voxel would leave the editable bounds nothing moves and the call fails: resize first.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Transform {
@@ -384,7 +382,7 @@ pub enum MaterialKind {
     Emit,
 }
 
-/// Set a palette slot's material, as the Material tab does: its type and its sliders. Every voxel of that slot changes. A slider not given keeps its value. Each type reads its own: metal roughness and metalness, plastic roughness and specular, glass roughness, transparency, refraction and attenuation, emit emission and power.
+/// Set a palette slot's material type and sliders; every voxel of the slot changes, and a slider not given keeps its value. metal reads roughness and metalness, plastic roughness and specular, glass roughness, transparency, refraction and attenuation, emit emission and power.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MaterialSet {
@@ -411,7 +409,7 @@ pub struct MaterialSet {
     pub power: Option<f32>,
 }
 
-/// Make voxels an object of their own, as the select flyout's To new object does: those of one or more parts, of slot from_slot, the selection, or those in a box (from, to). They leave this object's model and become a new object right after it, under the same group and on the same layer, each voxel on the world cell it was on, so nothing moves in the world. Not every voxel: what is left stays in this object, which rename names. Not on a linked copy, whose model other objects share. In a new scene the scene first becomes a world of one object. The new object is staged like every edit and made when the user applies the change; the result gives its node, for rename, and its voxels read as gone from this model.
+/// Make voxels a new object in place: those of parts, of slot from_slot, the selection, or a box (from, to). They leave this model for a new object after it, in the same group and layer, on the same world cells. Not every voxel: what is left stays in this object, which rename names. Not on a linked copy. A new scene becomes a world first. Made when the user applies; the result gives the new node, for rename, and its voxels read as gone from this model.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MakeObject {
@@ -643,6 +641,14 @@ macro_rules! ops {
         pub fn tools() -> Vec<Tool> {
             vec![$(tool::<$args>($name),)*]
         }
+
+        /// The tools that work on the world of objects (`world`) or on one model, in the
+        /// order [`tools`] gives them. Each set comes out the same bytes every time, so a
+        /// provider's prompt cache keeps it across requests.
+        pub fn tools_for(world: bool) -> Vec<Tool> {
+            let want = if world { Scope::World } else { Scope::Model };
+            vec![$(tool::<$args>($name),)*].into_iter().filter(|t| matches!(Op::scope(t.name), Scope::Any) || Op::scope(t.name) == want).collect()
+        }
     };
 }
 
@@ -691,6 +697,18 @@ ops! {
     "done" => Done(Done),
 }
 
+/// Where a tool works, see [`Op::scope`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scope {
+    /// On a model and on the world: the queries, the palette and materials, rename, undo,
+    /// redo and done.
+    Any,
+    /// Only on one model: the voxel edits, and the selection and clipboard they use.
+    Model,
+    /// Only on the world of several objects.
+    World,
+}
+
 /// What a call does, see [`Op::kind`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OpKind {
@@ -712,6 +730,19 @@ impl Op {
             Op::Select(_) | Op::Copy(_) => OpKind::Selection,
             Op::Undo(_) | Op::Redo(_) | Op::Done(_) => OpKind::Control,
             _ => OpKind::Edit,
+        }
+    }
+
+    /// Where the tool `name` works; the session refuses it elsewhere. rename works on a
+    /// model too, for the objects make_object stages.
+    pub fn scope(name: &str) -> Scope {
+        match name {
+            "move_object" | "duplicate" | "group" | "ungroup" | "hide" | "set_layer" | "delete_object"
+            | "new_layer" | "hide_layer" => Scope::World,
+            "place" | "erase" | "box" | "line" | "sphere" | "circle" | "face" | "fill" | "paint" | "select"
+            | "transform" | "copy" | "cut" | "paste" | "delete" | "hollow" | "fill_inside" | "resize" | "crop"
+            | "palette_swap" | "make_object" => Scope::Model,
+            _ => Scope::Any,
         }
     }
 
