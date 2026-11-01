@@ -195,6 +195,8 @@ impl Export {
         preview.set_materials(&gpu.queue, materials);
         preview.lighting = settings.lighting(cam.distance);
         preview.max_spp = settings.samples();
+        // Only the finished image is shown, so no coarse first frame.
+        preview.follow = false;
         preview.set_backdrop(backdrop);
         Ok(Self { preview, cam, readback: None })
     }
