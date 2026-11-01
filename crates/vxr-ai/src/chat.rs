@@ -87,8 +87,10 @@ fn header(k: &str, v: &str) -> (String, String) {
     (k.into(), v.into())
 }
 
-/// Anthropic Messages: thinking adaptive with its summary shown, effort medium, the system
-/// prompt and history cached, and tool inputs streamed as they are written.
+/// Anthropic Messages: thinking adaptive with its summary shown, effort medium, the tools and
+/// system prompt cached for an hour (so a request after a pause still reads them) and the
+/// history for 5 minutes, and tool inputs streamed as they
+/// are written.
 fn anthropic(settings: &Settings, key: Option<&str>, system: &str, tools: &[Tool], items: &[Item]) -> Request {
     let mut messages: Vec<Value> = Vec::new();
     let mut push = |role: &str, mut content: Vec<Value>| {
@@ -142,7 +144,7 @@ fn anthropic(settings: &Settings, key: Option<&str>, system: &str, tools: &[Tool
         "model": settings.model,
         "max_tokens": MAX_TOKENS,
         "stream": true,
-        "system": [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+        "system": [{"type": "text", "text": system, "cache_control": {"type": "ephemeral", "ttl": "1h"}}],
         "tools": tools,
         "messages": messages,
         "thinking": {"type": "adaptive", "display": "summarized"},
@@ -324,7 +326,8 @@ mod tests {
         assert_eq!(b["stream"], true);
         assert!(b.get("fallbacks").is_none(), "the model picked answers, no other");
         assert!(!r.headers.iter().any(|(k, _)| k == "anthropic-beta"));
-        assert_eq!(b["system"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(b["system"][0]["cache_control"], json!({"type": "ephemeral", "ttl": "1h"}));
+        assert_eq!(b["cache_control"], json!({"type": "ephemeral"}), "the history for 5 minutes");
         assert_eq!(b["tools"][0]["name"], "place");
         assert_eq!(b["tools"][0]["eager_input_streaming"], true);
         assert!(b["tools"][0]["input_schema"]["properties"]["cells"].is_object());
