@@ -816,7 +816,7 @@ impl Preview {
         self.write_frame(queue, cam, flags, edit);
 
         let rows = if converged && !reset_pass { 0 } else { self.budget.rows(budget_ms, self.height) };
-        // Dispatch slots: trace bands first, then A-trous steps, then resolve.
+        // Dispatch slots: trace bands first, then A-trous steps, the fill, then resolve.
         let trace_slots = MAX_SLOTS as u32 - ATROUS_ITERS - 3;
         // A fixed count traces every row it asks for, whatever the height: the bands are sized to
         // fit the slots, with one more band for each time the cursor wraps to the top.
