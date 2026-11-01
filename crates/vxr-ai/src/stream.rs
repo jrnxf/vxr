@@ -228,8 +228,9 @@ impl Decoder {
         if let Some(v) = n("cache_read_input_tokens") {
             self.usage.cache_read = v;
         }
+        // The total counts both lives; message_delta repeats it without the split.
         if let Some(v) = n("cache_creation_input_tokens") {
-            self.usage.cache_write = v;
+            self.usage.cache_write = v.saturating_sub(self.usage.cache_write_1h);
         }
         // Split by how long the entries live, when the provider says.
         let by_ttl = &u["cache_creation"];
@@ -438,7 +439,8 @@ mod tests {
             "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-opus-5-5\",",
             "\"usage\":{\"input_tokens\":4,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":14708,",
             "\"cache_creation\":{\"ephemeral_5m_input_tokens\":4330,\"ephemeral_1h_input_tokens\":10378},\"output_tokens\":1}}}\n\n",
-            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":90}}\n\n",
+            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},",
+            "\"usage\":{\"input_tokens\":4,\"cache_creation_input_tokens\":14708,\"cache_read_input_tokens\":0,\"output_tokens\":90}}\n\n",
             "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
         );
         let u = decode(Kind::Anthropic, s, 9).0.unwrap().usage;
