@@ -9,6 +9,10 @@
 //! - Edits reset only the pixels whose primary or sun ray crosses the edited box; a camera move
 //!   restarts the whole image. Recolours need no reset (radiance is stored demodulated),
 //!   unless a slot is metal, plastic or glass: those pixels are stored in colour, so they restart.
+//! - Motion: a restart shows the whole new view on its first frame. When the budget does not
+//!   reach every row, a coarse sample (one pixel of each block) is traced instead and the
+//!   denoiser fills the rest of each block, so the corner follows the camera every frame
+//!   instead of updating the old view in place.
 //! - Materials per palette slot ([`Preview::set_materials`]): diffuse, metal (glossy, with a
 //!   sun highlight), plastic (diffuse under a clear glossy coat), glass (Fresnel reflection, or
 //!   straight through with a tint that deepens with the distance crossed: thin glass, no
@@ -54,6 +58,9 @@ pub fn fix_samples_per_frame(n: Option<u32>) {
     FIXED_SAMPLES_PER_FRAME.store(n.unwrap_or(0).min(MAX_SAMPLES_PER_FRAME), Ordering::Relaxed);
 }
 
+/// The largest block a coarse sample takes one pixel of (the denoiser fills the rest of each
+/// block from the samples around it, up to about 30 pixels away).
+const MAX_BLOCK: u32 = 8;
 /// Trace dispatches are cut to about this much GPU time each.
 const DISPATCH_MS: f64 = 1.0;
 const SLOT: u64 = 256;
@@ -269,6 +276,7 @@ pub struct Preview {
     trace_pipe: wgpu::ComputePipeline,
     init_pipe: wgpu::ComputePipeline,
     atrous_pipe: wgpu::ComputePipeline,
+    fill_pipe: wgpu::ComputePipeline,
     resolve_pipe: wgpu::ComputePipeline,
     cs_pipe: wgpu::ComputePipeline,
     cs_layout: wgpu::BindGroupLayout,
@@ -279,6 +287,10 @@ pub struct Preview {
     last_post: [f32; 3],
     /// Sampling stops at this many samples per pixel until something changes.
     pub max_spp: u32,
+    /// A restart shows the whole new view on its first frame, with a coarse sample when the
+    /// budget does not reach every row (the live corner). Off, a restart traces rows from the
+    /// top as the budget allows, as a render export wants: it shows only the finished image.
+    pub follow: bool,
     /// The editor view's background gradient behind the scene (`ViewColors::sky`).
     backdrop: [[u8; 3]; 2],
     cursor: u32,
@@ -291,8 +303,11 @@ pub struct Preview {
     rows_since_restart: u64,
     /// Full restarts so far (camera or light changes, new scenes).
     pub restarts: u32,
-    /// Rows traced in the last frame.
+    /// Rows traced in the last frame (a coarse sample counts as the rows it costs).
     pub last_rows: u32,
+    /// Rows that show the current view since the last restart: every row after a coarse
+    /// sample, else the rows traced so far.
+    shown_rows: u32,
 }
 
 /// One slot's material as the trace shader reads it: two vec4s (`mats` in preview_trace.wgsl).
@@ -501,6 +516,7 @@ impl Preview {
         let trace_pipe = compute("preview trace", &trace_pl, &trace_mod, "trace_main");
         let init_pipe = compute("preview denoise init", &dn_pl, &dn_mod, "init_main");
         let atrous_pipe = compute("preview atrous", &dn_pl, &dn_mod, "atrous_main");
+        let fill_pipe = compute("preview fill", &dn_pl, &dn_mod, "fill_main");
         let resolve_pipe = compute("preview resolve", &dn_pl, &dn_mod, "resolve_main");
 
         let cs_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -550,6 +566,7 @@ impl Preview {
             trace_pipe,
             init_pipe,
             atrous_pipe,
+            fill_pipe,
             resolve_pipe,
             cs_pipe,
             cs_layout,
@@ -558,6 +575,7 @@ impl Preview {
             last_key: None,
             last_post: [1.0, 2.2, 0.0],
             max_spp: MAX_SPP,
+            follow: true,
             backdrop: crate::ViewColors::NEUTRAL.sky,
             cursor: 0,
             frame_counter: 0,
@@ -571,6 +589,7 @@ impl Preview {
             rows_since_restart: 0,
             restarts: 0,
             last_rows: 0,
+            shown_rows: 0,
         };
         queue.write_buffer(&me.pal_buf, 0, bytemuck::cast_slice(&palette_linear(palette)));
         queue.write_buffer(&me.mat_buf, 0, &[0u8; 256 * 32]);
@@ -638,6 +657,12 @@ impl Preview {
     /// Samples per pixel since the last restart or edit (pixels away from an edit have more).
     pub fn samples(&self) -> f32 {
         self.rows_since_restart as f32 / self.height as f32
+    }
+
+    /// Share of the image that shows the current view (the camera, light and scene of the
+    /// last frame) rather than what an older one left: 1 from a restart's first frame on.
+    pub fn current(&self) -> f32 {
+        self.shown_rows as f32 / self.height as f32
     }
 
     /// Sampling reached `max_spp` and stopped.
@@ -791,8 +816,8 @@ impl Preview {
         self.write_frame(queue, cam, flags, edit);
 
         let rows = if converged && !reset_pass { 0 } else { self.budget.rows(budget_ms, self.height) };
-        // Dispatch slots: trace bands first, then A-trous steps, then resolve.
-        let trace_slots = MAX_SLOTS as u32 - ATROUS_ITERS - 2;
+        // Dispatch slots: trace bands first, then A-trous steps, the fill, then resolve.
+        let trace_slots = MAX_SLOTS as u32 - ATROUS_ITERS - 3;
         // A fixed count traces every row it asks for, whatever the height: the bands are sized to
         // fit the slots, with one more band for each time the cursor wraps to the top.
         let fixed = FIXED_SAMPLES_PER_FRAME.load(Ordering::Relaxed);
@@ -802,7 +827,26 @@ impl Preview {
             ((DISPATCH_MS / self.budget.ms_per_row) as u32).max(8)
         };
         let mut slots: Vec<DispatchU> = Vec::new();
-        let mut left = rows;
+        // A restart (the camera, light or scene moved) shows only the new view this frame: when
+        // the budget does not reach every row, one pixel of each k x k block is traced instead,
+        // the denoiser fills the rest of each block from those samples, and the rows sharpen
+        // the image from the next frame on. Never part new view and part old.
+        let (mut coarse, mut block) = (0, 0);
+        if self.follow && restart && rows < self.height {
+            let k = ((self.height as f64 / rows as f64).sqrt().ceil() as u32).clamp(2, MAX_BLOCK);
+            let blocks = self.height.div_ceil(k);
+            // A row of blocks costs 1/k of a row of pixels.
+            (coarse, block) = (blocks.div_ceil(k), k);
+            let mut b0 = 0;
+            while b0 < blocks {
+                let n = (blocks - b0).min(rpd * k);
+                let seed = self.frame_counter.wrapping_mul(64).wrapping_add(slots.len() as u32);
+                slots.push(DispatchU { row0: b0, rows: n, seed, step: k });
+                b0 += n;
+            }
+        }
+        // The fill reads only the block samples: a coarse frame traces nothing else.
+        let mut left = if block > 0 { 0 } else { rows };
         while left > 0 && (slots.len() as u32) < trace_slots {
             let n = left.min(rpd).min(self.height - self.cursor);
             let seed = self.frame_counter.wrapping_mul(64).wrapping_add(slots.len() as u32);
@@ -810,12 +854,14 @@ impl Preview {
             self.cursor = (self.cursor + n) % self.height;
             left -= n;
         }
-        let traced: u32 = slots.iter().map(|s| s.rows).sum();
+        let traced: u32 = slots.iter().filter(|s| s.step == 0).map(|s| s.rows).sum();
         let n_trace = slots.len();
         let first_atrous = slots.len();
         for k in 0..ATROUS_ITERS {
             slots.push(DispatchU { step: 1 << k, ..Default::default() });
         }
+        let fill_slot = slots.len();
+        slots.push(DispatchU { step: block, ..Default::default() });
         let resolve_slot = slots.len();
         slots.push(DispatchU { step: 1, ..Default::default() });
         let mut bytes = vec![0u8; slots.len() * SLOT as usize];
@@ -852,7 +898,8 @@ impl Preview {
                 let k = i - reset_pass as usize;
                 p.set_pipeline(&self.trace_pipe);
                 p.set_bind_group(0, &self.trace_group, &[off(k)]);
-                p.dispatch_workgroups(gx, slots[k].rows.div_ceil(8), 1);
+                let blk = slots[k].step.max(1);
+                p.dispatch_workgroups(self.width.div_ceil(blk).div_ceil(8), slots[k].rows.div_ceil(8), 1);
             }
         }
 
@@ -870,14 +917,23 @@ impl Preview {
             p.set_pipeline(&self.init_pipe);
             p.set_bind_group(0, &self.dn_ba, &[off(first_atrous)]);
             p.dispatch_workgroups(gx, gy, 1);
-            p.set_pipeline(&self.atrous_pipe);
-            for k in 0..ATROUS_ITERS as usize {
-                let g = if k % 2 == 0 { &self.dn_ab } else { &self.dn_ba };
-                p.set_bind_group(0, g, &[off(first_atrous + k)]);
+            // A coarse sample's blocks are filled in one pass instead (a -> b).
+            let steps = if block > 0 {
+                p.set_pipeline(&self.fill_pipe);
+                p.set_bind_group(0, &self.dn_ab, &[off(fill_slot)]);
                 p.dispatch_workgroups(gx, gy, 1);
-            }
+                1
+            } else {
+                p.set_pipeline(&self.atrous_pipe);
+                for k in 0..ATROUS_ITERS as usize {
+                    let g = if k % 2 == 0 { &self.dn_ab } else { &self.dn_ba };
+                    p.set_bind_group(0, g, &[off(first_atrous + k)]);
+                    p.dispatch_workgroups(gx, gy, 1);
+                }
+                ATROUS_ITERS
+            };
             // The final filter result is in a when the step count is even, else in b.
-            let g = if ATROUS_ITERS.is_multiple_of(2) { &self.dn_ab } else { &self.dn_ba };
+            let g = if steps.is_multiple_of(2) { &self.dn_ab } else { &self.dn_ba };
             p.set_pipeline(&self.resolve_pipe);
             p.set_bind_group(0, g, &[off(resolve_slot)]);
             p.dispatch_workgroups(gx, gy, 1);
@@ -888,11 +944,13 @@ impl Preview {
             enc.resolve_query_set(&t.set, q..q + 4, &t.resolve, at);
             enc.copy_buffer_to_buffer(&t.resolve, at, &t.reads[i].0, 0, 32);
             t.reads[i].1.store(ENCODED, Ordering::Release);
-            t.reads[i].2 = traced;
+            t.reads[i].2 = traced + coarse;
         }
         self.frame_counter = self.frame_counter.wrapping_add(1);
         self.rows_since_restart += traced as u64;
-        self.last_rows = traced;
+        self.last_rows = traced + coarse;
+        let before = if restart { 0 } else { self.shown_rows };
+        self.shown_rows = if block > 0 { self.height } else { (before + traced).min(self.height) };
     }
 
     /// Start reading back the timestamps of the frame just submitted.

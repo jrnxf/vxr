@@ -251,14 +251,6 @@ fn pack_info(h: Hit, d: vec3<f32>) -> u32 {
     return h.value | ((h.axis * 2u + positive) << 8u) | HIT_BIT | select(0u, SPEC_BIT, specular(h.value));
 }
 
-// The editor view's background (march.wgsl), so the corner sits in the Hybrid UI like the
-// main view does. The sky still lights the scene.
-fn backdrop(px: vec2<f32>) -> vec3<f32> {
-    let uv = px * frame.size.zw - vec2<f32>(0.5, 0.35);
-    let k = clamp(length(uv / vec2<f32>(1.2, 0.9)) / 0.7, 0.0, 1.0);
-    return pow(mix(frame.backdrop[0].rgb, frame.backdrop[1].rgb, k), vec3<f32>(2.2));
-}
-
 fn ray_box(ro: vec3<f32>, d: vec3<f32>, lo: vec3<f32>, hi: vec3<f32>, t0: f32, t1: f32) -> bool {
     let inv = 1.0 / select(d, vec3<f32>(1e-7), abs(d) < vec3<f32>(1e-7));
     let ta = (lo - ro) * inv;
@@ -327,15 +319,25 @@ fn reset_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 fn trace_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let w = u32(frame.size.x);
     let hgt = u32(frame.size.y);
-    let y = disp.row0 + gid.y;
-    if (gid.x >= w || gid.y >= disp.rows || y >= hgt) { return; }
-    let i = y * w + gid.x;
-    var s = (i * 9781u + 6271u) ^ (disp.seed * 26699u) ^ (frame.flags.z * 0x9e3779b9u);
+    // disp.step > 1: a coarse sample, one pixel of each step x step block (rows count blocks),
+    // so a whole image of the current view fits the budget while the camera moves.
+    let blk = max(disp.step, 1u);
+    if (gid.x * blk >= w || gid.y >= disp.rows || (disp.row0 + gid.y) * blk >= hgt) { return; }
+    var s = ((disp.row0 + gid.y) * w + gid.x) * 9781u + 6271u;
+    s = s ^ (disp.seed * 26699u) ^ (frame.flags.z * 0x9e3779b9u);
     _ = pcg(&s);
+    var x = gid.x;
+    var y = disp.row0 + gid.y;
+    if (blk > 1u) {
+        let o = coarse_offset(blk);
+        x = min(x * blk + o.x, w - 1u);
+        y = min(y * blk + o.y, hgt - 1u);
+    }
+    let i = y * w + x;
 
     let jitter = vec2<f32>(rand(&s), rand(&s));
-    var d = camera_ray(vec2<f32>(f32(gid.x), f32(y)) + jitter);
-    var ro = camera_origin(vec2<f32>(f32(gid.x), f32(y)) + jitter);
+    var d = camera_ray(vec2<f32>(f32(x), f32(y)) + jitter);
+    var ro = camera_origin(vec2<f32>(f32(x), f32(y)) + jitter);
     let dof = (frame.flags.w & DOF) != 0u;
     if (dof) {
         // Thin lens: a point on the lens disc, aimed at the pixel's point on the focus plane.
@@ -345,7 +347,7 @@ fn trace_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         ro += frame.cam_r.xyz * (r * cos(phi)) + frame.cam_u.xyz * (r * sin(phi));
         d = normalize(focus_p - ro);
     }
-    let jpx = vec2<f32>(f32(gid.x), f32(y)) + jitter;
+    let jpx = vec2<f32>(f32(x), f32(y)) + jitter;
     let sky_backdrop = (frame.flags.w & SKY_BACKDROP) != 0u;
     // Walk the path. `thr` is what the light found so far is multiplied by. A diffuse primary
     // hit is stored divided by its colour (the resolve multiplies the current palette back
