@@ -131,7 +131,8 @@ impl Hybrid {
                 let last = (0..many.len()).map(|i| self.agent_last_active(now, i)).fold(f64::MIN, f64::max);
                 format!("{} agents connected · idle {}", many.len(), ago(now - last))
             }
-            many => format!("{} agents, {editing_n} editing", many.len()),
+            many if editing_n == many.len() => format!("{} agents are editing", many.len()),
+            many => format!("{editing_n} of {} agents are editing", many.len()),
         }
     }
 
@@ -628,6 +629,7 @@ impl Tab {
         } else {
             p.circle_stroke(c, 3.5, Stroke::new(1.2, th().faint));
         }
+        self.hits.push((format!("agents-dot-{conn}"), Rect::from_center_size(c, vec2(7.0, 7.0))));
         let g = p.layout_no_wrap(name.clone(), sans_semibold(12.5), th().text);
         let gw = g.size().x;
         p.galley(pos2(r.left() + 16.0, c.y - g.size().y / 2.0), g, th().text);

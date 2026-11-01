@@ -181,6 +181,15 @@ impl Agents {
         self.last.insert(conn, (now, what.to_string()));
     }
 
+    /// Note that every connected agent last called `ago` seconds before `now`, keeping what it
+    /// called.
+    pub fn called_ago(&mut self, now: f64, ago: f64) {
+        for (conn, _) in &self.clients {
+            let what = self.last.get(conn).map(|l| l.1.clone()).unwrap_or_default();
+            self.last.insert(*conn, (now - ago, what));
+        }
+    }
+
     /// When connection `conn` was first listed, and its last call.
     pub fn times(&self, conn: u64) -> (Option<f64>, Option<f64>) {
         (self.seen.get(&conn).copied(), self.last.get(&conn).map(|l| l.0))

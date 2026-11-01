@@ -657,6 +657,14 @@ impl App {
         )
     }
 
+    /// Back-date every connected agent's last call to `secs` before the last frame, for the
+    /// check of the hint bar's chip.
+    pub fn agents_called_ago(&mut self, secs: f64) {
+        self.woken = true;
+        let e = &mut self.host.editor;
+        e.agents.called_ago(e.ctx.input(|i| i.time), secs);
+    }
+
     /// Run a scripted AI request through the review step (see `vxr_app::review::Script`):
     /// the card and the ghost show it until Apply or Discard. Returns each call's answer by
     /// turn as JSON (`{"ok": text}`, `{"error": text}` or `"held"`), or the script's error.
