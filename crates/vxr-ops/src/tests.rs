@@ -504,6 +504,53 @@ fn select_and_fill() {
 }
 
 #[test]
+fn palette_set_takes_several_slots_as_one_step() {
+    let mut s = small();
+    let position = s.history().position();
+    let mut o = Session::new(&s, None);
+    let r = call(
+        &mut o,
+        &mut s,
+        "palette_set",
+        json!({"slots": [{"slot": 10, "hex": "#2a6fb0"}, {"slot": 20, "hex": "#00ff00"}, {"slot": 30, "hex": "#ffffff"}]}),
+    );
+    assert_eq!(
+        r,
+        "slot 10: #8c5528 -> #2a6fb0 (16 voxels use it); slot 20: #d72323 -> #00ff00 (3 voxels use it); \
+         slot 30: #ff3300 -> #ffffff (0 voxels use it)"
+    );
+    assert_eq!(o.steps().len(), 1);
+    // One bad colour: none is set.
+    let (k, m) = err(
+        &mut o,
+        &mut s,
+        "palette_set",
+        json!({"slots": [{"slot": 10, "hex": "#000000"}, {"slot": 20, "hex": "red"}]}),
+    );
+    assert!(k == ErrorKind::Invalid && m.starts_with("slot 20: ") && m.contains("not #rrggbb"), "{m}");
+    assert_eq!(s.palette[10], [0x2a, 0x6f, 0xb0, 255]);
+    for (args, says) in [
+        (json!({"slot": 10, "hex": "#000000", "slots": [{"slot": 20, "hex": "#000000"}]}), "not both"),
+        (json!({}), "give slot and hex, or slots"),
+        (json!({"slot": 10}), "give both slot and hex"),
+        (json!({"slots": [{"slot": 0, "hex": "#000000"}]}), "slot 0 is empty"),
+    ] {
+        let (_, m) = err(&mut o, &mut s, "palette_set", args);
+        assert!(m.contains(says), "{m}");
+    }
+    // Applied as one undo step that takes back every colour.
+    let steps = o.apply_steps(&mut s, |_, st, c| format!("{} {} slots", st.tool, c.palette.len())).0;
+    assert_eq!(steps.len(), 1);
+    assert_eq!(s.history().undo_label(), Some("palette_set 3 slots"));
+    assert_eq!(s.history().position(), position + 1);
+    assert!(s.undo());
+    assert_eq!(
+        (s.palette[10], s.palette[20], s.palette[30]),
+        (small().palette[10], small().palette[20], small().palette[30])
+    );
+}
+
+#[test]
 fn palette_set() {
     let mut s = small();
     let mut o = Session::new(&s, None);

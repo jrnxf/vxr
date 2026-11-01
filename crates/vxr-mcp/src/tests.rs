@@ -232,6 +232,8 @@ fn builds_a_scene_from_an_empty_file() {
     assert_eq!(editable["from"], json!([-8, 0, -8]));
 
     c.ok("palette_set", json!({"slot": 2, "hex": "#cc3322"}));
+    let t = c.ok("palette_set", json!({"slots": [{"slot": 4, "hex": "#2a8f4a"}, {"slot": 5, "hex": "#1f6b38"}]}));
+    assert!(t.starts_with("slot 4: ") && t.contains("; slot 5: ") && t.contains("-> #1f6b38"), "{t}");
     c.ok("box", json!({"from": [-4, 0, -4], "to": [3, 0, 3], "slot": 1, "name": "grass"}));
     c.ok("box", json!({"from": [-2, 1, -2], "to": [1, 4, 1], "slot": 2, "hollow": true}));
     c.ok("line", json!({"from": [-2, 5, 0], "to": [1, 5, 0], "slot": 2}));

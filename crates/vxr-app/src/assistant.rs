@@ -1031,18 +1031,18 @@ mod tests {
 
     #[test]
     fn done_in_the_same_answer_finishes_only_when_every_call_worked() {
-        // Edits and done in one answer: one request.
+        // Edits and done in one answer: one request. Two slots in one palette_set.
         let (mut a, fake) = assistant(0);
-        fake.answer(anthropic(
-            "",
-            &[("palette_set", json!({"slot": 10, "hex": "#00ff00"})), ("done", json!({"summary": "Green floor"}))],
-        ));
+        let slots = json!({"slots": [{"slot": 10, "hex": "#00ff00"}, {"slot": 11, "hex": "#008800"}]});
+        fake.answer(anthropic("", &[("palette_set", slots), ("done", json!({"summary": "Green floor"}))]));
         let mut s = scene();
         let mut r = Review::new(&s, "make the floor green");
         a.send("make the floor green", &mut r, &s, 0.0).unwrap();
         settle(&mut a, &mut r, &mut s, 50);
         assert!(!a.running() && fake.requests().len() == 1);
         assert_eq!(r.session.done(), Some("Green floor"));
+        assert_eq!(r.card(&s).slots.len(), 2);
+        assert_eq!((s.palette[10], s.palette[11]), ([0, 255, 0, 255], [0, 0x88, 0, 255]));
 
         // A failed call in that answer: the model gets the error back instead of finishing.
         let (mut a, fake) = assistant(0);

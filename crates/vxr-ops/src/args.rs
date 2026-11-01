@@ -96,7 +96,7 @@ pub enum SelectMode {
 #[serde(deny_unknown_fields)]
 pub struct SceneSummary {}
 
-/// Read exact cells: cells gives each cell's slot (0 is empty); columns gives each [x, z] column's top voxel (its y and slot, or null), the cheap way to find a surface to build on; from and to list the filled cells of a box. At most 4096 cells or columns per call.
+/// Read exact cells: cells gives each cell's slot (0 is empty); columns gives each [x, z] column's top voxel (its y and slot, or null), the cheap way to find a surface to build on; from and to list the filled cells of a box. Ask for every cell and column you need in one call (at most 4096).
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GetVoxels {
@@ -518,13 +518,26 @@ pub struct HideLayer {
     pub hidden: bool,
 }
 
-/// Set a palette slot's colour as #rrggbb. Every voxel of that slot changes colour. Pick an unused slot for a new colour.
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+/// Set palette slots' colours as #rrggbb: slot and hex for one, or slots for several in one call (one step). Every voxel of a slot changes colour. Pick an unused slot for a new colour.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PaletteSet {
     #[schemars(range(min = 1, max = 255))]
-    pub slot: u8,
+    pub slot: Option<u8>,
     /// The colour, #rrggbb.
+    pub hex: Option<String>,
+    /// Several slots and their colours, instead of slot and hex.
+    #[serde(default)]
+    pub slots: Vec<SlotColor>,
+}
+
+/// One slot's colour, for palette_set.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SlotColor {
+    #[schemars(range(min = 1, max = 255))]
+    pub slot: u8,
+    /// #rrggbb.
     pub hex: String,
 }
 

@@ -5401,7 +5401,11 @@ fn agents_live(dir: &Path) -> Result<(), String> {
         let roof = s.ed.scene.map.counts[20];
         let calls = [
             ("paint", serde_json::json!({"slot": 3, "from_slot": 20}), "Claude Code: paint 392 voxels"),
-            ("palette_set", serde_json::json!({"slot": 3, "hex": "#D94A3A"}), "Claude Code: palette_set slot 3"),
+            (
+                "palette_set",
+                serde_json::json!({"slots": [{"slot": 3, "hex": "#D94A3A"}, {"slot": 40, "hex": "#6B4A2A"}]}),
+                "Claude Code: palette_set 2 slots",
+            ),
             (
                 "line",
                 serde_json::json!({"from": [8, 0, 8], "to": [8, 9, 8], "slot": 40}),
@@ -5900,6 +5904,11 @@ fn agents_bridge(dir: &Path) -> Result<(), String> {
         let calls = [
             ("box", serde_json::json!({"from": [9, 7, 8], "to": [12, 9, 8], "slot": 50}), "Claude Code: box 12 voxels"),
             ("palette_set", serde_json::json!({"slot": 50, "hex": "#3A7BD9"}), "Claude Code: palette_set slot 50"),
+            (
+                "palette_set",
+                serde_json::json!({"slots": [{"slot": 50, "hex": "#2A8F4A"}, {"slot": 51, "hex": "#1F6B38"}]}),
+                "Claude Code: palette_set 2 slots",
+            ),
         ];
         for (name, args, label) in calls {
             let (t, e) = s.bridge_call(&mut page, &mut script, &mut claude, name, args);

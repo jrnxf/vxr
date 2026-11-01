@@ -697,14 +697,28 @@ fn the_housekeeping_select_and_palette_tools_change_the_window_and_undo_gives_th
     assert!(t.contains("(0 voxels use it)"), "{t}");
     let t = call(&mut w, &mut a, "palette_swap", json!({"a": 12, "b": 13}));
     assert!(t.contains("slot 13 is now") && t.contains("(59 voxels)"), "{t}");
+    // Several slots in one palette_set: one call, one undo step.
+    let position = w.scene.history().position();
+    let t = call(
+        &mut w,
+        &mut a,
+        "palette_set",
+        json!({"slots": [{"slot": 12, "hex": "#2a6fb0"}, {"slot": 13, "hex": "#3a7bd9"}]}),
+    );
+    assert!(
+        t.starts_with("slot 12: ") && t.contains("; slot 13: ") && t.ends_with("-> #3a7bd9 (59 voxels use it)"),
+        "{t}"
+    );
+    assert_eq!(w.scene.history().position(), position + 1);
+    assert_eq!((w.scene.palette[12], w.scene.palette[13]), ([0x2a, 0x6f, 0xb0, 255], [0x3a, 0x7b, 0xd9, 255]));
     call(&mut w, &mut a, "show_world", json!({}));
-    // Ten edits applied, one undo step each (the delete was undone): undone, the save is the
-    // file's bytes.
+    // Eleven edits applied, one undo step each (the delete was undone): undone, the save is
+    // the file's bytes.
     let mut steps = 0;
     while w.scene.undo() {
         steps += 1;
     }
-    assert_eq!(steps, 10);
+    assert_eq!(steps, 11);
     assert_eq!(w.scene.to_vox().unwrap(), bytes);
 }
 

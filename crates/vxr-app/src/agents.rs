@@ -569,6 +569,19 @@ mod tests {
     }
 
     #[test]
+    fn a_palette_set_of_several_slots_is_one_undo_step() {
+        let (mut a, mut s) = (Agents::default(), scene());
+        let (position, before) = (s.history().position(), s.palette);
+        let slots = json!({"slots": [{"slot": 5, "hex": "#00ff00"}, {"slot": 6, "hex": "#0000ff"}]});
+        ok(&mut a, &mut s, 1, "Claude Code", "palette_set", slots);
+        assert_eq!(s.history().undo_label(), Some("Claude Code: palette_set 2 slots"));
+        assert_eq!(s.history().position(), position + 1);
+        assert_eq!((s.palette[5], s.palette[6]), ([0, 255, 0, 255], [0, 0, 255, 255]));
+        assert!(s.undo());
+        assert_eq!(s.palette, before, "one Cmd-Z takes back both colours");
+    }
+
+    #[test]
     fn each_edit_is_one_undo_step_named_after_the_agent() {
         let (mut a, mut s) = (Agents::default(), scene());
         ok(&mut a, &mut s, 1, "Claude Code", "box", json!({"from": [0, 0, 0], "to": [3, 0, 3], "slot": 5}));
