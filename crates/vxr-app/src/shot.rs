@@ -3914,6 +3914,11 @@ fn agent_chip_states(dir: &Path) -> Result<(), String> {
         widths.push((name, s.ed.ui.hits.get("agent-chip").map(|r| r.width()).unwrap_or(0.0)));
         s.ed.ui.open_agents();
         s.frames(3);
+        let (hint, corner) = (s.ed.ui.hits.get("hint").copied(), s.ed.ui.hits.get("render").copied());
+        check(
+            hint.zip(corner).is_some_and(|(h, c)| !h.intersects(c)),
+            format!("{name}: the hint bar stays clear of the render corner: {hint:?}, {corner:?}"),
+        )?;
         // A dot is filled when its middle stands out from the background 6 points to its left.
         let (dev, queue) = (&s.ed.gpu.device, &s.ed.gpu.queue);
         let px = pollster::block_on(read_texture(dev, queue, &s.target));

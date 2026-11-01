@@ -4893,7 +4893,7 @@ impl Hybrid {
         // Too wide for the gap beside the palette or the colour editor: the hints hide while
         // they are open, and an agent's chip shows alone.
         let hints = full <= hi - lo || left <= self.stats_right;
-        if !hints && chip == 0.0 {
+        if (!hints || items.is_empty()) && chip == 0.0 {
             return;
         }
         let size = vec2(if hints { full } else { chip }, 16.8 + 16.0);
@@ -4914,6 +4914,10 @@ impl Hybrid {
             let up = Rect::from_min_size(pos2(x, y), size);
             let corner = self.render_dock.filter(|_| !self.full_render);
             let busy = open.iter().chain(&corner).any(|r| r.intersects(up)) || up.right() > screen.right() - 12.0;
+            // Nothing to stand above: the last hints drop until the row clears the render corner.
+            if busy && open.is_empty() && hints && !items.is_empty() {
+                return self.hint_panel(ctx, screen, &items[..items.len() - 1]);
+            }
             match open.iter().map(|r| r.top()).reduce(f32::min) {
                 Some(top) if busy => Rect::from_min_size(pos2(self.flyout_x(), top - 8.0 - size.y), size),
                 _ => up,
