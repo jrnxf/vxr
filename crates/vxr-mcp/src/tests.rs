@@ -146,6 +146,9 @@ fn tools_come_from_the_ops_schemas() {
         assert!(t["description"].as_str().is_some_and(|d| !d.is_empty()), "{}", t["name"]);
         assert!(t["name"].as_str().unwrap().len() <= 128);
     }
+    // Terminal agents get the same steer as the assistant: done in the answer with the edits.
+    let done = tools.iter().find(|t| t["name"] == "done").unwrap();
+    assert!(done["description"].as_str().unwrap().contains("call done in the same answer"), "{done}");
     // The generated schema is the ops crate's own.
     let place = tools.iter().find(|t| t["name"] == "place").unwrap();
     let ops_place = vxr_ops::tools().into_iter().find(|t| t.name == "place").unwrap();

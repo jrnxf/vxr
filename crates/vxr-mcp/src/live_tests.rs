@@ -154,6 +154,8 @@ fn a_call_goes_over_the_socket_and_back() {
         assert!(names.contains(&op.name), "{} is a tool", op.name);
     }
     assert!(names.contains(&"edit_object") && names.contains(&"review_status"));
+    let done = r["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == "done").unwrap();
+    assert!(done["description"].as_str().unwrap().contains("call done in the same answer"), "{done}");
     // Save and New scene are the window's own; opening a file is the user's, in its dialog.
     assert!(names.contains(&"save") && names.contains(&"new_scene"));
     assert!(names.contains(&"look") && names.contains(&"render_settings") && names.contains(&"export"));
