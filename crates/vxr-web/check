@@ -158,13 +158,16 @@ else
   expect "a wrong code turns the step red, and the page pairs with the code vxr bridge printed" "$paired" '["Wrong",true,null]'
   [ -S "$VXR_LIVE_DIR/live.sock" ] && pass "vxr bridge opens the agents' socket once paired" || fail "vxr bridge opens the agents' socket once paired" "no socket"
   before="$(axi eval "() => JSON.stringify(JSON.parse(window.vxr.state()).voxels)" | unwrap)"
-  # One agent: a box, then (after the page's Stop) another call that must be refused.
-  ./dev node "$here/check-agent.js" "$vxr" "[[\"box\", {\"from\": [-64, 28, -63], \"to\": [-63, 29, -62], \"slot\": 7}], \"wait $fixtures/stopped\", [\"scene_summary\", {}]]" >"$fixtures/agent.log" &
+  # One agent: a box and two colours in one palette_set, then (after the page's Stop) another
+  # call that must be refused.
+  ./dev node "$here/check-agent.js" "$vxr" "[[\"box\", {\"from\": [-64, 28, -63], \"to\": [-63, 29, -62], \"slot\": 7}], [\"palette_set\", {\"slots\": [{\"slot\": 250, \"hex\": \"#2a8f4a\"}, {\"slot\": 251, \"hex\": \"#1f6b38\"}]}], \"wait $fixtures/stopped\", [\"scene_summary\", {}]]" >"$fixtures/agent.log" &
   agent=$!
-  for _ in $(seq 100); do [ -s "$fixtures/agent.log" ] && break; sleep 0.1; done
-  expect "a real vxr mcp --live edits the page through the bridge" "$(head -1 "$fixtures/agent.log" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const r=JSON.parse(s);console.log(r.isError?r.text:'applied')})")" "applied"
-  shown="$(axi eval "async () => { await window.__frames(10); const s = JSON.parse(window.vxr.state()); return JSON.stringify([s.voxels - $before, s.undoLabel, s.agents.clients.map(c => c[1]), s.agents.edits.map(e => e.label)]) }" | unwrap)"
-  expect "the edit is one undo step named after the agent, listed with it" "$shown" '[8,"Claude Code: box 8 voxels",["Claude Code"],["Claude Code: box 8 voxels"]]'
+  for _ in $(seq 100); do [ "$(wc -l <"$fixtures/agent.log")" -ge 2 ] && break; sleep 0.1; done
+  applied() { node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const r=JSON.parse(s);console.log(r.isError?r.text:'applied')})"; }
+  expect "a real vxr mcp --live edits the page through the bridge" "$(sed -n 1p "$fixtures/agent.log" | applied)" "applied"
+  expect "a palette_set of two slots through the bridge" "$(sed -n 2p "$fixtures/agent.log" | applied)" "applied"
+  shown="$(axi eval "async () => { await window.__frames(10); const s = JSON.parse(window.vxr.state()); return JSON.stringify([s.voxels - $before, s.undoLabel, s.agents.clients.map(c => c[1]), s.agents.edits.map(e => e.label), Array.from(window.vxr.color(250)).slice(0, 3), Array.from(window.vxr.color(251)).slice(0, 3)]) }" | unwrap)"
+  expect "each edit is one undo step named after the agent, listed with it" "$shown" '[8,"Claude Code: palette_set 2 slots",["Claude Code"],["Claude Code: box 8 voxels","Claude Code: palette_set 2 slots"],[42,143,74],[31,107,56]]'
   axi screenshot "$shots/web-agents.png" >/dev/null
   # Stop in the panel: the agent's next call is told it was stopped.
   stopped="$(axi eval "async () => { const s = JSON.parse(window.vxr.state()); await window.__click(window.vxr.hit('agents-stop-' + s.agents.clients[0][0])); for (let i = 0; i < 100 && JSON.parse(window.vxr.state()).agents.clients.length; i++) await window.__frames(3); return JSON.stringify(JSON.parse(window.vxr.state()).agents.clients) }" | unwrap)"

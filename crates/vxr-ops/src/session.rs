@@ -739,12 +739,32 @@ impl Session {
                 Ok(format!("layer {} is {state} ({n} object{} on it); {t}", a.layer, if n == 1 { "" } else { "s" }))
             }
             Op::PaletteSet(a) => {
-                let s = slot(a.slot)?;
-                let c = parse_hex(&a.hex).map_err(invalid)?;
+                let pairs: Vec<(u8, String)> = match (a.slot, a.hex, a.slots.is_empty()) {
+                    (Some(s), Some(h), true) => vec![(s, h)],
+                    (None, None, false) => a.slots.into_iter().map(|c| (c.slot, c.hex)).collect(),
+                    (None, None, true) => return Err(invalid("give slot and hex, or slots")),
+                    (_, _, false) => return Err(invalid("give slot and hex, or slots, not both")),
+                    _ => return Err(invalid("give both slot and hex")),
+                };
+                if pairs.len() > 255 {
+                    return Err(invalid(format!("{} slots: at most 255", pairs.len())));
+                }
+                // Every colour is checked before any is set, so a bad one changes nothing.
+                let mut colors = Vec::with_capacity(pairs.len());
+                for (s, h) in &pairs {
+                    let c = parse_hex(h).map_err(|e| invalid(format!("slot {s}: {e}")))?;
+                    colors.push((slot(*s)?, c));
+                }
                 self.open(scene);
-                let old = scene.palette[s as usize];
-                scene.put_color(s, c);
-                Ok(format!("slot {s}: {} -> {} ({} voxels use it)", hex(old), hex(c), self.slot_count(scene, s)))
+                let lines: Vec<String> = colors
+                    .into_iter()
+                    .map(|(s, c)| {
+                        let old = scene.palette[s as usize];
+                        scene.put_color(s, c);
+                        format!("slot {s}: {} -> {} ({} voxels use it)", hex(old), hex(c), self.slot_count(scene, s))
+                    })
+                    .collect();
+                Ok(lines.join("; "))
             }
             Op::PaletteSwap(a) => {
                 let (x, y) = (slot(a.a)?, slot(a.b)?);

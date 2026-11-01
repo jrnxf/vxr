@@ -16,3 +16,10 @@ It sends two requests on a small house through the assistant panel for each key 
 `live-<provider>.png` and each answer's raw stream as `<provider>-streams/NN.sse` into the
 folder given. Copy a stream here to make it a fixture. Keys stay in memory and never reach a
 stream file.
+
+These variables change the run:
+
+- `VXR_LIVE_KINDS=anthropic` (or `openai`, or both) runs only those providers.
+- `VXR_LIVE_SCENE=/home/user/scene.vox` uses that scene instead of the house.
+- `VXR_LIVE_MODEL=<model id>` asks that model of the provider instead of its default.
+- `VXR_LIVE_PROMPTS="first|then"` replaces the two requests, one per `|`-separated part.

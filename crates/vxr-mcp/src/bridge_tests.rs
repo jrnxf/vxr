@@ -336,6 +336,13 @@ fn a_paired_page_answers_agents_as_the_window_does() {
     let call = got.iter().find(|m| m.get("call").is_some()).unwrap();
     assert_eq!(call["client"], "Claude Code");
     assert!(call["conn"].as_u64().is_some());
+    // A batched palette_set reaches the page whole, as one call (the editor makes it one undo
+    // step, as on desktop).
+    let slots = json!([{"slot": 39, "hex": "#2a8f4a"}, {"slot": 40, "hex": "#1f6b38"}]);
+    let (r, got_set) = answering(&mut page, || agent.call("palette_set", json!({"slots": slots})));
+    assert!(!r.1, "{}", r.0);
+    let sets: Vec<&Value> = got_set.iter().filter(|m| m.get("call").is_some()).collect();
+    assert_eq!((sets.len(), &sets[0]["call"], &sets[0]["args"]["slots"]), (1, &json!("palette_set"), &slots));
     // The page hears of an agent before its first request, so it can drop requests from agents
     // it no longer lists.
     let listed = got.iter().position(|m| m.get("clients").and_then(Value::as_array).is_some_and(|c| c.len() == 1));

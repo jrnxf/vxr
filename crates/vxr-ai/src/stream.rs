@@ -228,8 +228,16 @@ impl Decoder {
         if let Some(v) = n("cache_read_input_tokens") {
             self.usage.cache_read = v;
         }
+        // The total counts both lives; message_delta repeats it without the split.
         if let Some(v) = n("cache_creation_input_tokens") {
-            self.usage.cache_write = v;
+            self.usage.cache_write = v.saturating_sub(self.usage.cache_write_1h);
+        }
+        // Split by how long the entries live, when the provider says.
+        let by_ttl = &u["cache_creation"];
+        if let (Some(m5), Some(h1)) =
+            (by_ttl["ephemeral_5m_input_tokens"].as_u64(), by_ttl["ephemeral_1h_input_tokens"].as_u64())
+        {
+            (self.usage.cache_write, self.usage.cache_write_1h) = (m5, h1);
         }
         if let Some(v) = n("output_tokens") {
             self.usage.output = v;
@@ -269,9 +277,11 @@ impl Decoder {
                     self.model = m.into();
                 }
                 let u = &r["usage"];
+                // Input counts the cached tokens and those written to the cache.
                 let cached = u["input_tokens_details"]["cached_tokens"].as_u64().unwrap_or(0);
-                self.usage.cache_read = cached;
-                self.usage.input = u["input_tokens"].as_u64().unwrap_or(0).saturating_sub(cached);
+                let written = u["input_tokens_details"]["cache_write_tokens"].as_u64().unwrap_or(0);
+                (self.usage.cache_read, self.usage.cache_write) = (cached, written);
+                self.usage.input = u["input_tokens"].as_u64().unwrap_or(0).saturating_sub(cached + written);
                 self.usage.output = u["output_tokens"].as_u64().unwrap_or(0);
                 if self.text.is_empty() {
                     self.text = output_text(&self.output);
@@ -304,9 +314,11 @@ impl Decoder {
         }
         let u = &d["usage"];
         if u.is_object() {
+            // Prompt tokens count the cached ones and those written to the cache (OpenRouter).
             let cached = u["prompt_tokens_details"]["cached_tokens"].as_u64().unwrap_or(0);
-            self.usage.cache_read = cached;
-            self.usage.input = u["prompt_tokens"].as_u64().unwrap_or(0).saturating_sub(cached);
+            let written = u["prompt_tokens_details"]["cache_write_tokens"].as_u64().unwrap_or(0);
+            (self.usage.cache_read, self.usage.cache_write) = (cached, written);
+            self.usage.input = u["prompt_tokens"].as_u64().unwrap_or(0).saturating_sub(cached + written);
             self.usage.output = u["completion_tokens"].as_u64().unwrap_or(0);
             self.usage.cost = u["cost"].as_f64();
         }
@@ -419,6 +431,34 @@ mod tests {
         assert!(decode(Kind::Anthropic, s, 7).0.is_err());
         let e = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n";
         assert_eq!(decode(Kind::Anthropic, e, 5).0, Err("Overloaded".into()));
+    }
+
+    #[test]
+    fn cache_writes_are_split_by_how_long_they_live() {
+        let s = concat!(
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-opus-5-5\",",
+            "\"usage\":{\"input_tokens\":4,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":14708,",
+            "\"cache_creation\":{\"ephemeral_5m_input_tokens\":4330,\"ephemeral_1h_input_tokens\":10378},\"output_tokens\":1}}}\n\n",
+            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},",
+            "\"usage\":{\"input_tokens\":4,\"cache_creation_input_tokens\":14708,\"cache_read_input_tokens\":0,\"output_tokens\":90}}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        );
+        let u = decode(Kind::Anthropic, s, 9).0.unwrap().usage;
+        assert_eq!((u.input, u.cache_write, u.cache_write_1h, u.output), (4, 4330, 10378, 90));
+        let want = (4.0 * 4.0 + 4330.0 * 5.0 + 10378.0 * 8.0 + 90.0 * 20.0) / 1e6;
+        assert!((u.dollars("claude-opus-5-5").unwrap() - want).abs() < 1e-12);
+    }
+
+    #[test]
+    fn openrouter_cache_writes_are_counted_apart() {
+        let s = concat!(
+            "data: {\"model\":\"anthropic/claude-opus-5.5\",\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}],",
+            "\"usage\":{\"prompt_tokens\":10400,\"completion_tokens\":50,",
+            "\"prompt_tokens_details\":{\"cached_tokens\":0,\"cache_write_tokens\":10380}}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let u = decode(Kind::Compatible, s, 11).0.unwrap().usage;
+        assert_eq!((u.input, u.cache_read, u.cache_write, u.output, u.cost), (20, 0, 10380, 50, None));
     }
 
     #[test]

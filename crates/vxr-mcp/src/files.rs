@@ -118,7 +118,7 @@ pub fn tools() -> Vec<Value> {
         own_tools(),
         "Take back the last edit (every edit is one undo step). Call again to take back the one before.",
         "Bring back the edit undo took back last. Call again for the one after; a new edit ends what can come back.",
-        "Say you are finished, with a one-line summary. Save first if the file should keep the edits.",
+        "Say you are finished, with a one-line summary. Save first if the file should keep the edits. When you can predict the result of your last edits, call done in the same answer after them instead of waiting for their results.",
     )
 }
 

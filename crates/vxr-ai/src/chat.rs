@@ -87,8 +87,10 @@ fn header(k: &str, v: &str) -> (String, String) {
     (k.into(), v.into())
 }
 
-/// Anthropic Messages: thinking adaptive with its summary shown, effort medium, the system
-/// prompt and history cached, and tool inputs streamed as they are written.
+/// Anthropic Messages: thinking adaptive with its summary shown, effort medium, the tools and
+/// system prompt cached for an hour (so a request after a pause still reads them) and the
+/// history for 5 minutes, and tool inputs streamed as they
+/// are written.
 fn anthropic(settings: &Settings, key: Option<&str>, system: &str, tools: &[Tool], items: &[Item]) -> Request {
     let mut messages: Vec<Value> = Vec::new();
     let mut push = |role: &str, mut content: Vec<Value>| {
@@ -142,7 +144,7 @@ fn anthropic(settings: &Settings, key: Option<&str>, system: &str, tools: &[Tool
         "model": settings.model,
         "max_tokens": MAX_TOKENS,
         "stream": true,
-        "system": [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+        "system": [{"type": "text", "text": system, "cache_control": {"type": "ephemeral", "ttl": "1h"}}],
         "tools": tools,
         "messages": messages,
         "thinking": {"type": "adaptive", "display": "summarized"},
@@ -222,9 +224,17 @@ fn replay_item(item: &Value) -> Option<Value> {
     Some(v)
 }
 
-/// OpenAI-compatible Chat Completions with a base URL (OpenRouter, Ollama, LM Studio).
+/// OpenAI-compatible Chat Completions with a base URL (OpenRouter, Ollama, LM Studio). A
+/// Claude model on OpenRouter is cached as Anthropic's own client caches it (OpenRouter does
+/// not by itself); other servers get no cache fields, which a local one may refuse.
 fn compatible(settings: &Settings, key: Option<&str>, system: &str, tools: &[Tool], items: &[Item]) -> Request {
-    let mut messages = vec![json!({"role": "system", "content": system})];
+    let cache = settings.host() == "openrouter.ai" && settings.model.starts_with("anthropic/");
+    let mut messages = vec![if cache {
+        json!({"role": "system", "content": [{"type": "text", "text": system,
+            "cache_control": {"type": "ephemeral", "ttl": "1h"}}]})
+    } else {
+        json!({"role": "system", "content": system})
+    }];
     for item in items {
         match item {
             Item::User(text) => messages.push(json!({"role": "user", "content": text})),
@@ -252,7 +262,7 @@ fn compatible(settings: &Settings, key: Option<&str>, system: &str, tools: &[Too
         .iter()
         .map(|t| json!({"type": "function", "function": {"name": t.name, "description": t.description, "parameters": t.parameters}}))
         .collect();
-    let body = json!({
+    let mut body = json!({
         "model": settings.model,
         "messages": messages,
         "tools": tools,
@@ -260,6 +270,9 @@ fn compatible(settings: &Settings, key: Option<&str>, system: &str, tools: &[Too
         "stream": true,
         "stream_options": {"include_usage": true},
     });
+    if cache {
+        body["cache_control"] = json!({"type": "ephemeral"});
+    }
     let mut headers = vec![header("content-type", "application/json"), header("x-title", "vxr")];
     if let Some(k) = key.filter(|k| !k.is_empty()) {
         headers.push(header("authorization", &format!("Bearer {k}")));
@@ -324,7 +337,8 @@ mod tests {
         assert_eq!(b["stream"], true);
         assert!(b.get("fallbacks").is_none(), "the model picked answers, no other");
         assert!(!r.headers.iter().any(|(k, _)| k == "anthropic-beta"));
-        assert_eq!(b["system"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(b["system"][0]["cache_control"], json!({"type": "ephemeral", "ttl": "1h"}));
+        assert_eq!(b["cache_control"], json!({"type": "ephemeral"}), "the history for 5 minutes");
         assert_eq!(b["tools"][0]["name"], "place");
         assert_eq!(b["tools"][0]["eager_input_streaming"], true);
         assert!(b["tools"][0]["input_schema"]["properties"]["cells"].is_object());
@@ -385,5 +399,27 @@ mod tests {
             3
         );
         assert_eq!(b["stream_options"]["include_usage"], true);
+        assert!(!r.body.contains("cache_control"), "a local server gets no cache fields");
+    }
+
+    #[test]
+    fn a_claude_model_on_openrouter_is_cached() {
+        let mut s = Settings::new(Kind::Compatible, false);
+        let b = body(&request(&s, Some("k"), "sys", &tools(), &history(Kind::Compatible, json!(null))));
+        assert_eq!(b["model"], "anthropic/claude-opus-5.5");
+        assert_eq!(b["cache_control"], json!({"type": "ephemeral"}), "the history for 5 minutes");
+        assert_eq!(
+            b["messages"][0]["content"],
+            json!([{"type": "text", "text": "sys", "cache_control": {"type": "ephemeral", "ttl": "1h"}}]),
+            "the tools and system prompt for an hour"
+        );
+        // Another model on OpenRouter, or a Claude name on another server: no cache fields.
+        s.model = "openai/gpt-6.1-sol".into();
+        let r = request(&s, Some("k"), "sys", &tools(), &history(Kind::Compatible, json!(null)));
+        assert!(!r.body.contains("cache_control"));
+        s.model = "anthropic/claude-opus-5.5".into();
+        s.base = "http://127.0.0.1:1234/v1".into();
+        let r = request(&s, None, "sys", &tools(), &history(Kind::Compatible, json!(null)));
+        assert!(!r.body.contains("cache_control"));
     }
 }

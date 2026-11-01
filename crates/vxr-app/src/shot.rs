@@ -5048,8 +5048,19 @@ fn live_steps(dir: &Path) -> Result<(), String> {
             println!("skip {} ({var} is not set)", kind.name());
             continue;
         };
+        // `VXR_LIVE_KINDS` ("anthropic", "openai") limits the run to those providers.
+        if std::env::var("VXR_LIVE_KINDS").is_ok_and(|v| !v.contains(kind.id())) {
+            continue;
+        }
         ran += 1;
-        let mut s = Shot::new(house(), "house.vox", 2.0)?;
+        // `VXR_LIVE_SCENE` (a `.vox` path) swaps in another scene for the house.
+        let mut s = match std::env::var("VXR_LIVE_SCENE") {
+            Ok(p) => {
+                let bytes = std::fs::read(&p).map_err(|e| format!("{p}: {e}"))?;
+                Shot::new(Scene::from_vox(&bytes).map_err(|e| e.to_string())?, "scene.vox", 2.0)?
+            }
+            Err(_) => Shot::new(house(), "house.vox", 2.0)?,
+        };
         s.ed.ui.coach = false;
         s.ed.cam.distance *= 2.6;
         let h = s.ed.height as f32;
@@ -5062,6 +5073,12 @@ fn live_steps(dir: &Path) -> Result<(), String> {
         vxr_ai::Keys::set(&mut keys, kind, &key, false)?;
         drop(key);
         s.ed.assistant = vxr_app::assistant::Assistant::new(Box::new(net), Box::new(keys), false);
+        // `VXR_LIVE_MODEL` picks another model of that provider.
+        if let Ok(m) = std::env::var("VXR_LIVE_MODEL") {
+            let mut st = vxr_ai::Settings::new(kind, false);
+            st.model = m;
+            s.ed.assistant.set_settings(st);
+        }
         s.ed.ui.ai_open = true;
         s.frames(2);
         let mut cost = 0.0;
@@ -5095,10 +5112,11 @@ fn live_steps(dir: &Path) -> Result<(), String> {
                     && s.ed.assistant.entries.len() == before + 2
                     && card.as_ref().is_some_and(|c| c.counts.iter().sum::<usize>() > 0 || !c.slots.is_empty()),
                 format!(
-                    "{} {}: \"{prompt}\" -> {:?}, {} calls ({}), card {:?} slots {:?}, ${:.3}, {:.1} s",
+                    "{} {}: \"{prompt}\" -> {:?}, {} requests, {} calls ({}), card {:?} slots {:?}, ${:.3}, {:.1} s",
                     kind.name(),
                     a.model,
                     a.progress,
+                    a.turns,
                     a.calls.len(),
                     a.calls.iter().map(|c| c.tool.as_str()).collect::<Vec<_>>().join(" "),
                     card.as_ref().map(|c| c.counts),
@@ -5402,7 +5420,11 @@ fn agents_live(dir: &Path) -> Result<(), String> {
         let roof = s.ed.scene.map.counts[20];
         let calls = [
             ("paint", serde_json::json!({"slot": 3, "from_slot": 20}), "Claude Code: paint 392 voxels"),
-            ("palette_set", serde_json::json!({"slot": 3, "hex": "#D94A3A"}), "Claude Code: palette_set slot 3"),
+            (
+                "palette_set",
+                serde_json::json!({"slots": [{"slot": 3, "hex": "#D94A3A"}, {"slot": 40, "hex": "#6B4A2A"}]}),
+                "Claude Code: palette_set 2 slots",
+            ),
             (
                 "line",
                 serde_json::json!({"from": [8, 0, 8], "to": [8, 9, 8], "slot": 40}),
@@ -5901,6 +5923,11 @@ fn agents_bridge(dir: &Path) -> Result<(), String> {
         let calls = [
             ("box", serde_json::json!({"from": [9, 7, 8], "to": [12, 9, 8], "slot": 50}), "Claude Code: box 12 voxels"),
             ("palette_set", serde_json::json!({"slot": 50, "hex": "#3A7BD9"}), "Claude Code: palette_set slot 50"),
+            (
+                "palette_set",
+                serde_json::json!({"slots": [{"slot": 50, "hex": "#2A8F4A"}, {"slot": 51, "hex": "#1F6B38"}]}),
+                "Claude Code: palette_set 2 slots",
+            ),
         ];
         for (name, args, label) in calls {
             let (t, e) = s.bridge_call(&mut page, &mut script, &mut claude, name, args);

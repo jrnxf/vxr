@@ -252,7 +252,7 @@ fn staged_removals_read_as_gone() {
     assert_eq!(boxed["filled"].as_array().unwrap().len(), 3 + 2);
     let sum = json(&o.summary(&s));
     assert_eq!(sum["voxels"], 16 + 3 - 2);
-    assert_eq!(sum["slots_used"][1]["voxels"], 2);
+    assert!(sum["slots_used"][1].as_str().unwrap().starts_with("slot 20 #d72323: 2 voxels"), "{sum}");
     assert!(sum["staged"].as_str().unwrap().contains("0 added, 2 removed, 0 repainted"));
     let slice =
         json(&call(&mut o, &mut s, "slice", json!({"axis": "y", "index": 0, "from": [0, 0, 0], "to": [3, 0, 1]})));
@@ -504,6 +504,53 @@ fn select_and_fill() {
 }
 
 #[test]
+fn palette_set_takes_several_slots_as_one_step() {
+    let mut s = small();
+    let position = s.history().position();
+    let mut o = Session::new(&s, None);
+    let r = call(
+        &mut o,
+        &mut s,
+        "palette_set",
+        json!({"slots": [{"slot": 10, "hex": "#2a6fb0"}, {"slot": 20, "hex": "#00ff00"}, {"slot": 30, "hex": "#ffffff"}]}),
+    );
+    assert_eq!(
+        r,
+        "slot 10: #8c5528 -> #2a6fb0 (16 voxels use it); slot 20: #d72323 -> #00ff00 (3 voxels use it); \
+         slot 30: #ff3300 -> #ffffff (0 voxels use it)"
+    );
+    assert_eq!(o.steps().len(), 1);
+    // One bad colour: none is set.
+    let (k, m) = err(
+        &mut o,
+        &mut s,
+        "palette_set",
+        json!({"slots": [{"slot": 10, "hex": "#000000"}, {"slot": 20, "hex": "red"}]}),
+    );
+    assert!(k == ErrorKind::Invalid && m.starts_with("slot 20: ") && m.contains("not #rrggbb"), "{m}");
+    assert_eq!(s.palette[10], [0x2a, 0x6f, 0xb0, 255]);
+    for (args, says) in [
+        (json!({"slot": 10, "hex": "#000000", "slots": [{"slot": 20, "hex": "#000000"}]}), "not both"),
+        (json!({}), "give slot and hex, or slots"),
+        (json!({"slot": 10}), "give both slot and hex"),
+        (json!({"slots": [{"slot": 0, "hex": "#000000"}]}), "slot 0 is empty"),
+    ] {
+        let (_, m) = err(&mut o, &mut s, "palette_set", args);
+        assert!(m.contains(says), "{m}");
+    }
+    // Applied as one undo step that takes back every colour.
+    let steps = o.apply_steps(&mut s, |_, st, c| format!("{} {} slots", st.tool, c.palette.len())).0;
+    assert_eq!(steps.len(), 1);
+    assert_eq!(s.history().undo_label(), Some("palette_set 3 slots"));
+    assert_eq!(s.history().position(), position + 1);
+    assert!(s.undo());
+    assert_eq!(
+        (s.palette[10], s.palette[20], s.palette[30]),
+        (small().palette[10], small().palette[20], small().palette[30])
+    );
+}
+
+#[test]
 fn palette_set() {
     let mut s = small();
     let mut o = Session::new(&s, None);
@@ -513,8 +560,8 @@ fn palette_set() {
     assert!(m.contains("not #rrggbb"));
     call(&mut o, &mut s, "palette_set", json!({"slot": 99, "hex": "#123456"}));
     let sum = json(&o.summary(&s));
-    assert_eq!(sum["slots_used"][1]["hex"], "#00ff00");
-    assert_eq!(sum["slots_recoloured_unused"][0]["slot"], 99);
+    assert!(sum["slots_used"][1].as_str().unwrap().starts_with("slot 20 #00ff00: 3 voxels"), "{sum}");
+    assert_eq!(sum["slots_recoloured_unused"][0], "slot 99 #123456: no voxels");
 }
 
 #[test]
@@ -724,10 +771,7 @@ fn summary_shape() {
         sum["editable"],
         json!({"from": [-16, 0, -16], "to": [15, 31, 15], "ground_y": 0, "headroom": "nothing can go above y 31 until resize grows the bounds"})
     );
-    assert_eq!(
-        sum["slots_used"][0],
-        json!({"slot": 10, "hex": "#8c5528", "voxels": 16, "from": [0, 0, 0], "to": [3, 0, 3]})
-    );
+    assert_eq!(sum["slots_used"][0], "slot 10 #8c5528: 16 voxels, x 0..3, y 0..0, z 0..3");
     assert_eq!(sum["height_map"]["rows"].as_array().unwrap().len(), 8);
     assert_eq!(&sum["height_map"]["rows"][4], "....3...");
     assert!(sum.get("file_content").is_none());
@@ -1256,6 +1300,80 @@ fn world_tools_move_copy_group_hide_and_layer_objects() {
     // Apply: one undo step; undone, the save is the file's bytes.
     apply_and_undo(o, &mut s, &bytes);
     assert_eq!(s.world().unwrap().models.len(), models);
+}
+
+/// A valid call of every tool that works only on one mode, for [`each_scope_is_refused_elsewhere`].
+fn scoped_calls() -> Vec<(&'static str, Value)> {
+    vec![
+        ("place", json!({"cells": [[0, 1, 0]], "slot": 1})),
+        ("erase", json!({"cells": [[0, 0, 0]]})),
+        ("box", json!({"from": [0, 1, 0], "to": [1, 1, 1], "slot": 1})),
+        ("line", json!({"from": [0, 1, 0], "to": [2, 1, 0], "slot": 1})),
+        ("sphere", json!({"center": [0, 3, 0], "radius": 1, "slot": 1})),
+        ("circle", json!({"center": [0, 3, 0], "radius": 1, "slot": 1})),
+        ("face", json!({"cell": [0, 0, 0], "slot": 1})),
+        ("fill", json!({"slot": 1})),
+        ("paint", json!({"slot": 1, "from_slot": 10})),
+        ("select", json!({"all": true})),
+        ("transform", json!({"kind": "flip", "axis": "x"})),
+        ("copy", json!({})),
+        ("cut", json!({})),
+        ("paste", json!({"at": [0, 5, 0]})),
+        ("delete", json!({})),
+        ("hollow", json!({})),
+        ("fill_inside", json!({"slot": 1})),
+        ("resize", json!({"size": [40, 40, 40]})),
+        ("crop", json!({})),
+        ("palette_swap", json!({"a": 1, "b": 2})),
+        ("make_object", json!({"from_slot": 10})),
+        ("move_object", json!({"node": 1, "offset": [1, 0, 0]})),
+        ("duplicate", json!({"node": 1})),
+        ("group", json!({"nodes": [1]})),
+        ("ungroup", json!({"node": 2})),
+        ("hide", json!({"node": 1})),
+        ("set_layer", json!({"node": 1, "layer": 0})),
+        ("delete_object", json!({"node": 1})),
+        ("new_layer", json!({})),
+        ("hide_layer", json!({"layer": 0})),
+    ]
+}
+
+#[test]
+fn each_scope_is_refused_elsewhere() {
+    use crate::Scope;
+    let calls = scoped_calls();
+    let scoped: Vec<&str> = tools().iter().map(|t| t.name).filter(|n| Op::scope(n) != Scope::Any).collect();
+    assert_eq!(scoped, calls.iter().map(|c| c.0).collect::<Vec<_>>(), "a call for every scoped tool");
+    let bytes = world_file();
+    for (tool, args) in calls {
+        let mut s = Scene::from_vox(&bytes).unwrap();
+        let world = Op::scope(tool) == Scope::Model;
+        if !world {
+            assert!(s.edit_object(1));
+        }
+        let mut o = Session::new(&s, Some(&bytes));
+        // select and copy run on the world too, but nothing there can use what they take.
+        if world && Op::parse(tool, args.clone()).unwrap().kind() == crate::OpKind::Selection {
+            continue;
+        }
+        if world {
+            call(&mut o, &mut s, "select", json!({"all": true}));
+            call(&mut o, &mut s, "copy", json!({}));
+        }
+        let (k, m) = err(&mut o, &mut s, tool, args);
+        let says = if world { "world of several objects" } else { "show_world" };
+        assert!(k == ErrorKind::Invalid && m.contains(says), "{tool}: {m}");
+    }
+    // Each set: the tools of its scope and those of both, in the order of every tool.
+    for world in [false, true] {
+        let want = if world { Scope::World } else { Scope::Model };
+        let all: Vec<&str> = tools()
+            .iter()
+            .map(|t| t.name)
+            .filter(|n| matches!(Op::scope(n), Scope::Any) || Op::scope(n) == want)
+            .collect();
+        assert_eq!(crate::tools_for(world).iter().map(|t| t.name).collect::<Vec<_>>(), all);
+    }
 }
 
 #[test]

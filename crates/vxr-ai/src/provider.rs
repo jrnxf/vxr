@@ -122,7 +122,10 @@ pub struct Usage {
     /// Input tokens not read from the cache.
     pub input: u64,
     pub cache_read: u64,
+    /// Written to the cache for 5 minutes (OpenAI: for its default retention).
     pub cache_write: u64,
+    /// Written to the cache for an hour (Anthropic's system prompt and tools).
+    pub cache_write_1h: u64,
     pub output: u64,
     pub cost: Option<f64>,
 }
@@ -132,6 +135,7 @@ impl Usage {
         self.input += u.input;
         self.cache_read += u.cache_read;
         self.cache_write += u.cache_write;
+        self.cache_write_1h += u.cache_write_1h;
         self.output += u.output;
         self.cost = match (self.cost, u.cost) {
             (Some(a), Some(b)) => Some(a + b),
@@ -146,27 +150,40 @@ impl Usage {
         }
         let p = price(model)?;
         Some(
-            (self.input as f64 * p[0]
-                + self.output as f64 * p[1]
-                + self.cache_read as f64 * p[2]
-                + self.cache_write as f64 * p[3])
+            (self.input as f64 * p.input
+                + self.output as f64 * p.output
+                + self.cache_read as f64 * p.cache_read
+                + self.cache_write as f64 * p.cache_write
+                + self.cache_write_1h as f64 * p.cache_write_1h)
                 / 1e6,
         )
     }
 }
 
-/// US dollars per million tokens: input, output, cache read, cache write (5 minutes), for
-/// the picker's models under their own or OpenRouter's names. OpenAI's cached input is taken
-/// at a tenth of its input price, as the risk tests did.
-pub fn price(model: &str) -> Option<[f64; 4]> {
+/// US dollars per million tokens.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Price {
+    pub input: f64,
+    pub output: f64,
+    pub cache_read: f64,
+    /// A 5-minute cache write (OpenAI: its 30-minute one).
+    pub cache_write: f64,
+    /// A 1-hour cache write (OpenAI: its 12-hour one).
+    pub cache_write_1h: f64,
+}
+
+/// The price of the picker's models under their own or OpenRouter's names, from Anthropic's
+/// and OpenAI's pricing pages (2026-11-01; OpenAI's short-context rates, under 272K input).
+pub fn price(model: &str) -> Option<Price> {
     let id = model.rsplit('/').next().unwrap_or(model).replace('.', "-");
     let id = id.split('@').next().unwrap_or(&id);
-    match id {
-        "claude-opus-5-5" => Some([4.0, 20.0, 0.20, 5.0]),
-        "claude-sonnet-5-5" => Some([2.0, 10.0, 0.20, 2.5]),
-        "gpt-6-1-sol" => Some([2.0, 10.0, 0.20, 2.0]),
-        _ => None,
-    }
+    let [input, output, cache_read, cache_write, cache_write_1h] = match id {
+        "claude-opus-5-5" => [4.0, 20.0, 0.20, 5.0, 8.0],
+        "claude-sonnet-5-5" => [2.0, 10.0, 0.10, 2.5, 4.0],
+        "gpt-6-1-sol" => [2.0, 10.0, 0.10, 2.5, 5.0],
+        _ => return None,
+    };
+    Some(Price { input, output, cache_read, cache_write, cache_write_1h })
 }
 
 #[cfg(test)]
@@ -175,9 +192,13 @@ mod tests {
 
     #[test]
     fn prices_and_hosts() {
-        let u = Usage { input: 1_000_000, output: 100_000, cache_read: 1_000_000, cache_write: 0, cost: None };
+        let u = Usage { input: 1_000_000, output: 100_000, cache_read: 1_000_000, ..Default::default() };
         assert_eq!(u.dollars(OPUS), Some(4.0 + 2.0 + 0.2));
-        assert_eq!(u.dollars("anthropic/claude-sonnet-5.5"), Some(2.0 + 1.0 + 0.2));
+        let w = Usage { cache_write: 1_000_000, cache_write_1h: 1_000_000, ..Default::default() };
+        assert_eq!(w.dollars(OPUS), Some(5.0 + 8.0), "an hour's write costs more than 5 minutes'");
+        assert_eq!(u.dollars("anthropic/claude-sonnet-5.5"), Some(2.0 + 1.0 + 0.1));
+        assert_eq!(u.dollars(GPT), Some(2.0 + 1.0 + 0.1));
+        assert_eq!(Usage { cache_write: 1_000_000, ..Default::default() }.dollars(GPT), Some(2.5));
         assert_eq!(u.dollars("qwen3:8b"), None);
         assert_eq!(Usage { cost: Some(0.5), ..u }.dollars("qwen3:8b"), Some(0.5));
         let mut a = Usage { cost: Some(0.25), ..Default::default() };
