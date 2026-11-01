@@ -132,6 +132,8 @@ fn recorded_answers_decode_and_replay() {
 
     let (t, _) = decode(Kind::OpenAi, &fixture("responses-recorded.sse"));
     assert_eq!((t.model.as_str(), t.stop.clone()), ("gpt-6.1-sol", Stop::Tools));
+    // 2,578 input tokens: 2,131 read from the cache, 444 written to it, 3 plain.
+    assert_eq!((t.usage.input, t.usage.cache_read, t.usage.cache_write), (3, 2131, 444));
     assert!(!t.calls.is_empty() && t.calls.iter().all(|c| c.bad.is_none() && c.id.starts_with("call_")));
     for c in &t.calls {
         vxr_ops::Op::parse(&c.name, c.input.clone()).unwrap_or_else(|e| panic!("{}: {e}", c.name));

@@ -172,14 +172,15 @@ pub struct Price {
     pub cache_write_1h: f64,
 }
 
-/// The price of the picker's models under their own or OpenRouter's names.
+/// The price of the picker's models under their own or OpenRouter's names, from Anthropic's
+/// and OpenAI's pricing pages (2026-11-01; OpenAI's short-context rates, under 272K input).
 pub fn price(model: &str) -> Option<Price> {
     let id = model.rsplit('/').next().unwrap_or(model).replace('.', "-");
     let id = id.split('@').next().unwrap_or(&id);
     let [input, output, cache_read, cache_write, cache_write_1h] = match id {
         "claude-opus-5-5" => [4.0, 20.0, 0.20, 5.0, 8.0],
-        "claude-sonnet-5-5" => [2.0, 10.0, 0.20, 2.5, 4.0],
-        "gpt-6-1-sol" => [2.0, 10.0, 0.20, 2.0, 2.0],
+        "claude-sonnet-5-5" => [2.0, 10.0, 0.10, 2.5, 4.0],
+        "gpt-6-1-sol" => [2.0, 10.0, 0.10, 2.5, 5.0],
         _ => return None,
     };
     Some(Price { input, output, cache_read, cache_write, cache_write_1h })
@@ -195,7 +196,9 @@ mod tests {
         assert_eq!(u.dollars(OPUS), Some(4.0 + 2.0 + 0.2));
         let w = Usage { cache_write: 1_000_000, cache_write_1h: 1_000_000, ..Default::default() };
         assert_eq!(w.dollars(OPUS), Some(5.0 + 8.0), "an hour's write costs more than 5 minutes'");
-        assert_eq!(u.dollars("anthropic/claude-sonnet-5.5"), Some(2.0 + 1.0 + 0.2));
+        assert_eq!(u.dollars("anthropic/claude-sonnet-5.5"), Some(2.0 + 1.0 + 0.1));
+        assert_eq!(u.dollars(GPT), Some(2.0 + 1.0 + 0.1));
+        assert_eq!(Usage { cache_write: 1_000_000, ..Default::default() }.dollars(GPT), Some(2.5));
         assert_eq!(u.dollars("qwen3:8b"), None);
         assert_eq!(Usage { cost: Some(0.5), ..u }.dollars("qwen3:8b"), Some(0.5));
         let mut a = Usage { cost: Some(0.25), ..Default::default() };

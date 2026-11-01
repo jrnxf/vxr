@@ -276,9 +276,11 @@ impl Decoder {
                     self.model = m.into();
                 }
                 let u = &r["usage"];
+                // Input counts the cached tokens and those written to the cache.
                 let cached = u["input_tokens_details"]["cached_tokens"].as_u64().unwrap_or(0);
-                self.usage.cache_read = cached;
-                self.usage.input = u["input_tokens"].as_u64().unwrap_or(0).saturating_sub(cached);
+                let written = u["input_tokens_details"]["cache_write_tokens"].as_u64().unwrap_or(0);
+                (self.usage.cache_read, self.usage.cache_write) = (cached, written);
+                self.usage.input = u["input_tokens"].as_u64().unwrap_or(0).saturating_sub(cached + written);
                 self.usage.output = u["output_tokens"].as_u64().unwrap_or(0);
                 if self.text.is_empty() {
                     self.text = output_text(&self.output);
