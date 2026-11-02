@@ -4395,6 +4395,9 @@ fn agent_waiting(dir: &Path) -> Result<(), String> {
     )?;
 
     // 4. A New scene with unsaved edits asks the user; the agent's call is one running call.
+    // The render export showed the render corner, which converges slowly on a software GPU and
+    // redraws every frame until it does; hidden, the spinner check sees only the agent's call.
+    s.ed.ui.show_render = false;
     ask(&mut s, 1, "box", json!({"from": [9, 7, 8], "to": [12, 9, 8], "slot": 50}))
         .ok_or("box waited")?
         .map_err(|e| e.to_string())?;
