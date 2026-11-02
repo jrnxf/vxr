@@ -1,13 +1,15 @@
 //! Terminal agents in the Hybrid UI (`docs/research/ai.md` section 3, live mode, after the
 //! `mcp.html` and `mcp-live.html` mocks): the assistant panel's Agents tab (Cmd-K), a checklist
 //! with "Allow agents to edit this window", the setup line and the agents connected, then the
-//! review switch and the Agent edits list, each applied call with an Undo of its own; and the
+//! review switch and the ACTIVITY list, each call with its answer and each edit with an Undo of its own; and the
 //! chip in the hint bar while an agent is connected, with Stop. In the browser the tab says to
 //! run `vxr bridge` and takes the pairing code it prints ([`crate::bridge`]). Drawn in the
 //! panel style.
 
-pub use crate::agents::Fail;
+pub use crate::agents::{AgentCall, Fail};
 use egui::{ScrollArea, UiBuilder};
+
+use super::activity::{self, Item, Live, ago, span};
 
 use super::*;
 
@@ -20,9 +22,10 @@ pub const FILES_SETUP: &str = "claude mcp add vxr -- vxr mcp --root <folder>";
 /// The browser's first step: the bridge between this tab and `vxr mcp --live`.
 pub const BRIDGE_SETUP: &str = "vxr bridge";
 
-/// Most Agent edits rows shown, newest first, and how tall each is.
-const CARD_ROWS: usize = 8;
-const EDIT_ROW: f32 = 30.0;
+/// How tall an ACTIVITY row is: a call, an edit with its Undo, and a gap in the calls.
+const CALL_ROW: f32 = 40.0;
+const EDIT_ROW: f32 = 50.0;
+const GAP_ROW: f32 = 24.0;
 
 /// Terminal agents as the UI shows them (set by the editor).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -41,8 +44,15 @@ pub struct AgentsView {
     pub error: Option<String>,
     /// The connected agents: connection and name.
     pub clients: Vec<(u64, String)>,
-    /// Every applied call, oldest first.
+    /// Every applied edit, oldest first.
     pub edits: Vec<EditRow>,
+    /// Each connection's latest calls (the ACTIVITY list), oldest first within a connection;
+    /// the closed ones in `gone` too.
+    pub calls: Vec<(u64, AgentCall)>,
+    /// The closed connections whose calls are still listed: their key in `calls` and agent name.
+    pub gone: Vec<(u64, String)>,
+    /// For each of `clients`: how many calls it made since it connected.
+    pub made: Vec<u64>,
     /// What kind of failure `error` is.
     pub fail: Option<Fail>,
     /// When the link came up (egui time, seconds), while it is up.
@@ -58,6 +68,106 @@ pub struct EditRow {
     pub label: String,
     /// The edit is in the scene (not undone).
     pub applied: bool,
+}
+
+/// What the hint-bar chip draws.
+struct Chip {
+    /// The agent, or the sentence about it (a stall names it in the middle).
+    who: String,
+    /// The last call's icon, left of its words.
+    icon: Option<char>,
+    /// The last call in plain words.
+    verb: String,
+    /// How long ago, or what else there is to say, fainter.
+    tail: String,
+    lead: Lead,
+    /// Amber: no call for a while.
+    warn: bool,
+    /// Stop is made prominent: the agent may be stuck.
+    strong: bool,
+}
+
+impl Chip {
+    fn text(&self) -> String {
+        let mid = if self.verb.is_empty() { "" } else { " \u{b7} " };
+        format!("{}{mid}{}{}", self.who, self.verb, self.tail)
+    }
+}
+
+/// The mark at the chip's left, and an agent row's.
+#[derive(Clone, Copy, PartialEq)]
+enum Lead {
+    /// A call is running: a dot with a ring turning round it.
+    Spin,
+    /// Called a moment ago: a dot that pulses.
+    Pulse,
+    Dot,
+    /// Quiet too long: an amber dot.
+    Warn,
+    /// May be stuck: the alert icon.
+    Alert,
+    /// Connected and not calling: a ring.
+    Hollow,
+}
+
+/// How often a turning ring redraws: a call can run for as long as the user leaves a dialog open,
+/// so it does not draw every frame.
+const SPIN_REPAINT: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Where the chip's pieces start: padding and the mark, the gap before Stop and Stop itself, and
+/// the padding after it. Its icon takes `CHIP_ICON` before the call's words.
+const CHIP_LEAD: f32 = 25.0;
+const CHIP_STOP: f32 = 10.0 + 56.0;
+const CHIP_END: f32 = 14.0;
+const CHIP_ICON: f32 = 8.0 + 12.0 + 5.0;
+
+/// Draw a lead mark centred on `c` at `t` seconds.
+fn lead_mark(p: &egui::Painter, c: Pos2, lead: Lead, t: f64) {
+    match lead {
+        Lead::Spin | Lead::Pulse => {
+            let pulse = if lead == Lead::Pulse { 0.55 + 0.45 * (t * 3.0).sin().abs() as f32 } else { 1.0 };
+            p.circle_filled(c, 3.5, th().ok.gamma_multiply(pulse));
+            if lead == Lead::Spin {
+                // A ring a third round, turning once in under a second.
+                let a0 = (t * 7.5) as f32;
+                let arc: Vec<Pos2> = (0..=10)
+                    .map(|k| {
+                        let a = a0 + k as f32 * 0.2;
+                        c + vec2(a.cos(), a.sin()) * 6.5
+                    })
+                    .collect();
+                p.add(egui::Shape::line(arc, Stroke::new(1.5, th().ok)));
+            }
+        }
+        Lead::Dot => {
+            p.circle_filled(c, 3.5, th().ok);
+        }
+        Lead::Warn => {
+            p.circle_filled(c, 3.5, th().mid);
+        }
+        Lead::Alert => {
+            p.text(c, Align2::CENTER_CENTER, icon::TRIANGLE_ALERT, icon_font(13.0), th().mid);
+        }
+        Lead::Hollow => {
+            p.circle_stroke(c, 3.0, Stroke::new(1.0, th().faint));
+        }
+    }
+}
+
+/// A button in the accent colour, for the one thing to do now.
+fn solid_button(ui: &mut Ui, r: Rect, glyph: char, label: &str, id: &str) -> bool {
+    let resp = ui.interact(r, Id::unique(("sbtn", id)), Sense::click());
+    let p = ui.painter();
+    let fill = if resp.hovered() { th().accent.gamma_multiply(0.85) } else { th().accent };
+    p.rect_filled(r, CornerRadius::same(7), fill);
+    const SIZE: f32 = 12.0;
+    let g = p.layout_no_wrap(label.into(), sans(SIZE), th().on_accent);
+    let icon = label_icon(glyph, SIZE);
+    let iw = icon.size;
+    let x = r.center().x - (iw + 6.0 + g.size().x) / 2.0;
+    p.text(pos2(x + iw / 2.0, r.center().y), Align2::CENTER_CENTER, glyph, icon, th().on_accent);
+    p.galley(pos2(x + iw + 6.0, r.center().y - g.size().y / 2.0), g, th().on_accent);
+    resp.clicked()
 }
 
 fn wrapped(ctx: &Context, text: &str, font: FontId, color: Color32, width: f32) -> Arc<egui::Galley> {
@@ -104,65 +214,145 @@ impl Hybrid {
         self.view_panel = false;
     }
 
-    /// The agent chip at the left of the hint bar: who is editing, and Stop. Returns its
-    /// width, 0 with no agent connected.
-    pub(super) fn agent_chip_width(&self, ctx: &Context) -> f32 {
-        if self.agents.clients.is_empty() {
-            return 0.0;
-        }
-        let now = ctx.input(|i| i.time);
-        let g = ctx.fonts_mut(|f| f.layout_no_wrap(self.agent_chip_text(now), sans_medium(12.0), th().text));
-        14.0 + g.size().x + 10.0 + 58.0 + 14.0
-    }
-
-    /// How many connected agents called in the last seconds: the Agents tab's `editing`.
-    fn agents_editing(&self, now: f64) -> usize {
-        (0..self.agents.clients.len()).filter(|&i| editing(now, self.agents.times.get(i).and_then(|t| t.1))).count()
-    }
-
-    /// The chip's words, from the same state as the Agents tab's rows: "editing" while an agent
-    /// called in the last seconds, else "connected" with how long it has been idle.
-    pub fn agent_chip_text(&self, now: f64) -> String {
-        let editing_n = self.agents_editing(now);
-        match self.agents.clients.as_slice() {
-            [(_, one)] if editing_n == 1 => format!("{one} is editing"),
-            [(_, one)] => format!("{one} connected · idle {}", ago(now - self.agent_last_active(now, 0))),
-            many if editing_n == 0 => {
-                let last = (0..many.len()).map(|i| self.agent_last_active(now, i)).fold(f64::MIN, f64::max);
-                format!("{} agents connected · idle {}", many.len(), ago(now - last))
+    /// What the hint-bar chip says: the agent that matters most (the longest silent, else the one
+    /// that called last), from the same state as the Agents tab's rows and banner.
+    fn chip_parts(&self, now: f64) -> Option<Chip> {
+        let (i, n) = self.agents.lead(now)?;
+        let more = self.agents.clients.len() - 1;
+        let name = &self.agents.clients[i].1;
+        let name = if more > 0 { format!("{name} +{more}") } else { name.clone() };
+        let call = n.call;
+        let said = |running| call.map(|c| activity::verb(c, running)).unwrap_or_default();
+        let c = |who: String, icon, verb: String, tail: String, lead| Chip {
+            who,
+            icon,
+            verb,
+            tail,
+            lead,
+            warn: n.state.warn(),
+            strong: n.state == Live::Long,
+        };
+        let tool_icon = call.map(|c| activity::tool_icon(&c.tool));
+        Some(match n.state {
+            Live::Running => c(name, tool_icon, said(true), format!(" \u{b7} {} s", n.quiet as u64), Lead::Spin),
+            Live::Active => c(name, tool_icon, said(false), format!(" \u{b7} {}", ago(n.quiet)), Lead::Pulse),
+            Live::Quiet => c(name, tool_icon, said(false), format!(" \u{b7} {} ago", ago(n.quiet)), Lead::Dot),
+            Live::Stall => c(
+                format!("No call from {name} for {}", span(n.quiet)),
+                None,
+                String::new(),
+                format!(" \u{b7} last {}", activity::lower_first(&said(false))),
+                Lead::Warn,
+            ),
+            Live::Long => c(
+                format!("{name} may be stuck: no call for {}", span(n.quiet)),
+                None,
+                String::new(),
+                String::new(),
+                Lead::Alert,
+            ),
+            Live::Done => {
+                let summary = call.map(|c| c.arg.clone()).filter(|s| !s.is_empty());
+                c(
+                    format!("{name} is done"),
+                    None,
+                    String::new(),
+                    summary.map(|s| format!(" \u{b7} {s}")).unwrap_or_default(),
+                    Lead::Dot,
+                )
             }
-            many if editing_n == many.len() => format!("{} agents are editing", many.len()),
-            many => format!("{editing_n} of {} agents are editing", many.len()),
-        }
+            Live::Idle => c(
+                format!("{name} connected"),
+                None,
+                String::new(),
+                format!(" \u{b7} idle {}", ago(n.quiet)),
+                Lead::Hollow,
+            ),
+        })
     }
 
-    /// When agent `i` last called, else when it was first listed.
-    fn agent_last_active(&self, now: f64, i: usize) -> f64 {
-        self.agents.times.get(i).map_or(now, |t| t.1.unwrap_or(t.0))
+    /// The chip's words in one line, as the hint bar says them.
+    pub fn agent_chip_text(&self, now: f64) -> String {
+        self.chip_parts(now).map(|c| c.text()).unwrap_or_default()
+    }
+
+    /// The chip's text laid out on one line, cut with an ellipsis where the window is too narrow:
+    /// the galley, where its tool icon goes (left of the verb, when the whole name fits before
+    /// it) and the width it takes. That width is measured with every digit a zero, so the card
+    /// does not shift sideways as a counter ticks, only when it gains a digit.
+    fn chip_galley(&self, ctx: &Context, c: &Chip) -> (Arc<egui::Galley>, Option<f32>, f32) {
+        let (text, faint) = if c.warn { (th().mid, th().mid) } else { (th().text, th().faint) };
+        let fmt = |font: FontId, color| TextFormat { font_id: font, color, ..Default::default() };
+        let who = ctx.fonts_mut(|f| f.layout_no_wrap(c.who.clone(), sans_medium(12.0), text));
+        // The card spans the window less its margins, and the Stop button and padding.
+        let budget = ctx.content_rect().width() - 24.0 - (CHIP_LEAD + CHIP_STOP + CHIP_END);
+        let icon = c.icon.filter(|_| who.size().x + CHIP_ICON <= budget).map(|_| who.size().x + 8.0);
+        let lay = |zeros: bool| {
+            let t = |s: &str| if zeros { s.replace(|ch: char| ch.is_ascii_digit(), "0") } else { s.to_string() };
+            let mut job = LayoutJob::default();
+            job.append(&t(&c.who), 0.0, fmt(sans_medium(12.0), text));
+            if !c.verb.is_empty() {
+                job.append(&t(&c.verb), if icon.is_some() { CHIP_ICON } else { 6.0 }, fmt(sans(12.0), text));
+            }
+            job.append(&t(&c.tail), 0.0, fmt(sans(12.0), faint));
+            job.wrap = egui::text::TextWrapping {
+                max_width: budget.max(1.0),
+                max_rows: 1,
+                break_anywhere: true,
+                overflow_character: Some('\u{2026}'),
+            };
+            ctx.fonts_mut(|f| f.layout_job(job))
+        };
+        let (g, steady) = (lay(false), lay(true));
+        let w = steady.size().x.max(g.size().x);
+        (g, icon, w)
+    }
+
+    /// The agent chip at the left of the hint bar: which agent, what it did last and how long
+    /// ago, and Stop. Returns its width, 0 with no agent connected.
+    pub(super) fn agent_chip_width(&self, ctx: &Context) -> f32 {
+        let Some(c) = self.chip_parts(ctx.input(|i| i.time)) else { return 0.0 };
+        CHIP_LEAD + self.chip_galley(ctx, &c).2 + CHIP_STOP + CHIP_END
     }
 
     /// Draw the chip into the hint panel's `ui`, starting at `x`.
     pub(super) fn agent_chip(&mut self, ui: &mut Ui, rect: Rect, w: f32) {
-        if w == 0.0 {
-            return;
-        }
+        let t = ui.input(|i| i.time);
+        let Some(c) = self.chip_parts(t).filter(|_| w > 0.0) else { return };
         let cy = rect.center().y;
         let x = rect.left() + 12.0;
-        let t = ui.input(|i| i.time);
-        if self.agents_editing(t) > 0 {
-            let pulse = 0.55 + 0.45 * (t * 3.0).sin().abs() as f32;
-            ui.painter().circle_filled(pos2(x + 3.5, cy), 3.5, th().ok.gamma_multiply(pulse));
+        let (g, icon_at, steady) = self.chip_galley(ui.ctx(), &c);
+        let p = ui.painter().clone();
+        if c.warn {
+            let r = CornerRadius { nw: R, sw: R, ne: 0, se: 0 };
+            p.rect_filled(Rect::from_min_max(rect.min, pos2(rect.left() + w, rect.bottom())), r, th().mid_bg);
+        }
+        let dot = pos2(x + 3.5, cy);
+        lead_mark(&p, dot, c.lead, t);
+        if c.lead == Lead::Pulse {
             ui.ctx().request_repaint();
+        } else if c.lead == Lead::Spin {
+            ui.ctx().request_repaint_after(SPIN_REPAINT);
         } else {
-            ui.painter().circle_stroke(pos2(x + 3.5, cy), 3.0, Stroke::new(1.0, th().faint));
-            // The idle time ticks on, and the chip's width with it.
+            // The times tick on, and the chip's width with them.
             ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
         }
-        let g = ui.painter().layout_no_wrap(self.agent_chip_text(t), sans_medium(12.0), th().text);
-        let gw = g.size().x;
-        ui.painter().galley(pos2(x + 13.0, cy - g.size().y / 2.0), g, th().text);
-        let stop = Rect::from_min_size(pos2(x + 13.0 + gw + 10.0, cy - 11.0), vec2(56.0, 22.0));
-        if small_button(ui, stop, icon::SQUARE, "Stop", "agent-stop", false).clicked() {
+        let gx = x + 13.0;
+        let gw = steady;
+        let color = if c.warn { th().mid } else { th().text };
+        if let (Some(tool), Some(dx)) = (c.icon, icon_at) {
+            let icon = label_icon(tool, 12.0);
+            let icon_color = if c.warn { th().mid } else { th().muted };
+            p.text(pos2(gx + dx + 6.0, cy), Align2::CENTER_CENTER, tool, icon, icon_color);
+        }
+        p.galley(pos2(gx, cy - g.size().y / 2.0), g, color);
+        let stop = Rect::from_min_size(pos2(gx + gw + 10.0, cy - 11.0), vec2(56.0, 22.0));
+        let clicked = if c.strong {
+            solid_button(ui, stop, icon::SQUARE, "Stop", "agent-stop")
+        } else {
+            small_button(ui, stop, icon::SQUARE, "Stop", "agent-stop", false).clicked()
+        };
+        if clicked {
             self.actions.push(Action::StopAgents);
         }
         self.hits.insert("agent-stop".into(), stop);
@@ -177,7 +367,7 @@ impl Hybrid {
     // step ticks green and folds to one line, or turns red and holds its error. In the browser:
     // run `vxr bridge`, type the code it prints (the eighth character connects), connect an
     // agent; in the desktop app: allow the window, connect an agent. Then the review switch,
-    // the Agent edits list and the footer.
+    // the ACTIVITY list and the footer.
     pub(super) fn agents_tab(&mut self, ctx: &Context) {
         let Some(body) = self.ai_body.filter(|_| self.ai_open && self.agents_panel) else { return };
         let w = body.width() - 6.0;
@@ -287,22 +477,6 @@ const DASH_W: f32 = 16.0;
 
 /// How long a refused character's word stays.
 const REFUSED_SECS: f64 = 4.0;
-
-/// An elapsed time, in a few words.
-fn ago(secs: f64) -> String {
-    let s = secs.max(0.0) as u64;
-    match s {
-        0..=4 => "just now".into(),
-        5..=59 => format!("{s} s"),
-        60..=3599 => format!("{} min", s / 60),
-        _ => format!("{} h", s / 3600),
-    }
-}
-
-/// An agent is editing while it called in the last seconds.
-fn editing(now: f64, last: Option<f64>) -> bool {
-    last.is_some_and(|t| now - t < 5.0)
-}
 
 /// What a failure says, and what the step offers.
 fn failure_words(f: Fail, error: &str) -> (String, String) {
@@ -607,53 +781,177 @@ impl Tab {
     /// An agent row: the name and what it is doing, Stop, and when it came and what it did.
     fn agent(&mut self, ui: &mut Ui, i: usize) {
         let (conn, name) = self.v.clients[i].clone();
-        let (since, last) = self.v.times.get(i).copied().unwrap_or((self.now, None));
-        let is_editing = editing(self.now, last);
-        let n = self.v.edits.iter().filter(|e| e.conn == conn).count();
-        let what = self
-            .v
-            .edits
-            .iter()
-            .rev()
-            .find(|e| e.conn == conn)
-            .and_then(|e| e.label.strip_prefix(&format!("{name}: ")))
-            .map(str::to_string)
-            .unwrap_or_default();
+        let since = self.v.times.get(i).map_or(self.now, |t| t.0);
+        let n = self.v.now_of(i, self.now);
+        let (state, color, lead) = match (n.state, n.call) {
+            (Live::Running, Some(c)) => {
+                (format!("{} \u{b7} {} s", activity::verb(c, true), n.quiet as u64), th().ok, Lead::Spin)
+            }
+            (Live::Active, Some(c)) => {
+                (format!("{} \u{b7} {}", activity::verb(c, false), ago(n.quiet)), th().ok, Lead::Pulse)
+            }
+            (Live::Quiet, _) => (format!("last call {} ago", ago(n.quiet)), th().faint, Lead::Dot),
+            (Live::Stall, _) => (format!("no call for {}", span(n.quiet)), th().mid, Lead::Warn),
+            (Live::Long, _) => (format!("no call for {} \u{b7} may be stuck", span(n.quiet)), th().mid, Lead::Warn),
+            (Live::Done, _) => (format!("done \u{b7} {}", ago(n.quiet)), th().ok, Lead::Dot),
+            _ => (format!("idle {}", ago(n.quiet)), th().faint, Lead::Hollow),
+        };
+        let edits = self.v.edits.iter().filter(|e| e.conn == conn).count();
+        let calls = self.v.made.get(i).copied().unwrap_or(0);
         let r = self.block(ui, 44.0);
         let r = Rect::from_min_max(pos2(r.left() + 30.0, r.top()), r.max);
         let p = ui.painter().clone();
         let c = pos2(r.left() + 4.0, r.top() + 11.0);
-        if is_editing {
-            p.circle_filled(c, 3.5, th().ok);
-            ui.ctx().request_repaint_after(std::time::Duration::from_millis(1000));
+        lead_mark(&p, c, lead, self.now);
+        if lead == Lead::Pulse {
+            ui.ctx().request_repaint();
+        } else if lead == Lead::Spin {
+            ui.ctx().request_repaint_after(SPIN_REPAINT);
         } else {
-            p.circle_stroke(c, 3.5, Stroke::new(1.2, th().faint));
+            // The times tick on.
+            ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
         }
         self.hits.push((format!("agents-dot-{conn}"), Rect::from_center_size(c, vec2(7.0, 7.0))));
         let g = p.layout_no_wrap(name.clone(), sans_semibold(12.5), th().text);
         let gw = g.size().x;
         p.galley(pos2(r.left() + 16.0, c.y - g.size().y / 2.0), g, th().text);
-        let (state, color) = if is_editing {
-            ("editing now".to_string(), th().ok)
-        } else {
-            (format!("idle {}", last.map_or(ago(self.now - since), |t| ago(self.now - t))), th().faint)
-        };
-        p.text(pos2(r.left() + 16.0 + gw + 8.0, c.y), Align2::LEFT_CENTER, state, sans(11.5), color);
         let b = Rect::from_min_size(pos2(r.right() - 58.0, r.top()), vec2(58.0, 22.0));
+        let g = one_line(ui, &state, sans(11.5), color, (b.left() - 8.0) - (r.left() + 16.0 + gw + 8.0));
+        ui.painter().galley(pos2(r.left() + 16.0 + gw + 8.0, c.y - g.size().y / 2.0), g, color);
         let id = format!("agents-stop-{conn}");
-        if small_button(ui, b, icon::SQUARE, "Stop", &id, false).clicked() {
+        let clicked = if n.state == Live::Long {
+            solid_button(ui, b, icon::SQUARE, "Stop", &id)
+        } else {
+            small_button(ui, b, icon::SQUARE, "Stop", &id, false).clicked()
+        };
+        if clicked {
             self.actions.push(Action::StopAgent(conn));
         }
         self.hits.push((id, b));
         let mut meta = format!("since {}", ago(self.now - since));
-        if n > 0 {
-            meta += &format!(" · {n} edit{}", if n == 1 { "" } else { "s" });
+        if calls > 0 {
+            meta += &format!(" \u{b7} {calls} call{}", if calls == 1 { "" } else { "s" });
         }
-        if !what.is_empty() {
-            meta += &format!(" · {what}");
+        if edits > 0 {
+            meta += &format!(" \u{b7} {edits} edit{}", if edits == 1 { "" } else { "s" });
         }
         let g = one_line(ui, &meta, sans(11.0), th().faint, r.width() - 16.0);
         ui.painter().galley(pos2(r.left() + 16.0, r.top() + 25.0), g, th().faint);
+    }
+
+    /// A pause in an agent's calls: amber while it goes on, grey once the agent called again.
+    fn gap_row(&mut self, ui: &mut Ui, secs: f64, live: bool, who: Option<&str>) {
+        let r = self.block(ui, GAP_ROW);
+        let who = who.map(|w| format!("{w}: ")).unwrap_or_default();
+        let text =
+            if live { format!("{who}no call for {}", span(secs)) } else { format!("{who}{} with no call", span(secs)) };
+        let (color, line) = if live { (th().mid, th().mid_line) } else { (th().faint, th().line) };
+        let g = ui.painter().layout_no_wrap(text, sans(11.0), color);
+        let (w, cy) = (g.size().x, r.center().y);
+        if w + 40.0 < r.width() {
+            let (l, rt) = (r.center().x - w / 2.0 - 8.0, r.center().x + w / 2.0 + 8.0);
+            ui.painter().hline(r.left()..=l, cy, Stroke::new(1.0, line));
+            ui.painter().hline(rt..=r.right(), cy, Stroke::new(1.0, line));
+            ui.painter().galley(pos2(r.center().x - w / 2.0, cy - g.size().y / 2.0), g, color);
+        } else {
+            ui.painter().galley(pos2(r.left(), cy - g.size().y / 2.0), g, color);
+        }
+        self.hits.push((if live { "agent-gap-live" } else { "agent-gap" }.into(), r));
+    }
+
+    /// A call: its icon, what it was and how it ended in a line, when, and for an edit in the scene
+    /// its Undo. A closed connection's call names its agent, muted, before the line.
+    fn call_row(&mut self, ui: &mut Ui, i: usize) {
+        let (conn, c) = self.v.calls[i].clone();
+        let gone = self.v.gone.iter().find(|g| g.0 == conn).map(|g| g.1.clone());
+        let edit = c.edit.and_then(|e| self.v.edits.get(e).map(|row| (e, row.applied)));
+        let undoable = edit.is_some_and(|(_, applied)| applied);
+        let r = self.block(ui, if undoable { EDIT_ROW } else { CALL_ROW });
+        let running = c.answered.is_none();
+        let undone = edit.is_some_and(|(_, applied)| !applied);
+        let mark = pos2(r.left() + 5.0, r.top() + 11.0);
+        let p = ui.painter().clone();
+        let (tone, line2) = if running {
+            (th().ok, th().ok)
+        } else if !c.ok {
+            (th().danger, th().danger)
+        } else if undone {
+            (th().faint, th().faint)
+        } else if edit.is_some() {
+            (th().ok, th().muted)
+        } else {
+            (th().faint, th().faint)
+        };
+        if running {
+            lead_mark(&p, mark, Lead::Spin, self.now);
+            ui.ctx().request_repaint_after(SPIN_REPAINT);
+        } else {
+            let glyph = activity::tool_icon(&c.tool);
+            p.text(mark, Align2::CENTER_CENTER, glyph, label_icon(glyph, 12.0), tone);
+        }
+        let right = 64.0;
+        let tw = r.width() - 20.0 - right - 8.0;
+        let call_color = if undone || (!running && edit.is_none() && c.ok) { th().muted } else { th().text };
+        let mut job = LayoutJob::default();
+        let fmt = |color| TextFormat { font_id: mono(11.5), color, ..Default::default() };
+        job.append(&c.tool, 0.0, fmt(call_color));
+        if !c.arg.is_empty() {
+            job.append(&c.arg, 6.0, fmt(th().faint));
+        }
+        job.wrap = egui::text::TextWrapping {
+            max_width: tw.max(1.0),
+            max_rows: 1,
+            break_anywhere: true,
+            overflow_character: Some('\u{2026}'),
+        };
+        let g = ui.painter().layout_job(job);
+        p.galley(pos2(r.left() + 20.0, r.top() + 11.0 - g.size().y / 2.0), g, call_color);
+        let res = if running {
+            format!("running \u{b7} {} s", (self.now - c.started).max(0.0) as u64)
+        } else {
+            c.result.clone()
+        };
+        let g = match &gone {
+            Some(name) => {
+                let mut job = LayoutJob::default();
+                let fmt = |color| TextFormat { font_id: sans(11.5), color, ..Default::default() };
+                job.append(&format!("{name}, disconnected \u{b7} "), 0.0, fmt(th().faint));
+                job.append(&res, 0.0, fmt(line2));
+                job.wrap = egui::text::TextWrapping {
+                    max_width: tw.max(1.0),
+                    max_rows: 1,
+                    break_anywhere: true,
+                    overflow_character: Some('\u{2026}'),
+                };
+                ui.painter().layout_job(job)
+            }
+            None => one_line(ui, &res, sans(11.5), line2, tw),
+        };
+        p.galley(pos2(r.left() + 20.0, r.top() + 27.0 - g.size().y / 2.0), g, line2);
+        p.text(
+            pos2(r.right(), r.top() + 10.0),
+            Align2::RIGHT_CENTER,
+            ago(self.now - c.started),
+            mono(10.5),
+            th().faint,
+        );
+        if let Some((e, applied)) = edit {
+            let b = Rect::from_min_size(pos2(r.right() - right, r.top() + 22.0), vec2(right, 22.0));
+            if applied {
+                let id = format!("agent-undo-{e}");
+                if small_button(ui, b, icon::UNDO, "Undo", &id, false).clicked() {
+                    self.actions.push(Action::UndoAgentEdit(e));
+                }
+                self.hits.push((id, b));
+            } else {
+                p.text(pos2(r.right(), r.top() + 27.0), Align2::RIGHT_CENTER, "Undone", sans(11.5), th().faint);
+            }
+            self.hits.push((format!("agent-edit-{e}"), r));
+        }
+        if gone.is_some() {
+            self.hits.push((format!("agent-gone-{i}"), r));
+        }
+        self.hits.push((format!("agent-call-{i}"), r));
     }
 
     /// A switch row: the title, what it says now and the switch.
@@ -688,8 +986,6 @@ impl Tab {
         let web = v.web;
         let live = v.allowed;
         let clients = v.clients.len();
-        let is_editing: Vec<bool> = (0..clients).map(|i| editing(now, v.times.get(i).and_then(|t| t.1))).collect();
-        let editing_n = is_editing.iter().filter(|e| **e).count();
         // Where each step stands.
         let (s1, s2, s3) = if web {
             let s1 = match v.fail {
@@ -739,20 +1035,41 @@ impl Tab {
         };
         let steps: Vec<St> = if web { vec![s1, s2, s3] } else { vec![s1, s2] };
         let done = steps.iter().filter(|s| **s == St::Done).count();
-        // The banner.
-        let lead = match clients {
-            0 => String::new(),
-            1 => format!("{} {}", v.clients[0].1, if editing_n == 1 { "is editing" } else { "is connected" }),
-            n if editing_n == 0 => format!("{n} agents connected"),
-            n => format!("{n} agents, {editing_n} editing"),
+        // The banner, from the same state as the hint bar's chip: amber while the agent that matters
+        // most has made no call for a while.
+        let top = v.lead(now);
+        let working = (0..clients)
+            .filter(|&i| matches!(v.now_of(i, now).state, Live::Running | Live::Active | Live::Quiet))
+            .count();
+        let lead = match (clients, top) {
+            (0, _) | (_, None) => String::new(),
+            (_, Some((i, n))) if n.state.warn() => {
+                let who = &v.clients[i].1;
+                if n.state == Live::Long {
+                    format!("{who} may be stuck")
+                } else {
+                    format!("{who}: no call for {}", span(n.quiet))
+                }
+            }
+            (1, Some((_, n))) => {
+                let who = &v.clients[0].1;
+                match n.state {
+                    Live::Running | Live::Active | Live::Quiet => format!("{who} is working"),
+                    Live::Done => format!("{who} is done"),
+                    _ => format!("{who} is connected"),
+                }
+            }
+            (n, _) if working == 0 => format!("{n} agents connected"),
+            (n, _) => format!("{n} agents, {working} working"),
         };
+        let warn = top.is_some_and(|(_, n)| n.state.warn());
         let since = v.since.map(|t| ago(now - t));
         let (tone, text, right) = if live && clients > 0 {
             let right = since
                 .clone()
                 .map(|s| if web { format!("paired {s}") } else { format!("since {s}") })
                 .unwrap_or_default();
-            (Tone::Ok, format!("Live · {lead}"), right)
+            if warn { (Tone::Busy, lead, String::new()) } else { (Tone::Ok, format!("Live \u{b7} {lead}"), right) }
         } else if live {
             let t = if web { "Paired · waiting for an agent" } else { "Listening · waiting for an agent" };
             (Tone::Ok, t.to_string(), format!("{done} of {}", steps.len()))
@@ -985,61 +1302,31 @@ impl Tab {
         ) {
             self.actions.push(Action::ReviewAgents(!v.review));
         }
-        let n = v.edits.len();
-        if n > 0 {
+        // ACTIVITY: the agents' latest calls, newest first, with a row where they went quiet.
+        let list = activity::items(&v, now);
+        if !list.is_empty() {
             ui.add_space(8.0);
-            let applied = v.edits.iter().filter(|e| e.applied).count();
+            let calls: Vec<usize> =
+                list.iter().filter_map(|it| if let Item::Call(i) = it { Some(*i) } else { None }).collect();
+            let applied = calls
+                .iter()
+                .filter(|&&i| v.calls[i].1.edit.and_then(|e| v.edits.get(e)).is_some_and(|e| e.applied))
+                .count();
             let r = self.block(ui, 22.0);
-            let g = ui.painter().layout_job(spaced("AGENT EDITS", sans(9.0), th().faint, 0.72));
+            let g = ui.painter().layout_job(spaced("ACTIVITY", sans(9.0), th().faint, 0.72));
             ui.painter().galley(pos2(r.left(), r.top() + 8.0 - g.size().y / 2.0), g, th().faint);
             ui.painter().text(
                 pos2(r.right(), r.top() + 8.0),
                 Align2::RIGHT_CENTER,
-                format!("{applied} applied"),
+                format!("{} call{} \u{b7} {applied} applied", calls.len(), if calls.len() == 1 { "" } else { "s" }),
                 mono(11.0),
                 th().faint,
             );
-            let rows = n.min(CARD_ROWS);
-            for i in (0..n).rev().take(rows) {
-                let e = v.edits[i].clone();
-                let r = self.block(ui, EDIT_ROW);
-                let cy = r.center().y;
-                ui.painter().circle_filled(pos2(r.left() + 5.0, cy), 3.0, if e.applied { th().ok } else { th().faint });
-                let b = Rect::from_min_size(pos2(r.right() - 64.0, cy - 11.0), vec2(64.0, 22.0));
-                let color = if e.applied { th().text } else { th().faint };
-                let g = one_line(ui, &e.label, sans(12.0), color, b.left() - 8.0 - (r.left() + 16.0));
-                let gw = g.size().x;
-                ui.painter().galley(pos2(r.left() + 16.0, cy - g.size().y / 2.0), g, color);
-                if e.applied {
-                    let id = format!("agent-undo-{i}");
-                    if small_button(ui, b, icon::UNDO, "Undo", &id, false).clicked() {
-                        self.actions.push(Action::UndoAgentEdit(i));
-                    }
-                    self.hits.push((id, b));
-                } else {
-                    ui.painter().line_segment(
-                        [pos2(r.left() + 16.0, cy), pos2(r.left() + 16.0 + gw, cy)],
-                        Stroke::new(1.0, th().faint),
-                    );
-                    ui.painter().text(
-                        pos2(b.right() - 6.0, cy),
-                        Align2::RIGHT_CENTER,
-                        "Undone",
-                        sans(11.5),
-                        th().faint,
-                    );
+            for item in &list {
+                match item {
+                    Item::Gap { secs, live, who } => self.gap_row(ui, *secs, *live, who.as_deref()),
+                    Item::Call(i) => self.call_row(ui, *i),
                 }
-                self.hits.push((format!("agent-edit-{i}"), r));
-            }
-            if n > rows {
-                let r = self.block(ui, 20.0);
-                ui.painter().text(
-                    r.left_center(),
-                    Align2::LEFT_CENTER,
-                    format!("{} earlier", n - rows),
-                    sans(11.5),
-                    th().faint,
-                );
             }
         }
         ui.add_space(8.0);

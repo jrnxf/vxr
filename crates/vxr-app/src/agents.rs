@@ -8,7 +8,7 @@
 //! ([`crate::live`]); this is what a call does to the scene, with no GPU and no socket, so it
 //! is the same in tests.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use serde_json::{Value, json};
 use vxr_core::Scene;
@@ -17,7 +17,7 @@ use vxr_core::select::Clip;
 use vxr_ops::{Changes, Limits, Op, OpKind, Session, clean};
 
 use crate::review::Review;
-use crate::ui::group_thousands;
+use crate::ui::{LIST_ROWS, group_thousands};
 
 type Cell = [i32; 3];
 
@@ -32,6 +32,84 @@ pub struct AgentEdit {
     pub step: u64,
     /// The step that took it back when it was not the last one (see [`Agents::undo_edit`]).
     pub undone_by: Option<u64>,
+}
+
+/// How many of an agent's latest calls are kept for the Agents tab's ACTIVITY list. When more
+/// come, the oldest query goes first, so the calls that made an edit keep their Undo.
+pub const CALLS_KEPT: usize = 10;
+
+/// One tool call an agent made, queries included: what it asked, what vxr answered in a line,
+/// and when (egui time, seconds). A call with no `answered` time is still running.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AgentCall {
+    pub tool: String,
+    /// A few words of its arguments: a name, a view, how parts were found.
+    pub arg: String,
+    /// The first line of the answer, or of the error.
+    pub result: String,
+    /// The call did not fail.
+    pub ok: bool,
+    pub started: f64,
+    pub answered: Option<f64>,
+    /// The edit it made, an index into [`Agents::edits`].
+    pub edit: Option<usize>,
+    /// With review on, the step it staged, an index into the change under review's steps,
+    /// until the user applies or discards the change.
+    pub staged: Option<usize>,
+    /// When calls between it and the one kept before it were dropped from the list, the longest
+    /// pause (seconds with no call) among them.
+    pub pause: Option<f64>,
+}
+
+impl AgentCall {
+    /// The longest pause with no call between `before`, the call kept before it, and it.
+    pub fn pause_after(&self, before: &AgentCall) -> f64 {
+        self.pause.unwrap_or(self.started - before.answered.unwrap_or(before.started))
+    }
+}
+
+/// A few words of a call's arguments: a quoted name or search, a view, or `done`'s summary.
+fn summarize(tool: &str, args: &Value) -> String {
+    let text = |key: &str| args.get(key).and_then(Value::as_str).map(vxr_ops::sanitize);
+    let cut = |s: String, n: usize| s.chars().take(n).collect::<String>().trim().to_string();
+    if tool == "done" {
+        return text("summary").map(|s| cut(s, 80)).unwrap_or_default();
+    }
+    for key in ["name", "query"] {
+        if let Some(name) = text(key).map(|s| cut(s, 24)).filter(|s| !s.is_empty()) {
+            return format!("\u{2018}{name}\u{2019}");
+        }
+    }
+    if let Some(view) = text("view").map(|s| cut(s, 12)).filter(|s| !s.is_empty()) {
+        return view;
+    }
+    String::new()
+}
+
+/// The answer as a line for a row: a JSON answer as its note, else a few of its fields; else its
+/// first line, without the running tally of staged edits.
+fn one_line(text: &str) -> String {
+    let text = text.split("; staged so far").next().unwrap_or(text);
+    let from_json = serde_json::from_str::<Value>(text).ok().and_then(|v| {
+        let obj = v.as_object()?;
+        if let Some(note) = obj.get("note").and_then(Value::as_str) {
+            return Some(note.to_string());
+        }
+        let fields: Vec<String> = obj
+            .iter()
+            .filter_map(|(k, v)| match v {
+                Value::Array(a) => Some(format!("{k} {}", a.len())),
+                Value::String(s) if s.len() <= 24 => Some(format!("{k} {s}")),
+                Value::Number(n) => Some(format!("{k} {n}")),
+                Value::Bool(b) => Some(format!("{k} {b}")),
+                _ => None,
+            })
+            .take(4)
+            .collect();
+        (!fields.is_empty()).then(|| fields.join(", "))
+    });
+    let line = from_json.unwrap_or_else(|| text.lines().find(|l| !l.trim().is_empty()).unwrap_or("").to_string());
+    vxr_ops::sanitize(&line).chars().take(110).collect::<String>().trim().to_string()
 }
 
 /// The agents and what they did, beside the scene.
@@ -56,9 +134,18 @@ pub struct Agents {
     /// When the tab paired with `vxr bridge` (egui time, seconds), while it is paired; in the
     /// desktop app, when the socket opened.
     pub since: Option<f64>,
-    /// When each connection was first listed, and its last call: when and which.
+    /// When each connection was first listed.
     seen: HashMap<u64, f64>,
-    last: HashMap<u64, (f64, String)>,
+    /// Each connection's latest calls ([`CALLS_KEPT`]), oldest first; a closed one's too.
+    calls: HashMap<u64, VecDeque<AgentCall>>,
+    /// The closed connections whose calls are still listed, by a key of their own in `calls`
+    /// (counting down from `u64::MAX`, apart from any connection's), and the agent's name:
+    /// until the list is cleared or newer calls push them out of it.
+    gone: HashMap<u64, String>,
+    /// How many closed connections were listed, for the next one's key.
+    closed: u64,
+    /// How many calls each connection made since it connected.
+    made: HashMap<u64, u64>,
     /// Each agent's own selection (map cells) by connection, kept between its calls so it
     /// never changes the user's; it starts from the user's. Kept with the model and map it
     /// was made on, and dropped once either changes.
@@ -150,21 +237,74 @@ impl Agents {
     /// agents have not heard yet stays.
     pub fn clear(&mut self) {
         self.edits.clear();
+        for key in std::mem::take(&mut self.gone).into_keys() {
+            self.calls.remove(&key);
+        }
+        for q in self.calls.values_mut() {
+            q.iter_mut().for_each(|c| (c.edit, c.staged) = (None, None));
+        }
         self.selections.clear();
         self.clips.clear();
         self.undone.clear();
         self.version += 1;
     }
 
-    /// A connection closed: its selection and what it had not heard go with it. Its edits
-    /// stay listed, for the user to take back.
-    pub fn forget(&mut self, conn: u64) {
+    /// Connection `conn` of agent `name` closed: its selection and what it had not heard go
+    /// with it. Its calls stay listed under its name, with the Undo of its edits, and a call it
+    /// was waiting on is over.
+    pub fn forget(&mut self, conn: u64, name: &str) {
         self.selections.remove(&conn);
         self.clips.remove(&conn);
         self.undone.remove(&conn);
         self.notices.remove(&conn);
         self.seen.remove(&conn);
-        self.last.remove(&conn);
+        self.made.remove(&conn);
+        if let Some(mut q) = self.calls.remove(&conn) {
+            for c in q.iter_mut().filter(|c| c.answered.is_none()) {
+                (c.answered, c.ok, c.result) = (Some(c.started), false, "disconnected before the answer".into());
+            }
+            let key = u64::MAX - self.closed;
+            self.closed += 1;
+            self.calls.insert(key, q);
+            self.gone.insert(key, name.to_string());
+        }
+        self.prune_gone();
+    }
+
+    /// The closed connections whose calls are still listed: their key among the calls and the
+    /// agent's name.
+    pub fn gone(&self) -> impl Iterator<Item = (u64, &str)> {
+        self.gone.iter().map(|(c, n)| (*c, n.as_str()))
+    }
+
+    /// Forget the closed connections with no call among the latest the list shows.
+    fn prune_gone(&mut self) {
+        let mut starts: Vec<f64> = self.calls.values().flatten().map(|c| c.started).collect();
+        starts.sort_by(|a, b| b.total_cmp(a));
+        let Some(&oldest) = starts.get(LIST_ROWS - 1) else { return };
+        let calls = &mut self.calls;
+        self.gone.retain(|key, _| {
+            let shown = calls.get(key).is_some_and(|q| q.iter().any(|c| c.started >= oldest));
+            if !shown {
+                calls.remove(key);
+            }
+            shown
+        });
+    }
+
+    /// Put `call` last among connection `conn`'s calls, the oldest query going when there are
+    /// more than [`CALLS_KEPT`] (the oldest call when every other made an edit).
+    fn keep_call(&mut self, conn: u64, call: AgentCall) {
+        let q = self.calls.entry(conn).or_default();
+        q.push_back(call);
+        if q.len() > CALLS_KEPT {
+            let i = q.iter().take(q.len() - 1).position(|c| c.edit.is_none() && c.staged.is_none()).unwrap_or(0);
+            let gone = q.remove(i).expect("a call at a kept index");
+            if i > 0 {
+                q[i].pause = Some(gone.pause_after(&q[i - 1]).max(q[i].pause_after(&gone)));
+            }
+        }
+        self.prune_gone();
     }
 
     /// Note the connections listed at `now`: when each first appeared.
@@ -175,24 +315,90 @@ impl Agents {
         self.seen.retain(|c, _| self.clients.iter().any(|(n, _)| n == c));
     }
 
-    /// Note that connection `conn` called `what` at `now`.
-    pub fn note_call(&mut self, conn: u64, now: f64, what: &str) {
+    /// Connection `conn` started calling `tool` with `args` at `now`. A call it repeats while
+    /// the first still waits (a New scene asking the user) is the same call.
+    pub fn begin_call(&mut self, conn: u64, now: f64, tool: &str, args: &Value) {
         self.seen.entry(conn).or_insert(now);
-        self.last.insert(conn, (now, what.to_string()));
+        if self.calls.get(&conn).and_then(|q| q.back()).is_some_and(|c| c.answered.is_none() && c.tool == tool) {
+            return;
+        }
+        *self.made.entry(conn).or_default() += 1;
+        self.keep_call(
+            conn,
+            AgentCall {
+                tool: tool.to_string(),
+                arg: summarize(tool, args),
+                result: String::new(),
+                ok: true,
+                started: now,
+                answered: None,
+                edit: None,
+                staged: None,
+                pause: None,
+            },
+        );
+    }
+
+    /// Connection `conn`'s running call was answered at `now`: with `result`, and the edit it made.
+    pub fn end_call(&mut self, conn: u64, now: f64, result: &Result<String, String>, edit: Option<usize>) {
+        let Some(call) = self.calls.get_mut(&conn).and_then(|q| q.iter_mut().rev().find(|c| c.answered.is_none()))
+        else {
+            return;
+        };
+        call.answered = Some(now);
+        call.edit = edit;
+        (call.ok, call.result) = match result {
+            Ok(t) => (true, one_line(t.split_once("; waiting for the user's review").map_or(t, |(head, _)| head))),
+            Err(e) => (false, one_line(e)),
+        };
+        if result.as_ref().is_ok_and(|t| t.contains("; waiting for the user's review")) {
+            call.result += " \u{b7} waits for review";
+        }
+    }
+
+    /// Note that connection `conn` called `what` at `now`, answered at once.
+    pub fn note_call(&mut self, conn: u64, now: f64, what: &str) {
+        self.begin_call(conn, now, what, &Value::Null);
+        self.end_call(conn, now, &Ok(String::new()), None);
     }
 
     /// Note that every connected agent last called `ago` seconds before `now`, keeping what it
-    /// called.
+    /// called (a scene summary when it has not called yet).
     pub fn called_ago(&mut self, now: f64, ago: f64) {
-        for (conn, _) in &self.clients {
-            let what = self.last.get(conn).map(|l| l.1.clone()).unwrap_or_default();
-            self.last.insert(*conn, (now - ago, what));
+        for conn in self.clients.iter().map(|c| c.0).collect::<Vec<_>>() {
+            if self.calls.get(&conn).is_none_or(VecDeque::is_empty) {
+                self.begin_call(conn, now, "scene_summary", &Value::Null);
+            }
+            let call = self.calls.get_mut(&conn).and_then(|q| q.back_mut()).expect("a call was just noted");
+            (call.started, call.answered) = (now - ago, Some(now - ago));
         }
+    }
+
+    /// Whether connection `conn` has a call that is not answered yet.
+    pub fn running(&self, conn: u64) -> bool {
+        self.calls(conn).any(|c| c.answered.is_none())
+    }
+
+    /// How many calls connection `conn` made since it connected.
+    pub fn made(&self, conn: u64) -> u64 {
+        self.made.get(&conn).copied().unwrap_or(0)
+    }
+
+    /// Connection `conn`'s latest calls, oldest first.
+    pub fn calls(&self, conn: u64) -> impl Iterator<Item = &AgentCall> {
+        self.calls.get(&conn).into_iter().flatten()
+    }
+
+    /// Put `call` among connection `conn`'s calls (a check's way to set the scene).
+    pub fn push_call(&mut self, conn: u64, call: AgentCall) {
+        self.seen.entry(conn).or_insert(call.started);
+        self.keep_call(conn, call);
     }
 
     /// When connection `conn` was first listed, and its last call.
     pub fn times(&self, conn: u64) -> (Option<f64>, Option<f64>) {
-        (self.seen.get(&conn).copied(), self.last.get(&conn).map(|l| l.0))
+        let last = self.calls.get(&conn).and_then(|q| q.back()).map(|c| c.answered.unwrap_or(c.started));
+        (self.seen.get(&conn).copied(), last)
     }
 
     /// What connection `conn` has not heard yet, taken: one line per applied or discarded
@@ -283,6 +489,13 @@ impl Agents {
         review.session.set_camera(self.camera);
         let r = review.session.call(scene, name, args.clone());
         self.image = review.session.take_image();
+        if review.session.steps().len() > steps
+            && review.session.steps().last().is_some_and(|s| s.ok)
+            && let Some(call) =
+                self.calls.get_mut(&conn).and_then(|q| q.iter_mut().rev().find(|c| c.answered.is_none()))
+        {
+            call.staged = Some(steps);
+        }
         // After the call: a resize or crop of the change moves its selection with the map.
         self.selections.insert(conn, (scene.at(), scene.reshapes(), review.session.selection().collect()));
         match review.session.clipboard() {
@@ -320,8 +533,12 @@ impl Agents {
         });
         for (i, step) in &landed {
             let (conn, label) = labels.remove(i).expect("a landed step was labelled");
+            if let Some(call) = self.calls.values_mut().flatten().find(|c| c.staged == Some(*i)) {
+                call.edit = Some(self.edits.len());
+            }
             self.edits.push(AgentEdit { conn, client: name_of(conn), label, step: *step, undone_by: None });
         }
+        self.unstage();
         for (conn, kept, all) in counts {
             let text = match kept {
                 0 => format!(
@@ -350,7 +567,15 @@ impl Agents {
             self.notify(conn, format!("vxr: the user discarded the change under review: none of your {} that waited is in the scene. Look at the scene again before you go on.", edits_text(all)));
         }
         review.session.discard(scene);
+        self.unstage();
         self.version += 1;
+    }
+
+    /// The change under review is gone: no call's step waits in it any more.
+    fn unstage(&mut self) {
+        for q in self.calls.values_mut() {
+            q.iter_mut().for_each(|c| c.staged = None);
+        }
     }
 
     /// Each agent's edits in the change under review: connection, kept, all.
@@ -713,6 +938,112 @@ mod tests {
     }
 
     #[test]
+    fn a_pause_among_dropped_queries_stays_on_the_call_after_them() {
+        let mut a = Agents::default();
+        let call = |a: &mut Agents, t: f64, tool: &str, edit| {
+            a.begin_call(1, t, tool, &Value::Null);
+            a.end_call(1, t, &Ok(String::new()), edit);
+        };
+        call(&mut a, 0.0, "box", Some(0));
+        call(&mut a, 1.0, "look", None);
+        for t in 0..10 {
+            call(&mut a, 301.0 + t as f64, "look", None);
+        }
+        let pauses: Vec<_> = a.calls(1).map(|c| c.pause).collect();
+        assert_eq!(pauses[..3], [None, Some(300.0), None], "the 5 min pause before the dropped look's next");
+        call(&mut a, 311.0, "look", None);
+        let pauses: Vec<_> = a.calls(1).map(|c| c.pause).collect();
+        assert_eq!(pauses[..3], [None, Some(300.0), None], "and it is carried on when that one goes too");
+    }
+
+    #[test]
+    fn the_ring_keeps_edits_over_queries_and_a_closed_connection_stays_listed() {
+        let mut a = Agents { clients: vec![(1, "Claude Code".into()), (2, "Codex".into())], ..Default::default() };
+        a.note_clients(0.0);
+        let call = |a: &mut Agents, conn, t: f64, tool: &str, edit| {
+            a.begin_call(conn, t, tool, &Value::Null);
+            a.end_call(conn, t, &Ok(String::new()), edit);
+        };
+        call(&mut a, 1, 0.0, "box", Some(0));
+        for t in 1..=12 {
+            call(&mut a, 1, 20.0 * t as f64, "look", None);
+        }
+        let tools: Vec<_> = a.calls(1).map(|c| c.tool.as_str()).collect();
+        assert_eq!((tools.len(), tools[0]), (CALLS_KEPT, "box"), "the oldest queries went, not the edit");
+        let pauses: Vec<_> = a.calls(1).map(|c| c.pause).collect();
+        assert_eq!(pauses[..3], [None, Some(20.0), None], "the call after the dropped ones keeps their longest pause");
+        for t in 0..CALLS_KEPT {
+            call(&mut a, 2, 20.0 + t as f64, "paint", Some(t + 1));
+        }
+        call(&mut a, 2, 40.0, "paint", Some(99));
+        assert_eq!(a.calls(2).next().and_then(|c| c.edit), Some(2), "every call an edit: the oldest went");
+        // Codex closes with a call running: its calls stay under its name, the call over.
+        a.begin_call(2, 41.0, "look", &Value::Null);
+        a.clients.retain(|c| c.0 != 2);
+        a.forget(2, "Codex");
+        let gone: Vec<_> = a.gone().map(|(k, n)| (k, n.to_string())).collect();
+        assert!(gone.len() == 1 && gone[0].0 != 2 && gone[0].1 == "Codex" && a.calls(2).count() == 0, "{gone:?}");
+        let key = gone[0].0;
+        let last = a.calls(key).last().unwrap();
+        assert!(last.answered.is_some() && !last.ok, "{last:?}");
+        // A new connection under its number starts afresh, and the closed one's calls stay.
+        call(&mut a, 2, 30.0, "box", Some(0));
+        assert_eq!((a.calls(2).count(), a.calls(key).count(), a.gone().count()), (1, CALLS_KEPT, 1));
+        // Newer calls push it out of the list.
+        for t in 0..LIST_ROWS {
+            call(&mut a, 1, 300.0 + t as f64, "paint", Some(t + 20));
+        }
+        assert_eq!((a.gone().count(), a.calls(key).count()), (0, 0));
+        // Clearing forgets the closed ones.
+        a.forget(2, "Codex");
+        a.clear();
+        assert_eq!((a.gone().count(), a.calls(1).count()), (0, CALLS_KEPT));
+    }
+
+    #[test]
+    fn edits_applied_from_review_are_linked_to_the_calls_that_staged_them() {
+        let (mut a, mut s, mut r) = (Agents::default(), scene(), None);
+        a.review = true;
+        a.clients = vec![(1, "Claude Code".into()), (2, "Codex".into())];
+        let call = |a: &mut Agents, s: &mut Scene, r: &mut Option<Review>, conn, name: &str, args: Value| {
+            a.begin_call(conn, 0.0, name, &args);
+            let out = staged(a, s, r, conn, "Agent", name, args);
+            a.end_call(conn, 0.0, &out, None);
+        };
+        call(&mut a, &mut s, &mut r, 1, "box", json!({"from": [0, 0, 0], "to": [1, 0, 0], "slot": 5}));
+        call(&mut a, &mut s, &mut r, 1, "scene_summary", json!({}));
+        call(&mut a, &mut s, &mut r, 2, "place", json!({"cells": [[4, 0, 4]], "slot": 7}));
+        call(&mut a, &mut s, &mut r, 2, "place", json!({"cells": [[5, 0, 5]], "slot": 7}));
+        call(&mut a, &mut s, &mut r, 2, "undo", json!({}));
+        call(&mut a, &mut s, &mut r, 1, "paint", json!({"slot": 9, "from_slot": 5}));
+        assert!(a.calls(1).chain(a.calls(2)).all(|c| c.edit.is_none()), "nothing lands while it waits");
+        assert_eq!(a.apply_review(&mut s, r.take().unwrap()), Ok(3));
+        let edits = |a: &Agents, conn| a.calls(conn).map(|c| (c.tool.clone(), c.edit)).collect::<Vec<_>>();
+        let named = |v: &[(&str, Option<usize>)]| v.iter().map(|(t, e)| (t.to_string(), *e)).collect::<Vec<_>>();
+        assert_eq!(edits(&a, 1), named(&[("box", Some(0)), ("scene_summary", None), ("paint", Some(2))]));
+        assert_eq!(edits(&a, 2), named(&[("place", Some(1)), ("place", None), ("undo", None)]));
+        assert_eq!(a.edits[a.calls(1).last().unwrap().edit.unwrap()].label, "Agent: paint 2 voxels");
+        // A discarded change links nothing, and the next change's steps are its own.
+        call(&mut a, &mut s, &mut r, 1, "erase", json!({"cells": [[4, 0, 4]]}));
+        a.discard_review(&mut s, r.take().unwrap());
+        call(&mut a, &mut s, &mut r, 2, "place", json!({"cells": [[6, 0, 6]], "slot": 3}));
+        assert_eq!(a.apply_review(&mut s, r.take().unwrap()), Ok(1));
+        assert_eq!(a.calls(1).last().map(|c| c.edit), Some(None));
+        assert_eq!(a.calls(2).last().map(|c| c.edit), Some(Some(3)));
+        // A change of only failed calls closes by itself, as the editor closes it, and the
+        // next change's first step goes to the call that made it.
+        call(&mut a, &mut s, &mut r, 1, "paint", json!({"slot": 3, "part": "nope"}));
+        assert_eq!(a.calls(1).last().map(|c| c.ok), Some(false));
+        let failed = r.take().unwrap();
+        assert!(!failed.session.steps().iter().any(|s| s.ok));
+        failed.session.discard(&mut s);
+        call(&mut a, &mut s, &mut r, 1, "box", json!({"from": [2, 0, 2], "to": [3, 0, 2], "slot": 4}));
+        assert_eq!(a.apply_review(&mut s, r.take().unwrap()), Ok(1));
+        let calls: Vec<_> = a.calls(1).map(|c| (c.tool.clone(), c.edit)).collect();
+        assert_eq!(calls[calls.len() - 2..], [("paint".to_string(), None), ("box".to_string(), Some(4))]);
+    }
+
+    #[test]
     fn with_review_on_edits_wait_until_applied_as_steps_named_after_the_agent() {
         let (mut a, mut s, mut r) = (Agents::default(), scene(), None);
         a.review = true;
@@ -791,7 +1122,7 @@ mod tests {
         assert!(t.starts_with("vxr: the user discarded the change under review: none of your 1 edit"), "{t}");
         // A closed connection is not told.
         staged(&mut a, &mut s, &mut r, 2, "Codex", "place", json!({"cells": [[6, 0, 6]], "slot": 3})).unwrap();
-        a.forget(2);
+        a.forget(2, "Codex");
         a.clients.retain(|c| c.0 != 2);
         a.discard_review(&mut s, r.take().unwrap());
         assert!(a.take_notices(2).is_none());
@@ -1008,7 +1339,7 @@ mod tests {
         let (mut a, mut s) = (Agents::default(), scene());
         by_hand(&mut s, &[([0, 0, 0], 2), ([1, 0, 0], 2)]);
         ok(&mut a, &mut s, 1, "Claude Code", "select", json!({"from": [1, 0, 0], "to": [1, 0, 0]}));
-        a.forget(1);
+        a.forget(1, "Claude Code");
         let _ = a.call(&mut s, 1, "Claude Code", "paint", &json!({"slot": 9, "selection": true}));
         assert_eq!(at(&s, [1, 0, 0]), 2, "the old connection's selection is gone");
         assert_eq!(a.edits.len(), 0);

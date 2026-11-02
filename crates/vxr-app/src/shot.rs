@@ -7,7 +7,7 @@ use std::path::Path;
 use vxr_app::Editor;
 use vxr_app::editor::{Button, NEW_SIZE};
 use vxr_app::host::{Opened, Platform, Saved, run_action};
-use vxr_app::ui::{Action, Region, Shape, Tool};
+use vxr_app::ui::{Action, Live, Region, Shape, Tool};
 use vxr_core::Scene;
 use vxr_render::Gpu;
 use vxr_render::gpu::read_texture;
@@ -321,6 +321,8 @@ fn run_steps(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     assistant_column(dir)?;
     agent_chip_squeezed(dir)?;
     agent_chip_states(dir)?;
+    agent_activity(dir)?;
+    agent_waiting(dir)?;
     palette_beside_flyouts()?;
     column_short_window(dir)?;
     agents_states(dir)?;
@@ -3844,6 +3846,8 @@ fn agent_chip_squeezed(dir: &Path) -> Result<(), String> {
         (a.available, a.allowed, a.since) = (true, true, Some(now - 240.0));
         a.clients = vec![(1, "Claude Code".to_string())];
         a.note_clients(now - 240.0);
+        // Quiet for 1 min 40 s: the chip's longest words.
+        a.push_call(1, call("make_object", "\u{2018}chair\u{2019}", "new object", 100.0).at(now));
         s.ui_click("rail-color")?;
         if all {
             s.ui_click("palette-all")?;
@@ -3870,26 +3874,132 @@ fn agent_chip_squeezed(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// A chip case: name, agents with their last call's age, the chip's words.
-type Case = (&'static str, &'static [(&'static str, Option<f64>)], &'static str);
+/// A call for a check: tool, argument and answer, started `ago` seconds ago and answered at once
+/// (a call with no `answered` is running).
+fn call(tool: &str, arg: &str, result: &str, ago: f64) -> Called {
+    Called(vxr_app::agents::AgentCall {
+        tool: tool.into(),
+        arg: arg.into(),
+        result: result.into(),
+        ok: true,
+        started: -ago,
+        answered: Some(-ago),
+        edit: None,
+        staged: None,
+        pause: None,
+    })
+}
 
-/// The hint bar's chip says what the Agents tab's rows say: "editing" with a filled dot only
-/// while an agent called in the last 5 s, else "connected" and how long it has been idle, with
-/// a hollow dot. One agent called 1 s ago, 90 s ago and never; two agents, one, both and none
-/// editing. Each dot on screen, the chip's and every row's in the Agents tab, is filled exactly
-/// when that state is editing.
+/// A call made `ago` seconds before a clock reading: `.at(now)` puts it on the clock.
+struct Called(vxr_app::agents::AgentCall);
+
+impl Called {
+    fn at(mut self, now: f64) -> vxr_app::agents::AgentCall {
+        let ago = -self.0.started;
+        (self.0.started, self.0.answered) = (now - ago, Some(now - ago));
+        self.0
+    }
+
+    /// Still running, since `ago` seconds before `now`.
+    fn at_running(mut self, now: f64) -> vxr_app::agents::AgentCall {
+        self.0.started += now;
+        self.0.answered = None;
+        self.0
+    }
+}
+
+/// A chip case: name, each agent with its latest calls (seconds ago, relative to the clock), the
+/// chip's words and the state the first agent is in.
+type Case = (&'static str, &'static [(&'static str, &'static [(&'static str, &'static str, f64)])], &'static str, Live);
+
+/// The hint bar's chip and the Agents tab read one state (`ui::activity`): a call running, one in
+/// the last 5 s, one under 45 s ago, 45 s to 2 min of quiet (amber, counting), more than 2 min
+/// ("may be stuck", Stop solid), `done`, and idle. The chip names the agent's last call in plain
+/// words with its icon and says "editing" nowhere; the Agents tab's rows and banner agree with
+/// it, and every dot on screen, the chip's and every row's, is hollow exactly when the agent is idle.
 fn agent_chip_states(dir: &Path) -> Result<(), String> {
     let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
-    let cases: [Case; 6] = [
-        ("editing", &[("Claude Code", Some(1.0))], "Claude Code is editing"),
-        ("idle", &[("Claude Code", Some(90.0))], "Claude Code connected · idle 1 min"),
-        ("never", &[("Claude Code", None)], "Claude Code connected · idle 4 min"),
-        ("one-of-two", &[("Claude Code", Some(1.0)), ("Codex", Some(90.0))], "1 of 2 agents are editing"),
-        ("both-editing", &[("Claude Code", Some(1.0)), ("Codex", Some(2.0))], "2 agents are editing"),
-        ("both-idle", &[("Claude Code", Some(90.0)), ("Codex", Some(200.0))], "2 agents connected · idle 1 min"),
+    // (tool, argument, seconds ago); a negative age is a call still running that long.
+    const MUG: &[(&str, &str, f64)] = &[("make_object", "\u{2018}mug\u{2019}", 1.5)];
+    const CHAIR: &[(&str, &str, f64)] = &[("make_object", "\u{2018}chair\u{2019}", 12.5)];
+    let cases: [Case; 14] = [
+        (
+            "running",
+            &[("Claude Code", &[("look", "iso", -3.5)])],
+            "Claude Code \u{b7} Looking at the scene \u{b7} 3 s",
+            Live::Running,
+        ),
+        (
+            "active",
+            &[("Claude Code", MUG)],
+            "Claude Code \u{b7} Made \u{2018}mug\u{2019} \u{b7} just now",
+            Live::Active,
+        ),
+        (
+            "quiet",
+            &[("Claude Code", CHAIR)],
+            "Claude Code \u{b7} Made \u{2018}chair\u{2019} \u{b7} 12 s ago",
+            Live::Quiet,
+        ),
+        (
+            "stall",
+            &[("Claude Code", &[("make_object", "\u{2018}chair\u{2019}", 62.5)])],
+            "No call from Claude Code for 1 min 2 s \u{b7} last made \u{2018}chair\u{2019}",
+            Live::Stall,
+        ),
+        (
+            "long",
+            &[("Claude Code", &[("make_object", "\u{2018}chair\u{2019}", 181.5)])],
+            "Claude Code may be stuck: no call for 3 min 1 s",
+            Live::Long,
+        ),
+        ("done", &[("Claude Code", &[("done", "8 objects", 6.5)])], "Claude Code is done \u{b7} 8 objects", Live::Done),
+        (
+            "done-idle",
+            &[("Claude Code", &[("done", "8 objects", 30.5)])],
+            "Claude Code connected \u{b7} idle 30 s",
+            Live::Idle,
+        ),
+        (
+            "long-past-10-min",
+            &[("Claude Code", &[("look", "iso", 700.5)])],
+            "Claude Code may be stuck: no call for 11 min 40 s",
+            Live::Long,
+        ),
+        ("never", &[("Claude Code", &[])], "Claude Code connected \u{b7} idle 4 min", Live::Idle),
+        (
+            "two-active",
+            &[("Claude Code", MUG), ("Codex", &[("erase", "", 3.5)])],
+            "Claude Code +1 \u{b7} Made \u{2018}mug\u{2019} \u{b7} just now",
+            Live::Active,
+        ),
+        (
+            "two-one-stalled",
+            &[("Claude Code", MUG), ("Codex", &[("make_object", "\u{2018}chair\u{2019}", 62.5)])],
+            "No call from Codex +1 for 1 min 2 s \u{b7} last made \u{2018}chair\u{2019}",
+            Live::Active,
+        ),
+        (
+            "two-idle",
+            &[("Claude Code", &[("done", "", 90.5)]), ("Codex", &[("done", "", 200.5)])],
+            "Claude Code +1 connected \u{b7} idle 1 min",
+            Live::Idle,
+        ),
+        (
+            "write",
+            &[("Claude Code", &[("palette_set", "", 1.5)])],
+            "Claude Code \u{b7} Set colours \u{b7} just now",
+            Live::Active,
+        ),
+        (
+            "unknown-tool",
+            &[("Claude Code", &[("frobnicate", "", 1.5)])],
+            "Claude Code \u{b7} Called frobnicate \u{b7} just now",
+            Live::Active,
+        ),
     ];
     let mut widths = Vec::new();
-    for (name, agents, text) in cases {
+    for (name, agents, text, first) in cases {
         let mut s = Shot::new(house(), "house.vox", 2.0)?;
         s.ed.ui.coach = false;
         s.frames(2);
@@ -3898,15 +4008,20 @@ fn agent_chip_states(dir: &Path) -> Result<(), String> {
         (a.available, a.allowed, a.since) = (true, true, Some(now - 240.0));
         a.clients = agents.iter().enumerate().map(|(i, (n, _))| (i as u64 + 1, n.to_string())).collect();
         a.note_clients(now - 240.0);
-        for (i, (_, ago)) in agents.iter().enumerate() {
-            if let Some(ago) = ago {
-                a.note_call(i as u64 + 1, now - ago, "box");
+        for (i, (_, calls)) in agents.iter().enumerate() {
+            for (tool, arg, ago) in *calls {
+                let made = call(tool, arg, "ok", ago.abs());
+                let made = if *ago < 0.0 { made.at_running(now) } else { made.at(now) };
+                a.push_call(i as u64 + 1, made);
             }
         }
         s.frames(3);
         let t = s.ed.ctx.input(|i| i.time);
         let got = s.ed.ui.agent_chip_text(t);
         check(got == text, format!("{name}: the chip says {text:?}, got {got:?}"))?;
+        check(!got.contains("editing"), format!("{name}: the chip never says editing: {got:?}"))?;
+        let state = s.ed.ui.agents.now_of(0, t).state;
+        check(state == first, format!("{name}: the first agent is {first:?}, got {state:?}"))?;
         check(
             s.ed.ui.hits.contains_key("agent-stop") && s.ed.ui.hits.contains_key("agent-chip"),
             format!("{name}: the chip keeps its Stop"),
@@ -3932,28 +4047,391 @@ fn agent_chip_states(dir: &Path) -> Result<(), String> {
             (0..3).map(|i| (m[i] as i32 - b[i] as i32).abs()).sum::<i32>() > 60
         };
         let rect = |name: &str| s.ed.ui.hits.get(name).copied().ok_or(format!("{name}: no {name} on screen"));
-        let editing: Vec<bool> = agents.iter().map(|(_, a)| a.is_some_and(|a| a < 5.0)).collect();
-        let chip = rect("agent-chip")?;
-        let chip_dot = filled(egui::pos2(chip.left() + 15.5, chip.center().y));
+        let lead = s.ed.ui.agents.lead(t).map(|(_, n)| n.state);
+        let others: Vec<Live> = (0..agents.len()).map(|i| s.ed.ui.agents.now_of(i, t).state).collect();
         let rows = (1..=agents.len())
             .map(|conn| rect(&format!("agents-dot-{conn}")).map(|r| filled(r.center())))
             .collect::<Result<Vec<_>, _>>()?;
         check(
-            chip_dot == editing.contains(&true) && rows == editing,
-            format!(
-                "{name}: the chip's dot is filled ({chip_dot}) and the Agents tab's rows ({rows:?}) as they edit \
-                 ({editing:?})"
-            ),
+            rows == others.iter().map(|st| *st != Live::Idle).collect::<Vec<_>>(),
+            format!("{name}: a row's dot is hollow exactly when its agent is idle: {rows:?} for {others:?}"),
         )?;
-        if name == "editing" || name == "idle" {
+        // The chip's dot (the running ring and the alert triangle have their own marks).
+        if !matches!(lead, Some(Live::Running | Live::Long)) {
+            let chip = rect("agent-chip")?;
+            let chip_dot = filled(egui::pos2(chip.left() + 15.5, chip.center().y));
+            check(
+                chip_dot == (lead != Some(Live::Idle)),
+                format!("{name}: the chip's dot is filled ({chip_dot}) unless the lead agent ({lead:?}) is idle"),
+            )?;
+        }
+        if ["running", "active", "stall", "long", "done", "never", "two-one-stalled"].contains(&name) {
             s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
             s.save_png(&dir.join(format!("app-2x-agent-chip-{name}.png")))?;
         }
     }
+    let by = |n: &str| widths.iter().find(|w| w.0 == n).map_or(0.0, |w| w.1);
     check(
-        widths[0].1 != widths[1].1 && widths.iter().all(|w| w.1 > 0.0),
+        widths.iter().all(|w| w.1 > 0.0) && by("active") != by("stall") && by("stall") != by("long"),
         format!("the chip's width follows its words: {widths:?}"),
     )
+}
+
+/// The ACTIVITY list and the live state, through the editor's own `agent_call` as the socket
+/// reaches it: queries and edits both listed newest first with a line of result, the edits with
+/// their Undo (the AGENT EDITS list is gone), a call still running with its seconds, 45 s of
+/// quiet (the banner and chip amber, a live gap row), 2 min ("may be stuck", Stop solid), a grey
+/// gap row once it calls again, `done`'s summary, and only the latest 10 calls kept. In Neutral
+/// and Paper at 1280 points, and the list at phone widths.
+fn agent_activity(dir: &Path) -> Result<(), String> {
+    use serde_json::json;
+    use vxr_app::theme::ThemeChoice;
+    let connect = |s: &mut Shot| {
+        let now = s.ed.ctx.input(|i| i.time);
+        let a = &mut s.ed.agents;
+        (a.available, a.allowed, a.since) = (true, true, Some(now - 240.0));
+        a.clients = vec![(1, "Claude Code".to_string())];
+        a.note_clients(now - 240.0);
+    };
+    let ask = |s: &mut Shot, tool: &str, args: serde_json::Value| -> Result<String, String> {
+        match s.ed.agent_call(1, "Claude Code", tool, &args) {
+            Some(Ok(r)) => Ok(r.text),
+            Some(Err(e)) => Err(format!("{tool}: {e}")),
+            None => Err(format!("{tool}: waits")),
+        }
+    };
+    let hits = |s: &Shot, prefix: &str| s.ed.ui.hits.keys().filter(|k| k.starts_with(prefix)).count();
+    let chip = |s: &Shot| s.ed.ui.agent_chip_text(s.ed.ctx.input(|i| i.time));
+    let state = |s: &Shot| s.ed.ui.agents.now_of(0, s.ed.ctx.input(|i| i.time)).state;
+    for (theme, tag) in [(ThemeChoice::Neutral, ""), (ThemeChoice::Paper, "-paper")] {
+        let mut s = Shot::sized(house(), "house.vox", 2.0, (1280, 1000))?;
+        s.ed.ui.theme = theme;
+        s.ed.ui.coach = false;
+        s.frames(2);
+        connect(&mut s);
+        let flag = json!({"from": [9, 7, 8], "to": [12, 9, 8], "slot": 50});
+        let calls: [(&str, serde_json::Value); 7] = [
+            ("scene_summary", json!({})),
+            ("find_parts", json!({"query": "roof"})),
+            ("get_voxels", json!({"from": [8, 0, 8], "to": [12, 2, 8]})),
+            ("look", json!({"view": "iso", "size": 64})),
+            ("box", flag),
+            ("box", json!({"from": [9, 10, 8], "to": [12, 11, 8], "slot": 51})),
+            ("erase", json!({"cells": [[0, 0, 0], [99, 99, 99]]})),
+        ];
+        let mut failed = Vec::new();
+        for (tool, args) in calls {
+            if let Err(e) = ask(&mut s, tool, args) {
+                failed.push(e);
+            }
+            s.time += 3.0;
+            s.frames(1);
+        }
+        s.frames(3);
+        let v = &s.ed.ui.agents;
+        let tools: Vec<&str> = v.calls.iter().map(|c| c.1.tool.as_str()).collect();
+        check(
+            tools == ["scene_summary", "find_parts", "get_voxels", "look", "box", "box", "erase"],
+            format!("every call is listed, queries too: {tools:?} (failed: {failed:?})"),
+        )?;
+        let edit_of: Vec<Option<usize>> = v.calls.iter().map(|c| c.1.edit).collect();
+        check(
+            edit_of[..4] == [None; 4] && edit_of[4] == Some(0) && edit_of[5] == Some(1),
+            format!("the edits link to their undo steps, the queries to none: {edit_of:?}"),
+        )?;
+        check(
+            v.calls.iter().all(|c| c.1.answered.is_some() && (c.1.ok || c.1.tool == "erase") && !c.1.result.is_empty()),
+            format!(
+                "each call has its answer in a line: {:?}",
+                v.calls.iter().map(|c| &c.1.result).collect::<Vec<_>>()
+            ),
+        )?;
+        check(
+            v.calls[0].1.arg.is_empty() && v.calls[1].1.arg == "\u{2018}roof\u{2019}",
+            "and a few words of its arguments".into(),
+        )?;
+        s.ed.ui.open_agents();
+        s.frames(4);
+        check(
+            hits(&s, "agent-call-") == 7 && hits(&s, "agent-undo-") == 2 && hits(&s, "agent-edit-") == 2,
+            "ACTIVITY lists the 7 calls, 2 with an Undo".into(),
+        )?;
+        s.save_png(&dir.join(format!("app-2x-agent-activity{tag}.png")))?;
+        // Undo from the list: that edit says Undone, the other keeps its button, the rows stay.
+        s.ui_click("agent-undo-1")?;
+        s.frames(3);
+        let v = &s.ed.ui.agents;
+        check(
+            !v.edits[1].applied && v.edits[0].applied && hits(&s, "agent-undo-") == 1 && hits(&s, "agent-call-") == 7,
+            "Undo in ACTIVITY takes that edit back and keeps the row".into(),
+        )?;
+        // A call that has not been answered runs: the chip and the row show its seconds.
+        let now = s.ed.ctx.input(|i| i.time);
+        s.ed.agents.begin_call(1, now - 1.5, "look", &json!({"view": "iso"}));
+        s.frames(3);
+        check(state(&s) == Live::Running, format!("a call without an answer is running: {:?}", state(&s)))?;
+        check(
+            chip(&s) == "Claude Code \u{b7} Looking at the scene \u{b7} 1 s",
+            format!("the chip counts it: {}", chip(&s)),
+        )?;
+        s.save_png(&dir.join(format!("app-2x-agent-running{tag}.png")))?;
+        s.ed.agents.end_call(1, now, &Ok("picture 64 x 64 from iso".into()), None);
+        s.frames(2);
+        // 62 s of quiet: amber, counting, with the pause on top of the list.
+        s.time += 62.0;
+        s.frames(3);
+        check(state(&s) == Live::Stall, format!("62 s without a call is a stall: {:?}", state(&s)))?;
+        check(
+            chip(&s).starts_with("No call from Claude Code for 1 min 2 s \u{b7} last looked at the scene"),
+            format!("the chip counts the quiet: {}", chip(&s)),
+        )?;
+        check(
+            hits(&s, "agent-gap-live") == 1 && hits(&s, "agents-stop-1") == 1,
+            "the list opens on the live pause".into(),
+        )?;
+        s.save_png(&dir.join(format!("app-2x-agent-stall{tag}.png")))?;
+        // The counter ticks without moving the card: the chip keeps its width from 62 s to 63 s.
+        let width = |s: &Shot| s.ed.ui.hits.get("agent-chip").map(|r| (r.left(), r.width()));
+        let (first, text) = (width(&s), chip(&s));
+        s.time += 1.0;
+        s.frames(3);
+        check(
+            chip(&s) != text && width(&s) == first,
+            format!(
+                "the chip's words change ({text} to {}) and its place and width do not: {first:?}, {:?}",
+                chip(&s),
+                width(&s)
+            ),
+        )?;
+        // Past 2 min: may be stuck.
+        s.time += 70.0;
+        s.frames(3);
+        check(state(&s) == Live::Long, format!("over 2 min is long: {:?}", state(&s)))?;
+        check(chip(&s).contains("may be stuck: no call for 2 min"), format!("the chip says so: {}", chip(&s)))?;
+        s.save_png(&dir.join(format!("app-2x-agent-long{tag}.png")))?;
+        // It calls again: the pause stays in the list, grey.
+        ask(&mut s, "scene_summary", json!({}))?;
+        s.frames(3);
+        check(state(&s) == Live::Active, "a new call ends the warning".into())?;
+        check(
+            hits(&s, "agent-gap-live") == 0 && hits(&s, "agent-gap") == 1,
+            "and the pause stays as a grey row where it happened".into(),
+        )?;
+        s.save_png(&dir.join(format!("app-2x-agent-gap{tag}.png")))?;
+        // `done` shows its summary, briefly.
+        ask(&mut s, "done", json!({"summary": "drew a flag"}))?;
+        s.frames(3);
+        check(chip(&s) == "Claude Code is done \u{b7} drew a flag", format!("done: {}", chip(&s)))?;
+        s.save_png(&dir.join(format!("app-2x-agent-done{tag}.png")))?;
+        // Only the latest 10 calls are kept.
+        for _ in 0..12 {
+            ask(&mut s, "scene_summary", json!({}))?;
+        }
+        s.frames(3);
+        check(
+            s.ed.ui.agents.calls.len() == 10 && hits(&s, "agent-call-") == 10 && s.ed.agents.made(1) == 22,
+            format!("the ring keeps 10 of {} calls", s.ed.agents.made(1)),
+        )?;
+        // The queries went first: the edits made before them keep their rows and the Undo.
+        check(
+            s.ed.ui.hits.contains_key("agent-undo-0") && hits(&s, "agent-edit-") == 2,
+            "an edit before 12 queries keeps its Undo row".into(),
+        )?;
+        s.ui_click("agent-undo-0")?;
+        s.frames(3);
+        check(!s.ed.ui.agents.edits[0].applied, "and its Undo takes it back".into())?;
+    }
+    // An agent edits, says it is done and disconnects: its rows stay, its name muted, with no
+    // live state, and the edit's Undo works; opening a file forgets them.
+    {
+        let mut s = Shot::sized(house(), "house.vox", 2.0, (1280, 1000))?;
+        s.ed.ui.coach = false;
+        s.frames(2);
+        connect(&mut s);
+        ask(&mut s, "box", json!({"from": [9, 7, 8], "to": [12, 9, 8], "slot": 50}))?;
+        ask(&mut s, "done", json!({"summary": "drew a flag"}))?;
+        s.ed.agents.clients.clear();
+        s.ed.agents.forget(1, "Claude Code");
+        s.time += 200.0;
+        s.ed.ui.open_agents();
+        s.frames(6);
+        check(
+            hits(&s, "agent-gone-") == 2
+                && s.ed.ui.hits.contains_key("agent-undo-0")
+                && hits(&s, "agent-gap") == 0
+                && !s.ed.ui.hits.contains_key("agent-chip"),
+            "a disconnected agent's calls stay listed, with the Undo and no warning".into(),
+        )?;
+        s.save_png(&dir.join("app-2x-agent-gone.png"))?;
+        s.ui_click("agent-undo-0")?;
+        s.frames(3);
+        check(
+            !s.ed.ui.agents.edits[0].applied && hits(&s, "agent-gone-") == 2,
+            "its Undo takes the edit back and the rows stay".into(),
+        )?;
+        s.ed.load(house(), "other.vox")?;
+        s.frames(3);
+        check(s.ed.ui.agents.calls.is_empty() && hits(&s, "agent-call-") == 0, "opening a file forgets them".into())?;
+    }
+    // At phone widths the list, its rows and Undo stay on screen.
+    for css in [(360u32, 780u32), (390, 844), (430, 932)] {
+        let mut s = Shot::sized(house(), "house.vox", 3.0, css)?;
+        s.ed.set_touch(true);
+        s.frames(3);
+        connect(&mut s);
+        for (tool, args) in [
+            ("scene_summary", json!({})),
+            ("box", json!({"from": [9, 7, 8], "to": [12, 9, 8], "slot": 50})),
+            ("find_parts", json!({"query": "a part with a rather long name to cut"})),
+        ] {
+            ask(&mut s, tool, args)?;
+        }
+        s.time += 62.0;
+        s.ed.ui.open_agents();
+        s.frames(6);
+        let (w, h) = (s.ed.width as f32 / s.ed.ppp, s.ed.height as f32 / s.ed.ppp);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h)).expand(0.5);
+        let rows: Vec<_> = s.ed.ui.hits.iter().filter(|(k, _)| k.starts_with("agent-call-")).collect();
+        let off: Vec<_> = rows.iter().filter(|(_, r)| r.left() < screen.left() || r.right() > screen.right()).collect();
+        let undo = s.ed.ui.hits.get("agent-undo-0").copied();
+        check(
+            rows.len() == 3 && off.is_empty() && undo.is_some_and(|r| r.right() <= screen.right()),
+            format!("{css:?}: the rows ({}) and Undo stay inside the window: {off:?}, {undo:?}", rows.len()),
+        )?;
+        s.save_png(&dir.join(format!("app-3x-phone-agent-activity-{}x{}.png", css.0, css.1)))?;
+    }
+    Ok(())
+}
+
+/// The wall clock of a check, set by hand ([`vxr_app::Editor::wall_clock`] is a plain function).
+static WALL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn shot_wall() -> f64 {
+    f64::from_bits(WALL.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+fn set_wall(secs: f64) {
+    WALL.store(secs.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The calls that do not answer at once, through the editor's own `agent_call`: calls served
+/// while no frame draws (a minimised window) are stamped when they came, so the window coming
+/// back does not say "may be stuck"; a request queued behind another shows as running, not as
+/// silence; a render export stays running until its files are handed over, and a failed hand-over
+/// shows as failed; a New scene waiting for the user's answer is one running call, repeated or
+/// not, and a spinner does not redraw every frame meanwhile.
+fn agent_waiting(dir: &Path) -> Result<(), String> {
+    use serde_json::json;
+    let mut s = Shot::sized(house(), "house.vox", 2.0, (1280, 1000))?;
+    s.ed.wall_clock = shot_wall;
+    set_wall(0.0);
+    s.ed.ui.coach = false;
+    s.frames(2);
+    let now = s.ed.ctx.input(|i| i.time);
+    let a = &mut s.ed.agents;
+    (a.available, a.allowed, a.since) = (true, true, Some(now - 240.0));
+    a.clients = vec![(1, "Claude Code".to_string()), (2, "Codex".to_string())];
+    a.note_clients(now - 240.0);
+    let ask = |s: &mut Shot, conn: u64, tool: &str, args: serde_json::Value| {
+        let who = if conn == 1 { "Claude Code" } else { "Codex" };
+        s.ed.agent_call(conn, who, tool, &args)
+    };
+    let state = |s: &Shot, i: usize| s.ed.ui.agents.now_of(i, s.ed.ctx.input(|t| t.time)).state;
+    let chip = |s: &Shot| s.ed.ui.agent_chip_text(s.ed.ctx.input(|t| t.time));
+    let last = |s: &Shot, conn: u64| s.ed.agents.calls(conn).last().cloned();
+
+    // 1. Five minutes pass on the wall clock with no frame; both agents call meanwhile.
+    s.frames(1);
+    set_wall(300.0);
+    for conn in [1, 2] {
+        ask(&mut s, conn, "scene_summary", json!({})).ok_or("scene_summary waited")?.map_err(|e| e.to_string())?;
+    }
+    // The window comes back: its first frame is 5 minutes later.
+    s.time += 300.0;
+    s.frames(3);
+    check(
+        state(&s, 0) == Live::Active && !chip(&s).contains("stuck"),
+        format!("calls served with no frame are stamped when they came: {:?}, {}", state(&s, 0), chip(&s)),
+    )?;
+
+    // 2. Codex's `look` waits behind a render export of Claude Code's.
+    set_wall(300.0);
+    s.ed.agent_queued(2, "look", &json!({"view": "iso"}));
+    check(s.ed.agents.running(2), "a queued request shows as a running call".into())?;
+    let r = ask(&mut s, 1, "export", json!({"kind": "render"})).ok_or("export waited")?;
+    check(
+        r.is_ok() && s.ed.agent_waits(1) && s.ed.agents.running(1),
+        "the render export keeps Claude Code's call running".into(),
+    )?;
+    s.time += 130.0;
+    s.frames(3);
+    check(
+        state(&s, 1) == Live::Running && chip(&s).contains(" \u{b7} 130 s") && !chip(&s).contains("stuck"),
+        format!("the held agent is running, not silent: {:?}, {}", state(&s, 1), chip(&s)),
+    )?;
+    s.save_png(&dir.join("app-2x-agent-queued.png"))?;
+    // It is served later: the same call, answered once.
+    ask(&mut s, 2, "look", json!({"view": "iso", "size": 64})).ok_or("look waited")?.map_err(|e| e.to_string())?;
+    let looks = s.ed.agents.calls(2).filter(|c| c.tool == "look").count();
+    check(looks == 1 && !s.ed.agents.running(2), format!("serving a queued call adds none: {looks} look calls"))?;
+
+    // 3. The export ends: its call stays running until the host has written the files.
+    let mut rendered = None;
+    for _ in 0..3000 {
+        s.frames(1);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        if let Some(r) = s.ed.take_agent_render() {
+            rendered = Some(r);
+            break;
+        }
+    }
+    check(rendered.as_ref().is_some_and(|r| r.is_ok()), format!("the render finished: {rendered:?}"))?;
+    check(s.ed.agents.running(1), "and its call runs until the files are handed over".into())?;
+    s.ed.finish_agent_call(1, &Err("could not write house-render.png into Downloads: permission denied".into()));
+    let c = last(&s, 1).ok_or("no call")?;
+    check(
+        !c.ok && c.answered.is_some() && c.result.contains("could not write"),
+        format!("a failed hand-over shows as failed: {c:?}"),
+    )?;
+
+    // 4. A New scene with unsaved edits asks the user; the agent's call is one running call.
+    // The render export showed the render corner, which converges slowly on a software GPU and
+    // redraws every frame until it does; hidden, the spinner check sees only the agent's call.
+    s.ed.ui.show_render = false;
+    ask(&mut s, 1, "box", json!({"from": [9, 7, 8], "to": [12, 9, 8], "slot": 50}))
+        .ok_or("box waited")?
+        .map_err(|e| e.to_string())?;
+    let before = s.ed.agents.calls(1).count();
+    check(ask(&mut s, 1, "new_scene", json!({})).is_none(), "New scene waits for the user".into())?;
+    check(ask(&mut s, 1, "new_scene", json!({})).is_none(), "and again".into())?;
+    s.frames(3);
+    check(
+        s.ed.agents.calls(1).count() == before + 1 && s.ed.agents.running(1) && state(&s, 0) == Live::Running,
+        "asking twice is one running call".into(),
+    )?;
+    // Once the view has settled, the ring is all that asks to be drawn, and it asks every 50 ms.
+    for _ in 0..600 {
+        if s.ed.repaint_after() != Some(std::time::Duration::ZERO) {
+            break;
+        }
+        s.frames(1);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    check(
+        s.ed.repaint_after().is_some_and(|d| d >= std::time::Duration::from_millis(20)),
+        format!("the spinner does not redraw every frame: {:?}", s.ed.repaint_after()),
+    )?;
+    s.save_png(&dir.join("app-2x-agent-confirm.png"))?;
+    s.ui_click("new-cancel")?;
+    s.frames(2);
+    let r = ask(&mut s, 1, "new_scene", json!({})).ok_or("still waiting")?;
+    let c = last(&s, 1).ok_or("no call")?;
+    check(
+        r.is_err() && !c.ok && c.answered.is_some() && c.result.contains("kept"),
+        format!("Cancel ends the call as refused: {c:?}"),
+    )?;
+    set_wall(0.0);
+    Ok(())
 }
 
 /// The Agents tab's checklist in every state it has: the browser's twelve (not paired, typing, connecting,
@@ -5527,7 +6005,6 @@ fn agents_live(dir: &Path) -> Result<(), String> {
             )?;
         }
         check(s.ed.scene.map.counts[20] == 0 && s.ed.scene.map.counts[3] == roof, "the roof is slot 3 now".into())?;
-        agents_look_render(&mut s, &mut live, &mut claude, &downloads, dir)?;
         let names: Vec<&str> = s.ed.ui.agents.clients.iter().map(|c| c.1.as_str()).collect();
         check(names == ["Claude Code"], format!("the panel lists the agent: {names:?}"))?;
         s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
@@ -5567,6 +6044,8 @@ fn agents_live(dir: &Path) -> Result<(), String> {
         // It was not the last step, so it was taken back as a step of its own: Cmd-Z undoes that.
         s.frames_with(2, vec![key(egui::Key::Z, egui::Modifiers::COMMAND)]);
         check(s.voxels() == flag && s.ed.ui.agents.edits[3].applied, "Cmd-Z brings the flag back".into())?;
+        // The queries and exports after it push the first edits out of ACTIVITY's last 10 calls.
+        agents_look_render(&mut s, &mut live, &mut claude, &downloads, dir)?;
 
         // A call waits while the user drags, and runs when the drag ends.
         s.tool(Tool::Add, Shape::Voxel);
@@ -5616,6 +6095,13 @@ fn agents_live(dir: &Path) -> Result<(), String> {
         // Edits wait as a preview: no undo step, drawn as the AI change is, one card for every agent.
         let (voxels, label) = (s.voxels(), s.ed.scene.history().undo_label().map(str::to_string));
         let undo_label = |s: &Shot| s.ed.scene.history().undo_label().map(str::to_string);
+        // A failed edit first: the change it would have opened closes by itself and links nothing.
+        let (t, e) = s.agent_call(&mut live, &mut claude, "palette_swap", serde_json::json!({"a": 9, "b": 9}));
+        s.live_frames(&mut live, 2);
+        check(
+            e && s.ed.review.is_none() && s.voxels() == voxels,
+            format!("a failed edit under review leaves no change open ({e}, {t:.60})"),
+        )?;
         let (t, e) = s.agent_call(
             &mut live,
             &mut claude,
@@ -5664,6 +6150,23 @@ fn agents_live(dir: &Path) -> Result<(), String> {
                 && last == ["Claude Code: box 8 voxels", "Codex: place 1 voxel"],
             format!("Apply lands each edit as an undo step named after its agent: {last:?}"),
         )?;
+        // ACTIVITY links each applied edit to the call that staged it, not to the failed one.
+        let link = |tool: &str| s.ed.ui.agents.calls.iter().rev().find(|c| c.1.tool == tool).map(|c| c.1.edit);
+        let links = [link("place"), link("box"), link("palette_swap")];
+        check(
+            links == [Some(Some(n - 1)), Some(Some(n - 2)), Some(None)],
+            format!("applied edits link back to their calls: {links:?}"),
+        )?;
+        s.ed.ui.open_agents();
+        s.live_frames(&mut live, 3);
+        check(
+            s.ed.ui.hits.contains_key(&format!("agent-undo-{}", n - 1))
+                && s.ed.ui.hits.contains_key(&format!("agent-undo-{}", n - 2)),
+            "the applied edits have their Undo in ACTIVITY".into(),
+        )?;
+        s.save_png(&dir.join("app-2x-agent-review-applied.png"))?;
+        s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+        s.live_frames(&mut live, 2);
         let (t, _) = s.agent_call(&mut live, &mut claude, "review_status", serde_json::json!({}));
         check(t.starts_with("vxr: the user applied your 1 edit"), format!("review_status tells the agent: {t}"))?;
         let (t, _) = s.agent_call(&mut live, &mut codex, "scene_summary", serde_json::json!({}));
@@ -5773,7 +6276,12 @@ fn agents_live(dir: &Path) -> Result<(), String> {
             format!("a file opened behind the agent's confirm is reported as opened: {t}"),
         )?;
 
-        // A new token from the panel disconnects every agent and turns old ones away.
+        // A new token from the panel disconnects every agent and turns old ones away. The list of
+        // calls is long by now and would push the button below the window: it starts empty.
+        for (conn, name) in s.ed.agents.clients.clone() {
+            s.ed.agents.forget(conn, &name);
+        }
+        s.ed.agents.clear();
         s.ed.ui.open_agents();
         s.live_frames(&mut live, 2);
         s.live_frames(&mut live, 40);
@@ -6090,7 +6598,10 @@ fn agents_bridge(dir: &Path) -> Result<(), String> {
         let (t, e) = s.bridge_call(&mut page, &mut script, &mut codex, "scene_summary", serde_json::json!({}));
         check(old != new && e && t == REFUSED, "Regenerate makes a new token and turns old agents away".into())?;
 
-        // Disconnect ends the link: the bridge closes the agents' socket.
+        // Disconnect ends the link: the bridge closes the agents' socket. The disconnected agents'
+        // calls are still listed and would push the button below the window: the list starts empty.
+        s.ed.agents.clear();
+        s.bridge_frames(&mut page, &mut script, 2);
         s.ui_click("agents-disconnect")?;
         let off = s.bridge_until(&mut page, &mut script, |_| !sock_dir.join(SOCKET).exists() && !bridge.paired());
         s.bridge_frames(&mut page, &mut script, 2);

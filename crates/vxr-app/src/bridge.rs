@@ -204,7 +204,12 @@ impl Page {
             }
         }
         // The bridge's next clients message confirms it; until then the chip is gone.
-        ed.agents.clients.retain(|(c, _)| which.is_some_and(|w| w != *c));
+        let (kept, gone) =
+            std::mem::take(&mut ed.agents.clients).into_iter().partition(|(c, _)| which.is_some_and(|w| w != *c));
+        ed.agents.clients = kept;
+        for (conn, name) in gone {
+            ed.agents.forget(conn, &name);
+        }
         let ctx = ed.ctx.clone();
         match stopped.as_slice() {
             [] => {}
@@ -218,8 +223,8 @@ impl Page {
         self.pending.clear();
         self.stopped.clear();
         self.regenerating = false;
-        for (conn, _) in std::mem::take(&mut ed.agents.clients) {
-            ed.agents.forget(conn);
+        for (conn, name) in std::mem::take(&mut ed.agents.clients) {
+            ed.agents.forget(conn, &name);
         }
     }
 
@@ -308,10 +313,10 @@ impl Page {
                 .filter_map(|c| Some((c.get(0)?.as_u64()?, shown(c.get(1)?.as_str()?, 32))))
                 .filter(|(c, _)| !self.stopped.contains(c))
                 .collect();
-            let gone: Vec<u64> =
-                ed.agents.clients.iter().map(|(c, _)| *c).filter(|c| !clients.iter().any(|(n, _)| n == c)).collect();
-            for conn in gone {
-                ed.agents.forget(conn);
+            let gone: Vec<(u64, String)> =
+                ed.agents.clients.iter().filter(|(c, _)| !clients.iter().any(|(n, _)| n == c)).cloned().collect();
+            for (conn, name) in gone {
+                ed.agents.forget(conn, &name);
             }
             self.pending.retain(|r| clients.iter().any(|(c, _)| *c == r.conn));
             ed.agents.clients = clients;
@@ -342,12 +347,18 @@ impl Page {
             self.waiting = None;
             ed.forget_agent_render();
         }
+        for r in &self.pending {
+            if let Ask::Call { name, args } = &r.ask {
+                ed.agent_queued(r.conn, name, args);
+            }
+        }
         if self.waiting.is_some()
             && let Some(r) = ed.take_agent_render()
         {
             let w = self.waiting.take().unwrap();
-            let r = r.and_then(|what| self.deliver(ed, &w.client, &what)).map(Reply::from);
-            self.send(answer(&w.id, r));
+            let r = r.and_then(|what| self.deliver(ed, &w.client, &what));
+            ed.finish_agent_call(w.conn, &r);
+            self.send(answer(&w.id, r.map(Reply::from)));
         }
         while self.link == Link::Paired && !self.regenerating && !ed.agent_busy() && self.waiting.is_none() {
             let Some(r) = self.pending.pop_front() else { break };
@@ -362,7 +373,9 @@ impl Page {
                         continue;
                     }
                     let a = if name == EXPORT_TOOL {
-                        a.and_then(|a| self.deliver(ed, &r.client, &a.text).map(Reply::from))
+                        let a = a.and_then(|a| self.deliver(ed, &r.client, &a.text));
+                        ed.finish_agent_call(r.conn, &a);
+                        a.map(Reply::from)
                     } else {
                         a
                     };

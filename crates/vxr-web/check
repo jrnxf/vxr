@@ -169,9 +169,16 @@ else
   shown="$(axi eval "async () => { await window.__frames(10); const s = JSON.parse(window.vxr.state()); return JSON.stringify([s.voxels - $before, s.undoLabel, s.agents.clients.map(c => c[1]), s.agents.edits.map(e => e.label), Array.from(window.vxr.color(250)).slice(0, 3), Array.from(window.vxr.color(251)).slice(0, 3)]) }" | unwrap)"
   expect "each edit is one undo step named after the agent, listed with it" "$shown" '[8,"Claude Code: palette_set 2 slots",["Claude Code"],["Claude Code: box 8 voxels","Claude Code: palette_set 2 slots"],[42,143,74],[31,107,56]]'
   axi screenshot "$shots/web-agents.png" >/dev/null
-  # The hint-bar chip follows the Agents tab: editing after a call 1 s ago, idle after one 90 s ago.
-  chip="$(axi eval "async () => { const chip = async (ago) => { window.vxr.agents_called_ago(ago); await window.__frames(2); return JSON.parse(window.vxr.state()).agents.chip }; return JSON.stringify([await chip(1), await chip(90)]) }" | unwrap)"
-  expect "the chip says editing after a call and connected, idle once the agent is quiet" "$chip" '["Claude Code is editing","Claude Code connected · idle 1 min"]'
+  # ACTIVITY lists every call the agent made, queries included, with its edit and an answer in a line.
+  calls="$(axi eval "() => JSON.stringify(JSON.parse(window.vxr.state()).agents.calls.map((c) => [c.tool, c.edit, c.running, c.ok, c.result.length > 0]))" | unwrap)"
+  expect "the Agents tab keeps each call, linked to its edit, with its answer" "$calls" '[["box",0,false,true,true],["palette_set",1,false,true,true]]'
+  rows="$(axi eval "async () => { await window.__click(window.vxr.hit('ai-tab-agents')); await window.__frames(4); return JSON.stringify([window.vxr.hit('agent-call-0').length, window.vxr.hit('agent-undo-0').length, window.vxr.hit('agent-undo-1').length]) }" | unwrap)"
+  expect "ACTIVITY draws a row per call with an Undo on each edit" "$rows" '[2,2,2]'
+  axi screenshot "$shots/web-agent-activity.png" >/dev/null
+  # The hint-bar chip follows the Agents tab: a call 1 s ago, 95 s ago (amber, counting), 200 s ago.
+  chip="$(axi eval "async () => { const chip = async (ago) => { window.vxr.agents_called_ago(ago); await window.__frames(2); return JSON.parse(window.vxr.state()).agents }; const words = (a) => a.chip.replace(/ \\d+ s\\b/g, ' N s'); const one = await chip(1), stall = await chip(95), long = await chip(200); return JSON.stringify([words(one), one.live, words(stall), stall.live, words(long), long.live]) }" | unwrap)"
+  expect "the chip names the last call, then counts the quiet: amber at 45 s, may be stuck at 2 min" "$chip" '["Claude Code · Set colours · just now",["active"],"No call from Claude Code for 1 min N s · last set colours",["stall"],"Claude Code may be stuck: no call for 3 min N s",["long"]]'
+  axi screenshot "$shots/web-agent-stuck.png" >/dev/null
   # Stop in the panel: the agent's next call is told it was stopped.
   stopped="$(axi eval "async () => { const s = JSON.parse(window.vxr.state()); await window.__click(window.vxr.hit('agents-stop-' + s.agents.clients[0][0])); for (let i = 0; i < 100 && JSON.parse(window.vxr.state()).agents.clients.length; i++) await window.__frames(3); return JSON.stringify(JSON.parse(window.vxr.state()).agents.clients) }" | unwrap)"
   touch "$fixtures/stopped"

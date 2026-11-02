@@ -147,6 +147,11 @@ pub struct Editor {
     agent_new: Option<(u64, u64, Option<bool>)>,
     /// How many scenes were loaded (opened or started new), to tell which scene is shown.
     loads: u64,
+    /// Seconds on a clock that runs without frames (the desktop's monotonic clock; the page sets
+    /// its own), to stamp agent calls served while no frame draws (a minimised window).
+    pub wall_clock: fn() -> f64,
+    /// The egui time and the wall clock at the last frame.
+    frame_at: (f64, f64),
     /// A PNG render export in progress (the corner pauses meanwhile).
     pub export: Option<Export>,
     /// The last finished export's PNG and size, for the host to save or download.
@@ -180,7 +185,7 @@ pub struct Editor {
     chat_shown: Option<u64>,
     /// Terminal agents editing the window through `vxr mcp --live`, and what they did.
     pub agents: Agents,
-    /// The agents version and history position the Agents tab's Agent edits list shows.
+    /// The agents version and history position the Agents tab's ACTIVITY list shows.
     agents_shown: Option<(u64, u64)>,
 }
 
@@ -285,6 +290,8 @@ impl Editor {
             agent_host: Vec::new(),
             agent_new: None,
             loads: 0,
+            wall_clock: default_wall_clock,
+            frame_at: (0.0, 0.0),
             export: None,
             exported: None,
             agent_files: Vec::new(),
@@ -1373,6 +1380,7 @@ impl Editor {
     /// the host handles (open, save, embed) and egui's platform output.
     pub fn frame(&mut self, input: egui::RawInput, view: &wgpu::TextureView) -> (Vec<Action>, egui::PlatformOutput) {
         let mut input = input;
+        self.frame_at = (input.time.unwrap_or(self.frame_at.0), (self.wall_clock)());
         // Tab switches between the world and a model. egui would move keyboard focus with it
         // before the UI could consume it, so it never reaches egui unless a field is typing.
         let mut tabs = 0;
@@ -1468,6 +1476,13 @@ impl Editor {
             v.error = self.agents.error.clone();
         }
         (v.fail, v.since) = (self.agents.fail, self.agents.since);
+        v.gone = self.agents.gone().map(|(c, n)| (c, n.to_string())).collect();
+        v.gone.sort();
+        v.calls = (self.agents.clients.iter().map(|c| c.0))
+            .chain(v.gone.iter().map(|c| c.0))
+            .flat_map(|c| self.agents.calls(c).map(move |call| (c, call.clone())))
+            .collect();
+        v.made = self.agents.clients.iter().map(|(c, _)| self.agents.made(*c)).collect();
         v.times = self
             .agents
             .clients
@@ -1684,6 +1699,53 @@ impl Editor {
         name: &str,
         args: &serde_json::Value,
     ) -> Option<Result<Reply, String>> {
+        let now = self.agent_time();
+        self.agents.begin_call(conn, now, name, args);
+        let edits = self.agents.edits.len();
+        let r = self.agent_call_run(conn, client, name, args);
+        // A call that waits (New scene asking the user, a render export) stays running, and an
+        // export ends once the host has written its files ([`Editor::finish_agent_call`]).
+        if let Some(r) = &r
+            && !self.agent_waits(conn)
+            && name != vxr_mcp::live::EXPORT_TOOL
+        {
+            let plain = r.as_ref().map(|a| a.text.clone()).map_err(Clone::clone);
+            self.agents.end_call(conn, now, &plain, (self.agents.edits.len() > edits).then_some(edits));
+        }
+        r
+    }
+
+    /// The time for an agent call: the last frame's, plus the wall clock's seconds since it, so a
+    /// call served while no frame draws (the window is minimised) is stamped when it came, not
+    /// when the window last drew.
+    pub fn agent_time(&self) -> f64 {
+        self.frame_at.0 + ((self.wall_clock)() - self.frame_at.1).max(0.0)
+    }
+
+    /// A request from agent `conn` is queued behind another (a render export, a New scene
+    /// waiting for the user, a drag): its call shows as running, not as silence, unless the
+    /// connection already has one running.
+    pub fn agent_queued(&mut self, conn: u64, name: &str, args: &serde_json::Value) {
+        if !self.agents.running(conn) {
+            let now = self.agent_time();
+            self.agents.begin_call(conn, now, name, args);
+        }
+    }
+
+    /// The host answered connection `conn`'s call with `result` (an export, once its files are
+    /// written or failed to be).
+    pub fn finish_agent_call(&mut self, conn: u64, result: &Result<String, String>) {
+        let now = self.agent_time();
+        self.agents.end_call(conn, now, result, None);
+    }
+
+    fn agent_call_run(
+        &mut self,
+        conn: u64,
+        client: &str,
+        name: &str,
+        args: &serde_json::Value,
+    ) -> Option<Result<Reply, String>> {
         let agents_review = self.review.as_ref().filter(|r| r.agents.is_some());
         if name == vxr_mcp::live::REVIEW_STATUS {
             return Some(Ok(self.agents.status(conn, agents_review).into()));
@@ -1695,8 +1757,6 @@ impl Editor {
             return self.agent_file(conn, client, name).map(|r| r.map(Reply::from));
         }
         let notice = self.agents.take_notices(conn);
-        let now = self.ctx.input(|i| i.time);
-        self.agents.note_call(conn, now, name);
         self.agents.camera = Some(self.look_camera());
         self.agents.image = None;
         let r = if name == vxr_mcp::live::RENDER_SETTINGS {
@@ -1825,8 +1885,6 @@ impl Editor {
                 "edits wait for the user's review in vxr: {name} once they apply or discard them (review_status tells you)"
             )));
         }
-        let now = self.ctx.input(|i| i.time);
-        self.agents.note_call(conn, now, name);
         self.place_box();
         let scene = self.ui.scene_name.clone();
         if name == vxr_mcp::live::SAVE {
@@ -1896,7 +1954,7 @@ impl Editor {
         self.ui.toast(&self.ctx, msg);
     }
 
-    /// Undo on edit `i` in the Agents tab's Agent edits list.
+    /// Undo on edit `i` in the Agents tab's ACTIVITY list.
     pub fn undo_agent_edit(&mut self, i: usize) {
         self.gesture = None;
         self.moving = None;
@@ -2414,6 +2472,19 @@ pub fn tree_rows(s: &Scene) -> Vec<TreeRow> {
             }
         })
         .collect()
+}
+
+/// The wall clock's seconds, from the desktop's monotonic clock; the page has no `Instant` and
+/// sets its own ([`Editor::wall_clock`]).
+#[cfg(not(target_arch = "wasm32"))]
+fn default_wall_clock() -> f64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START.get_or_init(std::time::Instant::now).elapsed().as_secs_f64()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn default_wall_clock() -> f64 {
+    0.0
 }
 
 #[cfg(test)]
