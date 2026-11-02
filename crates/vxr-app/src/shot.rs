@@ -3886,7 +3886,7 @@ fn call(tool: &str, arg: &str, result: &str, ago: f64) -> Called {
         answered: Some(-ago),
         edit: None,
         staged: None,
-        skipped: false,
+        pause: None,
     })
 }
 

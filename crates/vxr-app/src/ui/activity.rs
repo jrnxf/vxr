@@ -265,8 +265,8 @@ pub fn items(v: &AgentsView, now: f64) -> Vec<Item> {
         let calls = v.calls_of(*conn);
         for pair in calls.windows(2) {
             let (a, b) = (pair[0], pair[1]);
-            let secs = b.started - a.answered.unwrap_or(a.started);
-            if secs >= STALL_SECS && b.started >= from && !b.skipped {
+            let secs = b.pause_after(a);
+            if secs >= STALL_SECS && b.started >= from {
                 timed.push((b.started - 0.001, Item::Gap { secs, live: false, who: name(*conn) }));
             }
         }
@@ -297,7 +297,7 @@ mod tests {
             answered,
             edit: None,
             staged: None,
-            skipped: false,
+            pause: None,
         }
     }
 
@@ -351,9 +351,14 @@ mod tests {
             items(&v, 104.0).as_slice(),
             [Item::Call(2), Item::Call(1), Item::Gap { live: false, .. }, Item::Call(0)]
         ));
-        // Calls dropped from between the two: no pause.
+        // Calls dropped from between the two: their longest pause, not the time between the two.
         let mut v = v;
-        v.calls[1].1.skipped = true;
+        v.calls[1].1.pause = Some(20.0);
         assert!(matches!(items(&v, 104.0).as_slice(), [Item::Call(2), Item::Call(1), Item::Call(0)]));
+        v.calls[2].1.pause = Some(60.0);
+        assert!(matches!(
+            items(&v, 104.0).as_slice(),
+            [Item::Call(2), Item::Gap { secs: 60.0, live: false, .. }, Item::Call(1), Item::Call(0)]
+        ));
     }
 }

@@ -56,9 +56,16 @@ pub struct AgentCall {
     /// With review on, the step it staged, an index into the change under review's steps,
     /// until the user applies or discards the change.
     pub staged: Option<usize>,
-    /// Calls between it and the one kept before it were dropped from the list, so the time
-    /// between the two is no pause.
-    pub skipped: bool,
+    /// When calls between it and the one kept before it were dropped from the list, the longest
+    /// pause (seconds with no call) among them.
+    pub pause: Option<f64>,
+}
+
+impl AgentCall {
+    /// The longest pause with no call between `before`, the call kept before it, and it.
+    pub fn pause_after(&self, before: &AgentCall) -> f64 {
+        self.pause.unwrap_or(self.started - before.answered.unwrap_or(before.started))
+    }
 }
 
 /// A few words of a call's arguments: a quoted name or search, a view, or `done`'s summary.
@@ -292,9 +299,9 @@ impl Agents {
         q.push_back(call);
         if q.len() > CALLS_KEPT {
             let i = q.iter().take(q.len() - 1).position(|c| c.edit.is_none() && c.staged.is_none()).unwrap_or(0);
-            q.remove(i);
+            let gone = q.remove(i).expect("a call at a kept index");
             if i > 0 {
-                q[i].skipped = true;
+                q[i].pause = Some(gone.pause_after(&q[i - 1]).max(q[i].pause_after(&gone)));
             }
         }
         self.prune_gone();
@@ -327,7 +334,7 @@ impl Agents {
                 answered: None,
                 edit: None,
                 staged: None,
-                skipped: false,
+                pause: None,
             },
         );
     }
@@ -931,6 +938,25 @@ mod tests {
     }
 
     #[test]
+    fn a_pause_among_dropped_queries_stays_on_the_call_after_them() {
+        let mut a = Agents::default();
+        let call = |a: &mut Agents, t: f64, tool: &str, edit| {
+            a.begin_call(1, t, tool, &Value::Null);
+            a.end_call(1, t, &Ok(String::new()), edit);
+        };
+        call(&mut a, 0.0, "box", Some(0));
+        call(&mut a, 1.0, "look", None);
+        for t in 0..10 {
+            call(&mut a, 301.0 + t as f64, "look", None);
+        }
+        let pauses: Vec<_> = a.calls(1).map(|c| c.pause).collect();
+        assert_eq!(pauses[..3], [None, Some(300.0), None], "the 5 min pause before the dropped look's next");
+        call(&mut a, 311.0, "look", None);
+        let pauses: Vec<_> = a.calls(1).map(|c| c.pause).collect();
+        assert_eq!(pauses[..3], [None, Some(300.0), None], "and it is carried on when that one goes too");
+    }
+
+    #[test]
     fn the_ring_keeps_edits_over_queries_and_a_closed_connection_stays_listed() {
         let mut a = Agents { clients: vec![(1, "Claude Code".into()), (2, "Codex".into())], ..Default::default() };
         a.note_clients(0.0);
@@ -944,8 +970,8 @@ mod tests {
         }
         let tools: Vec<_> = a.calls(1).map(|c| c.tool.as_str()).collect();
         assert_eq!((tools.len(), tools[0]), (CALLS_KEPT, "box"), "the oldest queries went, not the edit");
-        let skipped: Vec<_> = a.calls(1).map(|c| c.skipped).collect();
-        assert_eq!(skipped[..3], [false, true, false], "the call after the dropped ones says so");
+        let pauses: Vec<_> = a.calls(1).map(|c| c.pause).collect();
+        assert_eq!(pauses[..3], [None, Some(20.0), None], "the call after the dropped ones keeps their longest pause");
         for t in 0..CALLS_KEPT {
             call(&mut a, 2, 20.0 + t as f64, "paint", Some(t + 1));
         }
