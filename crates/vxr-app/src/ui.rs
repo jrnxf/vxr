@@ -16,8 +16,10 @@ use crate::color::{Hsv, hex, parse_hex};
 use crate::render::{EXPORT_SIZES, RenderSettings, SPP_CHOICES};
 use crate::theme::{self, Theme, ThemeChoice, th};
 
+mod activity;
 mod agents;
 mod assistant;
+pub use activity::{Item, Live};
 pub use agents::{AgentsView, EditRow, FILES_SETUP, LIVE_SETUP, SETUP};
 pub use assistant::{AiAction, AskBar, ChatView, PANEL_W};
 
@@ -211,6 +213,11 @@ mod icon {
     pub const CHEVRON_RIGHT: char = '\u{e06f}';
     pub const SHIELD_CHECK: char = '\u{e1ff}';
     pub const TERMINAL: char = '\u{e181}';
+    pub const LIST: char = '\u{e106}';
+    pub const GRID: char = '\u{e0e9}';
+    pub const PACKAGE_PLUS: char = '\u{e268}';
+    pub const CIRCLE_CHECK: char = '\u{e226}';
+    pub const MOVE: char = '\u{e121}';
 }
 
 pub use vxr_core::select::{Region, Transform};
@@ -344,7 +351,7 @@ pub enum Action {
     /// Disconnect one agent, or every agent (for the host).
     StopAgent(u64),
     StopAgents,
-    /// Take back one agent edit (Undo in the Agents tab's Agent edits list).
+    /// Take back one agent edit (Undo in the Agents tab's ACTIVITY list).
     UndoAgentEdit(usize),
     /// The theme was picked (for the host to keep: `Hybrid::theme`).
     Theme,

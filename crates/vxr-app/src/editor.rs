@@ -180,7 +180,7 @@ pub struct Editor {
     chat_shown: Option<u64>,
     /// Terminal agents editing the window through `vxr mcp --live`, and what they did.
     pub agents: Agents,
-    /// The agents version and history position the Agents tab's Agent edits list shows.
+    /// The agents version and history position the Agents tab's ACTIVITY list shows.
     agents_shown: Option<(u64, u64)>,
 }
 
@@ -1468,6 +1468,13 @@ impl Editor {
             v.error = self.agents.error.clone();
         }
         (v.fail, v.since) = (self.agents.fail, self.agents.since);
+        v.calls = self
+            .agents
+            .clients
+            .iter()
+            .flat_map(|(c, _)| self.agents.calls(*c).map(|call| (*c, call.clone())))
+            .collect();
+        v.made = self.agents.clients.iter().map(|(c, _)| self.agents.made(*c)).collect();
         v.times = self
             .agents
             .clients
@@ -1684,6 +1691,27 @@ impl Editor {
         name: &str,
         args: &serde_json::Value,
     ) -> Option<Result<Reply, String>> {
+        let now = self.ctx.input(|i| i.time);
+        self.agents.begin_call(conn, now, name, args);
+        let edits = self.agents.edits.len();
+        let r = self.agent_call_run(conn, client, name, args);
+        // A call that waits (New scene asking the user, a render export) stays running.
+        if let Some(r) = &r
+            && !self.agent_waits(conn)
+        {
+            let plain = r.as_ref().map(|a| a.text.clone()).map_err(Clone::clone);
+            self.agents.end_call(conn, now, &plain, (self.agents.edits.len() > edits).then_some(edits));
+        }
+        r
+    }
+
+    fn agent_call_run(
+        &mut self,
+        conn: u64,
+        client: &str,
+        name: &str,
+        args: &serde_json::Value,
+    ) -> Option<Result<Reply, String>> {
         let agents_review = self.review.as_ref().filter(|r| r.agents.is_some());
         if name == vxr_mcp::live::REVIEW_STATUS {
             return Some(Ok(self.agents.status(conn, agents_review).into()));
@@ -1695,8 +1723,6 @@ impl Editor {
             return self.agent_file(conn, client, name).map(|r| r.map(Reply::from));
         }
         let notice = self.agents.take_notices(conn);
-        let now = self.ctx.input(|i| i.time);
-        self.agents.note_call(conn, now, name);
         self.agents.camera = Some(self.look_camera());
         self.agents.image = None;
         let r = if name == vxr_mcp::live::RENDER_SETTINGS {
@@ -1796,13 +1822,15 @@ impl Editor {
     /// How the agent's render export ended, once it did (finished, failed or cancelled); its
     /// PNG is then in [`Editor::agent_files`].
     pub fn take_agent_render(&mut self) -> Option<Result<String, String>> {
-        self.agent_render?;
+        let conn = self.agent_render?;
         let r = self.agent_rendered.take().or_else(|| {
             self.export.is_none().then(|| {
                 Err("the render export was cancelled in vxr (the user cancelled it or the scene changed)".to_string())
             })
         })?;
         self.agent_render = None;
+        let now = self.ctx.input(|i| i.time);
+        self.agents.end_call(conn, now, &r, None);
         Some(r)
     }
 
@@ -1825,8 +1853,6 @@ impl Editor {
                 "edits wait for the user's review in vxr: {name} once they apply or discard them (review_status tells you)"
             )));
         }
-        let now = self.ctx.input(|i| i.time);
-        self.agents.note_call(conn, now, name);
         self.place_box();
         let scene = self.ui.scene_name.clone();
         if name == vxr_mcp::live::SAVE {
@@ -1896,7 +1922,7 @@ impl Editor {
         self.ui.toast(&self.ctx, msg);
     }
 
-    /// Undo on edit `i` in the Agents tab's Agent edits list.
+    /// Undo on edit `i` in the Agents tab's ACTIVITY list.
     pub fn undo_agent_edit(&mut self, i: usize) {
         self.gesture = None;
         self.moving = None;
