@@ -768,9 +768,11 @@ impl Tab {
         let n = self.v.now_of(i, self.now);
         let (state, color, lead) = match (n.state, n.call) {
             (Live::Running, Some(c)) => {
-                (format!("calling {} \u{b7} {} s", c.tool, n.quiet as u64), th().ok, Lead::Spin)
+                (format!("{} \u{b7} {} s", activity::verb(c, true), n.quiet as u64), th().ok, Lead::Spin)
             }
-            (Live::Active, Some(c)) => (format!("{} \u{b7} {}", c.tool, ago(n.quiet)), th().ok, Lead::Pulse),
+            (Live::Active, Some(c)) => {
+                (format!("{} \u{b7} {}", activity::verb(c, false), ago(n.quiet)), th().ok, Lead::Pulse)
+            }
             (Live::Quiet, _) => (format!("last call {} ago", ago(n.quiet)), th().faint, Lead::Dot),
             (Live::Stall, _) => (format!("no call for {}", span(n.quiet)), th().mid, Lead::Warn),
             (Live::Long, _) => (format!("no call for {} \u{b7} may be stuck", span(n.quiet)), th().mid, Lead::Warn),

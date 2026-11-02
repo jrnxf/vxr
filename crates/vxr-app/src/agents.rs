@@ -52,6 +52,9 @@ pub struct AgentCall {
     pub answered: Option<f64>,
     /// The edit it made, an index into [`Agents::edits`].
     pub edit: Option<usize>,
+    /// With review on, the step it staged, an index into the change under review's steps,
+    /// until the user applies or discards the change.
+    pub staged: Option<usize>,
 }
 
 /// A few words of a call's arguments: a quoted name or search, a view, or `done`'s summary.
@@ -218,7 +221,7 @@ impl Agents {
     pub fn clear(&mut self) {
         self.edits.clear();
         for q in self.calls.values_mut() {
-            q.iter_mut().for_each(|c| c.edit = None);
+            q.iter_mut().for_each(|c| (c.edit, c.staged) = (None, None));
         }
         self.selections.clear();
         self.clips.clear();
@@ -263,6 +266,7 @@ impl Agents {
             started: now,
             answered: None,
             edit: None,
+            staged: None,
         });
         while q.len() > CALLS_KEPT {
             q.pop_front();
@@ -418,6 +422,12 @@ impl Agents {
         review.session.set_camera(self.camera);
         let r = review.session.call(scene, name, args.clone());
         self.image = review.session.take_image();
+        if review.session.steps().len() > steps
+            && let Some(call) =
+                self.calls.get_mut(&conn).and_then(|q| q.iter_mut().rev().find(|c| c.answered.is_none()))
+        {
+            call.staged = Some(steps);
+        }
         // After the call: a resize or crop of the change moves its selection with the map.
         self.selections.insert(conn, (scene.at(), scene.reshapes(), review.session.selection().collect()));
         match review.session.clipboard() {
@@ -455,8 +465,12 @@ impl Agents {
         });
         for (i, step) in &landed {
             let (conn, label) = labels.remove(i).expect("a landed step was labelled");
+            if let Some(call) = self.calls.get_mut(&conn).and_then(|q| q.iter_mut().find(|c| c.staged == Some(*i))) {
+                call.edit = Some(self.edits.len());
+            }
             self.edits.push(AgentEdit { conn, client: name_of(conn), label, step: *step, undone_by: None });
         }
+        self.unstage();
         for (conn, kept, all) in counts {
             let text = match kept {
                 0 => format!(
@@ -485,7 +499,15 @@ impl Agents {
             self.notify(conn, format!("vxr: the user discarded the change under review: none of your {} that waited is in the scene. Look at the scene again before you go on.", edits_text(all)));
         }
         review.session.discard(scene);
+        self.unstage();
         self.version += 1;
+    }
+
+    /// The change under review is gone: no call's step waits in it any more.
+    fn unstage(&mut self) {
+        for q in self.calls.values_mut() {
+            q.iter_mut().for_each(|c| c.staged = None);
+        }
     }
 
     /// Each agent's edits in the change under review: connection, kept, all.
@@ -845,6 +867,38 @@ mod tests {
             Some(n) => out.map(|t| format!("{n}\n{t}")),
             None => out,
         }
+    }
+
+    #[test]
+    fn edits_applied_from_review_are_linked_to_the_calls_that_staged_them() {
+        let (mut a, mut s, mut r) = (Agents::default(), scene(), None);
+        a.review = true;
+        a.clients = vec![(1, "Claude Code".into()), (2, "Codex".into())];
+        let call = |a: &mut Agents, s: &mut Scene, r: &mut Option<Review>, conn, name: &str, args: Value| {
+            a.begin_call(conn, 0.0, name, &args);
+            let out = staged(a, s, r, conn, "Agent", name, args);
+            a.end_call(conn, 0.0, &out, None);
+        };
+        call(&mut a, &mut s, &mut r, 1, "box", json!({"from": [0, 0, 0], "to": [1, 0, 0], "slot": 5}));
+        call(&mut a, &mut s, &mut r, 1, "scene_summary", json!({}));
+        call(&mut a, &mut s, &mut r, 2, "place", json!({"cells": [[4, 0, 4]], "slot": 7}));
+        call(&mut a, &mut s, &mut r, 2, "place", json!({"cells": [[5, 0, 5]], "slot": 7}));
+        call(&mut a, &mut s, &mut r, 2, "undo", json!({}));
+        call(&mut a, &mut s, &mut r, 1, "paint", json!({"slot": 9, "from_slot": 5}));
+        assert!(a.calls(1).chain(a.calls(2)).all(|c| c.edit.is_none()), "nothing lands while it waits");
+        assert_eq!(a.apply_review(&mut s, r.take().unwrap()), Ok(3));
+        let edits = |a: &Agents, conn| a.calls(conn).map(|c| (c.tool.clone(), c.edit)).collect::<Vec<_>>();
+        let named = |v: &[(&str, Option<usize>)]| v.iter().map(|(t, e)| (t.to_string(), *e)).collect::<Vec<_>>();
+        assert_eq!(edits(&a, 1), named(&[("box", Some(0)), ("scene_summary", None), ("paint", Some(2))]));
+        assert_eq!(edits(&a, 2), named(&[("place", Some(1)), ("place", None), ("undo", None)]));
+        assert_eq!(a.edits[a.calls(1).last().unwrap().edit.unwrap()].label, "Agent: paint 2 voxels");
+        // A discarded change links nothing, and the next change's steps are its own.
+        call(&mut a, &mut s, &mut r, 1, "erase", json!({"cells": [[4, 0, 4]]}));
+        a.discard_review(&mut s, r.take().unwrap());
+        call(&mut a, &mut s, &mut r, 2, "place", json!({"cells": [[6, 0, 6]], "slot": 3}));
+        assert_eq!(a.apply_review(&mut s, r.take().unwrap()), Ok(1));
+        assert_eq!(a.calls(1).last().map(|c| c.edit), Some(None));
+        assert_eq!(a.calls(2).last().map(|c| c.edit), Some(Some(3)));
     }
 
     #[test]

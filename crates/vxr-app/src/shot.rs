@@ -3884,6 +3884,7 @@ fn call(tool: &str, arg: &str, result: &str, ago: f64) -> Called {
         started: -ago,
         answered: Some(-ago),
         edit: None,
+        staged: None,
     })
 }
 
@@ -3958,10 +3959,10 @@ fn agent_chip_states(dir: &Path) -> Result<(), String> {
             Live::Idle,
         ),
         (
-            "given-up",
+            "long-past-10-min",
             &[("Claude Code", &[("look", "iso", 700.5)])],
-            "Claude Code connected \u{b7} idle 11 min",
-            Live::Idle,
+            "Claude Code may be stuck: no call for 11 min 40 s",
+            Live::Long,
         ),
         ("never", &[("Claude Code", &[])], "Claude Code connected \u{b7} idle 4 min", Live::Idle),
         (

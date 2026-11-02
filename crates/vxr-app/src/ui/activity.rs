@@ -13,9 +13,6 @@ pub const ACTIVE_SECS: f64 = 5.0;
 pub const STALL_SECS: f64 = 45.0;
 /// No call for this long: "may be stuck", with Stop made prominent.
 pub const LONG_SECS: f64 = 120.0;
-/// After this long without a call the warning gives way to plain "idle": an agent that finished
-/// without calling `done` is waiting for its user, not stuck.
-pub const GIVE_UP_SECS: f64 = 600.0;
 /// How long `done`'s summary stays in place of the idle line.
 pub const DONE_SECS: f64 = 12.0;
 
@@ -30,7 +27,7 @@ pub enum Live {
     Quiet,
     /// No call for [`STALL_SECS`] to [`LONG_SECS`].
     Stall,
-    /// No call for [`LONG_SECS`] to [`GIVE_UP_SECS`].
+    /// No call for [`LONG_SECS`] or more, however long, until a call, `done` or a disconnect.
     Long,
     /// It called `done`.
     Done,
@@ -95,10 +92,8 @@ pub fn agent_now<'a>(now: f64, since: f64, calls: &[&'a AgentCall]) -> Now<'a> {
         Live::Quiet
     } else if quiet < LONG_SECS {
         Live::Stall
-    } else if quiet < GIVE_UP_SECS {
-        Live::Long
     } else {
-        Live::Idle
+        Live::Long
     };
     Now { state, call: Some(last), quiet }
 }
@@ -302,6 +297,7 @@ mod tests {
             started,
             answered,
             edit: None,
+            staged: None,
         }
     }
 
@@ -310,8 +306,8 @@ mod tests {
         let c = call("box", 100.0, Some(100.0));
         let at = |now| agent_now(now, 0.0, &[&c]).state;
         assert_eq!(
-            [at(102.0), at(110.0), at(150.0), at(230.0), at(800.0)],
-            [Live::Active, Live::Quiet, Live::Stall, Live::Long, Live::Idle]
+            [at(102.0), at(110.0), at(150.0), at(230.0), at(5000.0)],
+            [Live::Active, Live::Quiet, Live::Stall, Live::Long, Live::Long]
         );
         let running = call("look", 100.0, None);
         assert_eq!(agent_now(160.0, 0.0, &[&running]).state, Live::Running);
