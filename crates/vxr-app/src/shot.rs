@@ -4231,6 +4231,46 @@ fn agent_activity(dir: &Path) -> Result<(), String> {
             s.ed.ui.agents.calls.len() == 10 && hits(&s, "agent-call-") == 10 && s.ed.agents.made(1) == 22,
             format!("the ring keeps 10 of {} calls", s.ed.agents.made(1)),
         )?;
+        // The queries went first: the edits made before them keep their rows and the Undo.
+        check(
+            s.ed.ui.hits.contains_key("agent-undo-0") && hits(&s, "agent-edit-") == 2,
+            "an edit before 12 queries keeps its Undo row".into(),
+        )?;
+        s.ui_click("agent-undo-0")?;
+        s.frames(3);
+        check(!s.ed.ui.agents.edits[0].applied, "and its Undo takes it back".into())?;
+    }
+    // An agent edits, says it is done and disconnects: its rows stay, its name muted, with no
+    // live state, and the edit's Undo works; opening a file forgets them.
+    {
+        let mut s = Shot::sized(house(), "house.vox", 2.0, (1280, 1000))?;
+        s.ed.ui.coach = false;
+        s.frames(2);
+        connect(&mut s);
+        ask(&mut s, "box", json!({"from": [9, 7, 8], "to": [12, 9, 8], "slot": 50}))?;
+        ask(&mut s, "done", json!({"summary": "drew a flag"}))?;
+        s.ed.agents.clients.clear();
+        s.ed.agents.forget(1, "Claude Code");
+        s.time += 200.0;
+        s.ed.ui.open_agents();
+        s.frames(6);
+        check(
+            hits(&s, "agent-gone-") == 2
+                && s.ed.ui.hits.contains_key("agent-undo-0")
+                && hits(&s, "agent-gap") == 0
+                && !s.ed.ui.hits.contains_key("agent-chip"),
+            "a disconnected agent's calls stay listed, with the Undo and no warning".into(),
+        )?;
+        s.save_png(&dir.join("app-2x-agent-gone.png"))?;
+        s.ui_click("agent-undo-0")?;
+        s.frames(3);
+        check(
+            !s.ed.ui.agents.edits[0].applied && hits(&s, "agent-gone-") == 2,
+            "its Undo takes the edit back and the rows stay".into(),
+        )?;
+        s.ed.load(house(), "other.vox")?;
+        s.frames(3);
+        check(s.ed.ui.agents.calls.is_empty() && hits(&s, "agent-call-") == 0, "opening a file forgets them".into())?;
     }
     // At phone widths the list, its rows and Undo stay on screen.
     for css in [(360u32, 780u32), (390, 844), (430, 932)] {
@@ -6234,9 +6274,10 @@ fn agents_live(dir: &Path) -> Result<(), String> {
 
         // A new token from the panel disconnects every agent and turns old ones away. The list of
         // calls is long by now and would push the button below the window: it starts empty.
-        for conn in s.ed.agents.clients.iter().map(|c| c.0).collect::<Vec<_>>() {
-            s.ed.agents.forget(conn);
+        for (conn, name) in s.ed.agents.clients.clone() {
+            s.ed.agents.forget(conn, &name);
         }
+        s.ed.agents.clear();
         s.ed.ui.open_agents();
         s.live_frames(&mut live, 2);
         s.live_frames(&mut live, 40);
@@ -6553,7 +6594,10 @@ fn agents_bridge(dir: &Path) -> Result<(), String> {
         let (t, e) = s.bridge_call(&mut page, &mut script, &mut codex, "scene_summary", serde_json::json!({}));
         check(old != new && e && t == REFUSED, "Regenerate makes a new token and turns old agents away".into())?;
 
-        // Disconnect ends the link: the bridge closes the agents' socket.
+        // Disconnect ends the link: the bridge closes the agents' socket. The disconnected agents'
+        // calls are still listed and would push the button below the window: the list starts empty.
+        s.ed.agents.clear();
+        s.bridge_frames(&mut page, &mut script, 2);
         s.ui_click("agents-disconnect")?;
         let off = s.bridge_until(&mut page, &mut script, |_| !sock_dir.join(SOCKET).exists() && !bridge.paired());
         s.bridge_frames(&mut page, &mut script, 2);

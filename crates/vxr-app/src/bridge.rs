@@ -204,7 +204,12 @@ impl Page {
             }
         }
         // The bridge's next clients message confirms it; until then the chip is gone.
-        ed.agents.clients.retain(|(c, _)| which.is_some_and(|w| w != *c));
+        let (kept, gone) =
+            std::mem::take(&mut ed.agents.clients).into_iter().partition(|(c, _)| which.is_some_and(|w| w != *c));
+        ed.agents.clients = kept;
+        for (conn, name) in gone {
+            ed.agents.forget(conn, &name);
+        }
         let ctx = ed.ctx.clone();
         match stopped.as_slice() {
             [] => {}
@@ -218,8 +223,8 @@ impl Page {
         self.pending.clear();
         self.stopped.clear();
         self.regenerating = false;
-        for (conn, _) in std::mem::take(&mut ed.agents.clients) {
-            ed.agents.forget(conn);
+        for (conn, name) in std::mem::take(&mut ed.agents.clients) {
+            ed.agents.forget(conn, &name);
         }
     }
 
@@ -308,10 +313,10 @@ impl Page {
                 .filter_map(|c| Some((c.get(0)?.as_u64()?, shown(c.get(1)?.as_str()?, 32))))
                 .filter(|(c, _)| !self.stopped.contains(c))
                 .collect();
-            let gone: Vec<u64> =
-                ed.agents.clients.iter().map(|(c, _)| *c).filter(|c| !clients.iter().any(|(n, _)| n == c)).collect();
-            for conn in gone {
-                ed.agents.forget(conn);
+            let gone: Vec<(u64, String)> =
+                ed.agents.clients.iter().filter(|(c, _)| !clients.iter().any(|(n, _)| n == c)).cloned().collect();
+            for (conn, name) in gone {
+                ed.agents.forget(conn, &name);
             }
             self.pending.retain(|r| clients.iter().any(|(c, _)| *c == r.conn));
             ed.agents.clients = clients;

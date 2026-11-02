@@ -1476,11 +1476,11 @@ impl Editor {
             v.error = self.agents.error.clone();
         }
         (v.fail, v.since) = (self.agents.fail, self.agents.since);
-        v.calls = self
-            .agents
-            .clients
-            .iter()
-            .flat_map(|(c, _)| self.agents.calls(*c).map(|call| (*c, call.clone())))
+        v.gone = self.agents.gone().map(|(c, n)| (c, n.to_string())).collect();
+        v.gone.sort();
+        v.calls = (self.agents.clients.iter().map(|c| c.0))
+            .chain(v.gone.iter().map(|c| c.0))
+            .flat_map(|c| self.agents.calls(c).map(move |call| (c, call.clone())))
             .collect();
         v.made = self.agents.clients.iter().map(|(c, _)| self.agents.made(*c)).collect();
         v.times = self

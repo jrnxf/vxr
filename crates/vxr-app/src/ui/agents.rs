@@ -46,8 +46,11 @@ pub struct AgentsView {
     pub clients: Vec<(u64, String)>,
     /// Every applied edit, oldest first.
     pub edits: Vec<EditRow>,
-    /// Each connection's latest calls (the ACTIVITY list), oldest first within a connection.
+    /// Each connection's latest calls (the ACTIVITY list), oldest first within a connection;
+    /// the closed ones in `gone` too.
     pub calls: Vec<(u64, AgentCall)>,
+    /// The closed connections whose calls are still listed: connection and agent name.
+    pub gone: Vec<(u64, String)>,
     /// For each of `clients`: how many calls it made since it connected.
     pub made: Vec<u64>,
     /// What kind of failure `error` is.
@@ -857,9 +860,10 @@ impl Tab {
     }
 
     /// A call: its icon, what it was and how it ended in a line, when, and for an edit in the scene
-    /// its Undo.
+    /// its Undo. A closed connection's call names its agent, muted, before the line.
     fn call_row(&mut self, ui: &mut Ui, i: usize) {
-        let (_, c) = self.v.calls[i].clone();
+        let (conn, c) = self.v.calls[i].clone();
+        let gone = self.v.gone.iter().find(|g| g.0 == conn).map(|g| g.1.clone());
         let edit = c.edit.and_then(|e| self.v.edits.get(e).map(|row| (e, row.applied)));
         let undoable = edit.is_some_and(|(_, applied)| applied);
         let r = self.block(ui, if undoable { EDIT_ROW } else { CALL_ROW });
@@ -907,7 +911,22 @@ impl Tab {
         } else {
             c.result.clone()
         };
-        let g = one_line(ui, &res, sans(11.5), line2, tw);
+        let g = match &gone {
+            Some(name) => {
+                let mut job = LayoutJob::default();
+                let fmt = |color| TextFormat { font_id: sans(11.5), color, ..Default::default() };
+                job.append(&format!("{name}, disconnected \u{b7} "), 0.0, fmt(th().faint));
+                job.append(&res, 0.0, fmt(line2));
+                job.wrap = egui::text::TextWrapping {
+                    max_width: tw.max(1.0),
+                    max_rows: 1,
+                    break_anywhere: true,
+                    overflow_character: Some('\u{2026}'),
+                };
+                ui.painter().layout_job(job)
+            }
+            None => one_line(ui, &res, sans(11.5), line2, tw),
+        };
         p.galley(pos2(r.left() + 20.0, r.top() + 27.0 - g.size().y / 2.0), g, line2);
         p.text(
             pos2(r.right(), r.top() + 10.0),
@@ -928,6 +947,9 @@ impl Tab {
                 p.text(pos2(r.right(), r.top() + 27.0), Align2::RIGHT_CENTER, "Undone", sans(11.5), th().faint);
             }
             self.hits.push((format!("agent-edit-{e}"), r));
+        }
+        if gone.is_some() {
+            self.hits.push((format!("agent-gone-{i}"), r));
         }
         self.hits.push((format!("agent-call-{i}"), r));
     }

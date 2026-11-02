@@ -132,9 +132,9 @@ impl Live {
             ed.agents.since = None;
         }
         let clients = self.host.as_ref().map(Host::clients).unwrap_or_default();
-        for (conn, _) in std::mem::replace(&mut ed.agents.clients, clients.clone()) {
+        for (conn, name) in std::mem::replace(&mut ed.agents.clients, clients.clone()) {
             if !clients.iter().any(|(c, _)| *c == conn) {
-                ed.agents.forget(conn);
+                ed.agents.forget(conn, &name);
             }
         }
         ed.agents.note_clients(now);

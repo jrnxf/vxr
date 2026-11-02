@@ -17,7 +17,7 @@ use vxr_core::select::Clip;
 use vxr_ops::{Changes, Limits, Op, OpKind, Session, clean};
 
 use crate::review::Review;
-use crate::ui::group_thousands;
+use crate::ui::{LIST_ROWS, group_thousands};
 
 type Cell = [i32; 3];
 
@@ -34,7 +34,8 @@ pub struct AgentEdit {
     pub undone_by: Option<u64>,
 }
 
-/// How many of an agent's latest calls are kept for the Agents tab's ACTIVITY list.
+/// How many of an agent's latest calls are kept for the Agents tab's ACTIVITY list. When more
+/// come, the oldest query goes first, so the calls that made an edit keep their Undo.
 pub const CALLS_KEPT: usize = 10;
 
 /// One tool call an agent made, queries included: what it asked, what vxr answered in a line,
@@ -125,8 +126,11 @@ pub struct Agents {
     pub since: Option<f64>,
     /// When each connection was first listed.
     seen: HashMap<u64, f64>,
-    /// Each connection's latest calls ([`CALLS_KEPT`]), oldest first.
+    /// Each connection's latest calls ([`CALLS_KEPT`]), oldest first; a closed one's too.
     calls: HashMap<u64, VecDeque<AgentCall>>,
+    /// The closed connections whose calls are still listed, and the agent's name: until the
+    /// list is cleared or newer calls push them out of it.
+    gone: HashMap<u64, String>,
     /// How many calls each connection made since it connected.
     made: HashMap<u64, u64>,
     /// Each agent's own selection (map cells) by connection, kept between its calls so it
@@ -220,6 +224,9 @@ impl Agents {
     /// agents have not heard yet stays.
     pub fn clear(&mut self) {
         self.edits.clear();
+        for conn in std::mem::take(&mut self.gone).into_keys() {
+            self.calls.remove(&conn);
+        }
         for q in self.calls.values_mut() {
             q.iter_mut().for_each(|c| (c.edit, c.staged) = (None, None));
         }
@@ -229,22 +236,71 @@ impl Agents {
         self.version += 1;
     }
 
-    /// A connection closed: its selection and what it had not heard go with it. Its edits
-    /// stay listed, for the user to take back.
-    pub fn forget(&mut self, conn: u64) {
+    /// Connection `conn` of agent `name` closed: its selection and what it had not heard go
+    /// with it. Its calls stay listed under its name, with the Undo of its edits, and a call it
+    /// was waiting on is over.
+    pub fn forget(&mut self, conn: u64, name: &str) {
         self.selections.remove(&conn);
         self.clips.remove(&conn);
         self.undone.remove(&conn);
         self.notices.remove(&conn);
         self.seen.remove(&conn);
-        self.calls.remove(&conn);
         self.made.remove(&conn);
+        if let Some(q) = self.calls.get_mut(&conn) {
+            for c in q.iter_mut().filter(|c| c.answered.is_none()) {
+                (c.answered, c.ok, c.result) = (Some(c.started), false, "disconnected before the answer".into());
+            }
+            self.gone.insert(conn, name.to_string());
+        }
+        self.prune_gone();
+    }
+
+    /// The closed connections whose calls are still listed: connection and agent name.
+    pub fn gone(&self) -> impl Iterator<Item = (u64, &str)> {
+        self.gone.iter().map(|(c, n)| (*c, n.as_str()))
+    }
+
+    /// Forget the closed connections with no call among the latest the list shows.
+    fn prune_gone(&mut self) {
+        let mut starts: Vec<f64> = self.calls.values().flatten().map(|c| c.started).collect();
+        starts.sort_by(|a, b| b.total_cmp(a));
+        let Some(&oldest) = starts.get(LIST_ROWS - 1) else { return };
+        let calls = &mut self.calls;
+        self.gone.retain(|conn, _| {
+            let shown = calls.get(conn).is_some_and(|q| q.iter().any(|c| c.started >= oldest));
+            if !shown {
+                calls.remove(conn);
+            }
+            shown
+        });
+    }
+
+    /// Connection `conn` is new: a closed one listed under the same number goes.
+    fn arrived(&mut self, conn: u64) {
+        if self.gone.remove(&conn).is_some() {
+            self.calls.remove(&conn);
+        }
+    }
+
+    /// Put `call` last among connection `conn`'s calls, the oldest query going when there are
+    /// more than [`CALLS_KEPT`] (the oldest call when every other made an edit).
+    fn keep_call(&mut self, conn: u64, call: AgentCall) {
+        let q = self.calls.entry(conn).or_default();
+        q.push_back(call);
+        if q.len() > CALLS_KEPT {
+            let query = q.iter().take(q.len() - 1).position(|c| c.edit.is_none() && c.staged.is_none());
+            q.remove(query.unwrap_or(0));
+        }
+        self.prune_gone();
     }
 
     /// Note the connections listed at `now`: when each first appeared.
     pub fn note_clients(&mut self, now: f64) {
-        for (conn, _) in &self.clients {
-            self.seen.entry(*conn).or_insert(now);
+        for conn in self.clients.iter().map(|c| c.0).collect::<Vec<_>>() {
+            if !self.seen.contains_key(&conn) {
+                self.arrived(conn);
+                self.seen.insert(conn, now);
+            }
         }
         self.seen.retain(|c, _| self.clients.iter().any(|(n, _)| n == c));
     }
@@ -252,25 +308,27 @@ impl Agents {
     /// Connection `conn` started calling `tool` with `args` at `now`. A call it repeats while
     /// the first still waits (a New scene asking the user) is the same call.
     pub fn begin_call(&mut self, conn: u64, now: f64, tool: &str, args: &Value) {
-        self.seen.entry(conn).or_insert(now);
+        if !self.seen.contains_key(&conn) {
+            self.arrived(conn);
+            self.seen.insert(conn, now);
+        }
         if self.calls.get(&conn).and_then(|q| q.back()).is_some_and(|c| c.answered.is_none() && c.tool == tool) {
             return;
         }
         *self.made.entry(conn).or_default() += 1;
-        let q = self.calls.entry(conn).or_default();
-        q.push_back(AgentCall {
-            tool: tool.to_string(),
-            arg: summarize(tool, args),
-            result: String::new(),
-            ok: true,
-            started: now,
-            answered: None,
-            edit: None,
-            staged: None,
-        });
-        while q.len() > CALLS_KEPT {
-            q.pop_front();
-        }
+        self.keep_call(
+            conn,
+            AgentCall {
+                tool: tool.to_string(),
+                arg: summarize(tool, args),
+                result: String::new(),
+                ok: true,
+                started: now,
+                answered: None,
+                edit: None,
+                staged: None,
+            },
+        );
     }
 
     /// Connection `conn`'s running call was answered at `now`: with `result`, and the edit it made.
@@ -325,12 +383,11 @@ impl Agents {
 
     /// Put `call` among connection `conn`'s calls (a check's way to set the scene).
     pub fn push_call(&mut self, conn: u64, call: AgentCall) {
-        self.seen.entry(conn).or_insert(call.started);
-        let q = self.calls.entry(conn).or_default();
-        q.push_back(call);
-        while q.len() > CALLS_KEPT {
-            q.pop_front();
+        if !self.seen.contains_key(&conn) {
+            self.arrived(conn);
+            self.seen.insert(conn, call.started);
         }
+        self.keep_call(conn, call);
     }
 
     /// When connection `conn` was first listed, and its last call.
@@ -876,6 +933,47 @@ mod tests {
     }
 
     #[test]
+    fn the_ring_keeps_edits_over_queries_and_a_closed_connection_stays_listed() {
+        let mut a = Agents { clients: vec![(1, "Claude Code".into()), (2, "Codex".into())], ..Default::default() };
+        a.note_clients(0.0);
+        let call = |a: &mut Agents, conn, t: f64, tool: &str, edit| {
+            a.begin_call(conn, t, tool, &Value::Null);
+            a.end_call(conn, t, &Ok(String::new()), edit);
+        };
+        call(&mut a, 1, 1.0, "box", Some(0));
+        for t in 0..12 {
+            call(&mut a, 1, 2.0 + t as f64, "look", None);
+        }
+        let tools: Vec<_> = a.calls(1).map(|c| c.tool.as_str()).collect();
+        assert_eq!((tools.len(), tools[0]), (CALLS_KEPT, "box"), "the oldest queries went, not the edit");
+        for t in 0..CALLS_KEPT {
+            call(&mut a, 2, 20.0 + t as f64, "paint", Some(t + 1));
+        }
+        call(&mut a, 2, 40.0, "paint", Some(99));
+        assert_eq!(a.calls(2).next().and_then(|c| c.edit), Some(2), "every call an edit: the oldest went");
+        // Codex closes with a call running: its calls stay under its name, the call over.
+        a.begin_call(2, 41.0, "look", &Value::Null);
+        a.clients.retain(|c| c.0 != 2);
+        a.forget(2, "Codex");
+        assert_eq!(a.gone().collect::<Vec<_>>(), [(2, "Codex")]);
+        let last = a.calls(2).last().unwrap();
+        assert!(last.answered.is_some() && !last.ok, "{last:?}");
+        // Newer calls push it out of the list.
+        for t in 0..LIST_ROWS {
+            call(&mut a, 1, 50.0 + t as f64, "paint", Some(t + 20));
+        }
+        assert_eq!((a.gone().count(), a.calls(2).count()), (0, 0));
+        // A new connection under a closed one's number starts afresh; clearing forgets the closed.
+        call(&mut a, 3, 70.0, "box", Some(0));
+        a.forget(3, "Codex");
+        a.begin_call(3, 71.0, "look", &Value::Null);
+        assert_eq!((a.gone().count(), a.calls(3).count()), (0, 1));
+        a.forget(3, "Codex");
+        a.clear();
+        assert_eq!((a.gone().count(), a.calls(3).count(), a.calls(1).count()), (0, 0, CALLS_KEPT));
+    }
+
+    #[test]
     fn edits_applied_from_review_are_linked_to_the_calls_that_staged_them() {
         let (mut a, mut s, mut r) = (Agents::default(), scene(), None);
         a.review = true;
@@ -997,7 +1095,7 @@ mod tests {
         assert!(t.starts_with("vxr: the user discarded the change under review: none of your 1 edit"), "{t}");
         // A closed connection is not told.
         staged(&mut a, &mut s, &mut r, 2, "Codex", "place", json!({"cells": [[6, 0, 6]], "slot": 3})).unwrap();
-        a.forget(2);
+        a.forget(2, "Codex");
         a.clients.retain(|c| c.0 != 2);
         a.discard_review(&mut s, r.take().unwrap());
         assert!(a.take_notices(2).is_none());
@@ -1214,7 +1312,7 @@ mod tests {
         let (mut a, mut s) = (Agents::default(), scene());
         by_hand(&mut s, &[([0, 0, 0], 2), ([1, 0, 0], 2)]);
         ok(&mut a, &mut s, 1, "Claude Code", "select", json!({"from": [1, 0, 0], "to": [1, 0, 0]}));
-        a.forget(1);
+        a.forget(1, "Claude Code");
         let _ = a.call(&mut s, 1, "Claude Code", "paint", &json!({"slot": 9, "selection": true}));
         assert_eq!(at(&s, [1, 0, 0]), 2, "the old connection's selection is gone");
         assert_eq!(a.edits.len(), 0);

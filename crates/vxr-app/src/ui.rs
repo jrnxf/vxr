@@ -19,7 +19,7 @@ use crate::theme::{self, Theme, ThemeChoice, th};
 mod activity;
 mod agents;
 mod assistant;
-pub use activity::{Item, Live};
+pub use activity::{Item, LIST_ROWS, Live};
 pub use agents::{AgentsView, EditRow, FILES_SETUP, LIVE_SETUP, SETUP};
 pub use assistant::{AiAction, AskBar, ChatView, PANEL_W};
 
