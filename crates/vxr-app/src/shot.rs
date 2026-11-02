@@ -322,6 +322,7 @@ fn run_steps(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     agent_chip_squeezed(dir)?;
     agent_chip_states(dir)?;
     agent_activity(dir)?;
+    agent_waiting(dir)?;
     palette_beside_flyouts()?;
     column_short_window(dir)?;
     agents_states(dir)?;
@@ -4188,6 +4189,19 @@ fn agent_activity(dir: &Path) -> Result<(), String> {
             "the list opens on the live pause".into(),
         )?;
         s.save_png(&dir.join(format!("app-2x-agent-stall{tag}.png")))?;
+        // The counter ticks without moving the card: the chip keeps its width from 62 s to 63 s.
+        let width = |s: &Shot| s.ed.ui.hits.get("agent-chip").map(|r| (r.left(), r.width()));
+        let (first, text) = (width(&s), chip(&s));
+        s.time += 1.0;
+        s.frames(3);
+        check(
+            chip(&s) != text && width(&s) == first,
+            format!(
+                "the chip's words change ({text} to {}) and its place and width do not: {first:?}, {:?}",
+                chip(&s),
+                width(&s)
+            ),
+        )?;
         // Past 2 min: may be stuck.
         s.time += 70.0;
         s.frames(3);
@@ -4245,6 +4259,134 @@ fn agent_activity(dir: &Path) -> Result<(), String> {
         )?;
         s.save_png(&dir.join(format!("app-3x-phone-agent-activity-{}x{}.png", css.0, css.1)))?;
     }
+    Ok(())
+}
+
+/// The wall clock of a check, set by hand ([`vxr_app::Editor::wall_clock`] is a plain function).
+static WALL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn shot_wall() -> f64 {
+    f64::from_bits(WALL.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+fn set_wall(secs: f64) {
+    WALL.store(secs.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The calls that do not answer at once, through the editor's own `agent_call`: calls served
+/// while no frame draws (a minimised window) are stamped when they came, so the window coming
+/// back does not say "may be stuck"; a request queued behind another shows as running, not as
+/// silence; a render export stays running until its files are handed over, and a failed hand-over
+/// shows as failed; a New scene waiting for the user's answer is one running call, repeated or
+/// not, and a spinner does not redraw every frame meanwhile.
+fn agent_waiting(dir: &Path) -> Result<(), String> {
+    use serde_json::json;
+    let mut s = Shot::sized(house(), "house.vox", 2.0, (1280, 1000))?;
+    s.ed.wall_clock = shot_wall;
+    set_wall(0.0);
+    s.ed.ui.coach = false;
+    s.frames(2);
+    let now = s.ed.ctx.input(|i| i.time);
+    let a = &mut s.ed.agents;
+    (a.available, a.allowed, a.since) = (true, true, Some(now - 240.0));
+    a.clients = vec![(1, "Claude Code".to_string()), (2, "Codex".to_string())];
+    a.note_clients(now - 240.0);
+    let ask = |s: &mut Shot, conn: u64, tool: &str, args: serde_json::Value| {
+        let who = if conn == 1 { "Claude Code" } else { "Codex" };
+        s.ed.agent_call(conn, who, tool, &args)
+    };
+    let state = |s: &Shot, i: usize| s.ed.ui.agents.now_of(i, s.ed.ctx.input(|t| t.time)).state;
+    let chip = |s: &Shot| s.ed.ui.agent_chip_text(s.ed.ctx.input(|t| t.time));
+    let last = |s: &Shot, conn: u64| s.ed.agents.calls(conn).last().cloned();
+
+    // 1. Five minutes pass on the wall clock with no frame; both agents call meanwhile.
+    s.frames(1);
+    set_wall(300.0);
+    for conn in [1, 2] {
+        ask(&mut s, conn, "scene_summary", json!({})).ok_or("scene_summary waited")?.map_err(|e| e.to_string())?;
+    }
+    // The window comes back: its first frame is 5 minutes later.
+    s.time += 300.0;
+    s.frames(3);
+    check(
+        state(&s, 0) == Live::Active && !chip(&s).contains("stuck"),
+        format!("calls served with no frame are stamped when they came: {:?}, {}", state(&s, 0), chip(&s)),
+    )?;
+
+    // 2. Codex's `look` waits behind a render export of Claude Code's.
+    set_wall(300.0);
+    s.ed.agent_queued(2, "look", &json!({"view": "iso"}));
+    check(s.ed.agents.running(2), "a queued request shows as a running call".into())?;
+    let r = ask(&mut s, 1, "export", json!({"kind": "render"})).ok_or("export waited")?;
+    check(
+        r.is_ok() && s.ed.agent_waits(1) && s.ed.agents.running(1),
+        "the render export keeps Claude Code's call running".into(),
+    )?;
+    s.time += 130.0;
+    s.frames(3);
+    check(
+        state(&s, 1) == Live::Running && chip(&s).contains(" \u{b7} 130 s") && !chip(&s).contains("stuck"),
+        format!("the held agent is running, not silent: {:?}, {}", state(&s, 1), chip(&s)),
+    )?;
+    s.save_png(&dir.join("app-2x-agent-queued.png"))?;
+    // It is served later: the same call, answered once.
+    ask(&mut s, 2, "look", json!({"view": "iso", "size": 64})).ok_or("look waited")?.map_err(|e| e.to_string())?;
+    let looks = s.ed.agents.calls(2).filter(|c| c.tool == "look").count();
+    check(looks == 1 && !s.ed.agents.running(2), format!("serving a queued call adds none: {looks} look calls"))?;
+
+    // 3. The export ends: its call stays running until the host has written the files.
+    let mut rendered = None;
+    for _ in 0..3000 {
+        s.frames(1);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        if let Some(r) = s.ed.take_agent_render() {
+            rendered = Some(r);
+            break;
+        }
+    }
+    check(rendered.as_ref().is_some_and(|r| r.is_ok()), format!("the render finished: {rendered:?}"))?;
+    check(s.ed.agents.running(1), "and its call runs until the files are handed over".into())?;
+    s.ed.finish_agent_call(1, &Err("could not write house-render.png into Downloads: permission denied".into()));
+    let c = last(&s, 1).ok_or("no call")?;
+    check(
+        !c.ok && c.answered.is_some() && c.result.contains("could not write"),
+        format!("a failed hand-over shows as failed: {c:?}"),
+    )?;
+
+    // 4. A New scene with unsaved edits asks the user; the agent's call is one running call.
+    ask(&mut s, 1, "box", json!({"from": [9, 7, 8], "to": [12, 9, 8], "slot": 50}))
+        .ok_or("box waited")?
+        .map_err(|e| e.to_string())?;
+    let before = s.ed.agents.calls(1).count();
+    check(ask(&mut s, 1, "new_scene", json!({})).is_none(), "New scene waits for the user".into())?;
+    check(ask(&mut s, 1, "new_scene", json!({})).is_none(), "and again".into())?;
+    s.frames(3);
+    check(
+        s.ed.agents.calls(1).count() == before + 1 && s.ed.agents.running(1) && state(&s, 0) == Live::Running,
+        "asking twice is one running call".into(),
+    )?;
+    // Once the view has settled, the ring is all that asks to be drawn, and it asks every 50 ms.
+    for _ in 0..600 {
+        if s.ed.repaint_after() != Some(std::time::Duration::ZERO) {
+            break;
+        }
+        s.frames(1);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    check(
+        s.ed.repaint_after().is_some_and(|d| d >= std::time::Duration::from_millis(20)),
+        format!("the spinner does not redraw every frame: {:?}", s.ed.repaint_after()),
+    )?;
+    s.save_png(&dir.join("app-2x-agent-confirm.png"))?;
+    s.ui_click("new-cancel")?;
+    s.frames(2);
+    let r = ask(&mut s, 1, "new_scene", json!({})).ok_or("still waiting")?;
+    let c = last(&s, 1).ok_or("no call")?;
+    check(
+        r.is_err() && !c.ok && c.answered.is_some() && c.result.contains("kept"),
+        format!("Cancel ends the call as refused: {c:?}"),
+    )?;
+    set_wall(0.0);
     Ok(())
 }
 

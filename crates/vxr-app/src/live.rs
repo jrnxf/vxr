@@ -146,6 +146,11 @@ impl Live {
             self.pending.extend(h.poll());
             let open = h.clients();
             self.pending.retain(|r| open.iter().any(|(c, _)| *c == r.conn));
+            for r in &self.pending {
+                if let Ask::Call { name, args } = &r.ask {
+                    ed.agent_queued(r.conn, name, args);
+                }
+            }
             if self.waiting.as_ref().is_some_and(|w| !open.iter().any(|(c, _)| *c == w.conn)) {
                 self.waiting = None;
                 ed.forget_agent_render();
@@ -156,7 +161,9 @@ impl Live {
         {
             let w = self.waiting.take().unwrap();
             let client = w.client.clone();
-            w.answer(r.and_then(|what| self.deliver(ed, &client, &what)));
+            let r = r.and_then(|what| self.deliver(ed, &client, &what));
+            ed.finish_agent_call(w.conn, &r);
+            w.answer(r);
         }
         while !ed.agent_busy() && self.waiting.is_none() {
             let Some(r) = self.pending.pop_front() else { break };
@@ -171,7 +178,9 @@ impl Live {
                     if ed.agent_waits(conn) {
                         self.waiting = Some(r);
                     } else if name == EXPORT_TOOL {
-                        r.reply(a.and_then(|a| self.deliver(ed, &client, &a.text).map(Reply::from)));
+                        let a = a.and_then(|a| self.deliver(ed, &client, &a.text));
+                        ed.finish_agent_call(conn, &a);
+                        r.reply(a.map(Reply::from));
                     } else {
                         r.reply(a);
                     }

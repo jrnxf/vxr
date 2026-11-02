@@ -147,6 +147,11 @@ pub struct Editor {
     agent_new: Option<(u64, u64, Option<bool>)>,
     /// How many scenes were loaded (opened or started new), to tell which scene is shown.
     loads: u64,
+    /// Seconds on a clock that runs without frames (the desktop's monotonic clock; the page sets
+    /// its own), to stamp agent calls served while no frame draws (a minimised window).
+    pub wall_clock: fn() -> f64,
+    /// The egui time and the wall clock at the last frame.
+    frame_at: (f64, f64),
     /// A PNG render export in progress (the corner pauses meanwhile).
     pub export: Option<Export>,
     /// The last finished export's PNG and size, for the host to save or download.
@@ -285,6 +290,8 @@ impl Editor {
             agent_host: Vec::new(),
             agent_new: None,
             loads: 0,
+            wall_clock: default_wall_clock,
+            frame_at: (0.0, 0.0),
             export: None,
             exported: None,
             agent_files: Vec::new(),
@@ -1373,6 +1380,7 @@ impl Editor {
     /// the host handles (open, save, embed) and egui's platform output.
     pub fn frame(&mut self, input: egui::RawInput, view: &wgpu::TextureView) -> (Vec<Action>, egui::PlatformOutput) {
         let mut input = input;
+        self.frame_at = (input.time.unwrap_or(self.frame_at.0), (self.wall_clock)());
         // Tab switches between the world and a model. egui would move keyboard focus with it
         // before the UI could consume it, so it never reaches egui unless a field is typing.
         let mut tabs = 0;
@@ -1691,18 +1699,44 @@ impl Editor {
         name: &str,
         args: &serde_json::Value,
     ) -> Option<Result<Reply, String>> {
-        let now = self.ctx.input(|i| i.time);
+        let now = self.agent_time();
         self.agents.begin_call(conn, now, name, args);
         let edits = self.agents.edits.len();
         let r = self.agent_call_run(conn, client, name, args);
-        // A call that waits (New scene asking the user, a render export) stays running.
+        // A call that waits (New scene asking the user, a render export) stays running, and an
+        // export ends once the host has written its files ([`Editor::finish_agent_call`]).
         if let Some(r) = &r
             && !self.agent_waits(conn)
+            && name != vxr_mcp::live::EXPORT_TOOL
         {
             let plain = r.as_ref().map(|a| a.text.clone()).map_err(Clone::clone);
             self.agents.end_call(conn, now, &plain, (self.agents.edits.len() > edits).then_some(edits));
         }
         r
+    }
+
+    /// The time for an agent call: the last frame's, plus the wall clock's seconds since it, so a
+    /// call served while no frame draws (the window is minimised) is stamped when it came, not
+    /// when the window last drew.
+    pub fn agent_time(&self) -> f64 {
+        self.frame_at.0 + ((self.wall_clock)() - self.frame_at.1).max(0.0)
+    }
+
+    /// A request from agent `conn` is queued behind another (a render export, a New scene
+    /// waiting for the user, a drag): its call shows as running, not as silence, unless the
+    /// connection already has one running.
+    pub fn agent_queued(&mut self, conn: u64, name: &str, args: &serde_json::Value) {
+        if !self.agents.running(conn) {
+            let now = self.agent_time();
+            self.agents.begin_call(conn, now, name, args);
+        }
+    }
+
+    /// The host answered connection `conn`'s call with `result` (an export, once its files are
+    /// written or failed to be).
+    pub fn finish_agent_call(&mut self, conn: u64, result: &Result<String, String>) {
+        let now = self.agent_time();
+        self.agents.end_call(conn, now, result, None);
     }
 
     fn agent_call_run(
@@ -1822,15 +1856,13 @@ impl Editor {
     /// How the agent's render export ended, once it did (finished, failed or cancelled); its
     /// PNG is then in [`Editor::agent_files`].
     pub fn take_agent_render(&mut self) -> Option<Result<String, String>> {
-        let conn = self.agent_render?;
+        self.agent_render?;
         let r = self.agent_rendered.take().or_else(|| {
             self.export.is_none().then(|| {
                 Err("the render export was cancelled in vxr (the user cancelled it or the scene changed)".to_string())
             })
         })?;
         self.agent_render = None;
-        let now = self.ctx.input(|i| i.time);
-        self.agents.end_call(conn, now, &r, None);
         Some(r)
     }
 
@@ -2440,6 +2472,19 @@ pub fn tree_rows(s: &Scene) -> Vec<TreeRow> {
             }
         })
         .collect()
+}
+
+/// The wall clock's seconds, from the desktop's monotonic clock; the page has no `Instant` and
+/// sets its own ([`Editor::wall_clock`]).
+#[cfg(not(target_arch = "wasm32"))]
+fn default_wall_clock() -> f64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START.get_or_init(std::time::Instant::now).elapsed().as_secs_f64()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn default_wall_clock() -> f64 {
+    0.0
 }
 
 #[cfg(test)]

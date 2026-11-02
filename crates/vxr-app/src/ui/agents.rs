@@ -107,6 +107,10 @@ enum Lead {
     Hollow,
 }
 
+/// How often a turning ring redraws: a call can run for as long as the user leaves a dialog open,
+/// so it does not draw every frame.
+const SPIN_REPAINT: std::time::Duration = std::time::Duration::from_millis(50);
+
 /// Where the chip's pieces start: padding and the mark, the gap before Stop and Stop itself, and
 /// the padding after it. Its icon takes `CHIP_ICON` before the call's words.
 const CHIP_LEAD: f32 = 25.0;
@@ -269,35 +273,43 @@ impl Hybrid {
         self.chip_parts(now).map(|c| c.text()).unwrap_or_default()
     }
 
-    /// The chip's text laid out on one line, cut with an ellipsis where the window is too narrow,
-    /// with where its tool icon goes (left of the verb, when the whole name fits before it).
-    fn chip_galley(&self, ctx: &Context, c: &Chip) -> (Arc<egui::Galley>, Option<f32>) {
+    /// The chip's text laid out on one line, cut with an ellipsis where the window is too narrow:
+    /// the galley, where its tool icon goes (left of the verb, when the whole name fits before
+    /// it) and the width it takes. That width is measured with every digit a zero, so the card
+    /// does not shift sideways as a counter ticks, only when it gains a digit.
+    fn chip_galley(&self, ctx: &Context, c: &Chip) -> (Arc<egui::Galley>, Option<f32>, f32) {
         let (text, faint) = if c.warn { (th().mid, th().mid) } else { (th().text, th().faint) };
         let fmt = |font: FontId, color| TextFormat { font_id: font, color, ..Default::default() };
         let who = ctx.fonts_mut(|f| f.layout_no_wrap(c.who.clone(), sans_medium(12.0), text));
         // The card spans the window less its margins, and the Stop button and padding.
         let budget = ctx.content_rect().width() - 24.0 - (CHIP_LEAD + CHIP_STOP + CHIP_END);
         let icon = c.icon.filter(|_| who.size().x + CHIP_ICON <= budget).map(|_| who.size().x + 8.0);
-        let mut job = LayoutJob::default();
-        job.append(&c.who, 0.0, fmt(sans_medium(12.0), text));
-        if !c.verb.is_empty() {
-            job.append(&c.verb, if icon.is_some() { CHIP_ICON } else { 6.0 }, fmt(sans(12.0), text));
-        }
-        job.append(&c.tail, 0.0, fmt(sans(12.0), faint));
-        job.wrap = egui::text::TextWrapping {
-            max_width: budget.max(1.0),
-            max_rows: 1,
-            break_anywhere: true,
-            overflow_character: Some('\u{2026}'),
+        let lay = |zeros: bool| {
+            let t = |s: &str| if zeros { s.replace(|ch: char| ch.is_ascii_digit(), "0") } else { s.to_string() };
+            let mut job = LayoutJob::default();
+            job.append(&t(&c.who), 0.0, fmt(sans_medium(12.0), text));
+            if !c.verb.is_empty() {
+                job.append(&t(&c.verb), if icon.is_some() { CHIP_ICON } else { 6.0 }, fmt(sans(12.0), text));
+            }
+            job.append(&t(&c.tail), 0.0, fmt(sans(12.0), faint));
+            job.wrap = egui::text::TextWrapping {
+                max_width: budget.max(1.0),
+                max_rows: 1,
+                break_anywhere: true,
+                overflow_character: Some('\u{2026}'),
+            };
+            ctx.fonts_mut(|f| f.layout_job(job))
         };
-        (ctx.fonts_mut(|f| f.layout_job(job)), icon)
+        let (g, steady) = (lay(false), lay(true));
+        let w = steady.size().x.max(g.size().x);
+        (g, icon, w)
     }
 
     /// The agent chip at the left of the hint bar: which agent, what it did last and how long
     /// ago, and Stop. Returns its width, 0 with no agent connected.
     pub(super) fn agent_chip_width(&self, ctx: &Context) -> f32 {
         let Some(c) = self.chip_parts(ctx.input(|i| i.time)) else { return 0.0 };
-        CHIP_LEAD + self.chip_galley(ctx, &c).0.size().x + CHIP_STOP + CHIP_END
+        CHIP_LEAD + self.chip_galley(ctx, &c).2 + CHIP_STOP + CHIP_END
     }
 
     /// Draw the chip into the hint panel's `ui`, starting at `x`.
@@ -306,7 +318,7 @@ impl Hybrid {
         let Some(c) = self.chip_parts(t).filter(|_| w > 0.0) else { return };
         let cy = rect.center().y;
         let x = rect.left() + 12.0;
-        let (g, icon_at) = self.chip_galley(ui.ctx(), &c);
+        let (g, icon_at, steady) = self.chip_galley(ui.ctx(), &c);
         let p = ui.painter().clone();
         if c.warn {
             let r = CornerRadius { nw: R, sw: R, ne: 0, se: 0 };
@@ -314,14 +326,16 @@ impl Hybrid {
         }
         let dot = pos2(x + 3.5, cy);
         lead_mark(&p, dot, c.lead, t);
-        if matches!(c.lead, Lead::Spin | Lead::Pulse) {
+        if c.lead == Lead::Pulse {
             ui.ctx().request_repaint();
+        } else if c.lead == Lead::Spin {
+            ui.ctx().request_repaint_after(SPIN_REPAINT);
         } else {
             // The times tick on, and the chip's width with them.
             ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
         }
         let gx = x + 13.0;
-        let gw = g.size().x;
+        let gw = steady;
         let color = if c.warn { th().mid } else { th().text };
         if let (Some(tool), Some(dx)) = (c.icon, icon_at) {
             let icon = label_icon(tool, 12.0);
@@ -786,8 +800,10 @@ impl Tab {
         let p = ui.painter().clone();
         let c = pos2(r.left() + 4.0, r.top() + 11.0);
         lead_mark(&p, c, lead, self.now);
-        if matches!(lead, Lead::Spin | Lead::Pulse) {
+        if lead == Lead::Pulse {
             ui.ctx().request_repaint();
+        } else if lead == Lead::Spin {
+            ui.ctx().request_repaint_after(SPIN_REPAINT);
         } else {
             // The times tick on.
             ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
@@ -864,7 +880,7 @@ impl Tab {
         };
         if running {
             lead_mark(&p, mark, Lead::Spin, self.now);
-            ui.ctx().request_repaint();
+            ui.ctx().request_repaint_after(SPIN_REPAINT);
         } else {
             let glyph = activity::tool_icon(&c.tool);
             p.text(mark, Align2::CENTER_CENTER, glyph, label_icon(glyph, 12.0), tone);

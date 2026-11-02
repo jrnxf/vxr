@@ -342,12 +342,18 @@ impl Page {
             self.waiting = None;
             ed.forget_agent_render();
         }
+        for r in &self.pending {
+            if let Ask::Call { name, args } = &r.ask {
+                ed.agent_queued(r.conn, name, args);
+            }
+        }
         if self.waiting.is_some()
             && let Some(r) = ed.take_agent_render()
         {
             let w = self.waiting.take().unwrap();
-            let r = r.and_then(|what| self.deliver(ed, &w.client, &what)).map(Reply::from);
-            self.send(answer(&w.id, r));
+            let r = r.and_then(|what| self.deliver(ed, &w.client, &what));
+            ed.finish_agent_call(w.conn, &r);
+            self.send(answer(&w.id, r.map(Reply::from)));
         }
         while self.link == Link::Paired && !self.regenerating && !ed.agent_busy() && self.waiting.is_none() {
             let Some(r) = self.pending.pop_front() else { break };
@@ -362,7 +368,9 @@ impl Page {
                         continue;
                     }
                     let a = if name == EXPORT_TOOL {
-                        a.and_then(|a| self.deliver(ed, &r.client, &a.text).map(Reply::from))
+                        let a = a.and_then(|a| self.deliver(ed, &r.client, &a.text));
+                        ed.finish_agent_call(r.conn, &a);
+                        a.map(Reply::from)
                     } else {
                         a
                     };

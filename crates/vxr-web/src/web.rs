@@ -136,6 +136,7 @@ pub async fn start(
             });
     let mut host = Host::new(gpu, surface, (width, height), wgpu::PresentMode::Fifo, scene, &name, ppp, fonts)?;
     let editor = &mut host.editor;
+    editor.wall_clock = || js_sys::Date::now() / 1000.0;
     // The assistant calls its provider straight from this page, with keys in this tab.
     let keys = Rc::new(RefCell::new(KeyStore::default()));
     editor.assistant = Assistant::new(Box::new(Fetch), Box::new(WebKeys(keys.clone())), true);

@@ -308,6 +308,11 @@ impl Agents {
         }
     }
 
+    /// Whether connection `conn` has a call that is not answered yet.
+    pub fn running(&self, conn: u64) -> bool {
+        self.calls(conn).any(|c| c.answered.is_none())
+    }
+
     /// How many calls connection `conn` made since it connected.
     pub fn made(&self, conn: u64) -> u64 {
         self.made.get(&conn).copied().unwrap_or(0)

@@ -110,14 +110,13 @@ impl AgentsView {
         agent_now(now, since, &self.calls_of(self.clients[i].0))
     }
 
-    /// The agent the chip and the banner speak for: the one with the most to say, the longest
-    /// silent first, else the one that called last.
+    /// The agent the chip and the banner speak for: the one with the most to say; among agents in
+    /// a warning state the longest silent, else the one that called last.
     pub fn lead(&self, now: f64) -> Option<(usize, Now<'_>)> {
         (0..self.clients.len()).map(|i| (i, self.now_of(i, now))).max_by(|a, b| {
-            a.1.state
-                .rank()
-                .cmp(&b.1.state.rank())
-                .then(b.1.quiet.partial_cmp(&a.1.quiet).unwrap_or(std::cmp::Ordering::Equal))
+            use std::cmp::Ordering::Equal;
+            let by_quiet = a.1.quiet.partial_cmp(&b.1.quiet).unwrap_or(Equal);
+            a.1.state.rank().cmp(&b.1.state.rank()).then(if a.1.state.warn() { by_quiet } else { by_quiet.reverse() })
         })
     }
 }
@@ -317,6 +316,22 @@ mod tests {
             [Live::Done, Live::Idle]
         );
         assert_eq!(agent_now(50.0, 0.0, &[]).state, Live::Idle);
+    }
+
+    #[test]
+    fn the_chip_speaks_for_the_longest_silent_warning_else_the_latest_call() {
+        let view = |a: f64, b: f64| AgentsView {
+            clients: vec![(1, "Claude Code".into()), (2, "Codex".into())],
+            times: vec![(0.0, None), (0.0, None)],
+            calls: vec![(1, call("box", a, Some(a))), (2, call("box", b, Some(b)))],
+            ..Default::default()
+        };
+        // Both long, Claude Code silent for 10 min and Codex for 2 min 30 s.
+        let long = view(0.0, 450.0);
+        assert_eq!(long.lead(600.0).unwrap().0, 0);
+        // Both active: the one that called last.
+        let active = view(597.0, 599.0);
+        assert_eq!(active.lead(600.0).unwrap().0, 1);
     }
 
     #[test]
