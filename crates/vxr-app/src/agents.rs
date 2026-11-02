@@ -423,6 +423,7 @@ impl Agents {
         let r = review.session.call(scene, name, args.clone());
         self.image = review.session.take_image();
         if review.session.steps().len() > steps
+            && review.session.steps().last().is_some_and(|s| s.ok)
             && let Some(call) =
                 self.calls.get_mut(&conn).and_then(|q| q.iter_mut().rev().find(|c| c.answered.is_none()))
         {
@@ -899,6 +900,17 @@ mod tests {
         assert_eq!(a.apply_review(&mut s, r.take().unwrap()), Ok(1));
         assert_eq!(a.calls(1).last().map(|c| c.edit), Some(None));
         assert_eq!(a.calls(2).last().map(|c| c.edit), Some(Some(3)));
+        // A change of only failed calls closes by itself, as the editor closes it, and the
+        // next change's first step goes to the call that made it.
+        call(&mut a, &mut s, &mut r, 1, "paint", json!({"slot": 3, "part": "nope"}));
+        assert_eq!(a.calls(1).last().map(|c| c.ok), Some(false));
+        let failed = r.take().unwrap();
+        assert!(!failed.session.steps().iter().any(|s| s.ok));
+        failed.session.discard(&mut s);
+        call(&mut a, &mut s, &mut r, 1, "box", json!({"from": [2, 0, 2], "to": [3, 0, 2], "slot": 4}));
+        assert_eq!(a.apply_review(&mut s, r.take().unwrap()), Ok(1));
+        let calls: Vec<_> = a.calls(1).map(|c| (c.tool.clone(), c.edit)).collect();
+        assert_eq!(calls[calls.len() - 2..], [("paint".to_string(), None), ("box".to_string(), Some(4))]);
     }
 
     #[test]
