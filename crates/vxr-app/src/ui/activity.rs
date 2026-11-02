@@ -266,7 +266,7 @@ pub fn items(v: &AgentsView, now: f64) -> Vec<Item> {
         for pair in calls.windows(2) {
             let (a, b) = (pair[0], pair[1]);
             let secs = b.started - a.answered.unwrap_or(a.started);
-            if secs >= STALL_SECS && b.started >= from {
+            if secs >= STALL_SECS && b.started >= from && !b.skipped {
                 timed.push((b.started - 0.001, Item::Gap { secs, live: false, who: name(*conn) }));
             }
         }
@@ -297,6 +297,7 @@ mod tests {
             answered,
             edit: None,
             staged: None,
+            skipped: false,
         }
     }
 
@@ -346,10 +347,13 @@ mod tests {
             ],
             ..Default::default()
         };
-        let items = items(&v, 104.0);
         assert!(matches!(
-            items.as_slice(),
+            items(&v, 104.0).as_slice(),
             [Item::Call(2), Item::Call(1), Item::Gap { live: false, .. }, Item::Call(0)]
         ));
+        // Calls dropped from between the two: no pause.
+        let mut v = v;
+        v.calls[1].1.skipped = true;
+        assert!(matches!(items(&v, 104.0).as_slice(), [Item::Call(2), Item::Call(1), Item::Call(0)]));
     }
 }

@@ -49,7 +49,7 @@ pub struct AgentsView {
     /// Each connection's latest calls (the ACTIVITY list), oldest first within a connection;
     /// the closed ones in `gone` too.
     pub calls: Vec<(u64, AgentCall)>,
-    /// The closed connections whose calls are still listed: connection and agent name.
+    /// The closed connections whose calls are still listed: their key in `calls` and agent name.
     pub gone: Vec<(u64, String)>,
     /// For each of `clients`: how many calls it made since it connected.
     pub made: Vec<u64>,

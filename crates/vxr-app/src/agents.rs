@@ -56,6 +56,9 @@ pub struct AgentCall {
     /// With review on, the step it staged, an index into the change under review's steps,
     /// until the user applies or discards the change.
     pub staged: Option<usize>,
+    /// Calls between it and the one kept before it were dropped from the list, so the time
+    /// between the two is no pause.
+    pub skipped: bool,
 }
 
 /// A few words of a call's arguments: a quoted name or search, a view, or `done`'s summary.
@@ -128,9 +131,12 @@ pub struct Agents {
     seen: HashMap<u64, f64>,
     /// Each connection's latest calls ([`CALLS_KEPT`]), oldest first; a closed one's too.
     calls: HashMap<u64, VecDeque<AgentCall>>,
-    /// The closed connections whose calls are still listed, and the agent's name: until the
-    /// list is cleared or newer calls push them out of it.
+    /// The closed connections whose calls are still listed, by a key of their own in `calls`
+    /// (counting down from `u64::MAX`, apart from any connection's), and the agent's name:
+    /// until the list is cleared or newer calls push them out of it.
     gone: HashMap<u64, String>,
+    /// How many closed connections were listed, for the next one's key.
+    closed: u64,
     /// How many calls each connection made since it connected.
     made: HashMap<u64, u64>,
     /// Each agent's own selection (map cells) by connection, kept between its calls so it
@@ -224,8 +230,8 @@ impl Agents {
     /// agents have not heard yet stays.
     pub fn clear(&mut self) {
         self.edits.clear();
-        for conn in std::mem::take(&mut self.gone).into_keys() {
-            self.calls.remove(&conn);
+        for key in std::mem::take(&mut self.gone).into_keys() {
+            self.calls.remove(&key);
         }
         for q in self.calls.values_mut() {
             q.iter_mut().for_each(|c| (c.edit, c.staged) = (None, None));
@@ -246,16 +252,20 @@ impl Agents {
         self.notices.remove(&conn);
         self.seen.remove(&conn);
         self.made.remove(&conn);
-        if let Some(q) = self.calls.get_mut(&conn) {
+        if let Some(mut q) = self.calls.remove(&conn) {
             for c in q.iter_mut().filter(|c| c.answered.is_none()) {
                 (c.answered, c.ok, c.result) = (Some(c.started), false, "disconnected before the answer".into());
             }
-            self.gone.insert(conn, name.to_string());
+            let key = u64::MAX - self.closed;
+            self.closed += 1;
+            self.calls.insert(key, q);
+            self.gone.insert(key, name.to_string());
         }
         self.prune_gone();
     }
 
-    /// The closed connections whose calls are still listed: connection and agent name.
+    /// The closed connections whose calls are still listed: their key among the calls and the
+    /// agent's name.
     pub fn gone(&self) -> impl Iterator<Item = (u64, &str)> {
         self.gone.iter().map(|(c, n)| (*c, n.as_str()))
     }
@@ -266,20 +276,13 @@ impl Agents {
         starts.sort_by(|a, b| b.total_cmp(a));
         let Some(&oldest) = starts.get(LIST_ROWS - 1) else { return };
         let calls = &mut self.calls;
-        self.gone.retain(|conn, _| {
-            let shown = calls.get(conn).is_some_and(|q| q.iter().any(|c| c.started >= oldest));
+        self.gone.retain(|key, _| {
+            let shown = calls.get(key).is_some_and(|q| q.iter().any(|c| c.started >= oldest));
             if !shown {
-                calls.remove(conn);
+                calls.remove(key);
             }
             shown
         });
-    }
-
-    /// Connection `conn` is new: a closed one listed under the same number goes.
-    fn arrived(&mut self, conn: u64) {
-        if self.gone.remove(&conn).is_some() {
-            self.calls.remove(&conn);
-        }
     }
 
     /// Put `call` last among connection `conn`'s calls, the oldest query going when there are
@@ -288,19 +291,19 @@ impl Agents {
         let q = self.calls.entry(conn).or_default();
         q.push_back(call);
         if q.len() > CALLS_KEPT {
-            let query = q.iter().take(q.len() - 1).position(|c| c.edit.is_none() && c.staged.is_none());
-            q.remove(query.unwrap_or(0));
+            let i = q.iter().take(q.len() - 1).position(|c| c.edit.is_none() && c.staged.is_none()).unwrap_or(0);
+            q.remove(i);
+            if i > 0 {
+                q[i].skipped = true;
+            }
         }
         self.prune_gone();
     }
 
     /// Note the connections listed at `now`: when each first appeared.
     pub fn note_clients(&mut self, now: f64) {
-        for conn in self.clients.iter().map(|c| c.0).collect::<Vec<_>>() {
-            if !self.seen.contains_key(&conn) {
-                self.arrived(conn);
-                self.seen.insert(conn, now);
-            }
+        for (conn, _) in &self.clients {
+            self.seen.entry(*conn).or_insert(now);
         }
         self.seen.retain(|c, _| self.clients.iter().any(|(n, _)| n == c));
     }
@@ -308,10 +311,7 @@ impl Agents {
     /// Connection `conn` started calling `tool` with `args` at `now`. A call it repeats while
     /// the first still waits (a New scene asking the user) is the same call.
     pub fn begin_call(&mut self, conn: u64, now: f64, tool: &str, args: &Value) {
-        if !self.seen.contains_key(&conn) {
-            self.arrived(conn);
-            self.seen.insert(conn, now);
-        }
+        self.seen.entry(conn).or_insert(now);
         if self.calls.get(&conn).and_then(|q| q.back()).is_some_and(|c| c.answered.is_none() && c.tool == tool) {
             return;
         }
@@ -327,6 +327,7 @@ impl Agents {
                 answered: None,
                 edit: None,
                 staged: None,
+                skipped: false,
             },
         );
     }
@@ -383,10 +384,7 @@ impl Agents {
 
     /// Put `call` among connection `conn`'s calls (a check's way to set the scene).
     pub fn push_call(&mut self, conn: u64, call: AgentCall) {
-        if !self.seen.contains_key(&conn) {
-            self.arrived(conn);
-            self.seen.insert(conn, call.started);
-        }
+        self.seen.entry(conn).or_insert(call.started);
         self.keep_call(conn, call);
     }
 
@@ -528,7 +526,7 @@ impl Agents {
         });
         for (i, step) in &landed {
             let (conn, label) = labels.remove(i).expect("a landed step was labelled");
-            if let Some(call) = self.calls.get_mut(&conn).and_then(|q| q.iter_mut().find(|c| c.staged == Some(*i))) {
+            if let Some(call) = self.calls.values_mut().flatten().find(|c| c.staged == Some(*i)) {
                 call.edit = Some(self.edits.len());
             }
             self.edits.push(AgentEdit { conn, client: name_of(conn), label, step: *step, undone_by: None });
@@ -940,12 +938,14 @@ mod tests {
             a.begin_call(conn, t, tool, &Value::Null);
             a.end_call(conn, t, &Ok(String::new()), edit);
         };
-        call(&mut a, 1, 1.0, "box", Some(0));
-        for t in 0..12 {
-            call(&mut a, 1, 2.0 + t as f64, "look", None);
+        call(&mut a, 1, 0.0, "box", Some(0));
+        for t in 1..=12 {
+            call(&mut a, 1, 20.0 * t as f64, "look", None);
         }
         let tools: Vec<_> = a.calls(1).map(|c| c.tool.as_str()).collect();
         assert_eq!((tools.len(), tools[0]), (CALLS_KEPT, "box"), "the oldest queries went, not the edit");
+        let skipped: Vec<_> = a.calls(1).map(|c| c.skipped).collect();
+        assert_eq!(skipped[..3], [false, true, false], "the call after the dropped ones says so");
         for t in 0..CALLS_KEPT {
             call(&mut a, 2, 20.0 + t as f64, "paint", Some(t + 1));
         }
@@ -955,22 +955,23 @@ mod tests {
         a.begin_call(2, 41.0, "look", &Value::Null);
         a.clients.retain(|c| c.0 != 2);
         a.forget(2, "Codex");
-        assert_eq!(a.gone().collect::<Vec<_>>(), [(2, "Codex")]);
-        let last = a.calls(2).last().unwrap();
+        let gone: Vec<_> = a.gone().map(|(k, n)| (k, n.to_string())).collect();
+        assert!(gone.len() == 1 && gone[0].0 != 2 && gone[0].1 == "Codex" && a.calls(2).count() == 0, "{gone:?}");
+        let key = gone[0].0;
+        let last = a.calls(key).last().unwrap();
         assert!(last.answered.is_some() && !last.ok, "{last:?}");
+        // A new connection under its number starts afresh, and the closed one's calls stay.
+        call(&mut a, 2, 30.0, "box", Some(0));
+        assert_eq!((a.calls(2).count(), a.calls(key).count(), a.gone().count()), (1, CALLS_KEPT, 1));
         // Newer calls push it out of the list.
         for t in 0..LIST_ROWS {
-            call(&mut a, 1, 50.0 + t as f64, "paint", Some(t + 20));
+            call(&mut a, 1, 300.0 + t as f64, "paint", Some(t + 20));
         }
-        assert_eq!((a.gone().count(), a.calls(2).count()), (0, 0));
-        // A new connection under a closed one's number starts afresh; clearing forgets the closed.
-        call(&mut a, 3, 70.0, "box", Some(0));
-        a.forget(3, "Codex");
-        a.begin_call(3, 71.0, "look", &Value::Null);
-        assert_eq!((a.gone().count(), a.calls(3).count()), (0, 1));
-        a.forget(3, "Codex");
+        assert_eq!((a.gone().count(), a.calls(key).count()), (0, 0));
+        // Clearing forgets the closed ones.
+        a.forget(2, "Codex");
         a.clear();
-        assert_eq!((a.gone().count(), a.calls(3).count(), a.calls(1).count()), (0, 0, CALLS_KEPT));
+        assert_eq!((a.gone().count(), a.calls(1).count()), (0, CALLS_KEPT));
     }
 
     #[test]
