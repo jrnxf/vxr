@@ -5909,6 +5909,13 @@ fn agents_live(dir: &Path) -> Result<(), String> {
         // Edits wait as a preview: no undo step, drawn as the AI change is, one card for every agent.
         let (voxels, label) = (s.voxels(), s.ed.scene.history().undo_label().map(str::to_string));
         let undo_label = |s: &Shot| s.ed.scene.history().undo_label().map(str::to_string);
+        // A failed edit first: the change it would have opened closes by itself and links nothing.
+        let (t, e) = s.agent_call(&mut live, &mut claude, "palette_swap", serde_json::json!({"a": 9, "b": 9}));
+        s.live_frames(&mut live, 2);
+        check(
+            e && s.ed.review.is_none() && s.voxels() == voxels,
+            format!("a failed edit under review leaves no change open ({e}, {t:.60})"),
+        )?;
         let (t, e) = s.agent_call(
             &mut live,
             &mut claude,
@@ -5957,6 +5964,23 @@ fn agents_live(dir: &Path) -> Result<(), String> {
                 && last == ["Claude Code: box 8 voxels", "Codex: place 1 voxel"],
             format!("Apply lands each edit as an undo step named after its agent: {last:?}"),
         )?;
+        // ACTIVITY links each applied edit to the call that staged it, not to the failed one.
+        let link = |tool: &str| s.ed.ui.agents.calls.iter().rev().find(|c| c.1.tool == tool).map(|c| c.1.edit);
+        let links = [link("place"), link("box"), link("palette_swap")];
+        check(
+            links == [Some(Some(n - 1)), Some(Some(n - 2)), Some(None)],
+            format!("applied edits link back to their calls: {links:?}"),
+        )?;
+        s.ed.ui.open_agents();
+        s.live_frames(&mut live, 3);
+        check(
+            s.ed.ui.hits.contains_key(&format!("agent-undo-{}", n - 1))
+                && s.ed.ui.hits.contains_key(&format!("agent-undo-{}", n - 2)),
+            "the applied edits have their Undo in ACTIVITY".into(),
+        )?;
+        s.save_png(&dir.join("app-2x-agent-review-applied.png"))?;
+        s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+        s.live_frames(&mut live, 2);
         let (t, _) = s.agent_call(&mut live, &mut claude, "review_status", serde_json::json!({}));
         check(t.starts_with("vxr: the user applied your 1 edit"), format!("review_status tells the agent: {t}"))?;
         let (t, _) = s.agent_call(&mut live, &mut codex, "scene_summary", serde_json::json!({}));
