@@ -320,6 +320,7 @@ fn run_steps(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     review_phone(dir)?;
     assistant_column(dir)?;
     agent_chip_squeezed(dir)?;
+    agent_chip_states(dir)?;
     palette_beside_flyouts()?;
     column_short_window(dir)?;
     agents_states(dir)?;
@@ -3867,6 +3868,92 @@ fn agent_chip_squeezed(dir: &Path) -> Result<(), String> {
         )?;
     }
     Ok(())
+}
+
+/// A chip case: name, agents with their last call's age, the chip's words.
+type Case = (&'static str, &'static [(&'static str, Option<f64>)], &'static str);
+
+/// The hint bar's chip says what the Agents tab's rows say: "editing" with a filled dot only
+/// while an agent called in the last 5 s, else "connected" and how long it has been idle, with
+/// a hollow dot. One agent called 1 s ago, 90 s ago and never; two agents, one, both and none
+/// editing. Each dot on screen, the chip's and every row's in the Agents tab, is filled exactly
+/// when that state is editing.
+fn agent_chip_states(dir: &Path) -> Result<(), String> {
+    let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    let cases: [Case; 6] = [
+        ("editing", &[("Claude Code", Some(1.0))], "Claude Code is editing"),
+        ("idle", &[("Claude Code", Some(90.0))], "Claude Code connected · idle 1 min"),
+        ("never", &[("Claude Code", None)], "Claude Code connected · idle 4 min"),
+        ("one-of-two", &[("Claude Code", Some(1.0)), ("Codex", Some(90.0))], "1 of 2 agents are editing"),
+        ("both-editing", &[("Claude Code", Some(1.0)), ("Codex", Some(2.0))], "2 agents are editing"),
+        ("both-idle", &[("Claude Code", Some(90.0)), ("Codex", Some(200.0))], "2 agents connected · idle 1 min"),
+    ];
+    let mut widths = Vec::new();
+    for (name, agents, text) in cases {
+        let mut s = Shot::new(house(), "house.vox", 2.0)?;
+        s.ed.ui.coach = false;
+        s.frames(2);
+        let now = s.ed.ctx.input(|i| i.time);
+        let a = &mut s.ed.agents;
+        (a.available, a.allowed, a.since) = (true, true, Some(now - 240.0));
+        a.clients = agents.iter().enumerate().map(|(i, (n, _))| (i as u64 + 1, n.to_string())).collect();
+        a.note_clients(now - 240.0);
+        for (i, (_, ago)) in agents.iter().enumerate() {
+            if let Some(ago) = ago {
+                a.note_call(i as u64 + 1, now - ago, "box");
+            }
+        }
+        s.frames(3);
+        let t = s.ed.ctx.input(|i| i.time);
+        let got = s.ed.ui.agent_chip_text(t);
+        check(got == text, format!("{name}: the chip says {text:?}, got {got:?}"))?;
+        check(
+            s.ed.ui.hits.contains_key("agent-stop") && s.ed.ui.hits.contains_key("agent-chip"),
+            format!("{name}: the chip keeps its Stop"),
+        )?;
+        widths.push((name, s.ed.ui.hits.get("agent-chip").map(|r| r.width()).unwrap_or(0.0)));
+        s.ed.ui.open_agents();
+        s.frames(3);
+        let (hint, corner) = (s.ed.ui.hits.get("hint").copied(), s.ed.ui.hits.get("render").copied());
+        check(
+            hint.zip(corner).is_some_and(|(h, c)| !h.intersects(c)),
+            format!("{name}: the hint bar stays clear of the render corner: {hint:?}, {corner:?}"),
+        )?;
+        // A dot is filled when its middle stands out from the background 6 points to its left.
+        let (dev, queue) = (&s.ed.gpu.device, &s.ed.gpu.queue);
+        let px = pollster::block_on(read_texture(dev, queue, &s.target));
+        let (w, ppp) = (s.ed.width as usize, s.ed.ppp);
+        let at = |x: f32, y: f32| {
+            let i = ((y * ppp) as usize * w + (x * ppp) as usize) * 4;
+            [px[i], px[i + 1], px[i + 2]]
+        };
+        let filled = |c: egui::Pos2| {
+            let (m, b) = (at(c.x, c.y), at(c.x - 6.0, c.y));
+            (0..3).map(|i| (m[i] as i32 - b[i] as i32).abs()).sum::<i32>() > 60
+        };
+        let rect = |name: &str| s.ed.ui.hits.get(name).copied().ok_or(format!("{name}: no {name} on screen"));
+        let editing: Vec<bool> = agents.iter().map(|(_, a)| a.is_some_and(|a| a < 5.0)).collect();
+        let chip = rect("agent-chip")?;
+        let chip_dot = filled(egui::pos2(chip.left() + 15.5, chip.center().y));
+        let rows = (1..=agents.len())
+            .map(|conn| rect(&format!("agents-dot-{conn}")).map(|r| filled(r.center())))
+            .collect::<Result<Vec<_>, _>>()?;
+        check(
+            chip_dot == editing.contains(&true) && rows == editing,
+            format!(
+                "{name}: the chip's dot is filled ({chip_dot}) and the Agents tab's rows ({rows:?}) as they edit \
+                 ({editing:?})"
+            ),
+        )?;
+        if name == "editing" || name == "idle" {
+            s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+            s.save_png(&dir.join(format!("app-2x-agent-chip-{name}.png")))?;
+        }
+    }
+    check(
+        widths[0].1 != widths[1].1 && widths.iter().all(|w| w.1 > 0.0),
+        format!("the chip's width follows its words: {widths:?}"),
+    )
 }
 
 /// The Agents tab's checklist in every state it has: the browser's twelve (not paired, typing, connecting,
