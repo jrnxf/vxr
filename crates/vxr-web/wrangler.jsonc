@@ -26,5 +26,23 @@
   ],
   "r2_buckets": [{ "binding": "PROJECTS", "bucket_name": "vxr-projects" }],
   "observability": { "enabled": true },
-  "routes": [{ "pattern": "vxr.jrnxf.co", "custom_domain": true }]
+  "routes": [{ "pattern": "vxr.jrnxf.co", "custom_domain": true }],
+  // Branch builds (`--env preview`): a separate Worker, vxr-preview, on workers.dev only, with its
+  // own database and bucket and its own secrets (none by default, so sign-in is off there). Fill in
+  // database_id from `npx wrangler d1 create vxr-preview`; README.md "Deploy" has the steps.
+  "env": {
+    "preview": {
+      "routes": [],
+      "workers_dev": true,
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "vxr-preview",
+          "database_id": "00000000-0000-0000-0000-000000000000",
+          "migrations_dir": "migrations"
+        }
+      ],
+      "r2_buckets": [{ "binding": "PROJECTS", "bucket_name": "vxr-projects-preview" }]
+    }
+  }
 }

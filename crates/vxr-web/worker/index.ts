@@ -84,7 +84,7 @@ async function emailLink(req: Request, env: Env, url: URL, deps: Deps): Promise<
   if (!(deps.mailer ?? mailerFor)(env, url)) return problem(503, 'email_off');
   const verify = verifier(env, deps);
   if (!verify) return problem(503, 'sign_up_off');
-  if (!(await verify(req.headers.get('x-turnstile-token') ?? '', ip(req)))) return problem(403, 'challenge');
+  if (!(await verify(req.headers.get('x-turnstile-token') ?? '', ip(req), url.hostname))) return problem(403, 'challenge');
   let email = '';
   try {
     email = String(((await req.clone().json()) as { email?: unknown }).email ?? '').trim().toLowerCase();
@@ -113,7 +113,8 @@ async function passkeySignUp(req: Request, env: Env, auth: Auth, deps: Deps): Pr
   if (await who(auth, req)) return null;
   const verify = verifier(env, deps);
   if (!verify) return problem(503, 'sign_up_off');
-  if (!(await verify(req.headers.get('x-turnstile-token') ?? '', ip(req)))) return problem(403, 'challenge');
+  const host = new URL(req.url).hostname;
+  if (!(await verify(req.headers.get('x-turnstile-token') ?? '', ip(req), host))) return problem(403, 'challenge');
   return null;
 }
 

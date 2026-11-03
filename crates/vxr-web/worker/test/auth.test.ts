@@ -2,7 +2,7 @@ import { env } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
 import { handle, MAIL_PER_HOUR } from '../index';
 import { FROM, mailerFor, resendMailer, signInMail } from '../mail';
-import { turnstile } from '../turnstile';
+import { TEST_SECRET, turnstile } from '../turnstile';
 import { ORIGIN, World } from './helpers';
 
 describe('sign-in', () => {
@@ -121,19 +121,23 @@ describe('sign-in', () => {
     await expect(resendMailer('re_test', answer(422)).send(signInMail('dee@example.com', 'x'))).rejects.toThrow('422');
   });
 
-  it('checks Turnstile tokens with siteverify', async () => {
+  it('checks Turnstile tokens with siteverify, solved on this site', async () => {
     const seen: FormData[] = [];
-    const fake = (ok: boolean) =>
+    const fake = (ok: boolean, hostname = 'vxr.example.com') =>
       (async (_url: RequestInfo | URL, init?: RequestInit) => {
         seen.push(init!.body as FormData);
-        return Response.json({ success: ok });
+        return Response.json({ success: ok, hostname });
       }) as typeof fetch;
-    expect(await turnstile('secret', fake(true))('token', '192.0.2.1')).toBe(true);
+    expect(await turnstile('secret', fake(true))('token', '192.0.2.1', 'vxr.example.com')).toBe(true);
     expect(seen[0].get('secret')).toBe('secret');
     expect(seen[0].get('response')).toBe('token');
     expect(seen[0].get('remoteip')).toBe('192.0.2.1');
-    expect(await turnstile('secret', fake(false))('token', null)).toBe(false);
-    expect(await turnstile('secret', fake(true))('', null)).toBe(false);
+    expect(await turnstile('secret', fake(false))('token', null, 'vxr.example.com')).toBe(false);
+    expect(await turnstile('secret', fake(true))('', null, 'vxr.example.com')).toBe(false);
+    // A token solved on another site that uses the same site key.
+    expect(await turnstile('secret', fake(true, 'other.example'))('token', null, 'vxr.example.com')).toBe(false);
+    // The test keys' tokens belong to no site, for `wrangler dev`.
+    expect(await turnstile(TEST_SECRET, fake(true, 'example.com'))('token', null, 'localhost')).toBe(true);
   });
 
   it('serves the account page with its own content security policy', async () => {

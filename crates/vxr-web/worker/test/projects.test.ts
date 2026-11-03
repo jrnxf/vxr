@@ -1,5 +1,6 @@
 import { env } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
+import { LIMITS, projects } from '../projects';
 import { voxProblem } from '../vox';
 import { type Client, png, vox, World } from './helpers';
 
@@ -182,6 +183,40 @@ describe('projects', () => {
     expect((await a.json('/api/projects')).body.projects).toEqual([]);
     const left = await env.PROJECTS.list({ prefix: `${(await a.me()).user.id}/p1/` });
     expect(left.objects).toEqual([]);
+  });
+
+  it('leaves no files behind when a delete races a save or a thumbnail', async () => {
+    const a = await signedIn();
+    const user = (await a.me()).user.id;
+    const left = async () => (await env.PROJECTS.list({ prefix: `${user}/p1/` })).objects.map((o: R2Object) => o.key);
+    const del = () => projects(new Request('https://vxr.test/', { method: 'DELETE' }), env, user, ['p1'], LIMITS);
+
+    // A save's bytes land after the delete's first listing.
+    await a.put('p1', vox(1), null);
+    let listings = 0;
+    const late: R2Bucket = Object.assign(Object.create(env.PROJECTS), {
+      list: async (o: R2ListOptions) => {
+        const out = await env.PROJECTS.list(o);
+        if (listings++ === 0) await env.PROJECTS.put(`${user}/p1/late.vox`, vox(2));
+        return out;
+      },
+      delete: (k: string | string[]) => env.PROJECTS.delete(k),
+    });
+    expect((await projects(new Request('https://vxr.test/', { method: 'DELETE' }), { ...env, PROJECTS: late }, user, ['p1'], LIMITS)).status).toBe(204);
+    expect(await left()).toEqual([]);
+
+    // The delete runs between a thumbnail's row update and its put.
+    await a.put('p1', vox(1), null);
+    const racing: R2Bucket = Object.assign(Object.create(env.PROJECTS), {
+      put: async (k: string, v: Uint8Array, o?: R2PutOptions) => {
+        if (k.endsWith('/thumb.png')) expect((await del()).status).toBe(204);
+        return env.PROJECTS.put(k, v, o);
+      },
+      delete: (k: string | string[]) => env.PROJECTS.delete(k),
+    });
+    const put = new Request('https://vxr.test/', { method: 'PUT', body: png() });
+    expect((await projects(put, { ...env, PROJECTS: racing }, user, ['p1', 'thumb'], LIMITS)).status).toBe(404);
+    expect(await left()).toEqual([]);
   });
 
   it('refuses writes from another site and bad ids', async () => {

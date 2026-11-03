@@ -295,9 +295,17 @@ async function remove(env: Store, user: string, id: string): Promise<Response> {
   const r = await row(env.DB, user, id);
   if (!r) return problem(404, 'not_found');
   await env.DB.prepare('delete from project where user_id = ? and id = ?').bind(user, id).run();
+  // The row is gone, so no later write keeps an object here: a save's row update now fails and it
+  // deletes its own bytes, and a thumbnail put checks the row after it lands. List twice to also
+  // take what such a write put between the first listing and its own clean-up.
+  for (let i = 0; i < 2; i++) await clear(env, user, id);
+  return new Response(null, { status: 204 });
+}
+
+/** Deletes every object under a project's prefix. */
+async function clear(env: Store, user: string, id: string): Promise<void> {
   const listed = await env.PROJECTS.list({ prefix: `${user}/${id}/` });
   if (listed.objects.length) await env.PROJECTS.delete(listed.objects.map((o) => o.key));
-  return new Response(null, { status: 204 });
 }
 
 async function thumb(req: Request, env: Store, user: string, id: string, limits: Limits): Promise<Response> {
@@ -321,5 +329,10 @@ async function thumb(req: Request, env: Store, user: string, id: string, limits:
     .run();
   if (res.meta.changes !== 1) return problem(413, 'quota', { limit: limits.account });
   await env.PROJECTS.put(thumbKey(user, id), bytes, { httpMetadata: { contentType: 'image/png' } });
+  // A delete that ran between the row update and the put has already cleared the prefix.
+  if (!(await row(env.DB, user, id))) {
+    await env.PROJECTS.delete(thumbKey(user, id));
+    return problem(404, 'not_found');
+  }
   return new Response(null, { status: 204 });
 }
