@@ -70,10 +70,11 @@ window.vxrKeys = {
   },
 };
 
-// The projects list (crates/vxr-app/src/projects.rs) in IndexedDB: its index.json, each
-// scene's draft (drafts/<id>.vox) and thumbnail (thumbs/<id>.png), and its file, as a File
-// System Access handle where the browser has them (Chrome, Edge) or else a copy of its bytes
-// (files/<id>). The editor decides what to keep; this only reads and writes.
+// The projects list (crates/vxr-app/src/projects.rs) in IndexedDB: this device's id
+// (device.json), each project's record (list/<id>.json), draft (drafts/<id>.vox) and
+// thumbnail (thumbs/<id>.png), and its file, as a File System Access handle where the browser
+// has them (Chrome, Edge) or else a copy of its bytes (files/<id>). The editor decides what to
+// keep; this only reads and writes, and tells the other tabs of this page what changed.
 const PROJECTS_DB = 'vxr-projects';
 let projectsDb;
 function projectsTx(mode, f) {
@@ -105,16 +106,16 @@ window.vxrProjects = {
   },
   delete: (key) => projectsTx('readwrite', (s) => s.delete(key)),
   clear: () => projectsTx('readwrite', (s) => s.clear()),
-  // The list and the thumbnails, which the editor reads at launch: every key from index.json
-  // on (drafts/ and files/ sort before it).
+  // The device id, the records and the thumbnails, which the editor reads at launch: all but
+  // the drafts and the files.
   async preload() {
-    const range = IDBKeyRange.lowerBound('index.json');
     let keys;
     const values = await projectsTx('readonly', (s) => {
-      keys = s.getAllKeys(range);
-      return s.getAll(range);
+      keys = s.getAllKeys();
+      return s.getAll();
     });
-    return keys.result.map((k, i) => [k, values[i]]).filter(([, v]) => v instanceof Uint8Array);
+    return keys.result.map((k, i) => [k, values[i]])
+      .filter(([k, v]) => v instanceof Uint8Array && !k.startsWith('drafts/') && !k.startsWith('files/'));
   },
   // The project whose kept handle is to the same file as `handle`, else a new id.
   async idFor(handle) {
@@ -131,6 +132,49 @@ window.vxrProjects = {
   },
 };
 const warn = (what) => (e) => console.warn(`vxr: could not ${what}`, e);
+
+// Other tabs of this page share the store. Each hears what the others changed in the list
+// (records and thumbnails) on this channel, and holds the project it has open with a Web
+// Lock, so another tab's Clear or storage cap leaves it alone.
+const projectsChannel = typeof BroadcastChannel === 'function' ? new BroadcastChannel('vxr-projects') : null;
+const listedKey = (key) => key.startsWith('list/') || key.startsWith('thumbs/');
+const HOLD = 'vxr-open-';
+let holding = null; // { id, release } for the lock this tab has
+let wanted = null; // the project it has open, whose lock it asked for last
+let heldElsewhere = new Set();
+async function readHolds() {
+  const q = await navigator.locks?.query?.().catch(() => null);
+  if (!q) return;
+  heldElsewhere = new Set(q.held.map((l) => l.name)
+    .filter((n) => n.startsWith(HOLD) && n !== HOLD + holding?.id)
+    .map((n) => n.slice(HOLD.length)));
+}
+function hold(id) {
+  wanted = id;
+  if (holding?.id === id) return;
+  holding?.release();
+  holding = null;
+  projectsChannel?.postMessage({ holds: true });
+  if (!id || !navigator.locks) return;
+  navigator.locks.request(HOLD + id, { ifAvailable: true }, (lock) => {
+    // Another tab has it open already: it holds it, and this tab does not. A lock granted
+    // after this tab moved on to another project goes again at once.
+    if (!lock || wanted !== id) return;
+    return new Promise((release) => {
+      holding = { id, release };
+      projectsChannel?.postMessage({ holds: true });
+    });
+  }).catch(warn('hold the open project'));
+}
+if (projectsChannel) {
+  projectsChannel.onmessage = ({ data }) => {
+    if (data.holds) readHolds();
+    else if (data.key && app) app.listed(data.key, data.bytes ?? undefined);
+  };
+}
+// A tab closed lets its lock go without a word: read the locks again on coming back.
+addEventListener('focus', readHolds);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') readHolds(); });
 async function allowed(handle, mode) {
   const o = { mode };
   return (await handle.queryPermission(o)) === 'granted' || (await handle.requestPermission(o)) === 'granted';
@@ -422,8 +466,19 @@ window.vxrHost = {
     window.vxrProjects.get(key).catch(() => null)
       .then((v) => app.stored(key, v instanceof Uint8Array ? v : new Uint8Array()));
   },
-  storePut(key, bytes) { window.vxrProjects.put(key, bytes.slice()).catch(warn(`keep ${key}`)); },
-  storeDelete(key) { window.vxrProjects.delete(key).catch(warn(`delete ${key}`)); },
+  storePut(key, bytes) {
+    const copy = bytes.slice();
+    window.vxrProjects.put(key, copy)
+      .then(() => { if (listedKey(key)) projectsChannel?.postMessage({ key, bytes: copy }); })
+      .catch(warn(`keep ${key}`));
+  },
+  storeDelete(key) {
+    window.vxrProjects.delete(key)
+      .then(() => { if (listedKey(key)) projectsChannel?.postMessage({ key, bytes: null }); })
+      .catch(warn(`delete ${key}`));
+  },
+  storeHold: (id) => hold(id),
+  storeHeld: (id) => heldElsewhere.has(id),
   newId: () => crypto.randomUUID(),
   fetch: (id, method, path, headers, body) => libraryFetch(id, method, path, headers, body.slice()),
   openAccount() { window.open('/account?from=editor', '_blank', 'noopener'); },
@@ -492,6 +547,7 @@ async function main() {
   if (matchMedia('(pointer: coarse)').matches) app.set_touch(true);
   for (const [kind, key] of await window.vxrKeys.load().catch(() => [])) app.restore_key(kind, key);
   for (const [key, bytes] of await window.vxrProjects.preload().catch(warn('read the projects list')) ?? []) app.preload(key, bytes);
+  await readHolds();
   app.launch();
   app.check_account();
   // Edits not yet in a draft are written as the page goes or hides; leaving with unsaved

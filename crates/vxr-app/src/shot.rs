@@ -1145,11 +1145,13 @@ fn projects(dir: &Path) -> Result<(), String> {
     use egui::{Event, Key, Modifiers};
     use std::time::Duration;
     use vxr_app::host::{launch, open};
-    use vxr_app::projects::{CAP, Memory, Projects, SETTLE, STALE};
+    use vxr_app::projects::{CAP, Memory, Projects, SETTLE, STALE, draft_key};
     let mem = Memory::default();
     mem.clock.set(1.8e9);
     let keys = |prefix: &str| mem.files.borrow().keys().filter(|k| k.starts_with(prefix)).cloned().collect::<Vec<_>>();
     let relaunch = |s: &mut Shot| -> Result<(), String> {
+        // As after a crash: nothing more is drafted on the way out.
+        s.ed.mark_saved();
         s.ed.load(Scene::new(NEW_SIZE), "Untitled")?;
         s.ed.path = None;
         s.ed.projects = Projects::load(Box::new(mem.clone()));
@@ -1311,12 +1313,20 @@ fn projects(dir: &Path) -> Result<(), String> {
         s.voxels() == 2 && s.ed.is_unsaved() && s.ed.ui.scene_name == "Untitled" && s.ed.path.is_none(),
         format!("Restore brings the new scene back, unsaved ({} voxels)", s.voxels()),
     )?;
+    // An edit not yet drafted, then another scene opened in its place: the edit is kept.
+    let cell = s.ed.scene.to_map([1, 0, 0]);
+    s.ed.scene.edit([(cell, 0u8)]);
+    s.frames(2);
+    let untitled = s.ed.projects.current.clone().unwrap_or_default();
 
     // A third scene, then the list: newest first, each with its thumbnail and date.
     let garden = Opened { name: "garden.vox".into(), path: Some(files.join("garden.vox")), ..house_file(1.75e9) };
     mem.clock.set(mem.clock.get() + 3600.0);
     open(&mut s.ed, &mut p, garden);
     s.frames(2);
+    let kept = mem.files.borrow().get(&draft_key(&untitled)).cloned().unwrap_or_default();
+    let kept = Scene::from_vox(&kept).map(|b| b.map.voxels).unwrap_or(0);
+    check(kept == 1, format!("opening another scene first drafts the edits it replaces ({kept} voxels)"))?;
     edit(&mut s, [3, 1, 3]);
     settle(&mut s);
     s.ui_click("scene-select")?;

@@ -5,7 +5,7 @@ use vxr_app::bridge::{Out, Page};
 use vxr_app::editor::{Button, Finger, NEW_SIZE};
 use vxr_app::files::{File, vox_bytes, zip};
 use vxr_app::host::{Drawn, Host, Opened, Platform, Saved, run_action};
-use vxr_app::projects::{Project, Projects, Read, Store, file_key};
+use vxr_app::projects::{Project, Projects, Read, Store, content_hash, file_key};
 use vxr_app::theme::ThemeChoice;
 use vxr_app::ui::FontBytes;
 use vxr_core::Scene;
@@ -49,6 +49,10 @@ extern "C" {
     fn page_fetch(id: u32, method: &str, path: &str, headers: js_sys::Array, body: &[u8]);
     #[wasm_bindgen(js_namespace = vxrHost, js_name = openAccount)]
     fn page_open_account();
+    #[wasm_bindgen(js_namespace = vxrHost, js_name = storeHold)]
+    fn page_store_hold(id: &str);
+    #[wasm_bindgen(js_namespace = vxrHost, js_name = storeHeld)]
+    fn page_store_held(id: &str) -> bool;
 }
 
 /// What a browser does for [`run_action`]: Open is the page's file picker, which calls
@@ -62,11 +66,14 @@ struct Browser {
     pending: bool,
     /// Saves are written through a handle rather than downloaded.
     written: bool,
+    /// A download Save kept a copy of the file for this project, with its [`content_hash`].
+    kept: Option<(String, u64)>,
 }
 
 /// The projects list's store in this browser: IndexedDB, through the page. The list and the
-/// thumbnails are what the page read before [`App::launch`]; a draft is read when asked for
-/// and comes back through [`App::stored`].
+/// thumbnails are what the page read before [`App::launch`], and other tabs' changes come in
+/// through [`App::listed`]; a draft is read when asked for and comes back through
+/// [`App::stored`]. Each tab holds the project it has open with a Web Lock.
 struct Idb(HashMap<String, Vec<u8>>);
 
 impl Store for Idb {
@@ -88,6 +95,22 @@ impl Store for Idb {
 
     fn remove(&mut self, key: &str) {
         page_store_delete(key);
+    }
+
+    fn keys(&mut self, prefix: &str) -> Vec<String> {
+        self.0.keys().filter(|k| k.starts_with(prefix)).cloned().collect()
+    }
+
+    fn live(&self) -> bool {
+        false
+    }
+
+    fn hold(&mut self, id: Option<&str>) {
+        page_store_hold(id.unwrap_or_default());
+    }
+
+    fn held(&self, id: &str) -> bool {
+        page_store_held(id)
     }
 
     fn now(&self) -> f64 {
@@ -124,6 +147,7 @@ impl Platform for Browser {
         }
         page_download(bytes, name, "application/octet-stream");
         page_store_put(&file_key(project), bytes);
+        self.kept = Some((project.into(), content_hash(bytes)));
         Ok(Some(Saved { name: name.into(), copy: bytes.len() as u64, ..Default::default() }))
     }
 
@@ -188,8 +212,10 @@ pub struct App {
     due: f64,
     /// The list and thumbnails the page read from IndexedDB, until [`App::launch`].
     preloaded: HashMap<String, Vec<u8>>,
-    /// The history position of a Save the page is finishing through a file handle.
-    saving: Option<u64>,
+    /// A Save the page is finishing through a file handle: the history position it saved,
+    /// its project and [`Editor::loads`] then, so a finish after another scene took its place
+    /// is not taken for this one's.
+    saving: Option<(u64, Option<String>, u64)>,
 }
 
 /// Start the editor on `canvas` with the `.vox` bytes (an empty array opens a new scene).
@@ -510,9 +536,14 @@ impl App {
         for a in actions {
             if !self.bridge.act(&a, &mut self.host.editor) {
                 let mut browser = Browser::default();
-                run_action(&mut self.host.editor, &mut browser, a);
+                let editor = &mut self.host.editor;
+                run_action(editor, &mut browser, a);
                 if browser.pending {
-                    self.saving = Some(self.host.editor.scene.history().position());
+                    self.saving =
+                        Some((editor.scene.history().position(), editor.projects.current.clone(), editor.loads()));
+                }
+                if let Some((id, hash)) = browser.kept {
+                    editor.projects.set_source(&id, hash);
                 }
             }
         }
@@ -582,17 +613,14 @@ impl App {
     }
 
     /// Replace the scene with the `.vox` bytes the page read from a file it has no handle to
-    /// (the file input). The page keeps a copy, so the projects list can open it again; a
-    /// copy kept under the same name is the same project.
+    /// (the file input). The page keeps a copy, so the projects list can open it again. The
+    /// browser does not say where the file was, so only a copy of the same name and bytes is
+    /// the same project; any other file is a new one.
     pub fn open(&mut self, vox: &[u8], name: &str) {
         self.woken = true;
         let editor = &mut self.host.editor;
-        let id = editor
-            .projects
-            .list()
-            .iter()
-            .find(|p| !p.handle && p.copy > 0 && p.name == name)
-            .map_or_else(page_new_id, |p| p.id.clone());
+        let hash = content_hash(vox);
+        let id = editor.projects.copy_of(name, hash).unwrap_or_else(page_new_id);
         let file = Opened {
             name: name.into(),
             bytes: vox.to_vec(),
@@ -603,6 +631,7 @@ impl App {
         };
         if vxr_app::host::open(editor, &mut Browser::default(), file) {
             page_store_put(&file_key(&id), vox);
+            editor.projects.set_source(&id, hash);
         }
     }
 
@@ -631,10 +660,16 @@ impl App {
         self.host.editor.ui.toast(&ctx, format!("Could not open {name}: {why}"));
     }
 
-    /// A Save the page took finished: written through a handle to the file `name`.
+    /// A Save the page took finished: written through a handle to the file `name`. Nothing
+    /// changes here when another scene was opened meanwhile: the file has the scene it was
+    /// saved from, and the scene open now is no more saved than before.
     pub fn saved(&mut self, name: &str) {
         self.woken = true;
-        let Some(position) = self.saving.take() else { return };
+        let Some((position, project, loads)) = self.saving.take() else { return };
+        let editor = &self.host.editor;
+        if editor.loads() != loads || editor.projects.current != project {
+            return;
+        }
         let saved = Saved { name: name.into(), handle: true, ..Default::default() };
         vxr_app::host::saved(
             &mut self.host.editor,
@@ -685,6 +720,13 @@ impl App {
         let reply = vxr_app::sync::Reply { status, body, version: (!version.is_empty()).then(|| version.into()) };
         vxr_app::host::fetched(&mut self.host.editor, &mut Browser::default(), id, reply);
         self.send_library();
+    }
+
+    /// Another tab changed `key` in the projects store (a project's record or thumbnail): its
+    /// bytes now, or none when it was deleted.
+    pub fn listed(&mut self, key: &str, bytes: Option<Vec<u8>>) {
+        self.woken = true;
+        self.host.editor.projects.listed(key, bytes);
     }
 
     /// The projects store answered a read (a draft): empty bytes when it found nothing.
