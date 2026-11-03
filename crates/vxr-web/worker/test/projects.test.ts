@@ -4,9 +4,12 @@ import { LIMITS, projects } from '../projects';
 import { voxProblem } from '../vox';
 import { type Client, png, vox, World } from './helpers';
 
+// A new account each time, from its own IP so the sign-in email limits never apply.
+let accounts = 0;
 async function signedIn(w = new World(), ip?: string): Promise<Client> {
-  const c = w.client(ip);
-  expect((await c.passkeySignUp()).status).toBe(200);
+  const n = ++accounts;
+  const c = w.client(ip ?? `198.51.100.${n}`);
+  expect((await c.codeSignIn(`p${n}@example.com`)).status).toBe(200);
   return c;
 }
 

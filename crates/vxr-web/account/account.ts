@@ -1,10 +1,10 @@
-// The account page: sign in with a passkey (or make an account with one), or by an emailed link,
-// through Better Auth's client; the Worker (worker/index.ts) checks the Turnstile token sent as
-// the x-turnstile-token header before it makes an account or sends a link. The editor opens this
-// page with ?from=editor and checks /api/me again when its tab comes back.
-import { passkeyClient } from '@better-auth/passkey/client';
+// The account page: sign in by email, through Better Auth's client. One email carries a link and
+// a 6-digit code; the link signs in where it is opened, the code is typed here. The Worker
+// (worker/index.ts) checks the Turnstile token sent as the x-turnstile-token header before it sends
+// the email. The editor opens this page with ?from=editor and checks /api/me again when its tab
+// comes back.
 import { createAuthClient } from 'better-auth/client';
-import { magicLinkClient } from 'better-auth/client/plugins';
+import { emailOTPClient, magicLinkClient } from 'better-auth/client/plugins';
 
 /** The Turnstile site key, set by the build (TURNSTILE_SITE_KEY; Cloudflare's always-pass test key by default). */
 declare const TURNSTILE_SITE_KEY: string;
@@ -23,7 +23,7 @@ declare global {
 interface Me {
   signIn: boolean;
   email: boolean;
-  user: { id: string; email: string | null; name: string } | null;
+  user: { id: string; email: string; name: string } | null;
   usage?: number;
   limits: { account: number; file: number };
 }
@@ -31,7 +31,7 @@ interface Me {
 const auth = createAuthClient({
   baseURL: location.origin,
   basePath: '/api/auth',
-  plugins: [passkeyClient(), magicLinkClient()],
+  plugins: [magicLinkClient(), emailOTPClient()],
 });
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -63,21 +63,22 @@ function reason(err: { status?: number; error?: unknown; code?: unknown; message
     case 'too_many_links':
       return 'Too many sign-in links asked for. Try again in an hour.';
     case 'email_off':
-      return 'Email sign-in is off here. Use a passkey.';
     case 'sign_up_off':
     case 'sign_in_off':
       return 'Sign-in is off here.';
     case 'bad_email':
       return 'That email address does not look right.';
-    case 'AUTH_CANCELLED':
-    case 'ERROR_CEREMONY_ABORTED':
-      return 'Passkey cancelled.';
+    case 'INVALID_OTP':
+      return 'That code is not right. Check it and try again.';
+    case 'OTP_EXPIRED':
+    case 'TOO_MANY_ATTEMPTS':
+      return 'That code has expired or was tried too often. Ask for a new email.';
   }
   if (err?.status === 429) return 'Too many tries. Wait a minute and try again.';
   return typeof err?.message === 'string' && err.message ? err.message : 'Something went wrong. Try again.';
 }
 
-// One Turnstile widget for the two actions that need it: a new passkey account and an email link.
+// One Turnstile widget, for the action that needs it: asking for a sign-in email.
 let widget: string | null = null;
 let ready: Promise<Turnstile> | null = null;
 function turnstileJs(): Promise<Turnstile> {
@@ -100,7 +101,7 @@ async function renderChallenge() {
       action: 'account',
     });
   } catch {
-    say('The sign-up check could not load. Passkey sign-in still works.', true);
+    say('The sign-in check could not load. Reload the page to try again.', true);
   }
 }
 /** A fresh token, or null (and a message) when the check has not passed yet. */
@@ -145,49 +146,17 @@ async function refresh() {
     el.textContent = size(m.limits[el.dataset.limit as 'account' | 'file']);
   }
   if (!m.user) {
-    $('email-form').hidden = !m.email;
     show('out');
     void renderChallenge();
     return;
   }
-  $('who').textContent = m.user.email ? `As ${m.user.email}.` : 'With a passkey, and no email.';
+  $('who').textContent = `As ${m.user.email}.`;
   const used = m.usage ?? 0;
   $('usage').textContent = size(used);
   $('usage-bar').style.width = `${Math.min(100, (used / m.limits.account) * 100)}%`;
   $('return').hidden = params.get('from') !== 'editor';
   show('in');
 }
-
-$('passkey-in').addEventListener('click', (e) =>
-  busy(e.currentTarget as HTMLButtonElement, async () => {
-    const { error } = await auth.signIn.passkey();
-    if (error) return say(reason(error), true);
-    await refresh();
-  }),
-);
-
-$('passkey-up').addEventListener('click', (e) =>
-  busy(e.currentTarget as HTMLButtonElement, async () => {
-    const t = await token();
-    if (!t) return;
-    const { error } = await auth.passkey.addPasskey({
-      name: 'vxr',
-      createSession: true,
-      fetchOptions: { headers: { 'x-turnstile-token': t } },
-    });
-    spent();
-    if (error) return say(reason(error), true);
-    await refresh();
-  }),
-);
-
-$('passkey-add').addEventListener('click', (e) =>
-  busy(e.currentTarget as HTMLButtonElement, async () => {
-    const { error } = await auth.passkey.addPasskey({ name: 'vxr' });
-    if (error) return say(reason(error), true);
-    say('Passkey added.');
-  }),
-);
 
 $('email-form').addEventListener('submit', (e) => {
   e.preventDefault();
@@ -205,7 +174,21 @@ $('email-form').addEventListener('submit', (e) => {
     spent();
     if (error) return say(reason(error), true);
     $('sent-to').textContent = email;
+    $<HTMLInputElement>('code').value = '';
     show('sent');
+    $('code').focus();
+  });
+});
+
+$('code-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const button = (e.currentTarget as HTMLFormElement).querySelector('button')!;
+  void busy(button, async () => {
+    const email = $('sent-to').textContent ?? '';
+    const otp = $<HTMLInputElement>('code').value.replace(/\D/g, '');
+    const { error } = await auth.signIn.emailOtp({ email, otp });
+    if (error) return say(reason(error), true);
+    await refresh();
   });
 });
 

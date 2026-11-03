@@ -65,9 +65,6 @@ button:focus-visible, .button:focus-visible, input:focus-visible, .brand:focus-v
   outline: none; border-color: var(--ring); box-shadow: 0 0 0 3px rgb(115 115 115 / 50%);
 }
 
-.or { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 12px; margin: 8px 0; }
-.or::before, .or::after { content: ''; flex: 1; border-top: 1px solid var(--border); }
-
 .usage { margin-bottom: 20px; }
 .usage p { margin: 6px 0 0; font-size: 13px; }
 .bar { height: 6px; border-radius: 3px; background: var(--raised); overflow: hidden; }

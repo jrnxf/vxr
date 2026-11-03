@@ -1,5 +1,6 @@
 import { env } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
+import { OTP_OFF } from '../auth';
 import { handle, MAIL_PER_HOUR } from '../index';
 import { FROM, mailerFor, resendMailer, signInMail } from '../mail';
 import { TEST_SECRET, turnstile } from '../turnstile';
@@ -18,30 +19,6 @@ describe('sign-in', () => {
     expect(me).toMatchObject({ signIn: true, email: true, user: null, limits: { account: 100 * 1024 * 1024, file: 20 * 1024 * 1024 } });
   });
 
-  it('signs up with a passkey and no email, then signs in with it again', async () => {
-    const a = new World().client();
-    const up = await a.passkeySignUp();
-    expect(up.status).toBe(200);
-    const me = await a.me();
-    expect(me.user).toMatchObject({ email: null });
-    const id = me.user.id;
-
-    const out = await a.fetch('/api/auth/sign-out', { method: 'POST', json: {} });
-    expect(out.status).toBe(200);
-    expect((await a.me()).user).toBeNull();
-
-    const back = await a.passkeySignIn();
-    expect(back.status).toBe(200);
-    expect((await a.me()).user.id).toBe(id);
-  });
-
-  it('needs the Turnstile challenge to sign up with a passkey', async () => {
-    const a = new World().client();
-    const res = await a.passkeySignUp('wrong');
-    expect(res.status).toBe(403);
-    expect(await res.json()).toMatchObject({ error: 'challenge' });
-  });
-
   it('signs in by email link, once per link', async () => {
     const w = new World();
     const a = w.client();
@@ -56,16 +33,115 @@ describe('sign-in', () => {
     expect((await b.me()).user).toBeNull();
   });
 
-  it('adds a passkey to an account made by email link, with no challenge', async () => {
+  it('mails one email with both a link and a 6-digit code', async () => {
+    const w = new World();
+    expect((await w.client('192.0.2.30').askLink('eve@example.com')).status).toBe(200);
+    expect(w.mail).toHaveLength(1);
+    const [m] = w.mail;
+    const code = w.code('eve@example.com');
+    expect(code).toMatch(/^\d{6}$/);
+    expect(m.subject).toBe(`Sign in to vxr: ${code}`);
+    expect(w.link('eve@example.com')).toContain('/api/auth/magic-link/verify?token=');
+  });
+
+  it('signs in by email code, into the same account as the link', async () => {
     const w = new World();
     const a = w.client('192.0.2.12');
-    await a.emailSignIn('bea@example.com');
-    const id = (await a.me()).user.id;
-    const added = await a.passkeySignUp('no-token');
-    expect(added.status).toBe(200);
+    expect((await a.codeSignIn('bea@example.com')).status).toBe(200);
+    const me = (await a.me()).user;
+    expect(me).toMatchObject({ email: 'bea@example.com' });
+
+    // Signed out, the link from a second email finds the same account.
     await a.fetch('/api/auth/sign-out', { method: 'POST', json: {} });
-    await a.passkeySignIn();
-    expect((await a.me()).user).toMatchObject({ id, email: 'bea@example.com' });
+    expect((await a.me()).user).toBeNull();
+    await a.emailSignIn('bea@example.com');
+    expect((await a.me()).user).toMatchObject({ id: me.id, email: 'bea@example.com' });
+
+    // And a code on another device, from a third email, finds it again.
+    const b = w.client('192.0.2.15');
+    expect((await b.codeSignIn('bea@example.com')).status).toBe(200);
+    expect((await b.me()).user.id).toBe(me.id);
+  });
+
+  it('takes a code once, only for its address, and only the latest one', async () => {
+    const w = new World();
+    const a = w.client('192.0.2.16');
+    await a.askLink('fay@example.com');
+    const first = w.code('fay@example.com');
+    await a.askLink('fay@example.com');
+    const code = w.code('fay@example.com');
+    if (first !== code) expect((await a.enterCode('fay@example.com', first)).status).toBe(400);
+    // Another address's code signs nobody in.
+    await a.askLink('gus@example.com');
+    expect((await a.enterCode('gus@example.com', code)).status).toBe(400);
+    expect((await a.me()).user).toBeNull();
+
+    expect((await a.enterCode('fay@example.com', code)).status).toBe(200);
+    const b = w.client('192.0.2.17');
+    const again = await b.enterCode('fay@example.com', code);
+    expect(again.status).toBe(400);
+    expect(await again.json()).toMatchObject({ code: 'INVALID_OTP' });
+    expect((await b.me()).user).toBeNull();
+  });
+
+  it('drops a code after three wrong tries', async () => {
+    const w = new World();
+    const a = w.client('192.0.2.18');
+    await a.askLink('hal@example.com');
+    const code = w.code('hal@example.com');
+    const wrong = code === '000000' ? '000001' : '000000';
+    for (let i = 0; i < 3; i++) expect((await a.enterCode('hal@example.com', wrong)).status).toBe(400);
+    const late = await a.enterCode('hal@example.com', code);
+    expect(late.status).toBe(403);
+    expect(await late.json()).toMatchObject({ code: 'TOO_MANY_ATTEMPTS' });
+    expect((await a.me()).user).toBeNull();
+  });
+
+  it('expires a code with its link', async () => {
+    const w = new World();
+    const a = w.client('192.0.2.19');
+    await a.askLink('ida@example.com');
+    const code = w.code('ida@example.com');
+    const past = new Date(Date.now() - 1000).toISOString();
+    await env.DB.prepare('update verification set expiresAt = ?').bind(past).run();
+    const res = await a.enterCode('ida@example.com', code);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ code: 'OTP_EXPIRED' });
+    const link = new URL(w.link('ida@example.com'));
+    await a.fetch(link.pathname + link.search);
+    expect((await a.me()).user).toBeNull();
+  });
+
+  it('limits code tries per IP in the rate-limit table', async () => {
+    const w = new World();
+    const a = w.client('192.0.2.20');
+    let last = 0;
+    for (let i = 0; i <= 10 && last !== 429; i++) last = (await a.enterCode(`try${i}@example.com`, '123456')).status;
+    expect(last).toBe(429);
+    const { n } = (await env.DB.prepare('select count(*) as n from rateLimit where key like ?').bind('%/sign-in/email-otp').first<{ n: number }>())!;
+    expect(n).toBeGreaterThan(0);
+  });
+
+  it('answers no passkey route, and no code route but sign-in', async () => {
+    const w = new World();
+    const a = w.client('192.0.2.21');
+    for (const route of [
+      'generate-register-options',
+      'generate-authenticate-options',
+      'verify-registration',
+      'verify-authentication',
+      'list-user-passkeys',
+      'delete-passkey',
+    ]) {
+      expect((await a.fetch(`/api/auth/passkey/${route}`)).status, route).toBe(404);
+      expect((await a.fetch(`/api/auth/passkey/${route}`, { method: 'POST', json: {} })).status, route).toBe(404);
+    }
+    // A code sent on its own would skip the Turnstile check and the mail limits.
+    for (const route of OTP_OFF) {
+      const res = await a.fetch(`/api/auth${route}`, { method: 'POST', json: { email: 'jo@example.com', type: 'sign-in' } });
+      expect(res.status, route).toBe(404);
+    }
+    expect(w.mail).toHaveLength(0);
   });
 
   it('needs the challenge for an email link, and limits links per address', async () => {
@@ -94,7 +170,7 @@ describe('sign-in', () => {
     const w = new World();
     w.deps.mailer = () => null;
     const a = w.client('192.0.2.14');
-    expect((await a.me()).email).toBe(false);
+    expect(await a.me()).toMatchObject({ signIn: false, email: false });
     expect((await a.askLink('dee@example.com')).status).toBe(503);
   });
 
@@ -112,13 +188,14 @@ describe('sign-in', () => {
         seen.push({ url: String(url), init: init! });
         return new Response('{}', { status });
       }) as typeof fetch;
-    await resendMailer('re_test', answer(200)).send(signInMail('dee@example.com', 'https://example.com/link'));
+    await resendMailer('re_test', answer(200)).send(signInMail('dee@example.com', 'https://example.com/link', '123456'));
     expect(seen[0].url).toBe('https://api.resend.com/emails');
     expect(new Headers(seen[0].init.headers).get('authorization')).toBe('Bearer re_test');
     const body = JSON.parse(String(seen[0].init.body));
-    expect(body).toMatchObject({ from: FROM, to: ['dee@example.com'], subject: 'Sign in to vxr' });
+    expect(body).toMatchObject({ from: FROM, to: ['dee@example.com'], subject: 'Sign in to vxr: 123456' });
     expect(body.text).toContain('https://example.com/link');
-    await expect(resendMailer('re_test', answer(422)).send(signInMail('dee@example.com', 'x'))).rejects.toThrow('422');
+    expect(body.text).toContain('\n123456\n');
+    await expect(resendMailer('re_test', answer(422)).send(signInMail('dee@example.com', 'x', '123456'))).rejects.toThrow('422');
   });
 
   it('checks Turnstile tokens with siteverify, solved on this site', async () => {

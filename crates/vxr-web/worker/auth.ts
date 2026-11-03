@@ -1,17 +1,37 @@
-// The optional vxr account, through Better Auth on D1: a passkey first (sign-up needs no email),
-// and a one-time link by email as the fallback. Sessions are a same-site cookie on this origin,
-// so the editor's fetch to /api/projects carries it with no token handling of its own.
+// The optional vxr account, through Better Auth on D1: sign-in by email only. One email carries
+// a one-time link (the `magicLink` plugin) and a 6-digit code (the `emailOTP` plugin), so a person
+// can open the link, or read the code on one device and type it on another. Either one makes the
+// account on first use. Sessions are a same-site cookie on this origin, so the editor's fetch to
+// /api/projects carries it with no token handling of its own.
 import { betterAuth, type BetterAuthOptions } from 'better-auth';
+import { emailOTP } from 'better-auth/plugins/email-otp';
 import { magicLink } from 'better-auth/plugins/magic-link';
-import { passkey } from '@better-auth/passkey';
 import { type Mailer, signInMail } from './mail';
 
-/** What a passkey-only account has for the email Better Auth needs: never mailed, never shown. */
-export const NO_EMAIL = '@passkey.invalid';
+/** How long the link and the code in a sign-in email work, in seconds. */
+export const SIGN_IN_TTL = 600;
+
+/**
+ * The email-otp routes that stay off: codes are only made beside a link, through
+ * /sign-in/magic-link (behind the Worker's Turnstile check and mail limits), and only
+ * /sign-in/email-otp takes one.
+ */
+export const OTP_OFF = [
+  '/email-otp/send-verification-otp',
+  '/email-otp/check-verification-otp',
+  '/email-otp/verify-email',
+  '/email-otp/request-password-reset',
+  '/email-otp/reset-password',
+  '/forget-password/email-otp',
+  '/email-otp/request-email-change',
+  '/email-otp/change-email',
+];
+
+/** Sends the sign-in email for `email` with its link; null when there is no sender. */
+export type SendSignIn = ((email: string, link: string) => Promise<void>) | null;
 
 /** The Better Auth options for a Worker answering on `origin`. */
-export function authOptions(origin: string, secret: string, database: BetterAuthOptions['database'], mailer: Mailer | null) {
-  const url = new URL(origin);
+export function authOptions(origin: string, secret: string, database: BetterAuthOptions['database'], send: SendSignIn) {
   return {
     appName: 'vxr',
     baseURL: origin,
@@ -20,6 +40,7 @@ export function authOptions(origin: string, secret: string, database: BetterAuth
     database,
     trustedOrigins: [origin],
     session: { expiresIn: 60 * 60 * 24 * 60, updateAge: 60 * 60 * 24 },
+    disabledPaths: OTP_OFF,
     advanced: {
       cookiePrefix: 'vxr',
       ipAddress: { ipAddressHeaders: ['cf-connecting-ip'] },
@@ -32,39 +53,25 @@ export function authOptions(origin: string, secret: string, database: BetterAuth
       customRules: {
         '/sign-in/magic-link': { window: 600, max: 5 },
         '/magic-link/verify': { window: 600, max: 20 },
-        '/passkey/verify-authentication': { window: 60, max: 20 },
+        '/sign-in/email-otp': { window: 600, max: 10 },
       },
     },
     plugins: [
       magicLink({
-        expiresIn: 600,
+        expiresIn: SIGN_IN_TTL,
         async sendMagicLink({ email, url: link }) {
-          if (!mailer) throw new Error('no email sender');
-          await mailer.send(signInMail(email, link));
+          if (!send) throw new Error('no email sender');
+          await send(email, link);
         },
       }),
-      passkey({
-        rpID: url.hostname,
-        rpName: 'vxr',
-        origin,
-        authenticatorSelection: { residentKey: 'required', userVerification: 'preferred' },
-        registration: {
-          // Sign-up with a passkey: there is no user yet, so the Worker makes one after the
-          // passkey checks out (the router has checked the Turnstile token by then).
-          requireSession: false,
-          async resolveUser() {
-            return { id: crypto.randomUUID(), name: 'vxr account', displayName: 'vxr account' };
-          },
-          async afterVerification({ ctx, user }) {
-            // Signed in already (by email link): the passkey joins that account.
-            if (await ctx.context.internalAdapter.findUserById(user.id)) return;
-            const id = crypto.randomUUID();
-            const made = await ctx.context.internalAdapter.createUser(
-              { email: `${id}${NO_EMAIL}`, name: '', emailVerified: false },
-              { method: 'passkey' },
-            );
-            return { userId: made.id };
-          },
+      emailOTP({
+        expiresIn: SIGN_IN_TTL,
+        otpLength: 6,
+        allowedAttempts: 3,
+        storeOTP: 'hashed',
+        async sendVerificationOTP() {
+          // Only reachable through the routes in OTP_OFF; codes go out with a link instead.
+          throw new Error('codes are sent with a sign-in link');
         },
       }),
     ],
@@ -74,5 +81,18 @@ export function authOptions(origin: string, secret: string, database: BetterAuth
 export type Auth = ReturnType<typeof makeAuth>;
 
 export function makeAuth(origin: string, secret: string, db: D1Database, mailer: Mailer | null) {
-  return betterAuth(authOptions(origin, secret, db, mailer));
+  const auth = betterAuth(
+    authOptions(
+      origin,
+      secret,
+      db,
+      mailer &&
+        (async (email: string, link: string): Promise<void> => {
+          // A fresh code for this address (it replaces any earlier one), mailed beside the link.
+          const code: string = await auth.api.createVerificationOTP({ body: { email, type: 'sign-in' } });
+          await mailer.send(signInMail(email, link, code));
+        }),
+    ),
+  );
+  return auth;
 }

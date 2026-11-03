@@ -42,7 +42,7 @@ impl Account {
 #[derive(Clone, Debug, PartialEq)]
 pub struct User {
     pub id: String,
-    /// None for an account made with a passkey only.
+    /// The account's email address (None if the Worker sends none).
     pub email: Option<String>,
     /// The bytes the library holds, and the most it and one file may.
     pub usage: u64,

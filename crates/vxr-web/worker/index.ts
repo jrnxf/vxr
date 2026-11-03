@@ -2,10 +2,10 @@
 // every other path is the static editor, served by Cloudflare without it.
 //
 //   /api/me          whether sign-in is on, who is signed in, their bytes used and the limits
-//   /api/auth/*      Better Auth (worker/auth.ts): passkeys, email links, sessions
+//   /api/auth/*      Better Auth (worker/auth.ts): emailed links and codes, sessions
 //   /api/projects*   the account's cloud projects (worker/projects.ts)
 //   /account         the sign-in page (account/, built into dist/account.html)
-import { type Auth, makeAuth, NO_EMAIL } from './auth';
+import { type Auth, makeAuth } from './auth';
 import { type Mailer, mailerFor } from './mail';
 import { LIMITS, type Limits, json, problem, projects, usage } from './projects';
 import { turnstile, type Verify } from './turnstile';
@@ -16,11 +16,11 @@ export interface Env {
   PROJECTS: R2Bucket;
   /** Signs sessions (a Worker secret). Without it sign-in is off. */
   BETTER_AUTH_SECRET?: string;
-  /** Checks the Turnstile challenge on sign-up and email links (a Worker secret). */
+  /** Checks the Turnstile challenge before a sign-in email (a Worker secret). */
   TURNSTILE_SECRET_KEY?: string;
-  /** `log` prints sign-in links in `wrangler dev` instead of sending them. */
+  /** `log` prints sign-in emails in `wrangler dev` instead of sending them. */
   EMAIL_SENDER?: string;
-  /** Sends sign-in links through Resend (a Worker secret). Without it email sign-in is off. */
+  /** Sends sign-in emails through Resend (a Worker secret). Without it sign-in is off. */
   RESEND_API_KEY?: string;
 }
 
@@ -31,7 +31,7 @@ export interface Deps {
   limits?: Limits;
 }
 
-/** Sign-in links one address, and one IP, may ask for in an hour. */
+/** Sign-in emails one address, and one IP, may ask for in an hour. */
 export const MAIL_PER_HOUR = { email: 5, ip: 20 };
 
 // The account page's policy: the editor's (www/_headers) plus Turnstile's script and frame.
@@ -79,7 +79,7 @@ async function who(auth: Auth, req: Request) {
   return s?.user ?? null;
 }
 
-/** Turnstile and the per-address limit before Better Auth sends an email link. */
+/** Turnstile and the per-address limit before Better Auth sends a sign-in email (a link and a code). */
 async function emailLink(req: Request, env: Env, url: URL, deps: Deps): Promise<Response | null> {
   if (!(deps.mailer ?? mailerFor)(env, url)) return problem(503, 'email_off');
   const verify = verifier(env, deps);
@@ -91,7 +91,7 @@ async function emailLink(req: Request, env: Env, url: URL, deps: Deps): Promise<
   } catch {
     return problem(400, 'bad_body');
   }
-  if (!email || email.endsWith(NO_EMAIL)) return problem(400, 'bad_email');
+  if (!email) return problem(400, 'bad_email');
   const now = Date.now();
   const hour = now - 3600_000;
   const from = ip(req) ?? '';
@@ -105,16 +105,6 @@ async function emailLink(req: Request, env: Env, url: URL, deps: Deps): Promise<
     env.DB.prepare('insert into mail_log (email, ip, at) values (?, ?, ?)').bind(email, from, now),
     env.DB.prepare('delete from mail_log where at < ?').bind(now - 86400_000),
   ]);
-  return null;
-}
-
-/** Turnstile before a passkey sign-up (adding a passkey to a signed-in account needs none). */
-async function passkeySignUp(req: Request, env: Env, auth: Auth, deps: Deps): Promise<Response | null> {
-  if (await who(auth, req)) return null;
-  const verify = verifier(env, deps);
-  if (!verify) return problem(503, 'sign_up_off');
-  const host = new URL(req.url).hostname;
-  if (!(await verify(req.headers.get('x-turnstile-token') ?? '', ip(req), host))) return problem(403, 'challenge');
   return null;
 }
 
@@ -140,12 +130,14 @@ export async function handle(req: Request, env: Env, deps: Deps = DEFAULT): Prom
   if (path === '/api/me') {
     if (!auth) return json({ signIn: false, email: false, user: null, limits });
     const user = await who(auth, req);
+    const email = (deps.mailer ?? mailerFor)(env, url) !== null;
     return json({
-      signIn: true,
-      email: (deps.mailer ?? mailerFor)(env, url) !== null,
+      // Email is the only way in: without a sender only a session already made stays signed in.
+      signIn: email || user !== null,
+      email,
       user: user && {
         id: user.id,
-        email: user.email.endsWith(NO_EMAIL) ? null : user.email,
+        email: user.email,
         name: user.name,
       },
       usage: user ? await usage(env.DB, user.id) : 0,
@@ -156,11 +148,6 @@ export async function handle(req: Request, env: Env, deps: Deps = DEFAULT): Prom
   if (path.startsWith('/api/auth/')) {
     if (req.method === 'POST' && path === '/api/auth/sign-in/magic-link') {
       const stop = await emailLink(req, env, url, deps);
-      if (stop) return stop;
-    }
-    // Checked where the account is made, since the client sends headers only with this call.
-    if (req.method === 'POST' && path === '/api/auth/passkey/verify-registration') {
-      const stop = await passkeySignUp(req, env, auth, deps);
       if (stop) return stop;
     }
     return auth.handler(req);
