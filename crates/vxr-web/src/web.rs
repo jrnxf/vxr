@@ -598,6 +598,7 @@ impl App {
             bytes: vox.to_vec(),
             id: Some(id.clone()),
             copy: vox.len() as u64,
+            picked: true,
             ..Default::default()
         };
         if vxr_app::host::open(editor, &mut Browser::default(), file) {
@@ -607,7 +608,8 @@ impl App {
 
     /// Replace the scene with project `id`'s file: read through the `handle` the page keeps
     /// under that id (modified at `modified` seconds since 1970), or from its kept copy.
-    pub fn open_file(&mut self, vox: &[u8], name: &str, id: &str, handle: bool, modified: f64) {
+    /// `picked`: the user just picked the file to open, rather than a project in the list.
+    pub fn open_file(&mut self, vox: &[u8], name: &str, id: &str, handle: bool, modified: f64, picked: bool) {
         self.woken = true;
         let file = Opened {
             name: name.into(),
@@ -616,6 +618,7 @@ impl App {
             id: Some(id.into()),
             handle,
             copy: if handle { 0 } else { vox.len() as u64 },
+            picked,
             ..Default::default()
         };
         vxr_app::host::open(&mut self.host.editor, &mut Browser::default(), file);

@@ -136,10 +136,10 @@ async function allowed(handle, mode) {
   return (await handle.queryPermission(o)) === 'granted' || (await handle.requestPermission(o)) === 'granted';
 }
 const VOX_TYPES = [{ description: 'MagicaVoxel scene', accept: { 'application/octet-stream': ['.vox'] } }];
-async function openHandle(handle, id) {
+async function openHandle(handle, id, picked = false) {
   if (!(await allowed(handle, 'read'))) throw new Error('the browser was not allowed to read it');
   const f = await handle.getFile();
-  app.open_file(new Uint8Array(await f.arrayBuffer()), f.name, id, true, f.lastModified / 1000);
+  app.open_file(new Uint8Array(await f.arrayBuffer()), f.name, id, true, f.lastModified / 1000, picked);
 }
 async function pickOpen() {
   if (!handles()) return fileInput.click();
@@ -152,7 +152,7 @@ async function pickOpen() {
   }
   const id = await window.vxrProjects.idFor(handle);
   await window.vxrProjects.put('files/' + id, handle).catch(warn('keep the file handle'));
-  await openHandle(handle, id).catch((e) => app.open_failed(handle.name, e.message || String(e)));
+  await openHandle(handle, id, true).catch((e) => app.open_failed(handle.name, e.message || String(e)));
 }
 async function saveVox(id, name, bytes) {
   try {
@@ -174,7 +174,7 @@ async function openProject(id, name) {
   try {
     const v = await window.vxrProjects.get('files/' + id);
     if (v instanceof FileSystemFileHandle) await openHandle(v, id);
-    else if (v instanceof Uint8Array) app.open_file(v, name, id, false, 0);
+    else if (v instanceof Uint8Array) app.open_file(v, name, id, false, 0, false);
     else app.open_failed(name, 'this browser no longer keeps its file');
   } catch (e) {
     app.open_failed(name, e.name === 'NotFoundError' ? 'the file is gone' : e.message || String(e));

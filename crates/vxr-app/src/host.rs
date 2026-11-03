@@ -43,6 +43,9 @@ pub struct Opened {
     pub id: Option<String>,
     pub handle: bool,
     pub copy: u64,
+    /// The user picked it from this device's files (Open), as opposed to opening a project
+    /// from the list or the library: whatever project it lands in, it is not the library's.
+    pub picked: bool,
 }
 
 /// A `.vox` file the platform wrote.
@@ -136,7 +139,7 @@ pub fn run_action(ed: &mut Editor, p: &mut dyn Platform, action: Action) {
             ed.flush_draft();
             match p.pick_open() {
                 Ok(Some(file)) => {
-                    open(ed, p, file);
+                    open(ed, p, Opened { picked: true, ..file });
                 }
                 Ok(None) => {}
                 Err(e) => toast(ed, format!("Could not open: {e}")),
@@ -263,15 +266,21 @@ pub fn run_action(ed: &mut Editor, p: &mut dyn Platform, action: Action) {
 }
 
 /// Replace the scene with a file the user picked, or say why not; true when it opened. It
-/// becomes its project in the list, which offers its draft back when it has one.
+/// becomes its project in the list, which offers its draft back when it has one. A file
+/// picked from this device's files that lands in a library project takes it out of the
+/// library here (its copy is that file now), and the library's version is listed again.
 pub fn open(ed: &mut Editor, p: &mut dyn Platform, file: Opened) -> bool {
     let ctx = ed.ctx.clone();
-    let Opened { name, bytes, path, modified, id, handle, copy } = file;
+    let Opened { name, bytes, path, modified, id, handle, copy, picked } = file;
     match Scene::from_vox(&bytes).map_err(|e| format!("{name}: {e}")).and_then(|s| ed.load(s, &name)) {
         Ok(()) => {
             p.named(&name);
             ed.ui.toast(&ctx, format!("Opened {name}"));
-            ed.projects.opened(&name, path.as_deref(), id.as_deref(), modified, handle, copy);
+            let id = ed.projects.opened(&name, path.as_deref(), id.as_deref(), modified, handle, copy);
+            if picked && ed.projects.get(&id).is_some_and(|p| p.cloud.is_some()) {
+                ed.projects.update(&id, |p| p.cloud = None);
+                ed.library.list();
+            }
             ed.path = path;
             true
         }
@@ -388,7 +397,7 @@ fn catch_up(ed: &mut Editor) {
             let thumb = vxr_ops::look::thumbnail(&ed.scene, THUMB).ok();
             ed.library.upload(&mut ed.projects, &id, bytes, thumb);
         }
-    } else if cloud.behind() {
+    } else if cloud.behind() && !cloud.held {
         ed.library.download(&ed.projects, &id, true);
     }
 }

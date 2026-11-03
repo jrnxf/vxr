@@ -114,10 +114,23 @@ pub enum Event {
 /// What a call in flight is for.
 enum Want {
     Me,
-    List,
-    Upload { project: String, thumb: Option<Vec<u8>> },
-    Download { project: String, reload: bool },
-    GetThumb { project: String },
+    /// The list asked for as the `generation`th.
+    List {
+        generation: u32,
+    },
+    Upload {
+        project: String,
+        thumb: Option<Vec<u8>>,
+    },
+    /// `from` is the open scene's project as the download was asked for.
+    Download {
+        project: String,
+        reload: bool,
+        from: Option<String>,
+    },
+    GetThumb {
+        project: String,
+    },
     PutThumb,
 }
 
@@ -132,6 +145,12 @@ pub struct Library {
     waiting: HashMap<u32, Want>,
     /// The projects with an upload in flight, each with the newest save made since.
     uploading: HashMap<String, Queued>,
+    /// How many lists were asked for, whether another is wanted when the one in flight
+    /// answers, and the library ids uploaded since, each with the lists asked for before it
+    /// went up: a list asked for before an upload may not show it yet.
+    lists: u32,
+    relist: bool,
+    uploaded: HashMap<String, u32>,
 }
 
 #[derive(Deserialize)]
@@ -216,10 +235,18 @@ impl Library {
         self.waiting.insert(self.next, want);
     }
 
-    fn list(&mut self) {
-        if !self.waiting.values().any(|w| matches!(w, Want::List)) {
-            self.send(Want::List, "GET", "/api/projects".into(), Vec::new(), Vec::new());
+    /// Ask for the library's list, once the one in flight (if any) has answered.
+    pub fn list(&mut self) {
+        if self.account.user().is_none() {
+            return;
         }
+        if self.waiting.values().any(|w| matches!(w, Want::List { .. })) {
+            self.relist = true;
+            return;
+        }
+        self.lists += 1;
+        let generation = self.lists;
+        self.send(Want::List { generation }, "GET", "/api/projects".into(), Vec::new(), Vec::new());
     }
 
     /// Upload `vox` (and its `thumb`) as the newest version of `project`, which joins the
@@ -238,6 +265,7 @@ impl Library {
             version: None,
             latest: None,
             dirty: true,
+            held: false,
         });
         cloud.dirty = true;
         let name = p.name.strip_suffix(".vox").unwrap_or(&p.name).to_string();
@@ -258,12 +286,13 @@ impl Library {
     }
 
     /// Whether opening `project` takes the library's copy: it has none here, or the library's
-    /// is newer and this device has no edits of its own.
+    /// is newer and this device has no edits of its own (a draft, a save not up yet, or one
+    /// the library refused).
     pub fn wants_download(&self, projects: &Projects, project: &str) -> bool {
         let Some(user) = self.account.user() else { return false };
         let Some(p) = projects.get(project) else { return false };
         let Some(c) = p.library(&user.id) else { return false };
-        c.latest.is_some() && (p.stub() || (c.behind() && !c.dirty && p.draft.is_none()))
+        c.latest.is_some() && (p.stub() || (c.behind() && !c.dirty && !c.held && p.draft.is_none()))
     }
 
     /// Download `project` from the library, to open it.
@@ -274,7 +303,8 @@ impl Library {
             return;
         }
         let path = format!("/api/projects/{}", c.id);
-        self.send(Want::Download { project: project.into(), reload }, "GET", path, Vec::new(), Vec::new());
+        let from = projects.current.clone();
+        self.send(Want::Download { project: project.into(), reload, from }, "GET", path, Vec::new(), Vec::new());
     }
 
     /// The page got `reply` for call `id`: what the editor should do about it.
@@ -310,20 +340,33 @@ impl Library {
                     self.list();
                 }
             }
-            Want::List => match (ok, serde_json::from_slice::<List>(&reply.body)) {
+            Want::List { generation } => match (ok, serde_json::from_slice::<List>(&reply.body)) {
                 (true, Ok(list)) => {
                     let Account::In(user) = &mut self.account else { return events };
                     user.usage = list.usage;
                     let user = user.id.clone();
-                    for project in projects.merge_library(&user, &list.projects) {
+                    // Uploaded after this list was asked for: it may not show them yet.
+                    self.uploaded.retain(|_, before| *before >= generation);
+                    let fresh: Vec<String> = self.uploaded.keys().cloned().collect();
+                    let merged = projects.merge_library(&user, &list.projects, &fresh);
+                    for project in merged.thumbs {
                         let Some(c) = projects.get(&project).and_then(|p| p.library(&user)) else { continue };
                         let path = format!("/api/projects/{}/thumb", c.id);
                         self.send(Want::GetThumb { project }, "GET", path, Vec::new(), Vec::new());
                     }
+                    for (project, name) in merged.kept {
+                        events.push(Event::Renamed { project, name: name.clone() });
+                        events.push(Event::Toast(format!(
+                            "Your library has a newer version: kept this device's edits as {name}"
+                        )));
+                    }
                     events.push(Event::Listed);
+                    if std::mem::take(&mut self.relist) {
+                        self.list();
+                    }
                 }
                 _ if reply.status == 401 => self.signed_out(projects, &mut events),
-                _ => {}
+                _ => self.relist = false,
             },
             Want::Upload { project, thumb } => {
                 let next = self.uploading.remove(&project).flatten();
@@ -332,11 +375,13 @@ impl Library {
                     200 | 201 => {
                         if let Ok(Put { project: r }) = serde_json::from_slice(&reply.body) {
                             let cloud_id = r.id.clone();
+                            self.uploaded.insert(cloud_id.clone(), self.lists);
                             projects.update(&project, |p| {
                                 if let Some(c) = &mut p.cloud {
                                     c.version = Some(r.version.clone());
                                     c.latest = Some(r.version);
                                     c.dirty = next.is_some();
+                                    c.held = false;
                                 }
                             });
                             if let Some(png) = thumb.filter(|_| next.is_none()) {
@@ -351,6 +396,7 @@ impl Library {
                     409 => {
                         if let Ok(Conflict { copy }) = serde_json::from_slice(&reply.body) {
                             let user = self.account.user().map(|u| u.id.clone()).unwrap_or_default();
+                            self.uploaded.insert(copy.id.clone(), self.lists);
                             projects.update(&project, |p| {
                                 p.name = copy.name.clone();
                                 p.cloud = Some(Cloud {
@@ -359,6 +405,7 @@ impl Library {
                                     version: Some(copy.version.clone()),
                                     latest: Some(copy.version.clone()),
                                     dirty: next.is_some(),
+                                    held: false,
                                 });
                             });
                             if let Some(png) = thumb.filter(|_| next.is_none()) {
@@ -377,9 +424,12 @@ impl Library {
                         return events;
                     }
                     400 | 413 => {
+                        // Only this device has it now: it waits for a save the library takes,
+                        // and nothing downloads over it.
                         projects.update(&project, |p| {
                             if let Some(c) = &mut p.cloud {
                                 c.dirty = false;
+                                c.held = true;
                             }
                         });
                         let problem = serde_json::from_slice::<Problem>(&reply.body).ok();
@@ -404,7 +454,12 @@ impl Library {
                     self.upload(projects, &project, vox, thumb);
                 }
             }
-            Want::Download { project, reload } => {
+            Want::Download { project, reload, from } => {
+                // Chosen in the list while another scene was open: once a different one is,
+                // the download is no longer wanted.
+                if !reload && projects.current != from && reply.status != 401 {
+                    return events;
+                }
                 let name = projects.get(&project).map(|p| p.name.clone()).unwrap_or_default();
                 match (reply.status, reply.version) {
                     (200, Some(version)) => events.push(Event::Open { project, bytes: reply.body, version, reload }),
@@ -447,6 +502,8 @@ impl Library {
             self.account = Account::Out;
             projects.signed_out(None);
             self.uploading.clear();
+            self.uploaded.clear();
+            self.relist = false;
             events.push(Event::Listed);
             events.push(Event::Toast("Signed out: saves stay on this device until you sign in again".into()));
         }
@@ -810,7 +867,9 @@ mod tests {
         let events = lib.serve(&mut s, &mut p);
         assert!(matches!(&events[0], Event::Toast(t) if t.contains("over the 1 KB a file")), "{events:?}");
         let pr = p.get(&id).unwrap();
-        assert!(pr.has_file() && !pr.cloud.as_ref().unwrap().dirty);
+        let c = pr.cloud.as_ref().unwrap();
+        assert!(pr.has_file() && c.held && !c.dirty, "kept here only, and not sent again by itself");
+        assert!(!s.busy());
 
         lib.file_limit = 20 << 20;
         lib.offline = true;
@@ -822,6 +881,83 @@ mod tests {
         save(&mut p, &mut s, "big.vox", vox(2));
         lib.serve(&mut s, &mut p);
         assert_eq!(lib.projects[0].bytes, vox(2));
+        let c = p.get(&id).unwrap().cloud.clone().unwrap();
+        assert!(!c.held && !c.dirty, "the save the library took clears it");
+    }
+
+    #[test]
+    fn a_refused_save_is_kept_when_another_device_saves() {
+        let (m, mut p, mut s) = device();
+        let mut lib = FakeLibrary::signed_in("u1");
+        s.check();
+        lib.serve(&mut s, &mut p);
+        let id = save(&mut p, &mut s, "a.vox", vox(1));
+        lib.serve(&mut s, &mut p);
+        lib.file_limit = vox(1).len() as u64;
+        save(&mut p, &mut s, "a.vox", vox(9));
+        lib.serve(&mut s, &mut p);
+        assert!(!s.wants_download(&p, &id), "nothing downloads over the refused save");
+        lib.file_limit = 20 << 20;
+        lib.put(Some(&id), "a", vox(5));
+        s.check();
+        let events = lib.serve(&mut s, &mut p);
+
+        // This device's edits are their own project now, out of the library.
+        let mine = p.get(&id).unwrap();
+        assert_eq!(mine.name, "a (conflicted copy)");
+        assert!(mine.cloud.is_none() && mine.has_file());
+        assert_eq!(m.files.borrow().get(&format!("files/{id}")), Some(&vox(9)), "with the bytes the library refused");
+        assert!(events.contains(&Event::Renamed { project: id.clone(), name: "a (conflicted copy)".into() }));
+        assert!(events.iter().any(|e| matches!(e, Event::Toast(t) if t.contains("kept this device's edits"))));
+        // The library's version is listed beside it, to download.
+        let theirs = p.list().iter().find(|r| r.library("u1").is_some_and(|c| c.id == id)).map(|r| r.id.clone());
+        let theirs = theirs.expect("the library's version is listed");
+        assert!(p.get(&theirs).unwrap().stub() && s.wants_download(&p, &theirs));
+        assert_eq!(lib.projects.len(), 1, "the library holds only its own version");
+    }
+
+    #[test]
+    fn a_download_for_a_scene_no_longer_open_is_dropped() {
+        let (_, mut p, mut s) = device();
+        let mut lib = FakeLibrary::signed_in("u1");
+        lib.put(Some("c1"), "castle", vox(2));
+        s.check();
+        lib.serve(&mut s, &mut p);
+        p.opened("here.vox", None, Some("here"), None, false, 10);
+        s.download(&p, "c1", false);
+        // Another scene opens while the download runs.
+        p.opened("other.vox", None, Some("other"), None, false, 10);
+        assert!(lib.serve(&mut s, &mut p).is_empty(), "the scene now open stays");
+
+        s.download(&p, "c1", false);
+        assert!(matches!(&lib.serve(&mut s, &mut p)[..], [Event::Open { .. }]), "while it stays open, it opens");
+    }
+
+    #[test]
+    fn a_list_asked_for_before_an_upload_leaves_it_in_the_library() {
+        let (_, mut p, mut s) = device();
+        let mut lib = FakeLibrary::signed_in("u1");
+        s.check();
+        lib.serve(&mut s, &mut p);
+        s.list();
+        let call = s.take_out().remove(0);
+        let stale = lib.answer(&call);
+        let id = save(&mut p, &mut s, "new.vox", vox(1));
+        lib.serve(&mut s, &mut p);
+        assert_eq!(lib.projects.len(), 1);
+        // The list from before the upload answers last, without the project.
+        s.answer(call.id, stale, &mut p);
+        let c = p.get(&id).unwrap().cloud.clone().expect("still in the library");
+        assert_eq!((c.version.as_deref(), c.latest.as_deref()), (Some("v1"), Some("v1")));
+        // The list asked for after the upload went once that one answered.
+        lib.serve(&mut s, &mut p);
+        assert!(p.get(&id).unwrap().cloud.is_some());
+
+        // Once a list asked for after the upload leaves it out, it was deleted elsewhere.
+        lib.projects.clear();
+        s.list();
+        lib.serve(&mut s, &mut p);
+        assert!(p.get(&id).unwrap().cloud.is_none());
     }
 
     #[test]

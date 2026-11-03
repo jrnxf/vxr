@@ -1422,8 +1422,10 @@ fn projects(dir: &Path) -> Result<(), String> {
 /// lists it, opens it from the library and saves a newer version, which the first one takes
 /// when its tab comes back; a save over a version it never saw keeps both, this one as a
 /// conflicted copy; a file from this device saves to its file until Add to library; Download
-/// .vox hands over the scene; and a save while the library is out of reach goes up once it
-/// is back.
+/// .vox hands over the scene; a save while the library is out of reach goes up once it is
+/// back; a save the library refuses stays here, and is kept as its own project when another
+/// device saves a newer version; and a file picked from this device never takes a library
+/// project's place in the library.
 fn library(dir: &Path) -> Result<(), String> {
     use vxr_app::host::{fetched, open};
     use vxr_app::projects::{Memory, Projects};
@@ -1624,14 +1626,72 @@ fn library(dir: &Path) -> Result<(), String> {
     server.offline = false;
     a.ed.library.check();
     sync(&mut a, &mut pa, &mut server);
-    let house = server.projects.iter().find(|p| p.name == "house").map(|p| p.version.clone());
+    let after = server.projects.iter().find(|p| p.name == "house").map(|p| p.version.clone());
     check(
         kept && waiting.ends_with("· not in library yet")
-            && house.is_some()
-            && house != before
+            && after.is_some()
+            && after != before
             && holds(&a, &server, "house"),
         format!(
-            "a save while the library is out of reach stays here ({waiting:?}) and goes up when it is back ({house:?})"
+            "a save while the library is out of reach stays here ({waiting:?}) and goes up when it is back ({after:?})"
+        ),
+    )?;
+
+    // Over the file limit: the library refuses the save, which stays here and does not go up
+    // by itself. Another device then saves a newer version: this one is kept as its own
+    // project, and the library's is listed beside it.
+    server.file_limit = 64;
+    edit(&mut a, [2, 9, 0], 3);
+    run_action(&mut a.ed, &mut pa, Action::Save);
+    sync(&mut a, &mut pa, &mut server);
+    let refused = a.ed.ui.toast_text().is_some_and(|t| t.starts_with("Kept house.vox on this device"))
+        && !a.ed.library.busy()
+        && !a.ed.is_unsaved();
+    server.file_limit = 20 << 20;
+    let house_id = server.projects.iter().find(|p| p.name == "house").map(|p| p.id.clone()).unwrap_or_default();
+    server.put(Some(&house_id), "house", house().to_vox()?);
+    let mine = a.ed.scene.world_voxels(false);
+    a.ed.library.check();
+    sync(&mut a, &mut pa, &mut server);
+    let theirs = a.ed.projects.list().iter().find(|p| p.name == "house" && p.stub()).map(|p| p.id.clone());
+    let toast = a.ed.ui.toast_text().map(str::to_string);
+    check(
+        refused
+            && a.ed.scene.world_voxels(false) == mine
+            && a.ed.ui.scene_name == "house (conflicted copy)"
+            && theirs.is_some()
+            && toast.as_deref().is_some_and(|t| t.contains("kept this device's edits")),
+        format!(
+            "a save the library refused stays here, and is kept as its own project when the library moves on ({toast:?})"
+        ),
+    )?;
+
+    // A file picked from this device that lands in the library's project (in the browser, a
+    // file input with the same name) is a file of this device: its save goes to the file, and
+    // the library's version is listed again.
+    let bytes = house().to_vox()?;
+    let picked = Opened {
+        name: "house".into(),
+        copy: bytes.len() as u64,
+        bytes,
+        id: theirs,
+        picked: true,
+        ..Default::default()
+    };
+    open(&mut a.ed, &mut pa, picked);
+    sync(&mut a, &mut pa, &mut server);
+    let version = server.projects.iter().find(|p| p.name == "house").map(|p| p.version.clone());
+    edit(&mut a, [3, 9, 0], 3);
+    run_action(&mut a.ed, &mut pa, Action::Save);
+    sync(&mut a, &mut pa, &mut server);
+    let listed = a.ed.projects.list().iter().filter(|p| p.name == "house" && p.stub()).count();
+    check(
+        pa.calls.last().is_some_and(|c| c.starts_with("save_vox house"))
+            && server.projects.iter().find(|p| p.name == "house").map(|p| p.version.clone()) == version
+            && listed == 1,
+        format!(
+            "a file picked from this device saves to its file, and the library's is listed again ({:?})",
+            pa.calls.last()
         ),
     )
 }
