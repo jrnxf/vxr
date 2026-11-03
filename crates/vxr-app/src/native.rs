@@ -229,7 +229,7 @@ impl App {
         let editor = &mut host.editor;
         editor.ui.theme = load_theme();
         if let Some(dir) = config_dir() {
-            editor.projects = Projects::load(Box::new(Folder(dir.join("projects"))));
+            editor.projects = Projects::load(Box::new(Folder::new(dir.join("projects"))));
         }
         editor.path = self.path.take();
         match &editor.path {

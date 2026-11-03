@@ -1717,6 +1717,44 @@ async () => {
       s = st();
       step('the second Clear forgets every other project with its draft, thumbnail and file', s.projects.length === 1 && s.projects[0].name === 'handle.vox' && s.projects[0].thumb > 0 && s.storage[0] === s.projects[0].thumb + s.projects[0].copy, JSON.stringify([s.projects, s.storage]));
       await key('Escape');
+
+      // Two different files with one name are two projects; the same file again finds its own.
+      const island = new Uint8Array(await (await fetch('scene.vox')).arrayBuffer());
+      window.vxr.open(newSaved, 'same.vox');
+      await frames(4);
+      const sameA = here().id;
+      window.vxr.open(island, 'same.vox');
+      await frames(4);
+      const sameB = here().id;
+      window.vxr.open(newSaved, 'same.vox');
+      await frames(4);
+      s = st();
+      step('two files with one name through the file input are two projects, and the first again is its own', sameA !== sameB && here().id === sameA && s.projects.length === 3 && s.voxels === afterNew, JSON.stringify([sameA, sameB, s.projects.map((p) => p.name)]));
+      const held = await navigator.locks.query();
+      step('the page holds its open project with a Web Lock', held.held.some((l) => l.name === `vxr-open-${sameA}`) && !held.held.some((l) => l.name === `vxr-open-${sameB}`), JSON.stringify(held.held.map((l) => l.name)));
+
+      // Another tab of the page: what it writes to the list shows here, and the project it
+      // has open is safe from this tab's Clear.
+      const tab = new BroadcastChannel('vxr-projects');
+      const record = { id: 'tab-b', name: 'other-tab.vox', handle: false, copy: 10, edited: 1, used: 1, thumb: 0 };
+      tab.postMessage({ key: 'list/tab-b.json', bytes: new TextEncoder().encode(JSON.stringify(record)) });
+      const named = (n) => st().projects.some((p) => p.name === n);
+      step("another tab's new project shows in the list", await until(() => named('other-tab.vox'), 2000), JSON.stringify(st().projects.map((p) => p.name)));
+      tab.postMessage({ key: 'list/tab-b.json', bytes: null });
+      step("another tab's forgotten project leaves the list", await until(() => !named('other-tab.vox'), 2000));
+      let letGo;
+      const holding = new Promise((r) => { letGo = r; });
+      await new Promise((locked) => navigator.locks.request(`vxr-open-${sameB}`, () => { locked(); return holding; }));
+      tab.postMessage({ holds: true });
+      await frames(6);
+      await clickAt('scene-select');
+      await clickAt('projects-clear');
+      await clickAt('projects-clear');
+      s = st();
+      step("Clear keeps the project another tab has open", s.projects.length === 2 && s.projects.some((p) => p.id === sameB) && here().id === sameA, JSON.stringify(s.projects.map((p) => p.name)));
+      await key('Escape');
+      letGo();
+      tab.close();
     } finally {
       HTMLAnchorElement.prototype.click = realA;
       window.showOpenFilePicker = window.showSaveFilePicker = undefined;

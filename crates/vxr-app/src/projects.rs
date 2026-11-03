@@ -8,14 +8,19 @@
 //!
 //! Where it is kept is a [`Store`]: [`Folder`] in the config folder on the desktop, the
 //! browser's IndexedDB on the web (`vxr-web`), [`Memory`] in tests. The store holds
-//! `index.json` (the list), `drafts/<id>.vox` and `thumbs/<id>.png`; the browser also keeps
-//! its file handles or copies of the files under the project's id. Together they stay under
-//! [`CAP`], the oldest drafts and thumbnails going first.
+//! `device.json` (this device's id), one record per project (`list/<id>.json`),
+//! `drafts/<id>.vox` and `thumbs/<id>.png`; the browser also keeps its file handles or copies
+//! of the files under the project's id. Together they stay under [`CAP`]: thumbnails go
+//! first, then copies of files, then the oldest drafts.
+//!
+//! Several windows or tabs share one store. Each writes only the records it changed, so none
+//! drops another's projects, and each holds the project it has open ([`Store::hold`]): Clear
+//! and the cap leave the projects another window or tab has open alone.
 //!
 //! Each project has a stable id and each draft says when and on which device it was made,
 //! so the list can later be shared between devices.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -28,8 +33,20 @@ pub const CAP: u64 = 200 << 20;
 pub const STALE: f64 = 30.0 * 86_400.0;
 /// The thumbnail's longer side, in pixels.
 pub const THUMB: u32 = 160;
-/// The list's key in the store.
-pub const INDEX: &str = "index.json";
+/// The key of this device's id in the store.
+pub const DEVICE: &str = "device.json";
+/// Where the projects' records are in the store.
+pub const LIST: &str = "list/";
+
+/// The key of project `id`'s record in the store.
+pub fn record_key(id: &str) -> String {
+    format!("{LIST}{id}.json")
+}
+
+/// The project a record's key is for.
+fn record_id(key: &str) -> Option<&str> {
+    key.strip_prefix(LIST)?.strip_suffix(".json")
+}
 
 /// The key of project `id`'s draft in the store.
 pub fn draft_key(id: &str) -> String {
@@ -59,6 +76,20 @@ pub trait Store {
     fn read(&mut self, key: &str) -> Read;
     fn write(&mut self, key: &str, bytes: &[u8]) -> Result<(), String>;
     fn remove(&mut self, key: &str);
+    /// The keys under `prefix`.
+    fn keys(&mut self, prefix: &str) -> Vec<String>;
+    /// Whether a read sees what another window wrote since. The browser's store does not:
+    /// its page passes other tabs' changes in instead ([`Projects::listed`]).
+    fn live(&self) -> bool {
+        true
+    }
+    /// This window or tab now has project `id` open (None: no project), and no longer the
+    /// one before.
+    fn hold(&mut self, _id: Option<&str>) {}
+    /// Whether another window or tab has project `id` open.
+    fn held(&self, _id: &str) -> bool {
+        false
+    }
     /// Seconds since 1970.
     fn now(&self) -> f64;
     /// A new random id, for a project or this device.
@@ -103,6 +134,10 @@ pub struct Project {
     /// handles, else 0.
     #[serde(default)]
     pub copy: u64,
+    /// In the browser, for a copy: the [`content_hash`] of the file it was last opened from
+    /// through the file input or saved as, so opening that file again finds this project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<u64>,
     /// When it was last edited (a draft or a save) or, if later, when its file changed.
     pub edited: f64,
     /// When it was last opened or edited: the list's order.
@@ -129,12 +164,16 @@ impl Project {
     }
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Default)]
 struct Index {
-    #[serde(default)]
     device: String,
-    #[serde(default)]
     projects: Vec<Project>,
+}
+
+/// What `device.json` holds.
+#[derive(Serialize, Deserialize)]
+struct Device {
+    device: String,
 }
 
 /// What [`Projects::tick`] asks of the editor this frame.
@@ -176,6 +215,11 @@ pub struct Projects {
     waiting: Option<String>,
     /// The draft the restore prompt is asking about.
     pub offer: Option<Offer>,
+    /// Each project's record as this window last wrote or read it: [`Projects::keep`]
+    /// writes only the records that changed here.
+    written: HashMap<String, Vec<u8>>,
+    /// The names of the projects whose drafts the cap deleted, for the editor to say so.
+    pub evicted: Vec<String>,
 }
 
 impl Default for Projects {
@@ -187,34 +231,132 @@ impl Default for Projects {
 impl Projects {
     /// The list as `store` keeps it, its stale drafts and missing files cleaned up.
     pub fn load(mut store: Box<dyn Store>) -> Self {
-        let mut index = match store.read(INDEX) {
-            Read::Here(b) => serde_json::from_slice(&b).unwrap_or_default(),
-            _ => Index::default(),
+        let mut device = match store.read(DEVICE) {
+            Read::Here(b) => serde_json::from_slice::<Device>(&b).map(|d| d.device).unwrap_or_default(),
+            _ => String::new(),
         };
-        let mut wrote = false;
-        if index.device.is_empty() {
-            index.device = store.new_id();
-            wrote = true;
+        if device.is_empty() {
+            device = store.new_id();
+            if let Ok(json) = serde_json::to_vec(&Device { device: device.clone() })
+                && let Err(e) = store.write(DEVICE, &json)
+            {
+                eprintln!("vxr: could not keep this device's id: {e}");
+            }
         }
         let mut p = Self {
             store,
-            index,
+            index: Index { device, projects: Vec::new() },
             thumbs: HashMap::new(),
             current: None,
             drafted: 0,
             moved: None,
             waiting: None,
             offer: None,
+            written: HashMap::new(),
+            evicted: Vec::new(),
         };
-        for id in p.index.projects.iter().filter(|p| p.thumb > 0).map(|p| p.id.clone()).collect::<Vec<_>>() {
-            if let Read::Here(b) = p.store.read(&thumb_key(&id)) {
-                p.thumb_bytes(&id, &b);
-            }
-        }
-        if p.clean() || wrote {
+        p.read_list();
+        if p.clean() {
             p.keep();
         }
         p
+    }
+
+    /// Read every record in the store; the open scene's stays as this window has it, and
+    /// projects whose records are gone (another window forgot them) leave the list.
+    fn read_list(&mut self) {
+        let mut seen = HashSet::new();
+        for key in self.store.keys(LIST) {
+            let Some(id) = record_id(&key).map(str::to_string) else { continue };
+            if let Read::Here(b) = self.store.read(&key) {
+                self.listed_record(&id, Some(b));
+                seen.insert(id);
+            }
+        }
+        let gone: Vec<String> = self
+            .index
+            .projects
+            .iter()
+            .filter(|p| !seen.contains(&p.id) && self.written.contains_key(&p.id))
+            .map(|p| p.id.clone())
+            .collect();
+        for id in gone {
+            self.listed_record(&id, None);
+        }
+        self.sort();
+    }
+
+    /// Read the list again for what other windows changed since (the desktop: the browser's
+    /// page passes other tabs' changes in through [`Projects::listed`]).
+    pub fn refresh(&mut self) {
+        if self.store.live() {
+            self.read_list();
+        }
+    }
+
+    /// Another tab changed `key` in the store, as the page heard: a project's record or its
+    /// thumbnail, with its bytes now, or None when it was deleted.
+    pub fn listed(&mut self, key: &str, bytes: Option<Vec<u8>>) {
+        if let Some(id) = record_id(key) {
+            self.listed_record(id, bytes);
+            self.sort();
+        } else if let Some(id) = key.strip_prefix("thumbs/").and_then(|k| k.strip_suffix(".png")) {
+            match bytes {
+                Some(b) => self.thumb_bytes(id, &b),
+                None => _ = self.thumbs.remove(id),
+            }
+        }
+    }
+
+    /// Take project `id`'s record as the store has it (None: deleted), unless it is the open
+    /// scene's, whose record this window keeps.
+    fn listed_record(&mut self, id: &str, bytes: Option<Vec<u8>>) {
+        if self.current.as_deref() == Some(id) {
+            return;
+        }
+        let Some(b) = bytes else {
+            self.index.projects.retain(|p| p.id != id);
+            self.thumbs.remove(id);
+            self.written.remove(id);
+            return;
+        };
+        if self.written.get(id) == Some(&b) {
+            return;
+        }
+        let Ok(p) = serde_json::from_slice::<Project>(&b) else { return };
+        if p.id != id {
+            return;
+        }
+        let thumb = p.thumb;
+        let before = self.get(id).map(|o| o.thumb);
+        match self.index.projects.iter().position(|o| o.id == id) {
+            Some(i) => self.index.projects[i] = p,
+            None => self.index.projects.push(p),
+        }
+        self.written.insert(id.into(), b);
+        if thumb == 0 {
+            self.thumbs.remove(id);
+        } else if before != Some(thumb)
+            && let Read::Here(png) = self.store.read(&thumb_key(id))
+        {
+            self.thumb_bytes(id, &png);
+        }
+    }
+
+    fn sort(&mut self) {
+        self.index.projects.sort_by(|a, b| b.used.total_cmp(&a.used));
+    }
+
+    /// The open scene's project is now `id`, which this window holds.
+    fn set_current(&mut self, id: Option<String>) {
+        self.store.hold(id.as_deref());
+        self.current = id;
+    }
+
+    /// Whether Clear, the cap and the cleanup must leave project `id` alone: it is open here
+    /// or in another window or tab.
+    fn busy(&self, id: &str) -> bool {
+        self.current.as_deref() == Some(id) || self.store.held(id)
     }
 
     /// The list, most recently used first.
@@ -249,35 +391,50 @@ impl Projects {
         self.current.as_deref().and_then(|id| self.get(id)).and_then(|p| p.draft.as_ref())
     }
 
-    /// Write the list.
+    /// Write the records that changed here since this window last wrote or read them.
     fn keep(&mut self) {
-        self.index.projects.sort_by(|a, b| b.used.total_cmp(&a.used));
-        if let Ok(json) = serde_json::to_vec(&self.index)
-            && let Err(e) = self.store.write(INDEX, &json)
-        {
-            eprintln!("vxr: could not keep the projects list: {e}");
+        self.sort();
+        for p in &self.index.projects {
+            let Ok(json) = serde_json::to_vec(p) else { continue };
+            if self.written.get(&p.id) == Some(&json) {
+                continue;
+            }
+            match self.store.write(&record_key(&p.id), &json) {
+                Ok(()) => _ = self.written.insert(p.id.clone(), json),
+                Err(e) => eprintln!("vxr: could not keep {} in the projects list: {e}", p.name),
+            }
         }
     }
 
-    /// Delete stale drafts, and projects with nothing left to open: whose file is gone, or
-    /// that have neither a file nor a draft. True when anything went.
+    /// Delete stale drafts, and projects with nothing left to open: neither a file nor a
+    /// draft. A project whose file is gone (moved, or on a drive not mounted) keeps its
+    /// draft, as a scene with no file; only [`STALE`] deletes a draft. True when anything
+    /// changed.
     fn clean(&mut self) -> bool {
         let now = self.store.now();
-        let current = self.current.clone();
         let mut gone = Vec::new();
         let mut changed = false;
-        for p in &mut self.index.projects {
-            if current.as_ref() == Some(&p.id) {
+        let ids: Vec<String> = self.index.projects.iter().map(|p| p.id.clone()).collect();
+        for id in ids {
+            if self.busy(&id) {
                 continue;
             }
+            let missing = self.store.files()
+                && self.get(&id).and_then(|p| p.path.as_ref()).is_some_and(|f| self.store.modified(f).is_none());
+            let Some(p) = self.get_mut(&id) else { continue };
             if p.draft.as_ref().is_some_and(|d| now - d.saved > STALE) {
-                self.store.remove(&draft_key(&p.id));
                 p.draft = None;
+                self.store.remove(&draft_key(&id));
                 changed = true;
             }
-            let missing = self.store.files() && p.path.as_ref().is_some_and(|f| self.store.modified(f).is_none());
-            if missing || (!p.has_file() && p.draft.is_none()) {
-                gone.push(p.id.clone());
+            let Some(p) = self.get_mut(&id) else { continue };
+            if missing {
+                p.path = None;
+                p.modified = None;
+                changed = true;
+            }
+            if !p.has_file() && p.draft.is_none() {
+                gone.push(id);
             }
         }
         for id in &gone {
@@ -292,38 +449,57 @@ impl Projects {
         self.store.remove(&thumb_key(id));
         // The browser's handle or copy of its file.
         self.store.remove(&file_key(id));
+        self.store.remove(&record_key(id));
+        self.written.remove(id);
         self.thumbs.remove(id);
         self.index.projects.retain(|p| p.id != id);
     }
 
-    /// Delete the oldest drafts and thumbnails, then the oldest copies of files, until the
-    /// store is under [`CAP`]. The open scene's draft stays.
+    /// Free space until the store is under [`CAP`], what is easiest to get back first:
+    /// thumbnails, then copies of files the user also has, then drafts, the oldest first,
+    /// each named in [`Projects::evicted`]. The projects open here or in another window or
+    /// tab keep everything.
     fn fit(&mut self) {
-        let mut order: Vec<(f64, String)> = self.index.projects.iter().map(|p| (p.used, p.id.clone())).collect();
+        // Other windows' projects count too, and one may have changed a record this one is
+        // about to rewrite.
+        self.refresh();
+        if self.usage() <= CAP {
+            return;
+        }
+        let mut order: Vec<(f64, String)> =
+            self.index.projects.iter().filter(|p| !self.busy(&p.id)).map(|p| (p.used, p.id.clone())).collect();
         order.sort_by(|a, b| a.0.total_cmp(&b.0));
-        for pass in 0..2 {
+        for pass in 0..3 {
             for (_, id) in &order {
                 if self.usage() <= CAP {
                     return;
                 }
-                if self.current.as_deref() == Some(id.as_str()) {
-                    continue;
-                }
                 let Some(p) = self.get_mut(id) else { continue };
-                if pass == 0 {
-                    let draft = p.draft.take().is_some();
-                    p.thumb = 0;
-                    let keep = p.has_file();
-                    if draft {
+                match pass {
+                    0 if p.thumb > 0 => {
+                        p.thumb = 0;
+                        self.store.remove(&thumb_key(id));
+                        self.thumbs.remove(id);
+                    }
+                    1 if replaceable_copy(p) => {
+                        p.copy = 0;
+                        p.source = None;
+                        let left = p.has_file() || p.draft.is_some();
+                        self.store.remove(&file_key(id));
+                        if !left {
+                            self.forget(id);
+                        }
+                    }
+                    2 if p.draft.is_some() => {
+                        p.draft = None;
+                        let (name, left) = (p.name.clone(), p.has_file());
                         self.store.remove(&draft_key(id));
+                        self.evicted.push(name);
+                        if !left {
+                            self.forget(id);
+                        }
                     }
-                    self.store.remove(&thumb_key(id));
-                    self.thumbs.remove(id);
-                    if !keep {
-                        self.forget(id);
-                    }
-                } else if p.copy > 0 {
-                    self.forget(id);
+                    _ => {}
                 }
             }
         }
@@ -331,7 +507,7 @@ impl Projects {
 
     /// A new scene is open, at history `position`, with no project yet.
     pub fn reset(&mut self, position: u64) {
-        self.current = None;
+        self.set_current(None);
         self.drafted = position;
         self.moved = None;
         self.offer = None;
@@ -351,6 +527,8 @@ impl Projects {
         handle: bool,
         copy: u64,
     ) -> String {
+        // Another window may have drafted it since.
+        self.refresh();
         let now = self.store.now();
         let found = self
             .index
@@ -367,6 +545,7 @@ impl Projects {
                     path: None,
                     handle: false,
                     copy: 0,
+                    source: None,
                     edited: modified.unwrap_or(now),
                     used: now,
                     modified,
@@ -400,7 +579,7 @@ impl Projects {
             changed: changed(modified, d.base),
             launch: false,
         });
-        self.current = Some(id.clone());
+        self.set_current(Some(id.clone()));
         self.offer = offer;
         self.keep();
         id
@@ -424,6 +603,7 @@ impl Projects {
     /// `handle`, or as a download whose copy of `copy` bytes the page keeps. The draft goes.
     /// A scene with no project yet gets one.
     pub fn saved(&mut self, name: &str, path: Option<&Path>, handle: bool, copy: u64, position: u64) {
+        self.refresh();
         let now = self.store.now();
         let id = self.ensure(name);
         // Saved over another project's file: that one is this one now.
@@ -477,13 +657,14 @@ impl Projects {
             path: None,
             handle: false,
             copy: 0,
+            source: None,
             edited: now,
             used: now,
             modified: None,
             thumb: 0,
             draft: None,
         });
-        self.current = Some(id.clone());
+        self.set_current(Some(id.clone()));
         id
     }
 
@@ -584,7 +765,7 @@ impl Projects {
         if !keep {
             self.forget(id);
             if self.current.as_deref() == Some(id) {
-                self.current = None;
+                self.set_current(None);
             }
         }
         if self.offer.as_ref().is_some_and(|o| o.id == id) {
@@ -613,7 +794,7 @@ impl Projects {
     /// The open scene is project `id`'s restored draft, at history `position`: still not
     /// saved, and already drafted.
     pub fn restored(&mut self, id: &str, position: u64) {
-        self.current = Some(id.into());
+        self.set_current(Some(id.into()));
         self.drafted = position;
         self.moved = None;
         self.offer = None;
@@ -624,15 +805,33 @@ impl Projects {
         self.keep();
     }
 
-    /// Clear: forget every project but the open scene's, with their drafts, thumbnails and
-    /// copies.
+    /// Clear: forget every project but the open scene's and those another window or tab has
+    /// open, with their drafts, thumbnails and copies.
     pub fn clear(&mut self) {
-        let ids: Vec<String> =
-            self.index.projects.iter().filter(|p| Some(&p.id) != self.current.as_ref()).map(|p| p.id.clone()).collect();
+        self.refresh();
+        let ids: Vec<String> = self.index.projects.iter().filter(|p| !self.busy(&p.id)).map(|p| p.id.clone()).collect();
         for id in ids {
             self.forget(&id);
         }
         self.keep();
+    }
+
+    /// The project the browser keeps a copy of the file `name` for, with [`content_hash`]
+    /// `hash`: the same file opened again through the file input. A file of the same name
+    /// with other bytes is another project.
+    pub fn copy_of(&self, name: &str, hash: u64) -> Option<String> {
+        self.list()
+            .iter()
+            .find(|p| !p.handle && p.copy > 0 && p.name == name && p.source == Some(hash))
+            .map(|p| p.id.clone())
+    }
+
+    /// Project `id`'s copy is of the file with [`content_hash`] `hash` (the browser).
+    pub fn set_source(&mut self, id: &str, hash: u64) {
+        if let Some(p) = self.get_mut(id) {
+            p.source = Some(hash);
+            self.keep();
+        }
     }
 
     /// Forget every project, the open scene's too, as if nothing had been kept here.
@@ -641,11 +840,23 @@ impl Projects {
         for id in ids {
             self.forget(&id);
         }
-        self.current = None;
+        self.set_current(None);
         self.offer = None;
         self.waiting = None;
         self.keep();
     }
+}
+
+/// Whether the cap may delete `p`'s copy of its file: one the user also has, as the download
+/// it was saved as or the file it was opened from. The library's sign-in state adds its own
+/// rule here: a project the library has not taken (held) keeps its copy.
+fn replaceable_copy(p: &Project) -> bool {
+    p.copy > 0
+}
+
+/// A hash of a file's bytes (64-bit FNV-1a), to know the same file opened again.
+pub fn content_hash(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3))
 }
 
 /// Whether a file modified at `now` changed after a draft based on it at `base`.
@@ -710,6 +921,19 @@ pub struct Memory {
     /// The clock, in seconds since 1970.
     pub clock: std::rc::Rc<std::cell::Cell<f64>>,
     next: std::rc::Rc<std::cell::Cell<u32>>,
+    /// The project each window has open, by window.
+    holds: std::rc::Rc<std::cell::RefCell<HashMap<u32, String>>>,
+    windows: std::rc::Rc<std::cell::Cell<u32>>,
+    /// This window.
+    window: u32,
+}
+
+impl Memory {
+    /// The same store as another window (or tab) sees it: what each has open is its own.
+    pub fn another(&self) -> Self {
+        self.windows.set(self.windows.get() + 1);
+        Self { window: self.windows.get(), ..self.clone() }
+    }
 }
 
 impl Store for Memory {
@@ -726,6 +950,22 @@ impl Store for Memory {
         self.files.borrow_mut().remove(key);
     }
 
+    fn keys(&mut self, prefix: &str) -> Vec<String> {
+        self.files.borrow().keys().filter(|k| k.starts_with(prefix)).cloned().collect()
+    }
+
+    fn hold(&mut self, id: Option<&str>) {
+        let mut holds = self.holds.borrow_mut();
+        match id {
+            Some(id) => _ = holds.insert(self.window, id.into()),
+            None => _ = holds.remove(&self.window),
+        }
+    }
+
+    fn held(&self, id: &str) -> bool {
+        self.holds.borrow().iter().any(|(w, h)| *w != self.window && h == id)
+    }
+
     fn now(&self) -> f64 {
         self.clock.get()
     }
@@ -736,21 +976,38 @@ impl Store for Memory {
     }
 }
 
-/// The desktop's store: files in a folder (`projects` in the config folder).
+/// The desktop's store: files in a folder (`projects` in the config folder). Each window
+/// holds the project it has open with a lock on `open/<id>.lock`, which the system lets go
+/// when the window closes or crashes.
 #[cfg(not(target_arch = "wasm32"))]
-pub struct Folder(pub PathBuf);
+pub struct Folder {
+    dir: PathBuf,
+    /// The project this window holds, and its locked file.
+    open: Option<(String, std::fs::File)>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Folder {
+    pub fn new(dir: PathBuf) -> Self {
+        Self { dir, open: None }
+    }
+
+    fn lock_path(&self, id: &str) -> PathBuf {
+        self.dir.join("open").join(format!("{id}.lock"))
+    }
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Store for Folder {
     fn read(&mut self, key: &str) -> Read {
-        match std::fs::read(self.0.join(key)) {
+        match std::fs::read(self.dir.join(key)) {
             Ok(b) => Read::Here(b),
             Err(_) => Read::Missing,
         }
     }
 
     fn write(&mut self, key: &str, bytes: &[u8]) -> Result<(), String> {
-        let path = self.0.join(key);
+        let path = self.dir.join(key);
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         }
@@ -758,7 +1015,38 @@ impl Store for Folder {
     }
 
     fn remove(&mut self, key: &str) {
-        _ = std::fs::remove_file(self.0.join(key));
+        _ = std::fs::remove_file(self.dir.join(key));
+    }
+
+    fn keys(&mut self, prefix: &str) -> Vec<String> {
+        let Ok(entries) = std::fs::read_dir(self.dir.join(prefix)) else { return Vec::new() };
+        entries.flatten().filter_map(|e| e.file_name().to_str().map(|n| format!("{prefix}{n}"))).collect()
+    }
+
+    fn hold(&mut self, id: Option<&str>) {
+        if self.open.as_ref().map(|(o, _)| o.as_str()) == id {
+            return;
+        }
+        // Closing the file lets its lock go.
+        self.open = None;
+        let Some(id) = id else { return };
+        let path = self.lock_path(id);
+        if let Some(dir) = path.parent() {
+            _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(f) = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&path)
+            && f.try_lock().is_ok()
+        {
+            self.open = Some((id.into(), f));
+        }
+    }
+
+    fn held(&self, id: &str) -> bool {
+        if self.open.as_ref().is_some_and(|(o, _)| o == id) {
+            return false;
+        }
+        let Ok(f) = std::fs::OpenOptions::new().write(true).open(self.lock_path(id)) else { return false };
+        matches!(f.try_lock(), Err(std::fs::TryLockError::WouldBlock))
     }
 
     fn now(&self) -> f64 {
@@ -779,8 +1067,7 @@ impl Store for Folder {
     }
 
     fn modified(&self, path: &Path) -> Option<f64> {
-        let m = std::fs::metadata(path).ok()?.modified().ok()?;
-        Some(m.duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64()))
+        modified(path)
     }
 
     fn files(&self) -> bool {
@@ -791,7 +1078,8 @@ impl Store for Folder {
 /// When the file at `path` last changed, in seconds since 1970.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn modified(path: &Path) -> Option<f64> {
-    Folder(PathBuf::new()).modified(path)
+    let m = std::fs::metadata(path).ok()?.modified().ok()?;
+    Some(m.duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64()))
 }
 
 #[cfg(test)]
@@ -909,25 +1197,112 @@ mod tests {
     }
 
     #[test]
-    fn a_folder_store_keeps_files_and_sees_them_go() {
+    fn a_folder_store_keeps_files_and_keeps_the_draft_of_one_gone() {
         let dir = std::env::temp_dir().join(format!("vxr-projects-test-{}", std::process::id()));
         _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("scene.vox");
         std::fs::write(&file, b"x").unwrap();
-        let mut p = Projects::load(Box::new(Folder(dir.join("projects"))));
+        let store = dir.join("projects");
+        let mut p = Projects::load(Box::new(Folder::new(store.clone())));
         let m = modified(&file);
         let id = p.opened("scene.vox", Some(&file), None, m, false, 0);
         p.write_draft("scene.vox", b"draft", Some(b"png"), 1);
-        assert!(dir.join("projects").join(draft_key(&id)).exists());
-        assert!(dir.join("projects").join(INDEX).exists());
-        assert_ne!(Folder(dir.clone()).new_id(), Folder(dir.clone()).new_id());
+        assert!(store.join(draft_key(&id)).exists());
+        assert!(store.join(record_key(&id)).exists() && store.join(DEVICE).exists());
+        assert_ne!(Folder::new(dir.clone()).new_id(), Folder::new(dir.clone()).new_id());
+        // Another window sees this one hold the project, until it closes.
+        assert!(Folder::new(store.clone()).held(&id));
         drop(p);
+        assert!(!Folder::new(store.clone()).held(&id));
+        // The file moved (or its drive is not mounted): the unsaved edits stay, as a scene
+        // with no file.
         std::fs::remove_file(&file).unwrap();
-        let p = Projects::load(Box::new(Folder(dir.join("projects"))));
-        assert!(p.list().is_empty(), "a project whose file is gone is forgotten");
-        assert!(!dir.join("projects").join(draft_key(&id)).exists());
+        let mut p = Projects::load(Box::new(Folder::new(store.clone())));
+        let kept = p.get(&id).expect("a project whose file is gone keeps its draft");
+        assert!(kept.path.is_none() && !kept.has_file() && kept.draft.is_some());
+        assert!(store.join(draft_key(&id)).exists());
+        assert_eq!(p.launch_offer().map(|o| o.id), Some(id.clone()));
         _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn two_windows_keep_each_others_projects() {
+        let (m, mut one) = memory();
+        // The second window started before the first drafted anything.
+        let mut two = Projects::load(Box::new(m.another()));
+        let a = one.opened("one.vox", Some(Path::new("/home/user/one.vox")), None, Some(1.0), false, 0);
+        one.write_draft("one.vox", b"one", None, 1);
+        let b = two.opened("two.vox", Some(Path::new("/home/user/two.vox")), None, Some(1.0), false, 0);
+        two.write_draft("two.vox", b"two", None, 1);
+        let three = Projects::load(Box::new(m.another()));
+        let mut names: Vec<&str> = three.list().iter().map(|p| p.name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, ["one.vox", "two.vox"], "neither window's write drops the other's project");
+        assert!(three.get(&a).unwrap().draft.is_some(), "the first window's draft stays listed");
+        // Clear in the second window leaves the project the first has open.
+        two.clear();
+        assert!(two.get(&a).is_some() && m.files.borrow().contains_key(&draft_key(&a)));
+        // The first window moves on: its old project is no longer held, and Clear takes it.
+        one.reset(0);
+        two.clear();
+        assert!(two.get(&a).is_none() && two.get(&b).is_some());
+        // The first window hears of it when it reads the list again.
+        one.refresh();
+        assert_eq!(one.list().iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), [b.as_str()]);
+        // A tab hears of another's change through its page instead.
+        let mut tab = Projects::load(Box::new(m.another()));
+        let mut moved = two.get(&b).unwrap().clone();
+        moved.name = "renamed.vox".into();
+        tab.listed(&record_key(&b), Some(serde_json::to_vec(&moved).unwrap()));
+        assert_eq!(tab.get(&b).unwrap().name, "renamed.vox");
+        tab.listed(&record_key(&b), None);
+        assert!(tab.list().is_empty());
+    }
+
+    #[test]
+    fn the_cap_takes_thumbnails_and_copies_before_drafts() {
+        let (m, mut p) = memory();
+        // An old scene never saved: its draft is the only copy of its edits.
+        p.write_draft("Untitled", b"old", Some(&vec![0; 1000]), 1);
+        let old = p.current.clone().unwrap();
+        // A downloaded file's copy fills the store.
+        m.clock.set(1_000_001.0);
+        let copy = p.opened("big.vox", None, Some("c"), None, false, CAP - 500);
+        m.clock.set(1_000_002.0);
+        p.reset(0);
+        p.write_draft("Untitled", &vec![0; 2000], None, 1);
+        assert!(p.usage() <= CAP);
+        assert!(p.get(&old).is_some_and(|o| o.draft.is_some() && o.thumb == 0), "the thumbnail went, the draft stayed");
+        assert!(p.get(&copy).is_none(), "the copy went first");
+        assert!(p.evicted.is_empty());
+
+        // Only drafts left: the oldest goes, and the editor hears its name; the one another
+        // window has open stays.
+        let (m, mut p) = memory();
+        let big = vec![0u8; (CAP / 3) as usize];
+        p.write_draft("first", &big, None, 1);
+        let mut other = Projects::load(Box::new(m.another()));
+        m.clock.set(1_000_001.0);
+        other.write_draft("open elsewhere", &big, None, 1);
+        for (k, name) in ["third", "fourth"].iter().enumerate() {
+            m.clock.set(1_000_002.0 + k as f64);
+            p.reset(0);
+            p.write_draft(name, &big, None, 1);
+        }
+        let names: Vec<&str> = p.list().iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["fourth", "third", "open elsewhere"]);
+        assert_eq!(p.evicted, ["first"]);
+    }
+
+    #[test]
+    fn a_copy_is_found_again_only_with_the_same_bytes() {
+        let (_, mut p) = memory();
+        let id = p.opened("scene.vox", None, Some("a"), None, false, 3);
+        p.set_source(&id, content_hash(b"one"));
+        assert_eq!(p.copy_of("scene.vox", content_hash(b"one")), Some(id));
+        assert_eq!(p.copy_of("scene.vox", content_hash(b"two")), None, "another file of the same name");
+        assert_eq!(p.copy_of("other.vox", content_hash(b"one")), None);
     }
 
     #[test]

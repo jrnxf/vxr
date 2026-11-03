@@ -192,6 +192,8 @@ pub struct Editor {
     /// The projects list and the open scene's autosaved draft (in memory until the host
     /// gives it its store).
     pub projects: Projects,
+    /// The projects list was open last frame: opening it reads the list again.
+    projects_shown: bool,
     /// The window is to close (the close confirm's Save or Don't save): the native host exits.
     pub quit: bool,
 }
@@ -317,6 +319,7 @@ impl Editor {
             agents: Agents::default(),
             agents_shown: None,
             projects: Projects::default(),
+            projects_shown: false,
             quit: false,
         };
         e.shape = (e.scene.reshapes(), e.scene.origin);
@@ -328,6 +331,8 @@ impl Editor {
 
     /// Replace the scene (after Open), reframing the camera.
     pub fn load(&mut self, scene: Scene, name: &str) -> Result<(), String> {
+        // The edits since the last draft are kept before another scene takes their place.
+        self.flush_draft();
         self.loads += 1;
         // A change under review belongs to the scene it was staged on.
         self.assistant.stop(now_ms() / 1000.0);
@@ -365,6 +370,11 @@ impl Editor {
         Ok(())
     }
 
+    /// How many times another scene replaced the open one ([`Editor::load`]).
+    pub fn loads(&self) -> u64 {
+        self.loads
+    }
+
     /// The scene is saved as it stands now: New asks again only after another edit or undo.
     pub fn mark_saved(&mut self) {
         self.saved_at = self.scene.history().position();
@@ -398,6 +408,9 @@ impl Editor {
         };
         let thumb = vxr_ops::look::thumbnail(&self.scene, THUMB).ok();
         self.projects.write_draft(&self.ui.scene_name, &vox, thumb.as_deref(), position);
+        for name in std::mem::take(&mut self.projects.evicted) {
+            self.ui.toast(&self.ctx, format!("Storage is full: deleted the unsaved edits to {name}"));
+        }
     }
 
     /// Write the draft now when the scene has edits newer than it: before another scene
@@ -416,8 +429,14 @@ impl Editor {
             when: crate::projects::ago(now, o.saved),
             changed: o.changed,
         });
+        let opening = self.ui.projects_open && !self.projects_shown;
+        self.projects_shown = self.ui.projects_open;
         if !self.ui.projects_open {
             return;
+        }
+        if opening {
+            // Another window may have changed the list since.
+            self.projects.refresh();
         }
         let current = self.projects.current.clone();
         let unsaved = self.ui.unsaved;
@@ -468,6 +487,8 @@ impl Editor {
         {
             self.projects.drop_draft(&id);
         }
+        // Nothing of them is left to draft as the blank scene takes their place.
+        self.mark_saved();
         // Cannot fail for an empty map of the default size.
         let _ = self.load(Scene::new(NEW_SIZE), "Untitled");
         self.cam = OrbitCamera::framing(Vec3::ZERO, Vec3::ONE);
