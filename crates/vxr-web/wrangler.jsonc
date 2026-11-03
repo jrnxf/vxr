@@ -4,8 +4,8 @@
 //
 // Secrets (`wrangler secret put`, or .dev.vars for `wrangler dev`, see .dev.vars.example):
 // BETTER_AUTH_SECRET signs sessions, TURNSTILE_SECRET_KEY checks the sign-up challenge and
-// RESEND_API_KEY sends the emailed sign-in links. Without them the Worker still serves the site and
-// answers /api/me with sign-in (or email sign-in) off.
+// RESEND_API_KEY sends the sign-in emails (a link and a code). Without them the Worker still
+// serves the site and answers /api/me with sign-in off.
 {
   "name": "vxr",
   "main": "worker/index.ts",
