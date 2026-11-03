@@ -71,6 +71,13 @@ fn tool(a: &Action) -> Option<&'static str> {
         | Action::StopAgent(_)
         | Action::StopAgents
         | Action::UndoAgentEdit(_)
+        // The projects list, drafts and the close confirm: this device's storage, not the scene.
+        | Action::OpenProject(_)
+        | Action::RestoreDraft
+        | Action::DiscardDraft
+        | Action::ClearStorage
+        | Action::SaveAndClose
+        | Action::CloseDiscard
         | Action::Theme => None,
     }
 }

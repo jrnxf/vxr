@@ -355,6 +355,46 @@ pub enum Action {
     UndoAgentEdit(usize),
     /// The theme was picked (for the host to keep: `Hybrid::theme`).
     Theme,
+    /// Open the projects list's row (for the host): its file, or a never-saved scene's draft.
+    OpenProject(usize),
+    /// The restore prompt's Restore: load the scene's draft (for the host).
+    RestoreDraft,
+    /// The restore prompt's Discard: delete the draft (for the host).
+    DiscardDraft,
+    /// The projects list's Clear: forget every other project and its draft, thumbnail and
+    /// kept copy (for the host).
+    ClearStorage,
+    /// The close confirm's Save: save, then close the window if the save happened.
+    SaveAndClose,
+    /// The close confirm's Don't save: delete the draft and close.
+    CloseDiscard,
+}
+
+/// The projects list's row pitch, and its footer's height (the Storage line).
+const PROJECT_STEP: f32 = 50.0;
+const PROJECTS_FOOT: f32 = 44.0;
+
+/// A row of the projects list (set by the editor while it is open).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProjectRow {
+    pub name: String,
+    /// When it was last edited: "5 min ago".
+    pub when: String,
+    /// It has edits not saved to its file (a draft, or the open scene's).
+    pub unsaved: bool,
+    /// It is the open scene.
+    pub current: bool,
+    pub thumb: Option<egui::TextureId>,
+}
+
+/// What the restore prompt says (set by the editor while a draft is offered).
+#[derive(Clone, Debug, PartialEq)]
+pub struct RestoreAsk {
+    pub name: String,
+    /// When the draft was written: "5 min ago".
+    pub when: String,
+    /// The file changed on disk after the draft's edits began.
+    pub changed: bool,
 }
 
 /// The review card's text laid out for its width, and its height.
@@ -605,6 +645,18 @@ pub struct Hybrid {
     styled: Option<&'static str>,
     /// The New scene confirm is open: the scene has edits that starting a new one would drop.
     pub confirm_new: bool,
+    /// The close confirm is open: the window is closing with edits not saved (desktop).
+    pub confirm_close: bool,
+    /// The projects list under the scene name is open, its rows and the store's use and cap
+    /// in bytes (set by the editor while it is open), and whether Clear was pressed once.
+    pub projects_open: bool,
+    pub projects: Vec<ProjectRow>,
+    pub storage: (u64, u64),
+    pub clear_armed: bool,
+    /// The restore prompt, while a draft is offered back.
+    pub restore: Option<RestoreAsk>,
+    /// The first row the projects list shows.
+    projects_scroll: usize,
     /// Left edge of the top bar's Export button, where the Export menu lines up.
     export_x: f32,
     /// Guides drawn in the view: the ground grid, the ground plane and the bounds frame.
@@ -851,6 +903,7 @@ const COMMANDS: &[Command] = &[
     Command { label: "Redo", keys: &["⌘", "⇧", "Z"], run: |h| h.actions.push(Action::Redo) },
     Command { label: "New scene", keys: &["⌘", "N"], run: |h| h.request_new() },
     Command { label: "Open .vox", keys: &["⌘", "O"], run: |h| h.actions.push(Action::Open) },
+    Command { label: "Projects", keys: &[], run: |h| h.toggle_projects() },
     Command { label: "Save .vox", keys: &["⌘", "S"], run: |h| h.actions.push(Action::Save) },
     Command { label: "Embed", keys: &[], run: |h| h.actions.push(Action::Embed) },
     Command { label: "Show palette", keys: &[], run: |h| h.toggle_palette() },
@@ -928,6 +981,13 @@ impl Hybrid {
             theme_menu: false,
             styled: None,
             confirm_new: false,
+            confirm_close: false,
+            projects_open: false,
+            projects: Vec::new(),
+            storage: (0, 0),
+            clear_armed: false,
+            restore: None,
+            projects_scroll: 0,
             export_x: 0.0,
             grid: true,
             ground: true,
@@ -1238,6 +1298,7 @@ impl Hybrid {
         if std::mem::take(&mut self.view_panel)
             || std::mem::take(&mut self.export_menu)
             || std::mem::take(&mut self.theme_menu)
+            || std::mem::take(&mut self.projects_open)
             || std::mem::take(&mut self.palette_open)
         {
             return;
@@ -1354,6 +1415,9 @@ impl Hybrid {
         self.fitted(ctx, |s| s.new_confirm(ctx, screen));
         self.fitted(ctx, |s| s.export_menu(ctx));
         self.fitted(ctx, |s| s.theme_menu(ctx));
+        self.fitted(ctx, |s| s.projects_menu(ctx));
+        self.fitted(ctx, |s| s.restore_prompt(ctx, screen));
+        self.fitted(ctx, |s| s.close_confirm(ctx, screen));
         self.marquee(ctx);
         self.fitted(ctx, |s| s.palette_panel(ctx, screen));
         self.fitted(ctx, |s| s.color_editor(ctx, screen));
@@ -1422,6 +1486,25 @@ impl Hybrid {
             }
             if self.ai.focus && i.consume_key(Modifiers::NONE, Key::Escape) {
                 self.ai.focus = false;
+                return;
+            }
+            // The restore prompt takes every key: Enter restores. Escape does nothing, so a
+            // draft is never dropped by a key pressed in passing.
+            if self.restore.is_some() {
+                if i.consume_key(Modifiers::NONE, Key::Enter) {
+                    self.actions.push(Action::RestoreDraft);
+                }
+                i.consume_key(Modifiers::NONE, Key::Escape);
+                return;
+            }
+            // The close confirm too: Enter saves and closes, Escape keeps the window.
+            if self.confirm_close {
+                if i.consume_key(Modifiers::NONE, Key::Escape) {
+                    self.confirm_close = false;
+                } else if i.consume_key(Modifiers::NONE, Key::Enter) {
+                    self.confirm_close = false;
+                    self.actions.push(Action::SaveAndClose);
+                }
                 return;
             }
             // The New scene confirm takes every key: Enter starts the blank scene, Escape keeps this one.
@@ -1712,9 +1795,15 @@ impl Hybrid {
                 // #scene-select
                 let sel = Rect::from_min_size(pos2(x, cy - 14.0), vec2(sel_w, 28.0));
                 let resp = ui.interact(sel, Id::unique("scene-select"), Sense::click());
+                self.hits.insert("scene-select".into(), sel);
+                if resp.clicked() {
+                    self.toggle_projects();
+                }
                 let p = ui.painter();
                 p.rect(sel, CornerRadius::same(7), th().tint(10), Stroke::new(1.0, th().line), StrokeKind::Inside);
-                if resp.hovered() {
+                if self.projects_open {
+                    p.rect_filled(sel, CornerRadius::same(7), th().accent_bg);
+                } else if resp.hovered() {
                     p.rect_filled(sel, CornerRadius::same(7), th().hover);
                 }
                 p.galley(pos2(sel.left() + 10.0, cy - name.size().y / 2.0), name, th().text);
@@ -3073,7 +3162,95 @@ impl Hybrid {
         if !self.confirm_new {
             return;
         }
-        Area::new(Id::unique("new-backdrop"))
+        let picked = Self::dialog(
+            ctx,
+            screen,
+            &mut self.hits,
+            "new-confirm",
+            "Start a new scene?",
+            "The edits to this scene are not saved and will be lost.",
+            &[("new-discard", "Start new"), ("new-cancel", "Cancel")],
+            None,
+        );
+        match picked {
+            Some(0) => {
+                self.confirm_new = false;
+                self.actions.push(Action::New);
+            }
+            Some(_) => self.confirm_new = false,
+            None => {}
+        }
+    }
+
+    /// The restore prompt: the scene has a draft newer than its file (or no file at all).
+    fn restore_prompt(&mut self, ctx: &Context, screen: Rect) {
+        let Some(ask) = &self.restore else { return };
+        let mut note = format!("{} has edits from {} that were not saved.", ask.name, ask.when);
+        if ask.changed {
+            note.push_str(" The file changed on disk after this draft was made.");
+        }
+        let picked = Self::dialog(
+            ctx,
+            screen,
+            &mut self.hits,
+            "restore-confirm",
+            "Restore unsaved edits?",
+            &note,
+            &[("restore-restore", "Restore"), ("restore-discard", "Discard")],
+            None,
+        );
+        match picked {
+            Some(0) => self.actions.push(Action::RestoreDraft),
+            Some(_) => self.actions.push(Action::DiscardDraft),
+            None => {}
+        }
+    }
+
+    /// The close confirm: the window is closing with edits not saved.
+    fn close_confirm(&mut self, ctx: &Context, screen: Rect) {
+        if !self.confirm_close {
+            return;
+        }
+        let title = format!("Save changes to {}?", self.scene_name);
+        let picked = Self::dialog(
+            ctx,
+            screen,
+            &mut self.hits,
+            "close-confirm",
+            &title,
+            "Your edits will be lost if you don't save them.",
+            &[("close-save", "Save"), ("close-cancel", "Cancel")],
+            Some(("close-discard", "Don't save")),
+        );
+        match picked {
+            Some(0) => {
+                self.confirm_close = false;
+                self.actions.push(Action::SaveAndClose);
+            }
+            Some(1) => self.confirm_close = false,
+            Some(_) => {
+                self.confirm_close = false;
+                self.actions.push(Action::CloseDiscard);
+            }
+            None => {}
+        }
+    }
+
+    /// A centred dialog over a dimmed screen: a title, a note and buttons from the right (the
+    /// first is the accent one), with `left` on its own at the left. Returns the button
+    /// clicked: its index in `buttons`, or `buttons.len()` for `left`.
+    #[allow(clippy::too_many_arguments)]
+    fn dialog(
+        ctx: &Context,
+        screen: Rect,
+        hits_out: &mut HashMap<String, Rect>,
+        id: &str,
+        title: &str,
+        note: &str,
+        buttons: &[(&str, &str)],
+        left: Option<(&str, &str)>,
+    ) -> Option<usize> {
+        Area::new(Id::unique(format!("{id}-backdrop")))
             .fade_in(false)
             .order(Order::Foreground)
             .fixed_pos(screen.min)
@@ -3082,53 +3259,256 @@ impl Hybrid {
                 ui.painter().rect_filled(screen, CornerRadius::ZERO, Color32::from_black_alpha(64));
                 ui.allocate_rect(screen, Sense::click_and_drag());
             });
-        let (w, h) = (320.0, 138.0);
+        let w = 320.0;
+        let mut job = LayoutJob::default();
+        job.append(
+            note,
+            0.0,
+            TextFormat { font_id: sans(12.0), color: th().muted, line_height: Some(17.0), ..Default::default() },
+        );
+        job.wrap.max_width = w - 32.0;
+        let note = ctx.fonts_mut(|f| f.layout_job(job));
+        // Title, note, and the buttons' row 16 below it.
+        let h = 40.0 + note.size().y + 16.0 + 32.0 + 16.0;
         let rect = Rect::from_center_size(screen.center(), vec2(w, h));
         let mut hits = Vec::new();
-        let (mut cancel, mut discard) = (false, false);
-        Self::panel(ctx, "new-confirm", rect, Order::Foreground, |ui, rect| {
-            let title = ui.painter().layout_no_wrap("Start a new scene?".into(), sans_semibold(13.0), th().text);
+        let mut picked = None;
+        Self::panel(ctx, id, rect, Order::Foreground, |ui, rect| {
+            let title = ui.painter().layout_no_wrap(title.into(), sans_semibold(13.0), th().text);
             ui.painter().galley(pos2(rect.left() + 16.0, rect.top() + 16.0), title, th().text);
-            let mut job = LayoutJob::default();
-            job.append(
-                "The edits to this scene are not saved and will be lost.",
-                0.0,
-                TextFormat { font_id: sans(12.0), color: th().muted, line_height: Some(17.0), ..Default::default() },
-            );
-            job.wrap.max_width = w - 32.0;
-            let note = ui.fonts_mut(|f| f.layout_job(job));
             ui.painter().galley(pos2(rect.left() + 16.0, rect.top() + 40.0), note, th().muted);
             let by = rect.bottom() - 16.0 - 32.0;
-            let ink = th().on_accent;
-            let label = ui.painter().layout_no_wrap("Start new".into(), sans_semibold(13.0), ink);
-            let dw = label.size().x + 28.0;
-            let d = Rect::from_min_size(pos2(rect.right() - 16.0 - dw, by), vec2(dw, 32.0));
-            let resp = ui.interact(d, Id::unique("new-discard"), Sense::click());
-            let fill = if resp.hovered() { th().accent_hover } else { th().accent };
-            ui.painter().rect_filled(d, CornerRadius::same(8), fill);
-            ui.painter().galley(pos2(d.left() + 14.0, d.center().y - label.size().y / 2.0), label, ink);
-            discard = resp.clicked();
-            hits.push(("new-discard".to_string(), d));
-            let cl = ui.painter().layout_no_wrap("Cancel".into(), sans(13.0), th().muted);
-            let cw = cl.size().x + 28.0;
-            let c = Rect::from_min_size(pos2(d.left() - 6.0 - cw, by), vec2(cw, 32.0));
-            let resp = ui.interact(c, Id::unique("new-cancel"), Sense::click());
-            let color = if resp.hovered() { th().text } else { th().muted };
-            if resp.hovered() {
-                ui.painter().rect_filled(c, CornerRadius::same(8), th().hover);
+            let mut right = rect.right() - 16.0;
+            let ghost = |ui: &mut Ui, at: Rect, label: Arc<egui::Galley>, hit: &str| {
+                let resp = ui.interact(at, Id::unique(hit), Sense::click());
+                let color = if resp.hovered() { th().text } else { th().muted };
+                if resp.hovered() {
+                    ui.painter().rect_filled(at, CornerRadius::same(8), th().hover);
+                }
+                ui.painter().galley(pos2(at.left() + 14.0, at.center().y - label.size().y / 2.0), label, color);
+                resp.clicked()
+            };
+            for (k, (hit, text)) in buttons.iter().enumerate() {
+                let clicked = if k == 0 {
+                    let ink = th().on_accent;
+                    let label = ui.painter().layout_no_wrap((*text).into(), sans_semibold(13.0), ink);
+                    let bw = label.size().x + 28.0;
+                    let b = Rect::from_min_size(pos2(right - bw, by), vec2(bw, 32.0));
+                    let resp = ui.interact(b, Id::unique(*hit), Sense::click());
+                    let fill = if resp.hovered() { th().accent_hover } else { th().accent };
+                    ui.painter().rect_filled(b, CornerRadius::same(8), fill);
+                    ui.painter().galley(pos2(b.left() + 14.0, b.center().y - label.size().y / 2.0), label, ink);
+                    hits.push((hit.to_string(), b));
+                    right = b.left() - 6.0;
+                    resp.clicked()
+                } else {
+                    let label = ui.painter().layout_no_wrap((*text).into(), sans(13.0), th().muted);
+                    let bw = label.size().x + 28.0;
+                    let b = Rect::from_min_size(pos2(right - bw, by), vec2(bw, 32.0));
+                    hits.push((hit.to_string(), b));
+                    right = b.left() - 6.0;
+                    ghost(ui, b, label, hit)
+                };
+                if clicked {
+                    picked = Some(k);
+                }
             }
-            ui.painter().galley(pos2(c.left() + 14.0, c.center().y - cl.size().y / 2.0), cl, color);
-            cancel = resp.clicked();
-            hits.push(("new-cancel".to_string(), c));
+            if let Some((hit, text)) = left {
+                let label = ui.painter().layout_no_wrap(text.into(), sans(13.0), th().muted);
+                // Its text lines up with the title's.
+                let b = Rect::from_min_size(pos2(rect.left() + 2.0, by), vec2(label.size().x + 28.0, 32.0));
+                hits.push((hit.to_string(), b));
+                if ghost(ui, b, label, hit) {
+                    picked = Some(buttons.len());
+                }
+            }
         });
-        ctx.move_to_top(egui::LayerId::new(Order::Foreground, Id::unique("new-confirm")));
-        self.hits.extend(hits);
-        if discard {
-            self.confirm_new = false;
-            self.actions.push(Action::New);
-        } else if cancel {
-            self.confirm_new = false;
+        ctx.move_to_top(egui::LayerId::new(Order::Foreground, Id::unique(id)));
+        hits_out.extend(hits);
+        picked
+    }
+
+    /// The rows the projects list shows at once, and its height, for a screen this tall.
+    fn projects_layout(&self, screen: Rect) -> (usize, f32) {
+        let fits = ((screen.height() - 62.0 - 12.0 - 36.0 - 6.0 - PROJECTS_FOOT) / PROJECT_STEP).floor().max(1.0);
+        let rows = self.projects.len().clamp(1, (fits as usize).min(7));
+        (rows, 36.0 + PROJECT_STEP * rows as f32 + 4.0 + PROJECTS_FOOT)
+    }
+
+    // The projects list, under the scene name: every scene opened or made here, its draft and
+    // the store's use.
+    fn projects_menu(&mut self, ctx: &Context) {
+        if !self.projects_open {
+            self.clear_armed = false;
+            return;
         }
+        let button = self.hits.get("scene-select").copied().unwrap_or(Rect::NOTHING);
+        let screen = ctx.content_rect();
+        let w = 300.0_f32.min(screen.width() - 24.0);
+        let (rows, h) = self.projects_layout(screen);
+        self.projects_scroll = self.projects_scroll.min(self.projects.len().saturating_sub(rows));
+        let x = if button.is_positive() { button.left() } else { 12.0 }.min(screen.right() - 12.0 - w);
+        let rect = Rect::from_min_size(pos2(x, 12.0 + 44.0 + 6.0), vec2(w, h));
+        self.hits.insert("projects-menu".into(), rect);
+        let scroll = self.projects_scroll;
+        let (used, cap) = self.storage;
+        let armed = self.clear_armed;
+        let mut open = None;
+        let mut clear = false;
+        let mut wheel = 0.0;
+        let mut hits = Vec::new();
+        Self::panel_filled(ctx, "projects-menu", rect, Order::Foreground, th().panel_solid, |ui, rect| {
+            ui.allocate_rect(rect, Sense::click());
+            let hy = rect.top() + 18.0;
+            let g = ui.painter().layout_job(spaced("PROJECTS", sans(9.0), th().faint, 0.72));
+            ui.painter().galley(pos2(rect.left() + 12.0, hy - g.size().y / 2.0), g, th().faint);
+            if self.projects.len() > rows {
+                let more = format!("{}–{} of {}", scroll + 1, scroll + rows, self.projects.len());
+                ui.painter().text(pos2(rect.right() - 12.0, hy), Align2::RIGHT_CENTER, more, sans(11.0), th().faint);
+            }
+            let body = Rect::from_min_size(
+                pos2(rect.left() + 6.0, rect.top() + 36.0),
+                vec2(rect.width() - 12.0, PROJECT_STEP * rows as f32),
+            );
+            if ui.rect_contains_pointer(body) {
+                wheel = ui.input(|i| i.smooth_scroll_delta.y);
+            }
+            if self.projects.is_empty() {
+                let mut job = LayoutJob::default();
+                job.append(
+                    "Scenes you open or edit here show up in this list.",
+                    0.0,
+                    TextFormat {
+                        font_id: sans(12.0),
+                        color: th().muted,
+                        line_height: Some(17.0),
+                        ..Default::default()
+                    },
+                );
+                job.wrap.max_width = body.width() - 12.0;
+                let g = ui.fonts_mut(|f| f.layout_job(job));
+                ui.painter().galley(pos2(body.left() + 6.0, body.center().y - g.size().y / 2.0), g, th().muted);
+            }
+            for (k, row) in self.projects.iter().enumerate().skip(scroll).take(rows) {
+                let r = Rect::from_min_size(
+                    pos2(body.left(), body.top() + PROJECT_STEP * (k - scroll) as f32),
+                    vec2(body.width(), PROJECT_STEP - 2.0),
+                );
+                let id = format!("project-{k}");
+                let resp = ui.interact(r, Id::unique(&id), Sense::click());
+                hits.push((id, r));
+                let p = ui.painter();
+                if row.current {
+                    p.rect_filled(r, CornerRadius::same(7), th().accent_bg);
+                } else if resp.hovered() {
+                    p.rect_filled(r, CornerRadius::same(7), th().hover);
+                }
+                // The thumbnail, 4:3.
+                let t = Rect::from_min_size(pos2(r.left() + 6.0, r.center().y - 18.0), vec2(48.0, 36.0));
+                p.rect_filled(t, CornerRadius::same(5), th().tint(10));
+                if let Some(tex) = row.thumb {
+                    let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+                    egui::Image::new((tex, t.size())).uv(uv).corner_radius(CornerRadius::same(5)).paint_at(ui, t);
+                } else {
+                    p.text(t.center(), Align2::CENTER_CENTER, icon::BOX, icon_font(14.0), th().faint);
+                }
+                let p = ui.painter();
+                p.rect_stroke(t, CornerRadius::same(5), Stroke::new(1.0, th().line), StrokeKind::Inside);
+                let tx = t.right() + 10.0;
+                let mut right = r.right() - 10.0;
+                if row.unsaved {
+                    let g = p.layout_no_wrap("Unsaved".into(), sans(11.0), th().accent);
+                    right -= g.size().x;
+                    p.galley(pos2(right, r.center().y - g.size().y / 2.0), g, th().accent);
+                    p.circle_filled(pos2(right - 7.0, r.center().y), 3.0, th().accent);
+                    right -= 16.0;
+                }
+                let color = if row.current || resp.hovered() { th().text } else { th().muted };
+                let name = p.layout_no_wrap(row.name.clone(), sans(13.0), color);
+                let clip = Rect::from_min_max(pos2(tx, r.top()), pos2(right - 4.0, r.bottom()));
+                let shown = p.with_clip_rect(clip.intersect(p.clip_rect()));
+                shown.galley(pos2(tx, r.center().y - 1.0 - name.size().y), name, color);
+                let when = p.layout_no_wrap(row.when.clone(), sans(11.0), th().faint);
+                shown.galley(pos2(tx, r.center().y + 2.0), when, th().faint);
+                if resp.clicked() {
+                    open = Some(k);
+                }
+            }
+            // The store: what it holds, and Clear.
+            let fy = rect.bottom() - PROJECTS_FOOT;
+            ui.painter().line_segment(
+                [pos2(rect.left() + 1.0, fy + 0.5), pos2(rect.right() - 1.0, fy + 0.5)],
+                Stroke::new(1.0, th().line),
+            );
+            let cy = fy + PROJECTS_FOOT / 2.0;
+            let p = ui.painter();
+            let g = p.layout_no_wrap("Storage".into(), sans(12.0), th().muted);
+            p.galley(pos2(rect.left() + 12.0, cy - g.size().y / 2.0), g.clone(), th().muted);
+            let usage = p.layout_no_wrap(
+                format!("{} of {}", crate::projects::bytes(used), crate::projects::bytes(cap)),
+                mono(11.0),
+                th().faint,
+            );
+            p.galley(pos2(rect.left() + 12.0 + g.size().x + 8.0, cy - usage.size().y / 2.0), usage, th().faint);
+            let (text, ink) = if armed { ("Clear everything", th().danger) } else { ("Clear", th().muted) };
+            let label = p.layout_no_wrap(text.into(), sans(12.0), ink);
+            let bw = label.size().x + 20.0;
+            let b = Rect::from_min_size(pos2(rect.right() - 8.0 - bw, cy - 13.0), vec2(bw, 26.0));
+            let resp = ui.interact(b, Id::unique("projects-clear"), Sense::click());
+            hits.push(("projects-clear".to_string(), b));
+            let p = ui.painter();
+            if armed {
+                p.rect(
+                    b,
+                    CornerRadius::same(7),
+                    th().danger_bg,
+                    Stroke::new(1.0, th().danger_line),
+                    StrokeKind::Inside,
+                );
+            } else if resp.hovered() {
+                p.rect_filled(b, CornerRadius::same(7), th().hover);
+            }
+            let color = if armed || !resp.hovered() { ink } else { th().text };
+            p.galley(pos2(b.left() + 10.0, cy - label.size().y / 2.0), label, color);
+            clear = resp.clicked();
+        });
+        self.hits.extend(hits);
+        if wheel != 0.0 {
+            let steps = (wheel / PROJECT_STEP).round() as isize;
+            let steps = if steps == 0 { -(wheel.signum() as isize) } else { -steps };
+            self.projects_scroll =
+                self.projects_scroll.saturating_add_signed(steps).min(self.projects.len().saturating_sub(rows));
+        }
+        let outside = ctx.input(|i| {
+            i.pointer.any_pressed()
+                && i.pointer.interact_pos().is_some_and(|p| !rect.contains(p) && !button.contains(p))
+        });
+        if clear {
+            if armed {
+                self.clear_armed = false;
+                self.actions.push(Action::ClearStorage);
+            } else {
+                self.clear_armed = true;
+            }
+        }
+        if let Some(k) = open {
+            self.projects_open = false;
+            if !self.projects[k].current {
+                self.actions.push(Action::OpenProject(k));
+            }
+        }
+        if outside {
+            self.projects_open = false;
+        }
+    }
+
+    /// Open or close the projects list.
+    pub fn toggle_projects(&mut self) {
+        self.cmdk = None;
+        self.projects_open = !self.projects_open;
+        self.projects_scroll = 0;
+        self.theme_menu = false;
+        self.export_menu = false;
     }
 
     fn bounds_note(ctx: &Context) -> Arc<egui::Galley> {
@@ -5902,7 +6282,17 @@ mod tests {
             };
             let top = ctx.layer_id_at(r.center());
             // The confirm is a modal: the backdrop takes the touch until it is answered.
-            let own = ["dock", "dock-brushes", "dock-more", "top", "top-right", "new-backdrop"].map(egui::Id::unique);
+            let own = [
+                "dock",
+                "dock-brushes",
+                "dock-more",
+                "top",
+                "top-right",
+                "new-confirm-backdrop",
+                "restore-confirm-backdrop",
+                "close-confirm-backdrop",
+            ]
+            .map(egui::Id::unique);
             if !top.is_some_and(|l| own.contains(&l.id)) {
                 bad.push(format!("{n} at {:?} is under {top:?}", r.center()));
             }
@@ -5913,7 +6303,7 @@ mod tests {
     #[test]
     fn the_touch_layout_fits_phones() {
         type Open = fn(&mut super::Hybrid);
-        let scenarios: [(&str, Open); 15] = [
+        let scenarios: [(&str, Open); 18] = [
             ("plain", |_| {}),
             ("assistant", |h| h.ai_open = true),
             ("assistant+palette", |h| (h.ai_open, h.palette_open) = (true, true)),
@@ -5929,6 +6319,27 @@ mod tests {
             ("commands", |h| h.cmdk = Some(String::new())),
             ("colour editor", |h| h.open_color_edit()),
             ("confirm", |h| h.confirm_new = true),
+            ("projects", |h| {
+                h.projects_open = true;
+                h.projects = (0..12)
+                    .map(|k| super::ProjectRow {
+                        name: format!("a scene with a long name {k}.vox"),
+                        when: "3 weeks ago".into(),
+                        unsaved: k % 2 == 0,
+                        current: k == 0,
+                        thumb: None,
+                    })
+                    .collect();
+                h.storage = (180 << 20, 200 << 20);
+            }),
+            ("restore", |h| {
+                h.restore = Some(super::RestoreAsk {
+                    name: "a scene with a long name.vox".into(),
+                    when: "yesterday".into(),
+                    changed: true,
+                })
+            }),
+            ("close", |h| h.confirm_close = true),
         ];
         // 360, 390 and 430 CSS px wide upright, then 844 and 932 wide sideways, at 1.3 points.
         for pts in [(277.0, 649.0), (300.0, 649.0), (331.0, 685.0), (649.0, 300.0), (717.0, 331.0)] {

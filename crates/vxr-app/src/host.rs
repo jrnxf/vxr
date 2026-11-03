@@ -6,6 +6,10 @@
 //! [`Platform`]: how this machine picks a file to open, writes one out and remembers the
 //! theme. Open, Save and the exports are written once, so they cannot drift apart: a save
 //! is refused when the scene would not read back whole before any dialog or download starts.
+//!
+//! The projects list and the drafts ([`crate::projects`]) follow every open and save here:
+//! a scene opened becomes (or finds) its project and is offered its draft back, a save
+//! deletes the draft, and the scene being replaced keeps its newest edits as a draft first.
 
 use std::path::{Path, PathBuf};
 
@@ -15,22 +19,37 @@ use vxr_render::Gpu;
 use crate::Editor;
 use crate::editor::Button;
 use crate::files::{File, obj_files, slices_png, vox_bytes};
+use crate::projects::{Project, Read};
 use crate::ui::{Action, FontBytes};
 
 /// A scene file the user picked to open.
+#[derive(Default)]
 pub struct Opened {
     pub name: String,
     pub bytes: Vec<u8>,
     /// Where it came from, when the host has files (not in the browser).
     pub path: Option<PathBuf>,
+    /// When the file last changed (seconds since 1970), when the host can tell.
+    pub modified: Option<f64>,
+    /// In the browser: the project it was opened as (the page keeps its handle or copy under
+    /// this id), whether the page holds a handle to the file, and the bytes of the copy it
+    /// keeps where it has no handles.
+    pub id: Option<String>,
+    pub handle: bool,
+    pub copy: u64,
 }
 
 /// A `.vox` file the platform wrote.
+#[derive(Default)]
 pub struct Saved {
     /// The file's name, which the scene takes.
     pub name: String,
     /// Where it went, when the host has files: Save then replaces it without asking.
     pub path: Option<PathBuf>,
+    /// In the browser: written through a handle to the file, or downloaded with a copy of
+    /// this many bytes kept (see [`Opened`]).
+    pub handle: bool,
+    pub copy: u64,
 }
 
 /// What differs between this machine's hosts. Every method that writes returns `Ok(None)`
@@ -44,8 +63,20 @@ pub trait Platform {
     fn pick_open(&mut self) -> Result<Option<Opened>, String>;
 
     /// Write the scene's `.vox` bytes: over `current` when there is one, else wherever the
-    /// user chooses (suggesting `name`).
-    fn save_vox(&mut self, current: Option<&Path>, name: &str, bytes: &[u8]) -> Result<Option<Saved>, String>;
+    /// user chooses (suggesting `name`). `project` is the scene's project id, under which
+    /// the browser keeps its file's handle or copy. A browser writing through a handle
+    /// cannot answer at once either: it returns `Ok(None)` and the page calls back.
+    fn save_vox(
+        &mut self,
+        current: Option<&Path>,
+        project: &str,
+        name: &str,
+        bytes: &[u8],
+    ) -> Result<Option<Saved>, String>;
+
+    /// Open a project from the list: its file on the desktop, its handle or kept copy in the
+    /// browser (which answers later, as [`Platform::pick_open`] does).
+    fn open_project(&mut self, project: &Project) -> Result<Option<Opened>, String>;
 
     /// Write one PNG, suggesting `name`; returns the name it was given.
     fn save_png(&mut self, name: &str, bytes: &[u8]) -> Result<Option<String>, String>;
@@ -85,11 +116,17 @@ pub fn run_action(ed: &mut Editor, p: &mut dyn Platform, action: Action) {
                 toast(ed, format!("Could not keep the theme: {e}"));
             }
         }
-        Action::Open => match p.pick_open() {
-            Ok(Some(file)) => open(ed, p, file),
-            Ok(None) => {}
-            Err(e) => toast(ed, format!("Could not open: {e}")),
-        },
+        Action::Open => {
+            // The scene being replaced keeps its newest edits as its draft.
+            ed.flush_draft();
+            match p.pick_open() {
+                Ok(Some(file)) => {
+                    open(ed, p, file);
+                }
+                Ok(None) => {}
+                Err(e) => toast(ed, format!("Could not open: {e}")),
+            }
+        }
         Action::Save => {
             // Checked before any dialog or download: a scene that would not read back whole
             // is never offered for saving.
@@ -98,17 +135,56 @@ pub fn run_action(ed: &mut Editor, p: &mut dyn Platform, action: Action) {
                 Err(e) => return toast(ed, format!("Could not save: {e}")),
             };
             let name = ed.ui.scene_name.clone();
-            match p.save_vox(ed.path.as_deref(), &name, &bytes) {
-                Ok(Some(saved)) => {
-                    ed.ui.scene_name = saved.name.clone();
-                    p.named(&saved.name);
-                    toast(ed, format!("{} {}", p.verb(), saved.name));
-                    ed.path = saved.path;
-                    ed.mark_saved();
-                }
+            let project = ed.projects.ensure(&name);
+            match p.save_vox(ed.path.as_deref(), &project, &name, &bytes) {
+                Ok(Some(saved)) => self::saved(ed, p, saved, ed.scene.history().position()),
                 Ok(None) => {}
                 Err(e) => toast(ed, format!("Could not save: {e}")),
             }
+        }
+        Action::OpenProject(k) => {
+            let Some(project) = ed.projects.list().get(k).cloned() else { return };
+            ed.flush_draft();
+            if !project.has_file() {
+                // A scene never saved: its draft is all there is.
+                return load_draft(ed, p, &project.id);
+            }
+            match p.open_project(&project) {
+                Ok(Some(file)) => {
+                    open(ed, p, file);
+                }
+                Ok(None) => {}
+                Err(e) => toast(ed, format!("Could not open {}: {e}", project.name)),
+            }
+        }
+        Action::RestoreDraft => {
+            if let Some(offer) = ed.projects.offer.take() {
+                load_draft(ed, p, &offer.id);
+            }
+        }
+        Action::DiscardDraft => {
+            if let Some(offer) = ed.projects.offer.take() {
+                ed.projects.drop_draft(&offer.id);
+                toast(ed, format!("Discarded the unsaved edits to {}", offer.name));
+            }
+        }
+        Action::ClearStorage => {
+            ed.projects.clear();
+            toast(ed, "Cleared the projects list".into());
+        }
+        Action::SaveAndClose => {
+            run_action(ed, p, Action::Save);
+            ed.quit = !ed.is_unsaved();
+        }
+        Action::CloseDiscard => {
+            if let Some(id) = ed.projects.current.clone()
+                && ed.projects.current_draft().is_some()
+            {
+                ed.projects.drop_draft(&id);
+            }
+            // Nothing left to keep as a draft as the window goes.
+            ed.mark_saved();
+            ed.quit = true;
         }
         Action::Embed => toast(ed, "The embed export is not built yet".into()),
         Action::ExportObj => {
@@ -149,17 +225,88 @@ pub fn run_action(ed: &mut Editor, p: &mut dyn Platform, action: Action) {
     }
 }
 
-/// Replace the scene with a file the user picked, or say why not.
-pub fn open(ed: &mut Editor, p: &mut dyn Platform, file: Opened) {
+/// Replace the scene with a file the user picked, or say why not; true when it opened. It
+/// becomes its project in the list, which offers its draft back when it has one.
+pub fn open(ed: &mut Editor, p: &mut dyn Platform, file: Opened) -> bool {
     let ctx = ed.ctx.clone();
-    let Opened { name, bytes, path } = file;
+    let Opened { name, bytes, path, modified, id, handle, copy } = file;
     match Scene::from_vox(&bytes).map_err(|e| format!("{name}: {e}")).and_then(|s| ed.load(s, &name)) {
         Ok(()) => {
             p.named(&name);
             ed.ui.toast(&ctx, format!("Opened {name}"));
+            ed.projects.opened(&name, path.as_deref(), id.as_deref(), modified, handle, copy);
             ed.path = path;
+            true
         }
-        Err(e) => ed.ui.toast(&ctx, format!("Could not open: {e}")),
+        Err(e) => {
+            ed.ui.toast(&ctx, format!("Could not open: {e}"));
+            false
+        }
+    }
+}
+
+/// The platform wrote the scene as it was at history `position`: it takes the file's name and
+/// place, and its draft goes.
+pub fn saved(ed: &mut Editor, p: &mut dyn Platform, saved: Saved, position: u64) {
+    let Saved { name, path, handle, copy } = saved;
+    ed.ui.scene_name = name.clone();
+    p.named(&name);
+    let ctx = ed.ctx.clone();
+    ed.ui.toast(&ctx, format!("{} {name}", p.verb()));
+    ed.projects.saved(&name, path.as_deref(), handle, copy, position);
+    ed.path = path;
+    ed.mark_saved_at(position);
+}
+
+/// Load project `id`'s draft as the scene, still unsaved: now, or when the store answers
+/// ([`stored`]).
+pub fn load_draft(ed: &mut Editor, p: &mut dyn Platform, id: &str) {
+    match ed.projects.read_draft(id) {
+        Read::Here(bytes) => restore(ed, p, id, &bytes),
+        Read::Later => {}
+        Read::Missing => gone(ed, id),
+    }
+}
+
+/// The store answered a read it said would come later (the browser's IndexedDB): empty
+/// bytes when it found nothing.
+pub fn stored(ed: &mut Editor, p: &mut dyn Platform, key: &str, bytes: Vec<u8>) {
+    match ed.projects.stored(key, bytes) {
+        Some((id, bytes)) if bytes.is_empty() => gone(ed, &id),
+        Some((id, bytes)) => restore(ed, p, &id, &bytes),
+        None => {}
+    }
+}
+
+fn gone(ed: &mut Editor, id: &str) {
+    let ctx = ed.ctx.clone();
+    ed.ui.toast(&ctx, "The unsaved edits are gone from this device's storage");
+    ed.projects.drop_draft(id);
+}
+
+fn restore(ed: &mut Editor, p: &mut dyn Platform, id: &str, bytes: &[u8]) {
+    let ctx = ed.ctx.clone();
+    let Some(project) = ed.projects.get(id).cloned() else { return };
+    let name = project.name.clone();
+    match Scene::from_vox(bytes).map_err(|e| format!("{name}: {e}")).and_then(|s| ed.load(s, &name)) {
+        Ok(()) => {
+            p.named(&name);
+            ed.path = project.path;
+            ed.mark_unsaved();
+            ed.projects.restored(id, ed.scene.history().position());
+            ed.ui.toast(&ctx, format!("Restored the unsaved edits to {name}"));
+        }
+        Err(e) => ed.ui.toast(&ctx, format!("Could not restore: {e}")),
+    }
+}
+
+/// At launch with no file to open: offer the newest draft back, else show the projects list
+/// when there is one.
+pub fn launch(ed: &mut Editor) {
+    if let Some(offer) = ed.projects.launch_offer() {
+        ed.projects.offer = Some(offer);
+    } else if !ed.projects.list().is_empty() {
+        ed.ui.projects_open = true;
     }
 }
 

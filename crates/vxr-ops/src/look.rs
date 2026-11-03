@@ -5,6 +5,8 @@
 //! are empty, as in every view. It is not the path tracer: materials other than emit are not
 //! shown, which the Render export is for.
 
+use std::collections::{HashMap, HashSet};
+
 use serde_json::json;
 use vxr_core::Scene;
 use vxr_vox::Kind;
@@ -155,7 +157,7 @@ impl Session {
             v => framing(v, lo.map(|c| c as f32), hi.map(|c| c as f32)),
         };
         let (w, h) = dims(size, cam.aspect);
-        let rgb = self.draw(scene, &cam, w, h);
+        let rgb = self.seen().draw(scene, &cam, w, h);
         let png = encode(w, h, &rgb).map_err(invalid)?;
         if png.len() > MAX_PNG {
             return Err(invalid(format!(
@@ -214,6 +216,59 @@ impl Session {
         Ok(out.to_string())
     }
 
+    /// The scene as this change has it, for a picture.
+    fn seen(&self) -> Seen<'_> {
+        Seen { removed: Some(&self.removed), moved: Some(&self.moved), selection: Some(&self.selection), lines: true }
+    }
+}
+
+/// A small isometric picture of `scene` as it is, `size` pixels on its longer side, without
+/// grid lines or the selection's tint: a scene's thumbnail in the projects list. PNG bytes.
+pub fn thumbnail(scene: &Scene, size: u32) -> Result<Vec<u8>, String> {
+    let (mut lo, mut hi, mut voxels) = ([i32::MAX; 3], [i32::MIN; 3], 0usize);
+    scene.for_each_voxel(|p, _| {
+        voxels += 1;
+        for k in 0..3 {
+            lo[k] = lo[k].min(p[k]);
+            hi[k] = hi[k].max(p[k] + 1);
+        }
+    });
+    if voxels == 0 {
+        (lo, hi) = ([0; 3], scene.bounds().size.map(|s| s as i32));
+    }
+    let mut cam = framing(LookView::Iso, lo.map(|c| c as f32), hi.map(|c| c as f32));
+    // A list row's frame is wider than tall: the scene fills it at that shape.
+    let aspect = 4.0 / 3.0;
+    cam.half = cam.half.max(cam.half * cam.aspect / aspect);
+    cam.aspect = aspect;
+    let (w, h) = dims(size, aspect);
+    let seen = Seen { removed: None, moved: None, selection: None, lines: false };
+    encode(w, h, &seen.draw(scene, &cam, w, h))
+}
+
+/// What a picture leaves out or adds: a change's staged removals, the cells its new objects
+/// take, its selection (tinted), and grid lines where voxels are large enough to count.
+struct Seen<'a> {
+    removed: Option<&'a HashSet<Cell>>,
+    moved: Option<&'a HashMap<Cell, usize>>,
+    selection: Option<&'a HashSet<Cell>>,
+    lines: bool,
+}
+
+impl Seen<'_> {
+    fn removed(&self, p: &Cell) -> bool {
+        self.removed.is_some_and(|r| r.contains(p))
+    }
+
+    /// A cell as the change has it: staged removals are empty.
+    fn get(&self, scene: &Scene, p: Cell) -> u8 {
+        if self.removed(&p) || self.moved.is_some_and(|m| m.contains_key(&p)) {
+            0
+        } else {
+            scene.map.get(p[0], p[1], p[2])
+        }
+    }
+
     /// The picture as sRGB rows.
     fn draw(&self, scene: &Scene, cam: &Camera, w: u32, h: u32) -> Vec<u8> {
         let b = scene.bounds();
@@ -223,7 +278,7 @@ impl Session {
         let (bg, ground, grid, tint) = (lin(BACKGROUND), lin(GROUND), lin(GRID), lin(SELECTED));
         // Grid lines only where a voxel is several pixels wide.
         let ppv = h as f32 / (2.0 * cam.half);
-        let lines = cam.ortho && ppv >= 6.0;
+        let lines = self.lines && cam.ortho && ppv >= 6.0;
         let mut out = Vec::with_capacity((w * h * 3) as usize);
         for py in 0..h {
             for px in 0..w {
@@ -253,7 +308,7 @@ impl Session {
                         if lines && edge {
                             c = mul(c, 0.8);
                         }
-                        if self.selection.contains(&v) {
+                        if self.selection.is_some_and(|s| s.contains(&v)) {
                             c = mix(c, mul(tint, lit + 0.2), 0.45);
                         }
                         c
@@ -286,7 +341,7 @@ impl Session {
             let o = add(ro, mul(d, t0));
             let h = scene.map.raycast(o, d, max_t - t0)?;
             let n = h.normal.map(|c| c as f32);
-            if !self.removed.contains(&h.voxel) {
+            if !self.removed(&h.voxel) {
                 return Some((t0 + h.t, h.voxel, n));
             }
             // Past the removed cell: where the ray leaves it.

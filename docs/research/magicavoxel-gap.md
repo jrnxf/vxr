@@ -72,7 +72,7 @@ Feature names below follow the update log [S1] unless another source is given.
 | Hollow and fill | Edit tools (also in vengi [S4]) | done [6] (selection flyout and Cmd-K: Hollow keeps the voxels seen from outside, Fill inside fills enclosed space; the selection or the whole model) | P2 | sculpt |
 | Boolean operations | Groups and objects [S1 0.99.6.2] | missing | P3 | - |
 | Statistics | `log`: model count, scene size, voxels per colour [S1 0.99.6.2] | partial (voxel count in the header; per-colour count kept in the brick map, not shown) | P3 | - |
-| Auto-save and crash recovery | Every 25 steps to `cache/`, recover from `backup.vox` [S1 0.99, FAQ] | missing | P2 | - |
+| Auto-save and crash recovery | Every 25 steps to `cache/`, recover from `backup.vox` [S1 0.99, FAQ] | done (a draft about 2 s after edits settle, offered back on open or launch, with a projects list; desktop and browser) | P2 | - |
 
 ## Palette
 
