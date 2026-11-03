@@ -1,0 +1,7 @@
+# Copy to .dev.vars (git-ignored) for `npx wrangler dev --local`. Never put real secrets here.
+# Signs sessions: any random string of 32 characters or more, e.g. from `openssl rand -hex 32`.
+BETTER_AUTH_SECRET=replace-with-32-or-more-random-characters
+# Cloudflare's always-pass Turnstile test secret (the page's default site key is the matching test key).
+TURNSTILE_SECRET_KEY=1x0000000000000000000000000000000AA
+# Prints sign-in links to the wrangler log instead of sending email (only on localhost).
+EMAIL_SENDER=log

@@ -1,9 +1,29 @@
-// The browser editor on Cloudflare: static assets only, no Worker code.
-// Build with ./build. Workers Builds deploys main with ./cloudflare-build (see the README);
-// ./deploy deploys by hand.
+// The browser editor on Cloudflare: the static site in ./dist, and a small Worker (worker/) for
+// the optional account and the cloud projects behind /api/* and /account. Every other path is a
+// static file, served without running the Worker.
+//
+// Secrets (`wrangler secret put`, or .dev.vars for `wrangler dev`, see .dev.vars.example):
+// BETTER_AUTH_SECRET signs sessions, TURNSTILE_SECRET_KEY checks the sign-up challenge. Without
+// them the Worker still serves the site and answers /api/me with sign-in off.
 {
   "name": "vxr",
+  "main": "worker/index.ts",
   "compatibility_date": "2026-10-01",
-  "assets": { "directory": "./dist" },
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*", "/account"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "vxr",
+      "database_id": "e7319cb3-8df7-4725-a15b-db1e25e06ded",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [{ "binding": "PROJECTS", "bucket_name": "vxr-projects" }],
+  "observability": { "enabled": true },
   "routes": [{ "pattern": "vxr.jrnxf.co", "custom_domain": true }]
 }
