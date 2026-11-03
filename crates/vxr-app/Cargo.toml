@@ -22,6 +22,7 @@ vxr-ops.workspace = true
 vxr-ai.workspace = true
 # The MCP server's tools and live mode; the browser build uses only its shared text.
 vxr-mcp.workspace = true
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 glam.workspace = true
 egui = "0.37"

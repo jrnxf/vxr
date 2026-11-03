@@ -1,6 +1,7 @@
 // The vxr editor's page: everything on the canvas (scene and UI) is the Rust editor (pkg/,
-// built by crates/vxr-web/build); this script forwards input, opens files, downloads saves,
-// keeps remembered assistant keys and holds the WebSocket to vxr bridge.
+// built by crates/vxr-web/build); this script forwards input, opens and saves files, keeps
+// the projects list and its drafts, keeps remembered assistant keys and holds the WebSocket
+// to vxr bridge.
 import init, { start } from './pkg/vxr_web.js';
 
 const canvas = document.getElementById('c');
@@ -68,6 +69,117 @@ window.vxrKeys = {
     return out;
   },
 };
+
+// The projects list (crates/vxr-app/src/projects.rs) in IndexedDB: its index.json, each
+// scene's draft (drafts/<id>.vox) and thumbnail (thumbs/<id>.png), and its file, as a File
+// System Access handle where the browser has them (Chrome, Edge) or else a copy of its bytes
+// (files/<id>). The editor decides what to keep; this only reads and writes.
+const PROJECTS_DB = 'vxr-projects';
+let projectsDb;
+function projectsTx(mode, f) {
+  projectsDb ??= new Promise((resolve, reject) => {
+    const r = indexedDB.open(PROJECTS_DB, 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('p');
+    r.onsuccess = () => resolve(r.result);
+    r.onerror = () => reject(r.error);
+  });
+  return projectsDb.then((db) => new Promise((resolve, reject) => {
+    const t = db.transaction('p', mode);
+    const req = f(t.objectStore('p'));
+    t.oncomplete = () => resolve(req?.result);
+    t.onerror = t.onabort = () => reject(t.error);
+  }));
+}
+const handles = () => typeof window.showOpenFilePicker === 'function' && typeof window.showSaveFilePicker === 'function';
+let persisted = false;
+window.vxrProjects = {
+  get: (key) => projectsTx('readonly', (s) => s.get(key)),
+  put(key, value) {
+    // Without handles the copies are the only way back to a file: ask the browser not to
+    // evict them under storage pressure (Safari and Firefox).
+    if (!persisted && !handles()) {
+      persisted = true;
+      navigator.storage?.persist?.().catch(() => {});
+    }
+    return projectsTx('readwrite', (s) => s.put(value, key));
+  },
+  delete: (key) => projectsTx('readwrite', (s) => s.delete(key)),
+  clear: () => projectsTx('readwrite', (s) => s.clear()),
+  // The list and the thumbnails, which the editor reads at launch: every key from index.json
+  // on (drafts/ and files/ sort before it).
+  async preload() {
+    const range = IDBKeyRange.lowerBound('index.json');
+    let keys;
+    const values = await projectsTx('readonly', (s) => {
+      keys = s.getAllKeys(range);
+      return s.getAll(range);
+    });
+    return keys.result.map((k, i) => [k, values[i]]).filter(([, v]) => v instanceof Uint8Array);
+  },
+  // The project whose kept handle is to the same file as `handle`, else a new id.
+  async idFor(handle) {
+    const range = IDBKeyRange.bound('files/', 'files/\uffff');
+    let keys;
+    const values = await projectsTx('readonly', (s) => {
+      keys = s.getAllKeys(range);
+      return s.getAll(range);
+    });
+    for (const [i, v] of values.entries()) {
+      if (v instanceof FileSystemFileHandle && (await v.isSameEntry(handle).catch(() => false))) return keys.result[i].slice(6);
+    }
+    return crypto.randomUUID();
+  },
+};
+const warn = (what) => (e) => console.warn(`vxr: could not ${what}`, e);
+async function allowed(handle, mode) {
+  const o = { mode };
+  return (await handle.queryPermission(o)) === 'granted' || (await handle.requestPermission(o)) === 'granted';
+}
+const VOX_TYPES = [{ description: 'MagicaVoxel scene', accept: { 'application/octet-stream': ['.vox'] } }];
+async function openHandle(handle, id) {
+  if (!(await allowed(handle, 'read'))) throw new Error('the browser was not allowed to read it');
+  const f = await handle.getFile();
+  app.open_file(new Uint8Array(await f.arrayBuffer()), f.name, id, true, f.lastModified / 1000);
+}
+async function pickOpen() {
+  if (!handles()) return fileInput.click();
+  let handle;
+  try {
+    [handle] = await showOpenFilePicker({ types: VOX_TYPES });
+  } catch (e) {
+    if (e.name !== 'AbortError') console.warn('vxr: the file picker failed', e);
+    return;
+  }
+  const id = await window.vxrProjects.idFor(handle);
+  await window.vxrProjects.put('files/' + id, handle).catch(warn('keep the file handle'));
+  await openHandle(handle, id).catch((e) => app.open_failed(handle.name, e.message || String(e)));
+}
+async function saveVox(id, name, bytes) {
+  try {
+    let handle = await window.vxrProjects.get('files/' + id).catch(() => null);
+    if (!(handle instanceof FileSystemFileHandle)) {
+      handle = await showSaveFilePicker({ suggestedName: name, types: VOX_TYPES });
+      await window.vxrProjects.put('files/' + id, handle);
+    }
+    if (!(await allowed(handle, 'readwrite'))) throw new Error('the browser was not allowed to write it');
+    const w = await handle.createWritable();
+    await w.write(bytes);
+    await w.close();
+    app.saved(handle.name);
+  } catch (e) {
+    app.save_failed(e.name === 'AbortError' ? '' : e.message || String(e));
+  }
+}
+async function openProject(id, name) {
+  try {
+    const v = await window.vxrProjects.get('files/' + id);
+    if (v instanceof FileSystemFileHandle) await openHandle(v, id);
+    else if (v instanceof Uint8Array) app.open_file(v, name, id, false, 0);
+    else app.open_failed(name, 'this browser no longer keeps its file');
+  } catch (e) {
+    app.open_failed(name, e.name === 'NotFoundError' ? 'the file is gone' : e.message || String(e));
+  }
+}
 
 // Terminal agents through vxr bridge on this computer (crates/vxr-mcp/src/bridge.rs): the
 // editor says when to connect and what to send (app.bridge_out), and hears what happened. A
@@ -277,12 +389,24 @@ function download(bytes, name, type) {
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
+// Bytes from the editor are a view of its memory, which moves: anything kept past the call
+// takes a copy (slice).
 window.vxrHost = {
-  pickOpen: () => fileInput.click(),
+  pickOpen,
   download,
   keepTheme(id) {
     try { localStorage.setItem(THEME_KEY, id); } catch {}
   },
+  hasHandles: handles,
+  saveVox: (id, name, bytes) => saveVox(id, name, bytes.slice()),
+  openProject,
+  storeGet(key) {
+    window.vxrProjects.get(key).catch(() => null)
+      .then((v) => app.stored(key, v instanceof Uint8Array ? v : new Uint8Array()));
+  },
+  storePut(key, bytes) { window.vxrProjects.put(key, bytes.slice()).catch(warn(`keep ${key}`)); },
+  storeDelete(key) { window.vxrProjects.delete(key).catch(warn(`delete ${key}`)); },
+  newId: () => crypto.randomUUID(),
 };
 
 // What terminal agents exported (the editor toasts who exported what).
@@ -347,6 +471,18 @@ async function main() {
   // A touch-first screen (a tablet) starts in the touch layout.
   if (matchMedia('(pointer: coarse)').matches) app.set_touch(true);
   for (const [kind, key] of await window.vxrKeys.load().catch(() => [])) app.restore_key(kind, key);
+  for (const [key, bytes] of await window.vxrProjects.preload().catch(warn('read the projects list')) ?? []) app.preload(key, bytes);
+  app.launch();
+  // Edits not yet in a draft are written as the page goes or hides; leaving with unsaved
+  // edits asks first (the draft stays either way, as after a crash).
+  addEventListener('pagehide', () => app.flush());
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') app.flush(); });
+  addEventListener('beforeunload', (e) => {
+    if (!app.unsaved()) return;
+    app.flush();
+    e.preventDefault();
+    e.returnValue = '';
+  });
   msg.hidden = true;
   wire();
   canvas.focus();

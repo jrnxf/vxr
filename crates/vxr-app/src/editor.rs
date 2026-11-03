@@ -14,11 +14,13 @@ use vxr_render::{EditBox, Gpu, GpuMap, Guides, OrbitCamera, Preview, Renderer, b
 
 use crate::agents::Agents;
 use crate::assistant::{Assistant, Entry, Progress};
+use crate::projects::{Projects, THUMB, Tick};
 use crate::render::{EXPORT_SIZES, Export};
 use crate::review::{Answer, Review, Script};
 use crate::touch::Touches;
 use crate::ui::{
-    Action, AiAction, ChatView, EditRow, FontBytes, Hybrid, LayerRow, Named, Stats, TreeRow, group_thousands,
+    Action, AiAction, ChatView, EditRow, FontBytes, Hybrid, LayerRow, Named, ProjectRow, RestoreAsk, Stats, TreeRow,
+    group_thousands,
 };
 
 /// Input quiet for this long raises the preview's budget (spikes/preview/RESULTS.md).
@@ -187,6 +189,11 @@ pub struct Editor {
     pub agents: Agents,
     /// The agents version and history position the Agents tab's ACTIVITY list shows.
     agents_shown: Option<(u64, u64)>,
+    /// The projects list and the open scene's autosaved draft (in memory until the host
+    /// gives it its store).
+    pub projects: Projects,
+    /// The window is to close (the close confirm's Save or Don't save): the native host exits.
+    pub quit: bool,
 }
 
 /// Whether a review has nothing in it: no step and no change.
@@ -218,6 +225,7 @@ fn review_allows(a: &Action) -> bool {
             | Action::RegenerateToken
             | Action::StopAgent(_)
             | Action::StopAgents
+            | Action::CloseDiscard
     )
 }
 
@@ -308,6 +316,8 @@ impl Editor {
             chat_shown: None,
             agents: Agents::default(),
             agents_shown: None,
+            projects: Projects::default(),
+            quit: false,
         };
         e.shape = (e.scene.reshapes(), e.scene.origin);
         e.mark_saved();
@@ -348,7 +358,9 @@ impl Editor {
         self.sel_shown = (u64::MAX, 0);
         self.cursor = None;
         self.ui.confirm_new = false;
+        self.ui.confirm_close = false;
         self.mark_saved();
+        self.projects.reset(self.scene.history().position());
         self.frame_scene();
         Ok(())
     }
@@ -358,9 +370,104 @@ impl Editor {
         self.saved_at = self.scene.history().position();
     }
 
+    /// The scene was saved as it stood at history `position` (a save the browser finished
+    /// later): edits since then are still unsaved.
+    pub fn mark_saved_at(&mut self, position: u64) {
+        self.saved_at = position;
+    }
+
+    /// The scene is not saved as it stands (a restored draft, a save that did not happen).
+    pub fn mark_unsaved(&mut self) {
+        self.saved_at = u64::MAX;
+    }
+
+    /// Whether the scene has edits not yet saved.
+    pub fn is_unsaved(&self) -> bool {
+        self.scene.history().position() != self.saved_at
+    }
+
+    /// Write the open scene's draft, whatever the wait: its `.vox` and a thumbnail.
+    pub fn write_draft(&mut self) {
+        let position = self.scene.history().position();
+        let vox = match crate::files::vox_bytes(&self.scene) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("vxr: could not keep a draft: {e}");
+                return;
+            }
+        };
+        let thumb = vxr_ops::look::thumbnail(&self.scene, THUMB).ok();
+        self.projects.write_draft(&self.ui.scene_name, &vox, thumb.as_deref(), position);
+    }
+
+    /// Write the draft now when the scene has edits newer than it: before another scene
+    /// replaces this one, or the window or page goes.
+    pub fn flush_draft(&mut self) {
+        if self.projects.behind(self.scene.history().position(), self.saved_at) {
+            self.write_draft();
+        }
+    }
+
+    /// What the projects list and the restore prompt show.
+    fn show_projects(&mut self) {
+        let now = self.projects.now();
+        self.ui.restore = self.projects.offer.as_ref().map(|o| RestoreAsk {
+            name: o.name.clone(),
+            when: crate::projects::ago(now, o.saved),
+            changed: o.changed,
+        });
+        if !self.ui.projects_open {
+            return;
+        }
+        let current = self.projects.current.clone();
+        let unsaved = self.ui.unsaved;
+        let rows: Vec<(String, ProjectRow)> = self
+            .projects
+            .list()
+            .iter()
+            .map(|p| {
+                let here = current.as_ref() == Some(&p.id);
+                let row = ProjectRow {
+                    name: p.name.clone(),
+                    when: crate::projects::ago(now, p.edited),
+                    unsaved: p.draft.is_some() || (here && unsaved),
+                    current: here,
+                    thumb: None,
+                };
+                (p.id.clone(), row)
+            })
+            .collect();
+        self.ui.projects = rows
+            .into_iter()
+            .map(|(id, row)| ProjectRow { thumb: self.projects.texture(&self.ctx, &id), ..row })
+            .collect();
+        self.ui.storage = (self.projects.usage(), crate::projects::CAP);
+    }
+
+    /// Each frame: write the draft once the edits have rested, or drop it when undo went back
+    /// to the saved scene.
+    fn autosave(&mut self) {
+        let busy = self.agent_busy() || self.review.is_some();
+        match self.projects.tick(self.scene.history().position(), self.saved_at, self.frame_at.0, busy) {
+            Tick::Idle => {}
+            Tick::Write => self.write_draft(),
+            Tick::Drop => {
+                if let Some(id) = self.projects.current.clone() {
+                    self.projects.drop_draft(&id);
+                }
+            }
+        }
+    }
+
     /// Start a blank scene exactly as launching with no file does: the default size, palette
     /// and camera, no history, selection or path.
     pub fn new_scene(&mut self) {
+        // Its edits were just given up (the confirm said so): their draft goes too.
+        if let Some(id) = self.projects.current.clone()
+            && self.projects.current_draft().is_some()
+        {
+            self.projects.drop_draft(&id);
+        }
         // Cannot fail for an empty map of the default size.
         let _ = self.load(Scene::new(NEW_SIZE), "Untitled");
         self.cam = OrbitCamera::framing(Vec3::ZERO, Vec3::ONE);
@@ -1406,7 +1513,8 @@ impl Editor {
         self.ui.used = used(&self.scene);
         self.ui.can_undo = self.scene.history().can_undo();
         self.ui.can_redo = self.scene.history().can_redo();
-        self.ui.unsaved = self.scene.history().position() != self.saved_at;
+        self.ui.unsaved = self.is_unsaved();
+        self.show_projects();
         self.ui.selected = self.scene.selected_count();
         self.ui.has_clip = self.scene.clipboard.is_some();
         self.ui.can_split =
@@ -1638,6 +1746,7 @@ impl Editor {
         if let Some(done) = self.draw(out.shapes, out.pixels_per_point, out.textures_delta, view) {
             host.push(done);
         }
+        self.autosave();
         (host, out.platform_output)
     }
 
@@ -1660,7 +1769,15 @@ impl Editor {
         if moving {
             return Some(std::time::Duration::ZERO);
         }
-        (self.egui_delay != std::time::Duration::MAX).then_some(self.egui_delay)
+        // The draft is written by a frame, once the edits have rested.
+        let draft = self.projects.due().map(|t| {
+            std::time::Duration::from_secs_f64((t - self.frame_at.0).clamp(0.0, crate::projects::SETTLE) + 0.05)
+        });
+        let egui = (self.egui_delay != std::time::Duration::MAX).then_some(self.egui_delay);
+        match (egui, draft) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     /// What agents asked of the host (a save, a new scene's window title), for a window to

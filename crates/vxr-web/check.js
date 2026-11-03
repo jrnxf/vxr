@@ -13,6 +13,10 @@ async () => {
   const st = () => JSON.parse(window.vxr.state());
   const step = (name, pass, why = '') => out.push(pass ? `ok ${name}` : `FAIL ${name}: ${why}`);
   if (!window.vxr) return 'FAIL start: the editor did not start';
+  // Open and Save go through the file input and downloads, as in Safari and Firefox; the
+  // projects steps put File System Access back with handles to files in the page's own
+  // private storage.
+  window.showOpenFilePicker = window.showSaveFilePicker = undefined;
 
   let buttons = 0;
   const bit = { 0: 1, 1: 4, 2: 2 };
@@ -1607,6 +1611,117 @@ async () => {
   await frames(4);
   s = st();
   step('Save after New writes one model', afterNew > 0 && s.mode === 'object' && s.objects === 1 && s.voxels === afterNew, JSON.stringify([afterNew, s.mode, s.objects, s.voxels]));
+
+  // Projects: about 2 s after the edits settle the scene's draft is kept in IndexedDB, the
+  // scene still unsaved; the list under the scene name opens each project, a scene with a
+  // newer draft asks Restore or Discard, Save deletes the draft, and with File System Access
+  // Save and Open go through a handle to the file. The Storage line's Clear empties it.
+  {
+    const until = async (f, ms = 6000) => {
+      const t = performance.now();
+      while (!f() && performance.now() - t < ms) await frames(1);
+      return f();
+    };
+    const here = () => { const s = st(); return s.current === null ? null : s.projects[s.current]; };
+    let dl = null;
+    const realA = HTMLAnchorElement.prototype.click;
+    HTMLAnchorElement.prototype.click = function () { dl = this.download; };
+    const fromList = async (k) => {
+      if (!st().projectsMenu) await clickAt('scene-select');
+      const name = st().projects[k]?.name;
+      await clickAt(`project-${k}`);
+      await until(() => st().name === name && !st().projectsMenu);
+      return name;
+    };
+    // A draft some earlier step left behind is not what these steps ask about.
+    const dismiss = async () => { if (await until(() => st().restore, 300)) await clickAt('restore-discard'); };
+    try {
+      window.vxr.open(new Uint8Array(await (await fetch('scene.vox')).arrayBuffer()), 'island.vox');
+      await frames(6);
+      await dismiss();
+      const file = st().name;
+      const base = st().voxels;
+      await click(mx, my);
+      const edited = st().voxels;
+      step('an edit is not kept as a draft at once', !here()?.draft && st().unsaved, JSON.stringify(here()));
+      const t0 = performance.now();
+      const drafted = await until(() => here()?.draft);
+      const took = performance.now() - t0;
+      const kept = drafted && await window.vxrProjects.get(`drafts/${here().id}.vox`);
+      step('about 2 s after the edits settle the scene is kept as a draft in IndexedDB, still unsaved',
+        drafted && took > 1500 && took < 4500 && kept instanceof Uint8Array && String.fromCharCode(...kept.slice(0, 4)) === 'VOX ' && st().unsaved && here().thumb > 0,
+        JSON.stringify([took, here(), kept && kept.length]));
+      await clickAt('scene-select');
+      s = st();
+      step('the scene name opens the projects list, newest first, with the Storage line', s.projectsMenu && s.projects[0].name === file && !!at('project-0') && !!at('projects-clear') && s.storage[0] > 0 && s.storage[1] === 200 * 1024 * 1024, JSON.stringify([s.projectsMenu, s.projects.map((p) => p.name), s.storage]));
+      await key('Escape');
+      step('Escape closes the list', !st().projectsMenu);
+      const other = await fromList(1);
+      await dismiss();
+      step('a row opens its project from the copy this browser keeps', st().name === other && !st().unsaved, JSON.stringify([other, st().name]));
+      await fromList(1);
+      s = st();
+      step('opening a scene with a newer draft asks Restore or Discard', s.name === file && s.restore?.name === file && !s.restore.changed && s.voxels === base && !!at('restore-restore'), JSON.stringify(s.restore));
+      await clickAt('restore-restore');
+      await until(() => st().voxels === edited);
+      s = st();
+      step('Restore brings the draft back, still unsaved', !s.restore && s.voxels === edited && s.unsaved && here().draft, JSON.stringify([s.voxels, edited, s.unsaved]));
+      await fromList(1);
+      await dismiss();
+      await fromList(1);
+      await until(() => st().restore);
+      await clickAt('restore-discard');
+      s = st();
+      step('Discard keeps the file as it was and deletes the draft', !s.restore && s.name === file && s.voxels === base && !s.unsaved && !here().draft, JSON.stringify([s.voxels, base, here()]));
+      await click(mx, my);
+      await until(() => here()?.draft);
+      dl = null;
+      await key('s', cmd);
+      s = st();
+      step('Save downloads the file and deletes its draft', dl === file && !s.unsaved && !here().draft && here().copy > 0 && !(await window.vxrProjects.get(`drafts/${here().id}.vox`)), JSON.stringify([dl, here()]));
+
+      // File System Access: handles to files in the page's private storage stand in for the
+      // ones the browser's pickers give.
+      const dir = await navigator.storage.getDirectory();
+      const fh = await dir.getFileHandle('handle.vox', { create: true });
+      let asked = 0;
+      window.showSaveFilePicker = async () => { asked++; return fh; };
+      window.showOpenFilePicker = async () => { asked++; return [fh]; };
+      dl = null;
+      await key('s', cmd);
+      await until(() => st().name === 'handle.vox');
+      const onDisk = async () => new Uint8Array(await (await fh.getFile()).arrayBuffer());
+      step('with File System Access Save asks where once and writes the file through its handle', st().name === 'handle.vox' && asked === 1 && !dl && here().handle && same(await onDisk(), bytes()), JSON.stringify([st().name, asked, dl, here()]));
+      await click(mx, my);
+      await until(() => here()?.draft);
+      await key('s', cmd);
+      await until(() => !st().unsaved);
+      step('the next Save writes through the same handle without asking, and deletes the draft', asked === 1 && !st().unsaved && !here().draft && same(await onDisk(), bytes()), JSON.stringify([asked, here()]));
+      const count = st().projects.length;
+      await key('o', cmd);
+      await until(() => asked === 2 && st().current === 0, 2000);
+      await frames(4);
+      step('opening the same file again through the picker finds its project', asked === 2 && st().name === 'handle.vox' && st().projects.length === count, JSON.stringify([asked, st().projects.length, count]));
+      await fromList(1);
+      await dismiss();
+      await fromList(1);
+      step('the list opens it again through its handle', st().name === 'handle.vox' && asked === 2 && same(bytes(), await onDisk()));
+      window.showOpenFilePicker = window.showSaveFilePicker = undefined;
+      await dir.removeEntry('handle.vox');
+
+      await clickAt('scene-select');
+      await clickAt('projects-clear');
+      s = st();
+      step('Clear asks again before it clears', s.projectsMenu && s.projects.length > 1, `${s.projects.length}`);
+      await clickAt('projects-clear');
+      s = st();
+      step('the second Clear forgets every other project with its draft, thumbnail and file', s.projects.length === 1 && s.projects[0].name === 'handle.vox' && s.projects[0].thumb > 0 && s.storage[0] === s.projects[0].thumb + s.projects[0].copy, JSON.stringify([s.projects, s.storage]));
+      await key('Escape');
+    } finally {
+      HTMLAnchorElement.prototype.click = realA;
+      window.showOpenFilePicker = window.showSaveFilePicker = undefined;
+    }
+  }
 
   // Resize: the canvas follows its box at the device pixel ratio.
   c.style.width = '900px';

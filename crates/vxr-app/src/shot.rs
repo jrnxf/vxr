@@ -2,11 +2,12 @@
 //! locked. It renders the editor offscreen, drives every tool through the same pointer path
 //! the window uses, saves and reopens the scene, and writes screenshots.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use vxr_app::Editor;
 use vxr_app::editor::{Button, NEW_SIZE};
 use vxr_app::host::{Opened, Platform, Saved, run_action};
+use vxr_app::projects::Project;
 use vxr_app::ui::{Action, Live, Region, Shape, Tool};
 use vxr_core::Scene;
 use vxr_render::Gpu;
@@ -309,6 +310,7 @@ fn run_steps(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     new_scene_save(dir)?;
     host_actions()?;
     new_scene_command(dir)?;
+    projects(dir)?;
     scene_tree(dir)?;
     to_object(dir)?;
     organize(dir)?;
@@ -875,13 +877,26 @@ impl Platform for Fake {
         self.calls.push("open".into());
         Ok(None)
     }
-    fn save_vox(&mut self, current: Option<&Path>, name: &str, bytes: &[u8]) -> Result<Option<Saved>, String> {
+    fn save_vox(&mut self, current: Option<&Path>, _: &str, name: &str, bytes: &[u8]) -> Result<Option<Saved>, String> {
         self.calls.push(format!("save_vox {name} over {current:?}"));
         if self.cancel {
             return Ok(None);
         }
         self.vox = bytes.to_vec();
-        Ok(Some(Saved { name: "chosen.vox".into(), path: Some("chosen.vox".into()) }))
+        // A scene with a file saves over it, as the window does; one without picks chosen.vox.
+        let path = current.map_or_else(|| PathBuf::from("chosen.vox"), Path::to_path_buf);
+        let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        Ok(Some(Saved { name, path: Some(path), ..Default::default() }))
+    }
+    /// Opens what was saved last, as the project's file.
+    fn open_project(&mut self, project: &Project) -> Result<Option<Opened>, String> {
+        self.calls.push(format!("open_project {}", project.name));
+        Ok(Some(Opened {
+            name: project.name.clone(),
+            bytes: self.vox.clone(),
+            path: project.path.clone(),
+            ..Default::default()
+        }))
     }
     fn save_png(&mut self, name: &str, bytes: &[u8]) -> Result<Option<String>, String> {
         self.calls.push(format!("save_png {name} {}", bytes.starts_with(b"\x89PNG")));
@@ -1098,6 +1113,296 @@ fn new_scene_command(dir: &Path) -> Result<(), String> {
     check(
         voxels > 0 && objects == 1 && matches!(reopened.at(), At::Object(_)) && reopened.map.voxels == voxels,
         format!("Save after New writes one model ({objects} object, {voxels} voxel)"),
+    )
+}
+
+/// Run what the UI asked of the host, as the window does after a frame.
+fn serve(s: &mut Shot, p: &mut Fake) {
+    for a in std::mem::take(&mut s.host) {
+        run_action(&mut s.ed, p, a);
+    }
+    s.frames(2);
+}
+
+/// The projects list and the drafts (`projects.rs`), on a store in memory whose clock the check
+/// moves: a draft waits until the edits rest two seconds, then holds the whole scene while the
+/// file stays untouched and the scene unsaved; the scene name opens the list with its
+/// thumbnail, unsaved marker and Storage line; a relaunch offers the draft back (Restore brings
+/// the edits back unsaved, Discard deletes it, a file changed since says so); Save deletes it;
+/// a never-saved scene is offered back as Untitled; a row opens its project; Clear asks twice
+/// and forgets the rest; a draft a month old goes; and closing the window with edits asks
+/// Save, Don't save or Cancel.
+fn projects(dir: &Path) -> Result<(), String> {
+    use egui::{Event, Key, Modifiers};
+    use std::time::Duration;
+    use vxr_app::host::{launch, open};
+    use vxr_app::projects::{CAP, Memory, Projects, SETTLE, STALE};
+    let mem = Memory::default();
+    mem.clock.set(1.8e9);
+    let keys = |prefix: &str| mem.files.borrow().keys().filter(|k| k.starts_with(prefix)).cloned().collect::<Vec<_>>();
+    let relaunch = |s: &mut Shot| -> Result<(), String> {
+        s.ed.load(Scene::new(NEW_SIZE), "Untitled")?;
+        s.ed.path = None;
+        s.ed.projects = Projects::load(Box::new(mem.clone()));
+        s.ed.projects.reset(s.ed.scene.history().position());
+        launch(&mut s.ed);
+        s.frames(3);
+        Ok(())
+    };
+    // Edits, then the two seconds the draft waits for.
+    let edit = |s: &mut Shot, at: [i32; 3]| {
+        let cell = s.ed.scene.to_map(at);
+        s.ed.scene.edit([(cell, 3u8)]);
+        s.frames(2);
+    };
+    // A minute of the store's clock passes too, so each draft is newer than the last.
+    let settle = |s: &mut Shot| {
+        mem.clock.set(mem.clock.get() + 60.0);
+        s.time += SETTLE + 0.5;
+        s.frames(2);
+    };
+    let key = |key, modifiers| Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+
+    let mut s = Shot::new(Scene::new(NEW_SIZE), "Untitled", 2.0)?;
+    s.ed.ui.coach = false;
+    relaunch(&mut s)?;
+    let bytes = house().to_vox()?;
+    let files = dir.join("projects");
+    std::fs::create_dir_all(&files).map_err(|e| e.to_string())?;
+    let file = files.join("house.vox");
+    std::fs::write(&file, &bytes).map_err(|e| e.to_string())?;
+    let mut p = Fake { vox: bytes.clone(), ..Default::default() };
+    let house_file = |modified: f64| Opened {
+        name: "house.vox".into(),
+        bytes: bytes.clone(),
+        path: Some(file.clone()),
+        modified: Some(modified),
+        ..Default::default()
+    };
+    open(&mut s.ed, &mut p, house_file(1.7e9));
+    s.frames(2);
+    let v0 = s.voxels();
+
+    let corner = std::mem::replace(&mut s.ed.ui.show_render, false);
+    edit(&mut s, [0, 1, 0]);
+    let wait = s.ed.repaint_after();
+    s.ed.ui.show_render = corner;
+    check(
+        keys("drafts/").is_empty()
+            && wait.is_some_and(|w| w > Duration::ZERO && w <= Duration::from_secs_f64(SETTLE + 0.1)),
+        format!("an edit waits for its draft, and the window wakes for it ({wait:?})"),
+    )?;
+    settle(&mut s);
+    let drafts = keys("drafts/");
+    let draft = drafts.first().and_then(|k| mem.files.borrow().get(k).cloned()).unwrap_or_default();
+    let back = Scene::from_vox(&draft).map(|b| b.map.voxels).unwrap_or(0);
+    check(
+        drafts.len() == 1
+            && back == v0 + 1
+            && keys("thumbs/").len() == 1
+            && s.ed.is_unsaved()
+            && std::fs::read(&file).ok().as_deref() == Some(&bytes[..]),
+        format!(
+            "after the edits rest, the draft holds the whole scene ({back} voxels); the file is untouched and the scene unsaved"
+        ),
+    )?;
+
+    s.ui_click("scene-select")?;
+    s.frames(2);
+    let row = s.ed.ui.projects.first();
+    check(
+        s.ed.ui.projects_open
+            && s.ed.ui.projects.len() == 1
+            && row.is_some_and(|r| r.name == "house.vox" && r.unsaved && r.current && r.thumb.is_some())
+            && s.ed.ui.storage.1 == CAP
+            && s.ed.ui.storage.0 > draft.len() as u64
+            && s.ed.ui.hits.contains_key("projects-clear"),
+        format!(
+            "the scene name opens the projects list: the scene with its thumbnail and unsaved marker, and the Storage line ({:?})",
+            s.ed.ui.storage
+        ),
+    )?;
+    s.frames_with(2, vec![key(Key::Escape, Modifiers::NONE)]);
+    check(!s.ed.ui.projects_open, "Escape closes the list".into())?;
+
+    // A relaunch with no file: the newest draft is offered back.
+    relaunch(&mut s)?;
+    let ask = s.ed.ui.restore.clone();
+    check(
+        ask.as_ref().is_some_and(|a| a.name == "house.vox" && !a.changed)
+            && s.ed.ui.hits.contains_key("restore-restore")
+            && s.ed.ui.hits.contains_key("restore-discard"),
+        format!("a relaunch asks to restore the unsaved edits to house.vox ({ask:?})"),
+    )?;
+    s.save_png(&dir.join("app-2x-restore.png"))?;
+    s.ui_click("restore-restore")?;
+    serve(&mut s, &mut p);
+    check(
+        s.ed.ui.restore.is_none()
+            && s.voxels() == v0 + 1
+            && s.ed.is_unsaved()
+            && s.ed.ui.scene_name == "house.vox"
+            && s.ed.path.as_deref() == Some(file.as_path())
+            && keys("drafts/").len() == 1,
+        format!("Restore brings the edits back, still unsaved, with the file's place ({} voxels)", s.voxels()),
+    )?;
+
+    // Opening the file after it changed on disk: the prompt says so; Discard deletes the draft.
+    relaunch(&mut s)?;
+    s.ed.projects.offer = None;
+    open(&mut s.ed, &mut p, house_file(2.0e9));
+    s.frames(2);
+    let ask = s.ed.ui.restore.clone();
+    check(
+        ask.as_ref().is_some_and(|a| a.changed),
+        format!("opening the file after it changed since the draft says so ({ask:?})"),
+    )?;
+    s.save_png(&dir.join("app-2x-restore-changed.png"))?;
+    s.ui_click("restore-discard")?;
+    serve(&mut s, &mut p);
+    check(
+        s.ed.ui.restore.is_none()
+            && keys("drafts/").is_empty()
+            && s.voxels() == v0
+            && !s.ed.is_unsaved()
+            && s.ed.projects.list().len() == 1,
+        "Discard deletes the draft and keeps the file's scene and its row".into(),
+    )?;
+
+    // Save writes the file and deletes the draft.
+    edit(&mut s, [0, 1, 0]);
+    settle(&mut s);
+    let had = keys("drafts/").len();
+    run_action(&mut s.ed, &mut p, Action::Save);
+    s.frames(2);
+    check(
+        had == 1
+            && keys("drafts/").is_empty()
+            && !s.ed.is_unsaved()
+            && s.ed.projects.list().first().is_some_and(|r| r.draft.is_none())
+            && p.calls.last().is_some_and(|c| c.starts_with("save_vox house.vox over Some(")),
+        format!("Save writes the file and deletes the draft ({:?})", p.calls.last()),
+    )?;
+
+    // A new scene never saved keeps its draft and is offered back as Untitled.
+    s.ed.new_scene();
+    s.frames(2);
+    edit(&mut s, [0, 0, 0]);
+    edit(&mut s, [1, 0, 0]);
+    settle(&mut s);
+    relaunch(&mut s)?;
+    let ask = s.ed.ui.restore.clone();
+    check(
+        ask.as_ref().is_some_and(|a| a.name == "Untitled") && s.ed.projects.list().len() == 2,
+        format!("a new scene never saved keeps its draft and a relaunch offers it back ({ask:?})"),
+    )?;
+    s.ui_click("restore-restore")?;
+    serve(&mut s, &mut p);
+    check(
+        s.voxels() == 2 && s.ed.is_unsaved() && s.ed.ui.scene_name == "Untitled" && s.ed.path.is_none(),
+        format!("Restore brings the new scene back, unsaved ({} voxels)", s.voxels()),
+    )?;
+
+    // A third scene, then the list: newest first, each with its thumbnail and date.
+    let garden = Opened { name: "garden.vox".into(), path: Some(files.join("garden.vox")), ..house_file(1.75e9) };
+    mem.clock.set(mem.clock.get() + 3600.0);
+    open(&mut s.ed, &mut p, garden);
+    s.frames(2);
+    edit(&mut s, [3, 1, 3]);
+    settle(&mut s);
+    s.ui_click("scene-select")?;
+    s.frames(3);
+    let rows: Vec<_> = s.ed.ui.projects.iter().map(|r| (r.name.clone(), r.unsaved, r.thumb.is_some())).collect();
+    check(
+        rows == [
+            ("garden.vox".to_string(), true, true),
+            ("Untitled".to_string(), true, true),
+            ("house.vox".to_string(), false, true),
+        ],
+        format!("the list holds every scene, newest first, with its thumbnail and unsaved marker ({rows:?})"),
+    )?;
+    s.save_png(&dir.join("app-2x-projects.png"))?;
+
+    // A row opens its project, its file read again.
+    s.ui_click("project-2")?;
+    serve(&mut s, &mut p);
+    check(
+        !s.ed.ui.projects_open
+            && s.ed.ui.scene_name == "house.vox"
+            && s.ed.path.as_deref() == Some(file.as_path())
+            && s.voxels() == v0 + 1
+            && p.calls.last().is_some_and(|c| c == "open_project house.vox"),
+        format!("a row opens its project from its file ({:?})", p.calls.last()),
+    )?;
+
+    // Clear asks twice, then forgets every project but the open one.
+    s.ui_click("scene-select")?;
+    s.ui_click("projects-clear")?;
+    serve(&mut s, &mut p);
+    let armed = s.ed.ui.clear_armed && s.ed.projects.list().len() == 3;
+    s.save_png(&dir.join("app-2x-projects-clear.png"))?;
+    s.ui_click("projects-clear")?;
+    serve(&mut s, &mut p);
+    let left: Vec<_> = s.ed.projects.list().iter().map(|r| r.name.clone()).collect();
+    check(
+        armed && left == ["house.vox"] && keys("drafts/").is_empty() && keys("thumbs/").len() <= 1,
+        format!("Clear asks again, then forgets every project but the open one ({left:?})"),
+    )?;
+
+    // A draft a month old goes at the next launch.
+    open(&mut s.ed, &mut p, house_file(1.7e9));
+    edit(&mut s, [0, 1, 1]);
+    settle(&mut s);
+    let had = keys("drafts/").len();
+    mem.clock.set(mem.clock.get() + STALE + 86_400.0);
+    relaunch(&mut s)?;
+    check(
+        had == 1 && keys("drafts/").is_empty() && s.ed.ui.restore.is_none() && s.ed.projects.list().len() == 1,
+        "a draft over 30 days old is cleaned up at launch".into(),
+    )?;
+
+    // Closing the window with edits asks first (the window sets confirm_close on CloseRequested).
+    s.ed.ui.projects_open = false;
+    open(&mut s.ed, &mut p, house_file(1.7e9));
+    edit(&mut s, [0, 1, 0]);
+    s.ed.ui.confirm_close = true;
+    s.frames(3);
+    check(
+        ["close-save", "close-cancel", "close-discard"].iter().all(|h| s.ed.ui.hits.contains_key(*h)),
+        "closing with unsaved edits asks: Save, Don't save or Cancel".into(),
+    )?;
+    s.save_png(&dir.join("app-2x-close.png"))?;
+    s.ui_click("close-cancel")?;
+    serve(&mut s, &mut p);
+    settle(&mut s);
+    check(
+        !s.ed.ui.confirm_close && !s.ed.quit && s.ed.is_unsaved() && keys("drafts/").len() == 1,
+        "Cancel keeps the window and the edits, which get their draft".into(),
+    )?;
+    s.ed.ui.confirm_close = true;
+    s.frames(2);
+    s.ui_click("close-discard")?;
+    serve(&mut s, &mut p);
+    check(
+        s.ed.quit && keys("drafts/").is_empty() && !s.ed.is_unsaved(),
+        "Don't save closes and deletes the draft".into(),
+    )?;
+    s.ed.quit = false;
+    edit(&mut s, [1, 1, 0]);
+    p.cancel = true;
+    s.ed.ui.confirm_close = true;
+    s.frames(2);
+    s.frames_with(2, vec![key(Key::Enter, Modifiers::NONE)]);
+    serve(&mut s, &mut p);
+    let kept = !s.ed.quit && s.ed.is_unsaved();
+    p.cancel = false;
+    s.ed.ui.confirm_close = true;
+    s.frames(2);
+    s.ui_click("close-save")?;
+    serve(&mut s, &mut p);
+    check(
+        kept && s.ed.quit && !s.ed.is_unsaved() && p.calls.last().is_some_and(|c| c.starts_with("save_vox")),
+        "Save (or Enter) saves and closes; a cancelled save dialog keeps the window".into(),
     )
 }
 

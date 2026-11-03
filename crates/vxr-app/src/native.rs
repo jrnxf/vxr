@@ -1,5 +1,5 @@
 //! The native window: winit and egui-winit around the [`Editor`], with file dialogs for
-//! open and save.
+//! open and save, and the projects list and drafts kept in the config folder.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -7,6 +7,7 @@ use std::sync::Arc;
 use vxr_app::editor::{Button, Finger, NEW_SIZE};
 use vxr_app::files::{File, save_atomic};
 use vxr_app::host::{Drawn, Host, Opened, Platform, Saved, run_action};
+use vxr_app::projects::{Folder, Project, Projects, modified};
 use vxr_app::theme::ThemeChoice;
 use vxr_core::Scene;
 use vxr_render::Gpu;
@@ -117,11 +118,20 @@ impl Platform for Desktop {
         let Some(path) = rfd::FileDialog::new().add_filter("MagicaVoxel", &["vox"]).pick_file() else {
             return Ok(None);
         };
-        let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        Ok(Some(Opened { name: file_name(&path), bytes, path: Some(path) }))
+        read(&path).map(Some)
     }
 
-    fn save_vox(&mut self, current: Option<&Path>, _name: &str, bytes: &[u8]) -> Result<Option<Saved>, String> {
+    fn open_project(&mut self, project: &Project) -> Result<Option<Opened>, String> {
+        read(project.path.as_deref().ok_or("it has no file")?).map(Some)
+    }
+
+    fn save_vox(
+        &mut self,
+        current: Option<&Path>,
+        _project: &str,
+        _name: &str,
+        bytes: &[u8],
+    ) -> Result<Option<Saved>, String> {
         let path = match current {
             Some(p) => p.to_path_buf(),
             None => {
@@ -135,7 +145,7 @@ impl Platform for Desktop {
         // Through a symbolic link, the file it points at is the one replaced.
         let target = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
         save_atomic(&target, bytes)?;
-        Ok(Some(Saved { name: file_name(&path), path: Some(path) }))
+        Ok(Some(Saved { name: file_name(&path), path: Some(path), ..Default::default() }))
     }
 
     fn save_png(&mut self, name: &str, bytes: &[u8]) -> Result<Option<String>, String> {
@@ -179,8 +189,16 @@ impl Platform for Desktop {
     }
 }
 
+/// The file at `path` to open, with when it last changed.
+fn read(path: &Path) -> Result<Opened, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(Opened { name: file_name(path), bytes, path: Some(path.into()), modified: modified(path), ..Default::default() })
+}
+
 impl App {
     fn start(&mut self, event_loop: &ActiveEventLoop) -> Result<State, String> {
+        // The projects list knows a file by where it is, wherever it was opened from.
+        self.path = self.path.take().map(|p| std::path::absolute(&p).unwrap_or(p));
         let (scene, name) = match &self.path {
             Some(p) => open(p)?,
             None => (Scene::new(NEW_SIZE), "Untitled".into()),
@@ -210,6 +228,14 @@ impl App {
         )?;
         let editor = &mut host.editor;
         editor.ui.theme = load_theme();
+        if let Some(dir) = config_dir() {
+            editor.projects = Projects::load(Box::new(Folder(dir.join("projects"))));
+        }
+        editor.path = self.path.take();
+        match &editor.path {
+            Some(p) => _ = editor.projects.opened(&name, Some(p), None, modified(p), false, 0),
+            None => vxr_app::host::launch(editor),
+        }
         // The assistant reaches its provider from here, with keys from the OS keychain.
         editor.assistant =
             vxr_app::assistant::Assistant::new(Box::new(crate::net::Net::new()), Box::new(crate::net::Keychain), false);
@@ -299,13 +325,20 @@ impl ApplicationHandler<Wake> for App {
         s.window.request_redraw();
     }
 
+    /// Closing by any way the close confirm did not see (Cmd-Q, the app menu's Quit, a
+    /// logout) keeps the newest edits as a draft, as a crash would leave them.
+    fn exiting(&mut self, _: &ActiveEventLoop) {
+        if let Some(s) = &mut self.state {
+            s.host.editor.flush_draft();
+        }
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.state.is_some() {
             return;
         }
         match self.start(event_loop) {
-            Ok(mut s) => {
-                s.host.editor.path = self.path.take();
+            Ok(s) => {
                 s.window.request_redraw();
                 self.state = Some(s);
             }
@@ -326,6 +359,12 @@ impl ApplicationHandler<Wake> for App {
         }
         let ed = &mut s.host.editor;
         match event {
+            // With edits not saved the close confirm asks first; its Save or Don't save set
+            // `quit`, which the next draw sees.
+            WindowEvent::CloseRequested if ed.is_unsaved() => {
+                ed.ui.cmdk = None;
+                ed.ui.confirm_close = true;
+            }
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => s.host.resize(size.width, size.height, s.window.scale_factor() as f32),
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => s.host.rescale(scale_factor as f32),
@@ -367,7 +406,11 @@ impl ApplicationHandler<Wake> for App {
             }
             WindowEvent::RedrawRequested => {
                 s.serve_agents();
-                match s.redraw() {
+                let wait = s.redraw();
+                if s.host.editor.quit {
+                    return event_loop.exit();
+                }
+                match wait {
                     Some(d) if d.is_zero() => s.window.request_redraw(),
                     Some(d) => event_loop.set_control_flow(ControlFlow::WaitUntil(std::time::Instant::now() + d)),
                     None => event_loop.set_control_flow(ControlFlow::Wait),

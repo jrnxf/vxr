@@ -1,9 +1,11 @@
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use vxr_app::bridge::{Out, Page};
 use vxr_app::editor::{Button, Finger, NEW_SIZE};
 use vxr_app::files::{File, vox_bytes, zip};
 use vxr_app::host::{Drawn, Host, Opened, Platform, Saved, run_action};
+use vxr_app::projects::{Project, Projects, Read, Store, file_key};
 use vxr_app::theme::ThemeChoice;
 use vxr_app::ui::FontBytes;
 use vxr_core::Scene;
@@ -27,15 +29,73 @@ extern "C" {
     fn page_download(bytes: &[u8], name: &str, mime: &str);
     #[wasm_bindgen(js_namespace = vxrHost, js_name = keepTheme)]
     fn page_keep_theme(id: &str);
+    #[wasm_bindgen(js_namespace = vxrHost, js_name = hasHandles)]
+    fn page_has_handles() -> bool;
+    #[wasm_bindgen(js_namespace = vxrHost, js_name = saveVox)]
+    fn page_save_vox(id: &str, name: &str, bytes: &[u8]);
+    #[wasm_bindgen(js_namespace = vxrHost, js_name = openProject)]
+    fn page_open_project(id: &str, name: &str);
+    #[wasm_bindgen(js_namespace = vxrHost, js_name = storeGet)]
+    fn page_store_get(key: &str);
+    #[wasm_bindgen(js_namespace = vxrHost, js_name = storePut)]
+    fn page_store_put(key: &str, bytes: &[u8]);
+    #[wasm_bindgen(js_namespace = vxrHost, js_name = storeDelete)]
+    fn page_store_delete(key: &str);
+    #[wasm_bindgen(js_namespace = vxrHost, js_name = newId)]
+    fn page_new_id() -> String;
 }
 
-/// What a browser does for [`run_action`]: files are downloads and Open is the page's file
-/// picker, which calls [`App::open`] when the user has chosen.
-struct Browser;
+/// What a browser does for [`run_action`]: Open is the page's file picker, which calls
+/// [`App::open`] or [`App::open_file`] when the user has chosen. Save writes through a handle
+/// to the file where the browser has File System Access (Chrome, Edge), finishing in
+/// [`App::saved`]; elsewhere it downloads the file and keeps a copy to open it again from.
+/// Exports are downloads.
+#[derive(Default)]
+struct Browser {
+    /// The page took a Save that it finishes later.
+    pending: bool,
+    /// Saves are written through a handle rather than downloaded.
+    written: bool,
+}
+
+/// The projects list's store in this browser: IndexedDB, through the page. The list and the
+/// thumbnails are what the page read before [`App::launch`]; a draft is read when asked for
+/// and comes back through [`App::stored`].
+struct Idb(HashMap<String, Vec<u8>>);
+
+impl Store for Idb {
+    fn read(&mut self, key: &str) -> Read {
+        if let Some(bytes) = self.0.remove(key) {
+            Read::Here(bytes)
+        } else if key.starts_with("drafts/") {
+            page_store_get(key);
+            Read::Later
+        } else {
+            Read::Missing
+        }
+    }
+
+    fn write(&mut self, key: &str, bytes: &[u8]) -> Result<(), String> {
+        page_store_put(key, bytes);
+        Ok(())
+    }
+
+    fn remove(&mut self, key: &str) {
+        page_store_delete(key);
+    }
+
+    fn now(&self) -> f64 {
+        js_sys::Date::now() / 1000.0
+    }
+
+    fn new_id(&mut self) -> String {
+        page_new_id()
+    }
+}
 
 impl Platform for Browser {
     fn verb(&self) -> &'static str {
-        "Downloaded"
+        if self.written { "Saved" } else { "Downloaded" }
     }
 
     fn pick_open(&mut self) -> Result<Option<Opened>, String> {
@@ -43,10 +103,27 @@ impl Platform for Browser {
         Ok(None)
     }
 
-    fn save_vox(&mut self, _: Option<&std::path::Path>, name: &str, bytes: &[u8]) -> Result<Option<Saved>, String> {
+    fn save_vox(
+        &mut self,
+        _: Option<&std::path::Path>,
+        project: &str,
+        name: &str,
+        bytes: &[u8],
+    ) -> Result<Option<Saved>, String> {
         let name = if name.to_ascii_lowercase().ends_with(".vox") { name } else { "scene.vox" };
+        if page_has_handles() {
+            page_save_vox(project, name, bytes);
+            self.pending = true;
+            return Ok(None);
+        }
         page_download(bytes, name, "application/octet-stream");
-        Ok(Some(Saved { name: name.into(), path: None }))
+        page_store_put(&file_key(project), bytes);
+        Ok(Some(Saved { name: name.into(), copy: bytes.len() as u64, ..Default::default() }))
+    }
+
+    fn open_project(&mut self, project: &Project) -> Result<Option<Opened>, String> {
+        page_open_project(&project.id, &project.name);
+        Ok(None)
     }
 
     fn save_png(&mut self, name: &str, bytes: &[u8]) -> Result<Option<String>, String> {
@@ -94,6 +171,10 @@ pub struct App {
     /// The time (seconds) of the next frame owed with no input: the render corner sampling,
     /// a toast fading. Infinite when the view only changes with input.
     due: f64,
+    /// The list and thumbnails the page read from IndexedDB, until [`App::launch`].
+    preloaded: HashMap<String, Vec<u8>>,
+    /// The history position of a Save the page is finishing through a file handle.
+    saving: Option<u64>,
 }
 
 /// Start the editor on `canvas` with the `.vox` bytes (an empty array opens a new scene).
@@ -154,6 +235,8 @@ pub async fn start(
         downloads: Vec::new(),
         woken: true,
         due: 0.0,
+        preloaded: HashMap::new(),
+        saving: None,
     })
 }
 
@@ -411,7 +494,11 @@ impl App {
         });
         for a in actions {
             if !self.bridge.act(&a, &mut self.host.editor) {
-                run_action(&mut self.host.editor, &mut Browser, a);
+                let mut browser = Browser::default();
+                run_action(&mut self.host.editor, &mut browser, a);
+                if browser.pending {
+                    self.saving = Some(self.host.editor.scene.history().position());
+                }
             }
         }
         self.due = self.host.editor.repaint_after().map_or(f64::INFINITY, |d| time + d.as_secs_f64());
@@ -478,11 +565,115 @@ impl App {
         self.bridge.closed(why, &mut self.host.editor);
     }
 
-    /// Replace the scene with the `.vox` bytes the page read from a file.
+    /// Replace the scene with the `.vox` bytes the page read from a file it has no handle to
+    /// (the file input). The page keeps a copy, so the projects list can open it again; a
+    /// copy kept under the same name is the same project.
     pub fn open(&mut self, vox: &[u8], name: &str) {
         self.woken = true;
-        let file = Opened { name: name.into(), bytes: vox.to_vec(), path: None };
-        vxr_app::host::open(&mut self.host.editor, &mut Browser, file);
+        let editor = &mut self.host.editor;
+        let id = editor
+            .projects
+            .list()
+            .iter()
+            .find(|p| !p.handle && p.copy > 0 && p.name == name)
+            .map_or_else(page_new_id, |p| p.id.clone());
+        let file = Opened {
+            name: name.into(),
+            bytes: vox.to_vec(),
+            id: Some(id.clone()),
+            copy: vox.len() as u64,
+            ..Default::default()
+        };
+        if vxr_app::host::open(editor, &mut Browser::default(), file) {
+            page_store_put(&file_key(&id), vox);
+        }
+    }
+
+    /// Replace the scene with project `id`'s file: read through the `handle` the page keeps
+    /// under that id (modified at `modified` seconds since 1970), or from its kept copy.
+    pub fn open_file(&mut self, vox: &[u8], name: &str, id: &str, handle: bool, modified: f64) {
+        self.woken = true;
+        let file = Opened {
+            name: name.into(),
+            bytes: vox.to_vec(),
+            modified: (modified > 0.0).then_some(modified),
+            id: Some(id.into()),
+            handle,
+            copy: if handle { 0 } else { vox.len() as u64 },
+            ..Default::default()
+        };
+        vxr_app::host::open(&mut self.host.editor, &mut Browser::default(), file);
+    }
+
+    /// The page could not open project `name`'s file: `why`.
+    pub fn open_failed(&mut self, name: &str, why: &str) {
+        self.woken = true;
+        let ctx = self.host.editor.ctx.clone();
+        self.host.editor.ui.toast(&ctx, format!("Could not open {name}: {why}"));
+    }
+
+    /// A Save the page took finished: written through a handle to the file `name`.
+    pub fn saved(&mut self, name: &str) {
+        self.woken = true;
+        let Some(position) = self.saving.take() else { return };
+        let saved = Saved { name: name.into(), handle: true, ..Default::default() };
+        vxr_app::host::saved(
+            &mut self.host.editor,
+            &mut Browser { written: true, ..Default::default() },
+            saved,
+            position,
+        );
+    }
+
+    /// A Save the page took did not happen: cancelled (`why` empty) or failed.
+    pub fn save_failed(&mut self, why: &str) {
+        self.woken = true;
+        self.saving = None;
+        if !why.is_empty() {
+            let ctx = self.host.editor.ctx.clone();
+            self.host.editor.ui.toast(&ctx, format!("Could not save: {why}"));
+        }
+    }
+
+    /// One entry the page read from the projects store (`index.json`, `thumbs/...`), before
+    /// [`App::launch`].
+    pub fn preload(&mut self, key: &str, bytes: Vec<u8>) {
+        self.preloaded.insert(key.into(), bytes);
+    }
+
+    /// Start the projects list from what the page preloaded: offer the newest draft back, or
+    /// show the list. The demo scene the page started with is no file of the user's.
+    pub fn launch(&mut self) {
+        self.woken = true;
+        let editor = &mut self.host.editor;
+        editor.projects = Projects::load(Box::new(Idb(std::mem::take(&mut self.preloaded))));
+        editor.projects.reset(editor.scene.history().position());
+        vxr_app::host::launch(editor);
+    }
+
+    /// The projects store answered a read (a draft): empty bytes when it found nothing.
+    pub fn stored(&mut self, key: &str, bytes: Vec<u8>) {
+        self.woken = true;
+        vxr_app::host::stored(&mut self.host.editor, &mut Browser::default(), key, bytes);
+    }
+
+    /// Write the draft now when the scene has edits newer than it: the page is going away
+    /// or out of sight.
+    pub fn flush(&mut self) {
+        self.host.editor.flush_draft();
+    }
+
+    /// Whether the scene has edits not yet saved, for the page's leave prompt.
+    pub fn unsaved(&self) -> bool {
+        self.host.editor.is_unsaved()
+    }
+
+    /// Forget every project and take the scene as saved, so nothing is written as the page
+    /// goes: for the browser check, between its pages.
+    pub fn forget_projects(&mut self) {
+        let editor = &mut self.host.editor;
+        editor.projects.forget_all();
+        editor.mark_saved();
     }
 
     /// The scene as a `.vox` file, checked as a save is; New then has nothing to lose. Empty,
@@ -509,7 +700,7 @@ impl App {
         let e = &self.host.editor;
         let (c, h) = (&e.cam, e.scene.history());
         format!(
-            r#"{{"voxels":{},"tool":"{:?}","shape":"{:?}","mirror":{},"mirrorAxes":[{},{},{}],"lock":{},"brushSize":{},"sizePanel":{},"lifting":{},"span":{},"selected":{},"region":"{:?}","hasClip":{},"bounds":[{},{},{}],"boundsPanel":{},"slot":{},"colorEdit":{},"slotOp":"{:?}","undo":{},"redo":{},"cmdk":{},"coach":{},"name":{:?},"size":[{},{}],"ppp":{},"cam":[{},{},{},{},{},{}],"ortho":{},"inView":[{},{}],"cameraHints":{},"view":{},"viewPanel":{},"exportMenu":{},"confirmNew":{},"theme":"{}","themeMenu":{},"touch":{},"paletteOpen":{},"themeShown":{:?},"guides":[{},{},{}],"mode":"{}","objects":{},"models":{},"picked":{},"tree":[{}],"treeOn":{},"renaming":{},"layers":[{}],"layerOn":{},"render":{{"shown":{},"spp":{},"rows":{},"current":{},"restarts":{},"timestamps":{},"panel":{},"full":{},"size":[{},{}],"maxSpp":{},"exposure":{},"gamma":{},"vignette":{},"aperture":{},"sky":{},"physicalSky":{},"export":{}}},"review":{},"undoLabel":{},"asks":{:?},"agents":{{"panel":{},"available":{},"web":{},"allowed":{},"review":{},"connecting":{},"error":{},"fail":{},"code":{:?},"clients":[{}],"edits":[{}],"chip":{:?},"live":[{}],"calls":[{}]}}}}"#,
+            r#"{{"voxels":{},"tool":"{:?}","shape":"{:?}","mirror":{},"mirrorAxes":[{},{},{}],"lock":{},"brushSize":{},"sizePanel":{},"lifting":{},"span":{},"selected":{},"region":"{:?}","hasClip":{},"bounds":[{},{},{}],"boundsPanel":{},"slot":{},"colorEdit":{},"slotOp":"{:?}","undo":{},"redo":{},"cmdk":{},"coach":{},"name":{:?},"size":[{},{}],"ppp":{},"cam":[{},{},{},{},{},{}],"ortho":{},"inView":[{},{}],"cameraHints":{},"view":{},"viewPanel":{},"exportMenu":{},"confirmNew":{},"theme":"{}","themeMenu":{},"touch":{},"paletteOpen":{},"themeShown":{:?},"guides":[{},{},{}],"mode":"{}","objects":{},"models":{},"picked":{},"tree":[{}],"treeOn":{},"renaming":{},"layers":[{}],"layerOn":{},"render":{{"shown":{},"spp":{},"rows":{},"current":{},"restarts":{},"timestamps":{},"panel":{},"full":{},"size":[{},{}],"maxSpp":{},"exposure":{},"gamma":{},"vignette":{},"aperture":{},"sky":{},"physicalSky":{},"export":{}}},"review":{},"undoLabel":{},"asks":{:?},"unsaved":{},"projectsMenu":{},"projects":[{}],"current":{},"restore":{},"confirmClose":{},"storage":[{},{}],"agents":{{"panel":{},"available":{},"web":{},"allowed":{},"review":{},"connecting":{},"error":{},"fail":{},"code":{:?},"clients":[{}],"edits":[{}],"chip":{:?},"live":[{}],"calls":[{}]}}}}"#,
             e.scene.map.voxels,
             e.ui.tool,
             e.ui.shape,
@@ -638,6 +829,34 @@ impl App {
             )),
             h.undo_label().map_or("null".into(), |l| format!("{l:?}")),
             e.asks,
+            e.is_unsaved(),
+            e.ui.projects_open,
+            e.projects
+                .list()
+                .iter()
+                .map(|p| format!(
+                    r#"{{"id":{:?},"name":{:?},"draft":{},"handle":{},"copy":{},"thumb":{}}}"#,
+                    p.id,
+                    p.name,
+                    p.draft.is_some(),
+                    p.handle,
+                    p.copy,
+                    p.thumb
+                ))
+                .collect::<Vec<_>>()
+                .join(","),
+            e.projects
+                .current
+                .as_ref()
+                .and_then(|id| e.projects.list().iter().position(|p| &p.id == id))
+                .map_or("null".into(), |i| i.to_string()),
+            e.ui.restore.as_ref().map_or("null".into(), |r| format!(
+                r#"{{"name":{:?},"when":{:?},"changed":{}}}"#,
+                r.name, r.when, r.changed
+            )),
+            e.ui.confirm_close,
+            e.projects.usage(),
+            vxr_app::projects::CAP,
             e.ui.agents_panel,
             e.ui.agents.available,
             e.ui.agents.web,
