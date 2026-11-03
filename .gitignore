@@ -11,4 +11,7 @@ prototype/demo/
 # The browser build, made by crates/vxr-web/build, and its check screenshots.
 /crates/vxr-web/dist/
 /crates/vxr-web/.wrangler/
+# The Worker's npm packages (package-lock.json) and its local secrets for `wrangler dev`.
+/crates/vxr-web/node_modules/
+/crates/vxr-web/.dev.vars
 /crates/vxr-web/shots/

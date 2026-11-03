@@ -1,9 +1,48 @@
-// The browser editor on Cloudflare: static assets only, no Worker code.
-// Build with ./build. Workers Builds deploys main with ./cloudflare-build (see the README);
-// ./deploy deploys by hand.
+// The browser editor on Cloudflare: the static site in ./dist, and a small Worker (worker/) for
+// the optional account and the cloud projects behind /api/* and /account. Every other path is a
+// static file, served without running the Worker.
+//
+// Secrets (`wrangler secret put`, or .dev.vars for `wrangler dev`, see .dev.vars.example):
+// BETTER_AUTH_SECRET signs sessions, TURNSTILE_SECRET_KEY checks the sign-up challenge and
+// RESEND_API_KEY sends the emailed sign-in links. Without them the Worker still serves the site and
+// answers /api/me with sign-in (or email sign-in) off.
 {
   "name": "vxr",
+  "main": "worker/index.ts",
   "compatibility_date": "2026-10-01",
-  "assets": { "directory": "./dist" },
-  "routes": [{ "pattern": "vxr.jrnxf.co", "custom_domain": true }]
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*", "/account"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "vxr",
+      "database_id": "e7319cb3-8df7-4725-a15b-db1e25e06ded",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [{ "binding": "PROJECTS", "bucket_name": "vxr-projects" }],
+  "observability": { "enabled": true },
+  "routes": [{ "pattern": "vxr.jrnxf.co", "custom_domain": true }],
+  // Branch builds (`--env preview`): a separate Worker, vxr-preview, on workers.dev only, with its
+  // own database and bucket and its own secrets (none by default, so sign-in is off there).
+  // README.md "Deploy" has how it was set up.
+  "env": {
+    "preview": {
+      "routes": [],
+      "workers_dev": true,
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "vxr-preview",
+          "database_id": "3c92e8a5-fde2-4dd9-8876-b28be2a208ec",
+          "migrations_dir": "migrations"
+        }
+      ],
+      "r2_buckets": [{ "binding": "PROJECTS", "bucket_name": "vxr-projects-preview" }]
+    }
+  }
 }

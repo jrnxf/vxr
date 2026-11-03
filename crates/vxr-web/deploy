@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# Build the site and deploy it to Cloudflare (Workers static assets, see wrangler.jsonc).
-# Deploy only from main. Workers Builds already deploys every push to main (see the README), so
-# this is for deploying by hand. Log in once with `./dev wrangler login`.
+# Build the site, apply the D1 migrations and deploy it to Cloudflare (the Worker with its static
+# assets, see wrangler.jsonc), as Workers Builds does for every push to main (see the README).
+# Deploy only from main; this is for deploying by hand. Log in once with `npx wrangler login`.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 branch="$(git -C "$here" branch --show-current)"
 [ "$branch" = main ] || { echo "deploy only from main (on $branch)" >&2; exit 1; }
 [ -z "$(git -C "$here" status --porcelain)" ] || { echo "commit or stash changes first" >&2; exit 1; }
+npm ci --prefix "$here" --no-audit --no-fund
 "$here/build"
 cd "$here"
-../../dev wrangler deploy
+npx wrangler d1 migrations apply vxr --remote
+npx wrangler deploy

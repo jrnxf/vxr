@@ -17,8 +17,10 @@
 //! drops another's projects, and each holds the project it has open ([`Store::hold`]): Clear
 //! and the cap leave the projects another window or tab has open alone.
 //!
-//! Each project has a stable id and each draft says when and on which device it was made,
-//! so the list can later be shared between devices.
+//! Each project has a stable id and each draft says when and on which device it was made.
+//! Signed in to an account in the browser ([`crate::sync`]), a project can also be in the
+//! account's library ([`Cloud`]): the list then shows the library's projects too, those not
+//! on this device yet as rows with no file ([`Project::stub`]) that download when opened.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -119,6 +121,47 @@ pub struct Draft {
     pub base: Option<f64>,
 }
 
+/// Where a project is in an account's library.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Cloud {
+    /// The account's user id.
+    pub user: String,
+    /// Its id in the library: the project's own id, unless a conflict kept it as a copy.
+    pub id: String,
+    /// The library version this device's copy holds: None before its first upload, and for a
+    /// project not downloaded yet.
+    #[serde(default)]
+    pub version: Option<String>,
+    /// The newest version the library last listed.
+    #[serde(default)]
+    pub latest: Option<String>,
+    /// Saved here and not in the library yet (the upload failed or is under way).
+    #[serde(default)]
+    pub dirty: bool,
+    /// Saved here, and the library refused it (over a limit, or not a `.vox` it reads): only
+    /// this device has these edits. It does not go up again by itself, nothing downloads over
+    /// it, and when the library moves on it is kept as its own project ([`Projects::merge_library`]).
+    /// The next upload the library takes clears it.
+    #[serde(default)]
+    pub held: bool,
+}
+
+impl Cloud {
+    /// The library has a version newer than this device's copy.
+    pub fn behind(&self) -> bool {
+        self.version.is_some() && self.latest.is_some() && self.latest != self.version
+    }
+}
+
+/// What [`Projects::merge_library`] did that the editor follows up on.
+#[derive(Debug, Default, PartialEq)]
+pub struct Merged {
+    /// The new projects whose thumbnails the library has, to fetch.
+    pub thumbs: Vec<String>,
+    /// The projects kept here as conflicted copies, with their new names.
+    pub kept: Vec<(String, String)>,
+}
+
 /// A scene opened or made here.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Project {
@@ -150,6 +193,9 @@ pub struct Project {
     pub thumb: u64,
     #[serde(default)]
     pub draft: Option<Draft>,
+    /// Its place in an account's library.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud: Option<Cloud>,
 }
 
 impl Project {
@@ -157,6 +203,21 @@ impl Project {
     /// saved).
     pub fn has_file(&self) -> bool {
         self.path.is_some() || self.handle || self.copy > 0
+    }
+
+    /// Its place in `user`'s library, when it has one there.
+    pub fn library(&self, user: &str) -> Option<&Cloud> {
+        self.cloud.as_ref().filter(|c| c.user == user)
+    }
+
+    /// A project of the library with nothing on this device yet: no file and no draft.
+    pub fn stub(&self) -> bool {
+        self.cloud.is_some() && !self.has_file() && self.draft.is_none()
+    }
+
+    /// Whether there is anything to open it from: a file, a draft or the library.
+    fn kept(&self) -> bool {
+        self.has_file() || self.draft.is_some() || self.cloud.is_some()
     }
 
     fn size(&self) -> u64 {
@@ -433,7 +494,7 @@ impl Projects {
                 p.modified = None;
                 changed = true;
             }
-            if !p.has_file() && p.draft.is_none() {
+            if !p.kept() {
                 gone.push(id);
             }
         }
@@ -484,7 +545,11 @@ impl Projects {
                     1 if replaceable_copy(p) => {
                         p.copy = 0;
                         p.source = None;
-                        let left = p.has_file() || p.draft.is_some();
+                        // A library project stays listed, to download again.
+                        if let Some(c) = &mut p.cloud {
+                            c.version = None;
+                        }
+                        let left = p.kept();
                         self.store.remove(&file_key(id));
                         if !left {
                             self.forget(id);
@@ -492,7 +557,7 @@ impl Projects {
                     }
                     2 if p.draft.is_some() => {
                         p.draft = None;
-                        let (name, left) = (p.name.clone(), p.has_file());
+                        let (name, left) = (p.name.clone(), p.kept());
                         self.store.remove(&draft_key(id));
                         self.evicted.push(name);
                         if !left {
@@ -551,6 +616,7 @@ impl Projects {
                     modified,
                     thumb: 0,
                     draft: None,
+                    cloud: None,
                 });
                 id
             }
@@ -663,6 +729,7 @@ impl Projects {
             modified: None,
             thumb: 0,
             draft: None,
+            cloud: None,
         });
         self.set_current(Some(id.clone()));
         id
@@ -760,7 +827,7 @@ impl Projects {
     pub fn drop_draft(&mut self, id: &str) {
         let Some(p) = self.get_mut(id) else { return };
         p.draft = None;
-        let keep = p.has_file();
+        let keep = p.kept();
         self.store.remove(&draft_key(id));
         if !keep {
             self.forget(id);
@@ -845,13 +912,141 @@ impl Projects {
         self.waiting = None;
         self.keep();
     }
+
+    /// Change project `id` with `f`, and keep the list.
+    pub fn update(&mut self, id: &str, f: impl FnOnce(&mut Project)) {
+        if let Some(p) = self.get_mut(id) {
+            f(p);
+            self.keep();
+        }
+    }
+
+    /// Keep `vox` as project `id`'s copy of its file (a library save or download), in place
+    /// of any handle to a file of this device's.
+    pub fn keep_copy(&mut self, id: &str, vox: &[u8]) -> Result<(), String> {
+        self.store.write(&file_key(id), vox)?;
+        if let Some(p) = self.get_mut(id) {
+            p.copy = vox.len() as u64;
+            p.handle = false;
+        }
+        self.fit();
+        self.keep();
+        Ok(())
+    }
+
+    /// `user`'s library lists `remote`: add the projects not here yet (with no file, to
+    /// download when opened), note each one's newest version, and let go of the ones the
+    /// library no longer has (another device deleted them). `fresh` are the library ids
+    /// uploaded since the list was asked for, which it may show as they were before (or not
+    /// at all): they are left as they are.
+    ///
+    /// A project the library refused a save of ([`Cloud::held`]) that the library has moved
+    /// on from is kept as its own project here, "<name> (conflicted copy)", out of the
+    /// library, and the library's version is listed beside it to download.
+    pub fn merge_library(&mut self, user: &str, remote: &[crate::sync::Remote], fresh: &[String]) -> Merged {
+        let mut merged = Merged::default();
+        for r in remote {
+            if fresh.contains(&r.id) {
+                continue;
+            }
+            let updated = r.updated / 1000.0;
+            let here = self.index.projects.iter_mut().find(|p| p.library(user).is_some_and(|c| c.id == r.id));
+            if let Some(p) = here {
+                let stub = p.stub();
+                let c = p.cloud.as_mut().expect("found by its library");
+                if c.held && c.version.as_deref() != Some(r.version.as_str()) {
+                    let stem = p.name.strip_suffix(".vox").unwrap_or(&p.name);
+                    p.name = format!("{stem} (conflicted copy)");
+                    p.cloud = None;
+                    merged.kept.push((p.id.clone(), p.name.clone()));
+                } else {
+                    c.latest = Some(r.version.clone());
+                    if stub {
+                        p.name = r.name.clone();
+                        p.edited = p.edited.max(updated);
+                        if r.thumb && p.thumb == 0 {
+                            merged.thumbs.push(p.id.clone());
+                        }
+                    }
+                    continue;
+                }
+            }
+            let id = if self.get(&r.id).is_none() { r.id.clone() } else { self.store.new_id() };
+            self.index.projects.push(Project {
+                id: id.clone(),
+                name: r.name.clone(),
+                path: None,
+                handle: false,
+                copy: 0,
+                source: None,
+                edited: updated,
+                used: updated,
+                modified: None,
+                thumb: 0,
+                draft: None,
+                cloud: Some(Cloud {
+                    user: user.into(),
+                    id: r.id.clone(),
+                    version: None,
+                    latest: Some(r.version.clone()),
+                    dirty: false,
+                    held: false,
+                }),
+            });
+            if r.thumb {
+                merged.thumbs.push(id);
+            }
+        }
+        let mut gone = Vec::new();
+        for p in &mut self.index.projects {
+            let Some(c) = p.library(user) else { continue };
+            // Not uploaded yet, listed, or uploaded after the list was asked for: nothing to
+            // let go of.
+            if (c.version.is_none() && c.latest.is_none())
+                || remote.iter().any(|r| r.id == c.id)
+                || fresh.contains(&c.id)
+            {
+                continue;
+            }
+            if p.stub() && self.current.as_ref() != Some(&p.id) {
+                gone.push(p.id.clone());
+            } else if !c.dirty {
+                p.cloud = None;
+            }
+        }
+        for id in &gone {
+            self.forget(id);
+        }
+        self.keep();
+        merged
+    }
+
+    /// Signed out, or in as `user`: forget the library projects of anyone else that have
+    /// nothing on this device.
+    pub fn signed_out(&mut self, user: Option<&str>) {
+        let gone: Vec<String> = self
+            .index
+            .projects
+            .iter()
+            .filter(|p| p.stub() && p.cloud.as_ref().is_some_and(|c| Some(c.user.as_str()) != user))
+            .filter(|p| self.current.as_ref() != Some(&p.id))
+            .map(|p| p.id.clone())
+            .collect();
+        if gone.is_empty() {
+            return;
+        }
+        for id in &gone {
+            self.forget(id);
+        }
+        self.keep();
+    }
 }
 
 /// Whether the cap may delete `p`'s copy of its file: one the user also has, as the download
-/// it was saved as or the file it was opened from. The library's sign-in state adds its own
-/// rule here: a project the library has not taken (held) keeps its copy.
+/// it was saved as or the file it was opened from, or the library's. A save the library has
+/// not taken yet (waiting to upload, or refused and held) is the only one, and keeps its copy.
 fn replaceable_copy(p: &Project) -> bool {
-    p.copy > 0
+    p.copy > 0 && !p.cloud.as_ref().is_some_and(|c| c.dirty || c.held)
 }
 
 /// A hash of a file's bytes (64-bit FNV-1a), to know the same file opened again.
@@ -1183,6 +1378,35 @@ mod tests {
         assert!(p.usage() <= CAP);
         assert_eq!(p.list().len(), 3, "the oldest draft went");
         assert_eq!(p.list()[0].used, 1_000_003.0);
+    }
+
+    #[test]
+    fn a_copy_the_library_refused_stays_when_the_store_is_full() {
+        let (m, mut p) = memory();
+        let big = vec![0u8; (CAP / 2) as usize];
+        let add = |p: &mut Projects, at: f64, held: Option<bool>| {
+            m.clock.set(at);
+            p.reset(0);
+            let id = p.ensure("Untitled");
+            let cloud = held.map(|held| Cloud {
+                user: "u1".into(),
+                id: id.clone(),
+                version: Some("v1".into()),
+                latest: Some("v1".into()),
+                dirty: false,
+                held,
+            });
+            p.update(&id, |p| p.cloud = cloud);
+            p.keep_copy(&id, &big).unwrap();
+            id
+        };
+        let held = add(&mut p, 1_000_000.0, Some(true));
+        let synced = add(&mut p, 1_000_001.0, Some(false));
+        add(&mut p, 1_000_002.0, None);
+        assert!(p.usage() <= CAP);
+        assert_eq!(p.get(&held).map(|p| p.copy), Some(big.len() as u64), "the only copy of its edits stays");
+        let synced = p.get(&synced).expect("listed, to download again");
+        assert_eq!(synced.copy, 0, "a copy the library holds goes first");
     }
 
     #[test]

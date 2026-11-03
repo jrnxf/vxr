@@ -180,10 +180,10 @@ async function allowed(handle, mode) {
   return (await handle.queryPermission(o)) === 'granted' || (await handle.requestPermission(o)) === 'granted';
 }
 const VOX_TYPES = [{ description: 'MagicaVoxel scene', accept: { 'application/octet-stream': ['.vox'] } }];
-async function openHandle(handle, id) {
+async function openHandle(handle, id, picked = false) {
   if (!(await allowed(handle, 'read'))) throw new Error('the browser was not allowed to read it');
   const f = await handle.getFile();
-  app.open_file(new Uint8Array(await f.arrayBuffer()), f.name, id, true, f.lastModified / 1000);
+  app.open_file(new Uint8Array(await f.arrayBuffer()), f.name, id, true, f.lastModified / 1000, picked);
 }
 async function pickOpen() {
   if (!handles()) return fileInput.click();
@@ -196,7 +196,7 @@ async function pickOpen() {
   }
   const id = await window.vxrProjects.idFor(handle);
   await window.vxrProjects.put('files/' + id, handle).catch(warn('keep the file handle'));
-  await openHandle(handle, id).catch((e) => app.open_failed(handle.name, e.message || String(e)));
+  await openHandle(handle, id, true).catch((e) => app.open_failed(handle.name, e.message || String(e)));
 }
 async function saveVox(id, name, bytes) {
   try {
@@ -218,7 +218,7 @@ async function openProject(id, name) {
   try {
     const v = await window.vxrProjects.get('files/' + id);
     if (v instanceof FileSystemFileHandle) await openHandle(v, id);
-    else if (v instanceof Uint8Array) app.open_file(v, name, id, false, 0);
+    else if (v instanceof Uint8Array) app.open_file(v, name, id, false, 0, false);
     else app.open_failed(name, 'this browser no longer keeps its file');
   } catch (e) {
     app.open_failed(name, e.name === 'NotFoundError' ? 'the file is gone' : e.message || String(e));
@@ -433,6 +433,24 @@ function download(bytes, name, type) {
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
+// The library (crates/vxr-app/src/sync.rs): the editor makes each call to the vxr Worker's
+// /api (same origin, with the session cookie the account page set) and reads the answer;
+// status 0 is a network failure.
+async function libraryFetch(id, method, path, flat, body) {
+  const headers = new Headers();
+  for (let i = 0; i + 1 < flat.length; i += 2) headers.set(flat[i], flat[i + 1]);
+  try {
+    const r = await fetch(path, {
+      method, headers, credentials: 'same-origin', cache: 'no-store',
+      body: method === 'GET' || method === 'HEAD' ? undefined : body,
+    });
+    const bytes = new Uint8Array(await r.arrayBuffer());
+    app.fetched(id, r.status, r.headers.get('x-vxr-version') ?? '', bytes);
+  } catch {
+    app.fetched(id, 0, '', new Uint8Array());
+  }
+}
+
 // Bytes from the editor are a view of its memory, which moves: anything kept past the call
 // takes a copy (slice).
 window.vxrHost = {
@@ -462,6 +480,8 @@ window.vxrHost = {
   storeHold: (id) => hold(id),
   storeHeld: (id) => heldElsewhere.has(id),
   newId: () => crypto.randomUUID(),
+  fetch: (id, method, path, headers, body) => libraryFetch(id, method, path, headers, body.slice()),
+  openAccount() { window.open('/account?from=editor', '_blank', 'noopener'); },
 };
 
 // What terminal agents exported (the editor toasts who exported what).
@@ -529,10 +549,15 @@ async function main() {
   for (const [key, bytes] of await window.vxrProjects.preload().catch(warn('read the projects list')) ?? []) app.preload(key, bytes);
   await readHolds();
   app.launch();
+  app.check_account();
   // Edits not yet in a draft are written as the page goes or hides; leaving with unsaved
   // edits asks first (the draft stays either way, as after a crash).
   addEventListener('pagehide', () => app.flush());
-  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') app.flush(); });
+  // Back from the account page or another tab: who is signed in, and what the library has now.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') app.flush();
+    else app.check_account();
+  });
   addEventListener('beforeunload', (e) => {
     if (!app.unsaved()) return;
     app.flush();

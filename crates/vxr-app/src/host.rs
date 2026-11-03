@@ -10,6 +10,11 @@
 //! The projects list and the drafts ([`crate::projects`]) follow every open and save here:
 //! a scene opened becomes (or finds) its project and is offered its draft back, a save
 //! deletes the draft, and the scene being replaced keeps its newest edits as a draft first.
+//!
+//! Signed in (in the browser), Save puts a new scene, or one already in the account's
+//! library, in the library ([`crate::sync`]); a file opened from this device stays a file
+//! until Add to library. The page sends the library's calls and hands each reply to
+//! [`fetched`].
 
 use std::path::{Path, PathBuf};
 
@@ -19,7 +24,8 @@ use vxr_render::Gpu;
 use crate::Editor;
 use crate::editor::Button;
 use crate::files::{File, obj_files, slices_png, vox_bytes};
-use crate::projects::{Project, Read};
+use crate::projects::{Project, Read, THUMB};
+use crate::sync::{Event, Reply};
 use crate::ui::{Action, FontBytes};
 
 /// A scene file the user picked to open.
@@ -37,6 +43,9 @@ pub struct Opened {
     pub id: Option<String>,
     pub handle: bool,
     pub copy: u64,
+    /// The user picked it from this device's files (Open), as opposed to opening a project
+    /// from the list or the library: whatever project it lands in, it is not the library's.
+    pub picked: bool,
 }
 
 /// A `.vox` file the platform wrote.
@@ -92,6 +101,15 @@ pub trait Platform {
     /// Keep the picked theme (by its id) for the next start.
     fn persist_theme(&mut self, id: &str) -> Result<(), String>;
 
+    /// Open the account page, where the user signs in or out (the browser's, in a new tab).
+    fn open_account(&mut self) {}
+
+    /// Download the scene's `.vox` bytes as `name`, beside its place in the library; returns
+    /// the name it was given.
+    fn export_vox(&mut self, _name: &str, _bytes: &[u8]) -> Result<Option<String>, String> {
+        Err("there is no download here".into())
+    }
+
     /// The scene now has this name (the window's title).
     fn named(&mut self, _name: &str) {}
 
@@ -121,13 +139,13 @@ pub fn run_action(ed: &mut Editor, p: &mut dyn Platform, action: Action) {
             ed.flush_draft();
             match p.pick_open() {
                 Ok(Some(file)) => {
-                    open(ed, p, file);
+                    open(ed, p, Opened { picked: true, ..file });
                 }
                 Ok(None) => {}
                 Err(e) => toast(ed, format!("Could not open: {e}")),
             }
         }
-        Action::Save => {
+        Action::Save | Action::AddToLibrary => {
             // Checked before any dialog or download: a scene that would not read back whole
             // is never offered for saving.
             let bytes = match vox_bytes(&ed.scene) {
@@ -136,6 +154,9 @@ pub fn run_action(ed: &mut Editor, p: &mut dyn Platform, action: Action) {
             };
             let name = ed.ui.scene_name.clone();
             let project = ed.projects.ensure(&name);
+            if to_library(ed, &project, action == Action::AddToLibrary) {
+                return library_save(ed, p, &project, name, bytes);
+            }
             match p.save_vox(ed.path.as_deref(), &project, &name, &bytes) {
                 Ok(Some(saved)) => self::saved(ed, p, saved, ed.scene.history().position()),
                 Ok(None) => {}
@@ -145,6 +166,11 @@ pub fn run_action(ed: &mut Editor, p: &mut dyn Platform, action: Action) {
         Action::OpenProject(k) => {
             let Some(project) = ed.projects.list().get(k).cloned() else { return };
             ed.flush_draft();
+            if ed.library.wants_download(&ed.projects, &project.id) {
+                // In the library and newer there (or not on this device yet): it opens when
+                // the download answers, from the copy here when it cannot.
+                return ed.library.download(&ed.projects, &project.id, false);
+            }
             if !project.has_file() {
                 // A scene never saved: its draft is all there is.
                 return load_draft(ed, p, &project.id);
@@ -186,6 +212,20 @@ pub fn run_action(ed: &mut Editor, p: &mut dyn Platform, action: Action) {
             ed.mark_saved();
             ed.quit = true;
         }
+        Action::SignIn => p.open_account(),
+        Action::DownloadVox => {
+            let bytes = match vox_bytes(&ed.scene) {
+                Ok(b) => b,
+                Err(e) => return toast(ed, format!("Could not download: {e}")),
+            };
+            let name = &ed.ui.scene_name;
+            let name = if name.to_ascii_lowercase().ends_with(".vox") { name.clone() } else { format!("{name}.vox") };
+            match p.export_vox(&name, &bytes) {
+                Ok(Some(name)) => toast(ed, format!("{} {name}", p.verb())),
+                Ok(None) => {}
+                Err(e) => toast(ed, format!("Could not download: {e}")),
+            }
+        }
         Action::Embed => toast(ed, "The embed export is not built yet".into()),
         Action::ExportObj => {
             let mut quads = 0;
@@ -226,15 +266,21 @@ pub fn run_action(ed: &mut Editor, p: &mut dyn Platform, action: Action) {
 }
 
 /// Replace the scene with a file the user picked, or say why not; true when it opened. It
-/// becomes its project in the list, which offers its draft back when it has one.
+/// becomes its project in the list, which offers its draft back when it has one. A file
+/// picked from this device's files that lands in a library project takes it out of the
+/// library here (its copy is that file now), and the library's version is listed again.
 pub fn open(ed: &mut Editor, p: &mut dyn Platform, file: Opened) -> bool {
     let ctx = ed.ctx.clone();
-    let Opened { name, bytes, path, modified, id, handle, copy } = file;
+    let Opened { name, bytes, path, modified, id, handle, copy, picked } = file;
     match Scene::from_vox(&bytes).map_err(|e| format!("{name}: {e}")).and_then(|s| ed.load(s, &name)) {
         Ok(()) => {
             p.named(&name);
             ed.ui.toast(&ctx, format!("Opened {name}"));
-            ed.projects.opened(&name, path.as_deref(), id.as_deref(), modified, handle, copy);
+            let id = ed.projects.opened(&name, path.as_deref(), id.as_deref(), modified, handle, copy);
+            if picked && ed.projects.get(&id).is_some_and(|p| p.cloud.is_some()) {
+                ed.projects.update(&id, |p| p.cloud = None);
+                ed.library.list();
+            }
             ed.path = path;
             true
         }
@@ -256,6 +302,104 @@ pub fn saved(ed: &mut Editor, p: &mut dyn Platform, saved: Saved, position: u64)
     ed.projects.saved(&name, path.as_deref(), handle, copy, position);
     ed.path = path;
     ed.mark_saved_at(position);
+}
+
+/// Whether Save puts project `id` in the library: signed in, and it is there already, is a
+/// new scene, or the user asked (`add`).
+fn to_library(ed: &Editor, id: &str, add: bool) -> bool {
+    let Some(user) = ed.library.account.user() else { return false };
+    add || ed.projects.get(id).is_none_or(|p| p.library(&user.id).is_some() || !p.has_file())
+}
+
+/// Save the scene to the library: the page keeps its copy (so it opens offline) and the
+/// upload goes; [`fetched`] says how it went.
+fn library_save(ed: &mut Editor, p: &mut dyn Platform, id: &str, name: String, bytes: Vec<u8>) {
+    let ctx = ed.ctx.clone();
+    if let Err(e) = ed.projects.keep_copy(id, &bytes) {
+        return ed.ui.toast(&ctx, format!("Could not save: {e}"));
+    }
+    let position = ed.scene.history().position();
+    ed.projects.saved(&name, None, false, bytes.len() as u64, position);
+    let thumb = vxr_ops::look::thumbnail(&ed.scene, THUMB).ok();
+    if let Some(t) = &thumb {
+        ed.projects.set_thumb(id, t);
+    }
+    p.named(&name);
+    ed.ui.scene_name = name;
+    ed.path = None;
+    ed.mark_saved_at(position);
+    ed.library.upload(&mut ed.projects, id, bytes, thumb);
+}
+
+/// The page's answer to the library call `id` (see [`crate::sync::Library::take_out`]).
+pub fn fetched(ed: &mut Editor, p: &mut dyn Platform, id: u32, reply: Reply) {
+    let ctx = ed.ctx.clone();
+    for event in ed.library.answer(id, reply, &mut ed.projects) {
+        match event {
+            Event::Toast(text) => ed.ui.toast(&ctx, text),
+            Event::Open { project, bytes, version, reload } => {
+                let here = ed.projects.current.as_deref() == Some(project.as_str());
+                // A newer version for the scene on screen replaces it only while it has no
+                // edits of its own.
+                if reload && (!here || ed.is_unsaved() || ed.projects.current_draft().is_some()) {
+                    continue;
+                }
+                if let Err(e) = ed.projects.keep_copy(&project, &bytes) {
+                    ed.ui.toast(&ctx, format!("Could not keep a copy: {e}"));
+                }
+                let Some(name) = ed.projects.get(&project).map(|p| p.name.clone()) else { continue };
+                let copy = bytes.len() as u64;
+                let file = Opened { name: name.clone(), bytes, id: Some(project.clone()), copy, ..Default::default() };
+                if open(ed, p, file) {
+                    ed.projects.update(&project, |p| {
+                        if let Some(c) = &mut p.cloud {
+                            c.version = Some(version.clone());
+                            c.latest = Some(version);
+                        }
+                    });
+                    if reload {
+                        ed.ui.toast(&ctx, format!("Updated {name} from your library"));
+                    }
+                }
+            }
+            Event::OpenHere { project } => {
+                let Some(project) = ed.projects.get(&project).cloned() else { continue };
+                match p.open_project(&project) {
+                    Ok(Some(file)) => {
+                        open(ed, p, file);
+                    }
+                    Ok(None) => {}
+                    Err(e) => ed.ui.toast(&ctx, format!("Could not open {}: {e}", project.name)),
+                }
+            }
+            Event::Renamed { project, name } => {
+                if ed.projects.current.as_deref() == Some(project.as_str()) {
+                    p.named(&name);
+                    ed.ui.scene_name = name;
+                }
+            }
+            Event::Listed => catch_up(ed),
+        }
+    }
+}
+
+/// After the library listed: the scene on screen, when it is in the library as saved here,
+/// goes up if its last upload did not, or comes down if the library has a newer version.
+fn catch_up(ed: &mut Editor) {
+    let Some(user) = ed.library.account.user().map(|u| u.id.clone()) else { return };
+    let Some(id) = ed.projects.current.clone() else { return };
+    let Some(cloud) = ed.projects.get(&id).and_then(|p| p.library(&user)).cloned() else { return };
+    if ed.is_unsaved() || ed.projects.current_draft().is_some() || ed.library.uploading(&id) {
+        return;
+    }
+    if cloud.dirty {
+        if let Ok(bytes) = vox_bytes(&ed.scene) {
+            let thumb = vxr_ops::look::thumbnail(&ed.scene, THUMB).ok();
+            ed.library.upload(&mut ed.projects, &id, bytes, thumb);
+        }
+    } else if cloud.behind() && !cloud.held {
+        ed.library.download(&ed.projects, &id, true);
+    }
 }
 
 /// Load project `id`'s draft as the scene, still unsaved: now, or when the store answers

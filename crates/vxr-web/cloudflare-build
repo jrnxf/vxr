@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # The build command for Cloudflare Workers Builds, whose image (Ubuntu, x86_64) has node and curl
 # but no nix: install the tools nix/flake.nix gives ./dev, at the same versions and checked by
-# sha256, into target/tools/, then run ./build with them. Also runs on an Apple Silicon Mac, to try
-# it outside nix. Bump the versions here with nix/flake.lock and Cargo.lock.
+# sha256, into target/tools/, install the Worker's npm packages (package-lock.json), then run
+# ./build with them. Also runs on an Apple Silicon Mac, to try it outside nix. Bump the versions
+# here with nix/flake.lock and Cargo.lock.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/../.." && pwd)"
@@ -84,4 +85,7 @@ cargo --version
 wasm-bindgen --version
 wasm-opt --version
 node --version
-VXR_TOOLS=path "$here/build"
+npm ci --prefix "$here" --no-audit --no-fund
+# The production Turnstile widget's site key (public), for vxr.jrnxf.co; a build variable of the
+# same name overrides it.
+TURNSTILE_SITE_KEY="${TURNSTILE_SITE_KEY:-0x4AAAAAAFyaVEV7xpBkZE27}" VXR_TOOLS=path "$here/build"

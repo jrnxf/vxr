@@ -311,6 +311,7 @@ fn run_steps(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     host_actions()?;
     new_scene_command(dir)?;
     projects(dir)?;
+    library(dir)?;
     scene_tree(dir)?;
     to_object(dir)?;
     organize(dir)?;
@@ -919,6 +920,14 @@ impl Platform for Fake {
         self.calls.push(format!("theme {id}"));
         Ok(())
     }
+    fn open_account(&mut self) {
+        self.calls.push("account".into());
+    }
+    fn export_vox(&mut self, name: &str, bytes: &[u8]) -> Result<Option<String>, String> {
+        self.calls.push(format!("export_vox {name}"));
+        self.vox = bytes.to_vec();
+        Ok(Some(name.into()))
+    }
 }
 
 /// The file actions the UI asks of a host, run by the one [`run_action`] both hosts use,
@@ -1413,6 +1422,287 @@ fn projects(dir: &Path) -> Result<(), String> {
     check(
         kept && s.ed.quit && !s.ed.is_unsaved() && p.calls.last().is_some_and(|c| c.starts_with("save_vox")),
         "Save (or Enter) saves and closes; a cancelled save dialog keeps the window".into(),
+    )
+}
+
+/// The account and its library (`sync.rs`), as two browsers signed in to one stand-in library
+/// (`FakeLibrary`, which answers as the Worker does): with sign-in off the projects menu has
+/// no account row; signed out it offers Sign in, which opens the account page; signed in, Save
+/// puts a new scene in the library (no file dialog) and the row says so; the other browser
+/// lists it, opens it from the library and saves a newer version, which the first one takes
+/// when its tab comes back; a save over a version it never saw keeps both, this one as a
+/// conflicted copy; a file from this device saves to its file until Add to library; Download
+/// .vox hands over the scene; a save while the library is out of reach goes up once it is
+/// back; a save the library refuses stays here, and is kept as its own project when another
+/// device saves a newer version; and a file picked from this device never takes a library
+/// project's place in the library.
+fn library(dir: &Path) -> Result<(), String> {
+    use vxr_app::host::{fetched, open};
+    use vxr_app::projects::{Memory, Projects};
+    use vxr_app::sync::{Account, FakeLibrary};
+    // Answer every call the editor queued, and those the answers queue, as the page does.
+    let sync = |s: &mut Shot, p: &mut Fake, server: &mut FakeLibrary| {
+        loop {
+            let calls = s.ed.library.take_out();
+            if calls.is_empty() {
+                break;
+            }
+            for call in calls {
+                let reply = server.answer(&call);
+                fetched(&mut s.ed, p, call.id, reply);
+            }
+        }
+        s.frames(2);
+    };
+    let device = |s: &mut Shot, clock: f64| {
+        let mem = Memory::default();
+        mem.clock.set(clock);
+        s.ed.projects = Projects::load(Box::new(mem));
+        s.ed.projects.reset(s.ed.scene.history().position());
+        s.ed.ui.coach = false;
+        s.frames(3);
+    };
+    let edit = |s: &mut Shot, at: [i32; 3], slot: u8| {
+        let cell = s.ed.scene.to_map(at);
+        s.ed.scene.edit([(cell, slot)]);
+        s.frames(2);
+    };
+    // Whether the scene on screen is the library's project `name` as it holds it now.
+    let holds = |s: &Shot, server: &FakeLibrary, name: &str| {
+        server.projects.iter().find(|p| p.name == name).is_some_and(|p| {
+            Scene::from_vox(&p.bytes).is_ok_and(|l| l.world_voxels(false) == s.ed.scene.world_voxels(false))
+        })
+    };
+    let menu = |s: &mut Shot| -> Result<(), String> {
+        if !s.ed.ui.projects_open {
+            s.ui_click("scene-select")?;
+        }
+        s.frames(2);
+        Ok(())
+    };
+    let row = |s: &Shot, k: usize| s.ed.ui.projects.get(k).map(|r| r.when.clone()).unwrap_or_default();
+
+    let mut a = Shot::new(Scene::new(NEW_SIZE), "Untitled", 2.0)?;
+    device(&mut a, 1.8e9);
+    let mut pa = Fake::default();
+    menu(&mut a)?;
+    check(
+        a.ed.ui.account.is_none() && !a.ed.ui.hits.contains_key("projects-sign-in"),
+        "with sign-in off (the desktop, or a page with no Worker) the projects menu has no account row".into(),
+    )?;
+
+    let mut server = FakeLibrary::signed_in("u1");
+    server.user = None;
+    a.ed.library.check();
+    sync(&mut a, &mut pa, &mut server);
+    menu(&mut a)?;
+    let out = matches!(a.ed.library.account, Account::Out) && a.ed.ui.hits.contains_key("projects-sign-in");
+    a.save_png(&dir.join("app-2x-library-signed-out.png"))?;
+    a.ui_click("projects-sign-in")?;
+    serve(&mut a, &mut pa);
+    check(
+        out && pa.calls.last().is_some_and(|c| c == "account") && !a.ed.ui.projects_open,
+        format!("signed out, the menu offers Sign in, which opens the account page ({:?})", pa.calls.last()),
+    )?;
+
+    // Signed in: Save puts the new scene in the library, with no file dialog.
+    server.user = Some("u1".into());
+    a.ed.library.check();
+    sync(&mut a, &mut pa, &mut server);
+    edit(&mut a, [0, 0, 0], 3);
+    edit(&mut a, [1, 0, 0], 3);
+    run_action(&mut a.ed, &mut pa, Action::Save);
+    sync(&mut a, &mut pa, &mut server);
+    let up = server.projects.first().cloned();
+    let toast = a.ed.ui.toast_text().map(str::to_string);
+    check(
+        matches!(a.ed.library.account, Account::In(_))
+            && up.as_ref().is_some_and(|u| u.name == "Untitled" && u.version == "v1" && !u.thumb.is_empty())
+            && !a.ed.is_unsaved()
+            && a.ed.path.is_none()
+            && !pa.calls.iter().any(|c| c.starts_with("save_vox"))
+            && toast.as_deref() == Some("Saved Untitled to your library"),
+        format!("signed in, Save puts a new scene in the library with its thumbnail, no file dialog ({toast:?})"),
+    )?;
+    menu(&mut a)?;
+    let when = row(&a, 0);
+    check(
+        when.ends_with("· library")
+            && a.ed.ui.hits.contains_key("projects-account")
+            && a.ed.ui.account.as_ref().is_some_and(|r| r.signed_in && r.used > 0 && r.cap == server.limit),
+        format!("the row says it is in the library, and the menu shows the library's use and Account ({when:?})"),
+    )?;
+    a.save_png(&dir.join("app-2x-library.png"))?;
+    a.ed.ui.projects_open = false;
+
+    // Another browser lists it, opens it from the library and saves a newer version.
+    let mut b = Shot::new(Scene::new(NEW_SIZE), "Untitled", 1.0)?;
+    device(&mut b, 1.8e9 + 60.0);
+    let mut pb = Fake::default();
+    b.ed.library.check();
+    sync(&mut b, &mut pb, &mut server);
+    menu(&mut b)?;
+    let listed = b.ed.ui.projects.first().is_some_and(|r| r.name == "Untitled" && r.thumb.is_some())
+        && row(&b, 0).ends_with("· in library");
+    b.ui_click("project-0")?;
+    serve(&mut b, &mut pb);
+    sync(&mut b, &mut pb, &mut server);
+    check(
+        listed && b.voxels() == 2 && !b.ed.is_unsaved() && b.ed.ui.scene_name == "Untitled",
+        format!("another browser lists it with its thumbnail and opens it from the library ({} voxels)", b.voxels()),
+    )?;
+    // Cells the scene has (a scene read from a file is as big as what it holds).
+    edit(&mut b, [0, 0, 0], 5);
+    run_action(&mut b.ed, &mut pb, Action::Save);
+    sync(&mut b, &mut pb, &mut server);
+
+    // The first browser's tab comes back: it takes the newer version.
+    a.ed.library.check();
+    sync(&mut a, &mut pa, &mut server);
+    let toast = a.ed.ui.toast_text().map(str::to_string);
+    check(
+        holds(&a, &server, "Untitled")
+            && server.projects[0].version != up.map(|u| u.version).unwrap_or_default()
+            && !a.ed.is_unsaved()
+            && toast.as_deref() == Some("Updated Untitled from your library"),
+        format!("back in the first browser, the scene on screen takes the newer version ({toast:?})"),
+    )?;
+
+    // Both save over v2: the second to arrive keeps both, as a conflicted copy.
+    edit(&mut b, [1, 0, 0], 6);
+    run_action(&mut b.ed, &mut pb, Action::Save);
+    sync(&mut b, &mut pb, &mut server);
+    edit(&mut a, [0, 0, 0], 7);
+    run_action(&mut a.ed, &mut pa, Action::Save);
+    sync(&mut a, &mut pa, &mut server);
+    let names: Vec<_> = server.projects.iter().map(|p| p.name.clone()).collect();
+    check(
+        names == ["Untitled", "Untitled (conflicted copy)"]
+            && a.ed.ui.scene_name == "Untitled (conflicted copy)"
+            && !a.ed.is_unsaved()
+            && a.ed.ui.toast_text().is_some_and(|t| t.contains("kept both")),
+        format!("a save over a version this browser never saw keeps both ({names:?}, {:?})", a.ed.ui.toast_text()),
+    )?;
+    b.ed.library.check();
+    sync(&mut b, &mut pb, &mut server);
+    check(
+        b.ed.projects.list().len() == 2 && holds(&b, &server, "Untitled"),
+        format!("the other browser lists the copy and keeps its own version ({} projects)", b.ed.projects.list().len()),
+    )?;
+    drop(b);
+
+    // A file from this device saves to its file, until Add to library.
+    let file = Opened {
+        name: "house.vox".into(),
+        bytes: house().to_vox()?,
+        path: Some("house.vox".into()),
+        ..Default::default()
+    };
+    pa.vox = file.bytes.clone();
+    open(&mut a.ed, &mut pa, file);
+    a.frames(2);
+    edit(&mut a, [0, 9, 0], 3);
+    run_action(&mut a.ed, &mut pa, Action::Save);
+    sync(&mut a, &mut pa, &mut server);
+    let to_file = pa.calls.last().is_some_and(|c| c.starts_with("save_vox house.vox")) && server.projects.len() == 2;
+    menu(&mut a)?;
+    let offered = a.ed.ui.hits.contains_key("projects-add");
+    a.ui_click("projects-add")?;
+    serve(&mut a, &mut pa);
+    sync(&mut a, &mut pa, &mut server);
+    check(
+        to_file
+            && offered
+            && server.projects.iter().any(|p| p.name == "house")
+            && a.ed.ui.toast_text() == Some("Saved house.vox to your library"),
+        format!("a file from this device saves to its file, until Add to library ({:?})", a.ed.ui.toast_text()),
+    )?;
+    run_action(&mut a.ed, &mut pa, Action::DownloadVox);
+    check(
+        pa.calls.last().is_some_and(|c| c == "export_vox house.vox") && Scene::from_vox(&pa.vox).is_ok(),
+        format!("Download .vox hands over the scene beside its library copy ({:?})", pa.calls.last()),
+    )?;
+
+    // Out of reach: the save stays here and goes up once the library answers again.
+    let before = server.projects.iter().find(|p| p.name == "house").map(|p| p.version.clone());
+    server.offline = true;
+    edit(&mut a, [1, 9, 0], 3);
+    run_action(&mut a.ed, &mut pa, Action::Save);
+    sync(&mut a, &mut pa, &mut server);
+    let kept = a.ed.ui.toast_text().is_some_and(|t| t.contains("could not be reached")) && !a.ed.is_unsaved();
+    menu(&mut a)?;
+    let waiting = a.ed.ui.projects.iter().find(|r| r.current).map(|r| r.when.clone()).unwrap_or_default();
+    a.ed.ui.projects_open = false;
+    server.offline = false;
+    a.ed.library.check();
+    sync(&mut a, &mut pa, &mut server);
+    let after = server.projects.iter().find(|p| p.name == "house").map(|p| p.version.clone());
+    check(
+        kept && waiting.ends_with("· not in library yet")
+            && after.is_some()
+            && after != before
+            && holds(&a, &server, "house"),
+        format!(
+            "a save while the library is out of reach stays here ({waiting:?}) and goes up when it is back ({after:?})"
+        ),
+    )?;
+
+    // Over the file limit: the library refuses the save, which stays here and does not go up
+    // by itself. Another device then saves a newer version: this one is kept as its own
+    // project, and the library's is listed beside it.
+    server.file_limit = 64;
+    edit(&mut a, [2, 9, 0], 3);
+    run_action(&mut a.ed, &mut pa, Action::Save);
+    sync(&mut a, &mut pa, &mut server);
+    let refused = a.ed.ui.toast_text().is_some_and(|t| t.starts_with("Kept house.vox on this device"))
+        && !a.ed.library.busy()
+        && !a.ed.is_unsaved();
+    server.file_limit = 20 << 20;
+    let house_id = server.projects.iter().find(|p| p.name == "house").map(|p| p.id.clone()).unwrap_or_default();
+    server.put(Some(&house_id), "house", house().to_vox()?);
+    let mine = a.ed.scene.world_voxels(false);
+    a.ed.library.check();
+    sync(&mut a, &mut pa, &mut server);
+    let theirs = a.ed.projects.list().iter().find(|p| p.name == "house" && p.stub()).map(|p| p.id.clone());
+    let toast = a.ed.ui.toast_text().map(str::to_string);
+    check(
+        refused
+            && a.ed.scene.world_voxels(false) == mine
+            && a.ed.ui.scene_name == "house (conflicted copy)"
+            && theirs.is_some()
+            && toast.as_deref().is_some_and(|t| t.contains("kept this device's edits")),
+        format!(
+            "a save the library refused stays here, and is kept as its own project when the library moves on ({toast:?})"
+        ),
+    )?;
+
+    // A file picked from this device that lands in the library's project (in the browser, a
+    // file input with the same name) is a file of this device: its save goes to the file, and
+    // the library's version is listed again.
+    let bytes = house().to_vox()?;
+    let picked = Opened {
+        name: "house".into(),
+        copy: bytes.len() as u64,
+        bytes,
+        id: theirs,
+        picked: true,
+        ..Default::default()
+    };
+    open(&mut a.ed, &mut pa, picked);
+    sync(&mut a, &mut pa, &mut server);
+    let version = server.projects.iter().find(|p| p.name == "house").map(|p| p.version.clone());
+    edit(&mut a, [3, 9, 0], 3);
+    run_action(&mut a.ed, &mut pa, Action::Save);
+    sync(&mut a, &mut pa, &mut server);
+    let listed = a.ed.projects.list().iter().filter(|p| p.name == "house" && p.stub()).count();
+    check(
+        pa.calls.last().is_some_and(|c| c.starts_with("save_vox house"))
+            && server.projects.iter().find(|p| p.name == "house").map(|p| p.version.clone()) == version
+            && listed == 1,
+        format!(
+            "a file picked from this device saves to its file, and the library's is listed again ({:?})",
+            pa.calls.last()
+        ),
     )
 }
 

@@ -19,8 +19,8 @@ use crate::render::{EXPORT_SIZES, Export};
 use crate::review::{Answer, Review, Script};
 use crate::touch::Touches;
 use crate::ui::{
-    Action, AiAction, ChatView, EditRow, FontBytes, Hybrid, LayerRow, Named, ProjectRow, RestoreAsk, Stats, TreeRow,
-    group_thousands,
+    AccountRow, Action, AiAction, ChatView, EditRow, FontBytes, Hybrid, LayerRow, Named, ProjectRow, RestoreAsk, Stats,
+    TreeRow, group_thousands,
 };
 
 /// Input quiet for this long raises the preview's budget (spikes/preview/RESULTS.md).
@@ -192,6 +192,8 @@ pub struct Editor {
     /// The projects list and the open scene's autosaved draft (in memory until the host
     /// gives it its store).
     pub projects: Projects,
+    /// The optional account (in the browser) and the library its projects sync with.
+    pub library: crate::sync::Library,
     /// The projects list was open last frame: opening it reads the list again.
     projects_shown: bool,
     /// The window is to close (the close confirm's Save or Don't save): the native host exits.
@@ -319,6 +321,7 @@ impl Editor {
             agents: Agents::default(),
             agents_shown: None,
             projects: Projects::default(),
+            library: crate::sync::Library::default(),
             projects_shown: false,
             quit: false,
         };
@@ -429,6 +432,22 @@ impl Editor {
             when: crate::projects::ago(now, o.saved),
             changed: o.changed,
         });
+        // The Cmd-K account commands read this with the menu shut too.
+        self.ui.account = match &self.library.account {
+            crate::sync::Account::Off => None,
+            crate::sync::Account::Out => Some(AccountRow { signed_in: false, used: 0, cap: 0, can_add: false }),
+            crate::sync::Account::In(u) => Some(AccountRow {
+                signed_in: true,
+                used: u.usage,
+                cap: u.limit,
+                can_add: !self
+                    .projects
+                    .current
+                    .as_ref()
+                    .and_then(|id| self.projects.get(id))
+                    .is_some_and(|p| p.library(&u.id).is_some()),
+            }),
+        };
         let opening = self.ui.projects_open && !self.projects_shown;
         self.projects_shown = self.ui.projects_open;
         if !self.ui.projects_open {
@@ -440,15 +459,25 @@ impl Editor {
         }
         let current = self.projects.current.clone();
         let unsaved = self.ui.unsaved;
+        let user = self.library.account.user().map(|u| u.id.clone());
+        let library = &self.library;
         let rows: Vec<(String, ProjectRow)> = self
             .projects
             .list()
             .iter()
             .map(|p| {
                 let here = current.as_ref() == Some(&p.id);
+                let ago = crate::projects::ago(now, p.edited);
+                let when = match user.as_deref().and_then(|u| p.library(u)) {
+                    None => ago,
+                    Some(_) if p.stub() => format!("{ago} · in library"),
+                    Some(c) if c.dirty || library.uploading(&p.id) => format!("{ago} · not in library yet"),
+                    Some(c) if c.behind() => format!("{ago} · newer in library"),
+                    Some(_) => format!("{ago} · library"),
+                };
                 let row = ProjectRow {
                     name: p.name.clone(),
-                    when: crate::projects::ago(now, p.edited),
+                    when,
                     unsaved: p.draft.is_some() || (here && unsaved),
                     current: here,
                     thumb: None,

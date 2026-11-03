@@ -13,6 +13,7 @@
 //!   and Open, Save and the exports, with a `Platform` for what differs.
 //! - [`projects`]: the projects list and the autosaved drafts, in a `Store` per platform.
 //! - [`render`]: the Render panel's settings and the PNG render export.
+//! - [`sync`]: the optional account (in the browser) and the library its projects sync with.
 //! - [`review`]: the review step of an AI change, and scripts that drive it.
 //! - [`theme`]: the UI themes' colour tokens and the editor view's colours.
 
@@ -31,6 +32,7 @@ mod parity;
 pub mod projects;
 pub mod render;
 pub mod review;
+pub mod sync;
 pub mod theme;
 pub mod touch;
 pub mod ui;

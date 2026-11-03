@@ -1654,6 +1654,9 @@ async () => {
       await clickAt('scene-select');
       s = st();
       step('the scene name opens the projects list, newest first, with the Storage line', s.projectsMenu && s.projects[0].name === file && !!at('project-0') && !!at('projects-clear') && s.storage[0] > 0 && s.storage[1] === 200 * 1024 * 1024, JSON.stringify([s.projectsMenu, s.projects.map((p) => p.name), s.storage]));
+      // The check server has no /api, so /api/me answers 404: sign-in is off and the list has
+      // no Library row.
+      step('with no /api the account is off and the list has no Library row', s.account === 'off' && !at('projects-sign-in') && !at('projects-account'), JSON.stringify(s.account));
       await key('Escape');
       step('Escape closes the list', !st().projectsMenu);
       const other = await fromList(1);

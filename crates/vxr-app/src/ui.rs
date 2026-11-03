@@ -368,6 +368,13 @@ pub enum Action {
     SaveAndClose,
     /// The close confirm's Don't save: delete the draft and close.
     CloseDiscard,
+    /// Open the account page, to sign in or to see the account (for the host).
+    SignIn,
+    /// Save the scene to the account's library, even when it has a file of its own here
+    /// (for the host).
+    AddToLibrary,
+    /// Download the scene as a `.vox` file, wherever its project is kept (for the host).
+    DownloadVox,
 }
 
 /// The projects list's row pitch, and its footer's height (the Storage line).
@@ -385,6 +392,17 @@ pub struct ProjectRow {
     /// It is the open scene.
     pub current: bool,
     pub thumb: Option<egui::TextureId>,
+}
+
+/// The projects list's account line, where there is sign-in (the browser): set by the editor.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AccountRow {
+    pub signed_in: bool,
+    /// The library's use and cap, in bytes.
+    pub used: u64,
+    pub cap: u64,
+    /// The open scene is not in the library yet.
+    pub can_add: bool,
 }
 
 /// What the restore prompt says (set by the editor while a draft is offered).
@@ -653,6 +671,8 @@ pub struct Hybrid {
     pub projects: Vec<ProjectRow>,
     pub storage: (u64, u64),
     pub clear_armed: bool,
+    /// The account line, where there is sign-in (set by the editor).
+    pub account: Option<AccountRow>,
     /// The restore prompt, while a draft is offered back.
     pub restore: Option<RestoreAsk>,
     /// The first row the projects list shows.
@@ -905,6 +925,10 @@ const COMMANDS: &[Command] = &[
     Command { label: "Open .vox", keys: &["⌘", "O"], run: |h| h.actions.push(Action::Open) },
     Command { label: "Projects", keys: &[], run: |h| h.toggle_projects() },
     Command { label: "Save .vox", keys: &["⌘", "S"], run: |h| h.actions.push(Action::Save) },
+    Command { label: "Download .vox", keys: &[], run: |h| h.actions.push(Action::DownloadVox) },
+    Command { label: "Sign in", keys: &[], run: |h| h.actions.push(Action::SignIn) },
+    Command { label: "Account", keys: &[], run: |h| h.actions.push(Action::SignIn) },
+    Command { label: "Add to library", keys: &[], run: |h| h.actions.push(Action::AddToLibrary) },
     Command { label: "Embed", keys: &[], run: |h| h.actions.push(Action::Embed) },
     Command { label: "Show palette", keys: &[], run: |h| h.toggle_palette() },
     Command { label: "Edit color", keys: &[], run: |h| h.open_color_edit() },
@@ -986,6 +1010,7 @@ impl Hybrid {
             projects: Vec::new(),
             storage: (0, 0),
             clear_armed: false,
+            account: None,
             restore: None,
             projects_scroll: 0,
             export_x: 0.0,
@@ -3330,9 +3355,15 @@ impl Hybrid {
 
     /// The rows the projects list shows at once, and its height, for a screen this tall.
     fn projects_layout(&self, screen: Rect) -> (usize, f32) {
-        let fits = ((screen.height() - 62.0 - 12.0 - 36.0 - 6.0 - PROJECTS_FOOT) / PROJECT_STEP).floor().max(1.0);
+        let foot = self.projects_foot();
+        let fits = ((screen.height() - 62.0 - 12.0 - 36.0 - 6.0 - foot) / PROJECT_STEP).floor().max(1.0);
         let rows = self.projects.len().clamp(1, (fits as usize).min(7));
-        (rows, 36.0 + PROJECT_STEP * rows as f32 + 4.0 + PROJECTS_FOOT)
+        (rows, 36.0 + PROJECT_STEP * rows as f32 + 4.0 + foot)
+    }
+
+    /// The footer's height: the Storage line, and the account line above it.
+    fn projects_foot(&self) -> f32 {
+        if self.account.is_some() { 2.0 * PROJECTS_FOOT } else { PROJECTS_FOOT }
     }
 
     // The projects list, under the scene name: every scene opened or made here, its draft and
@@ -3355,6 +3386,8 @@ impl Hybrid {
         let armed = self.clear_armed;
         let mut open = None;
         let mut clear = false;
+        let mut account_press = None;
+        let account = self.account.clone();
         let mut wheel = 0.0;
         let mut hits = Vec::new();
         Self::panel_filled(ctx, "projects-menu", rect, Order::Foreground, th().panel_solid, |ui, rect| {
@@ -3434,6 +3467,45 @@ impl Hybrid {
                     open = Some(k);
                 }
             }
+            // The account: sign in, or the library's use and Add to library (or Account).
+            if let Some(a) = &account {
+                let fy = rect.bottom() - 2.0 * PROJECTS_FOOT;
+                ui.painter().line_segment(
+                    [pos2(rect.left() + 1.0, fy + 0.5), pos2(rect.right() - 1.0, fy + 0.5)],
+                    Stroke::new(1.0, th().line),
+                );
+                let cy = fy + PROJECTS_FOOT / 2.0;
+                let p = ui.painter();
+                let g = p.layout_no_wrap("Library".into(), sans(12.0), th().muted);
+                p.galley(pos2(rect.left() + 12.0, cy - g.size().y / 2.0), g.clone(), th().muted);
+                let (note, font) = if a.signed_in {
+                    (format!("{} of {}", crate::projects::bytes(a.used), crate::projects::bytes(a.cap)), mono(11.0))
+                } else {
+                    ("Sync between browsers".to_string(), sans(11.0))
+                };
+                let note = p.layout_no_wrap(note, font, th().faint);
+                p.galley(pos2(rect.left() + 12.0 + g.size().x + 8.0, cy - note.size().y / 2.0), note, th().faint);
+                let (text, id, action) = match (a.signed_in, a.can_add) {
+                    (false, _) => ("Sign in", "projects-sign-in", Action::SignIn),
+                    (true, true) => ("Add to library", "projects-add", Action::AddToLibrary),
+                    (true, false) => ("Account", "projects-account", Action::SignIn),
+                };
+                let label = p.layout_no_wrap(text.into(), sans(12.0), th().muted);
+                let bw = label.size().x + 20.0;
+                let b = Rect::from_min_size(pos2(rect.right() - 8.0 - bw, cy - 13.0), vec2(bw, 26.0));
+                let resp = ui.interact(b, Id::unique(id), Sense::click());
+                hits.push((id.to_string(), b));
+                let p = ui.painter();
+                p.rect_stroke(b, CornerRadius::same(7), Stroke::new(1.0, th().line), StrokeKind::Inside);
+                if resp.hovered() {
+                    p.rect_filled(b, CornerRadius::same(7), th().hover);
+                }
+                let color = if resp.hovered() { th().text } else { th().muted };
+                p.galley(pos2(b.left() + 10.0, cy - label.size().y / 2.0), label, color);
+                if resp.clicked() {
+                    account_press = Some(action);
+                }
+            }
             // The store: what it holds, and Clear.
             let fy = rect.bottom() - PROJECTS_FOOT;
             ui.painter().line_segment(
@@ -3491,6 +3563,10 @@ impl Hybrid {
                 self.clear_armed = true;
             }
         }
+        if let Some(action) = account_press {
+            self.projects_open = false;
+            self.actions.push(action);
+        }
         if let Some(k) = open {
             self.projects_open = false;
             if !self.projects[k].current {
@@ -3503,6 +3579,18 @@ impl Hybrid {
     }
 
     /// Open or close the projects list.
+    /// Whether Cmd-K offers the command: the account's only where there is sign-in.
+    fn command_shown(&self, label: &str) -> bool {
+        let signed_in = self.account.as_ref().map(|a| a.signed_in);
+        match label {
+            "Download .vox" => signed_in.is_some(),
+            "Sign in" => signed_in == Some(false),
+            "Account" => signed_in == Some(true),
+            "Add to library" => signed_in == Some(true) && self.account.as_ref().is_some_and(|a| a.can_add),
+            _ => true,
+        }
+    }
+
     pub fn toggle_projects(&mut self) {
         self.cmdk = None;
         self.projects_open = !self.projects_open;
@@ -5533,8 +5621,9 @@ impl Hybrid {
     // Cmd-K: not in the mockups; styled like #help (a centred .panel).
     fn cmdk(&mut self, ctx: &Context, screen: Rect) {
         let query = self.cmdk.clone().unwrap_or_default().to_lowercase();
-        let hits: Vec<usize> =
-            (0..COMMANDS.len()).filter(|&i| COMMANDS[i].label.to_lowercase().contains(&query)).collect();
+        let hits: Vec<usize> = (0..COMMANDS.len())
+            .filter(|&i| self.command_shown(COMMANDS[i].label) && COMMANDS[i].label.to_lowercase().contains(&query))
+            .collect();
         self.cmdk_sel = self.cmdk_sel.min(hits.len().saturating_sub(1));
         let (mut run, mut close, mut ask) = (None, false, false);
         ctx.input_mut(|i| {
