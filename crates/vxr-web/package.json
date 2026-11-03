@@ -1,7 +1,6 @@
 {
   "name": "vxr-web",
   "private": true,
-  "type": "module",
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc -p . && tsc -p account"

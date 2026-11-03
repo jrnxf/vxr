@@ -5,3 +5,4 @@ BETTER_AUTH_SECRET=replace-with-32-or-more-random-characters
 TURNSTILE_SECRET_KEY=1x0000000000000000000000000000000AA
 # Prints sign-in links to the wrangler log instead of sending email (only on localhost).
 EMAIL_SENDER=log
+# Production sends links through Resend with the RESEND_API_KEY Worker secret; leave it out here.

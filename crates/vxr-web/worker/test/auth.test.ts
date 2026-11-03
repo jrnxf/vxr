@@ -1,7 +1,7 @@
 import { env } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
 import { handle, MAIL_PER_HOUR } from '../index';
-import { mailerFor } from '../mail';
+import { FROM, mailerFor, resendMailer, signInMail } from '../mail';
 import { turnstile } from '../turnstile';
 import { ORIGIN, World } from './helpers';
 
@@ -102,6 +102,23 @@ describe('sign-in', () => {
     expect(mailerFor({ EMAIL_SENDER: 'log' }, new URL('http://localhost:8787/'))).not.toBeNull();
     expect(mailerFor({ EMAIL_SENDER: 'log' }, new URL('https://vxr.jrnxf.co/'))).toBeNull();
     expect(mailerFor({}, new URL('http://localhost:8787/'))).toBeNull();
+    expect(mailerFor({ RESEND_API_KEY: 're_test' }, new URL('https://vxr.jrnxf.co/'))).not.toBeNull();
+  });
+
+  it('sends a link through Resend', async () => {
+    const seen: { url: string; init: RequestInit }[] = [];
+    const answer = (status: number) =>
+      (async (url: RequestInfo | URL, init?: RequestInit) => {
+        seen.push({ url: String(url), init: init! });
+        return new Response('{}', { status });
+      }) as typeof fetch;
+    await resendMailer('re_test', answer(200)).send(signInMail('dee@example.com', 'https://example.com/link'));
+    expect(seen[0].url).toBe('https://api.resend.com/emails');
+    expect(new Headers(seen[0].init.headers).get('authorization')).toBe('Bearer re_test');
+    const body = JSON.parse(String(seen[0].init.body));
+    expect(body).toMatchObject({ from: FROM, to: ['dee@example.com'], subject: 'Sign in to vxr' });
+    expect(body.text).toContain('https://example.com/link');
+    await expect(resendMailer('re_test', answer(422)).send(signInMail('dee@example.com', 'x'))).rejects.toThrow('422');
   });
 
   it('checks Turnstile tokens with siteverify', async () => {

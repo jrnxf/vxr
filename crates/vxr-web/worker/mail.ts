@@ -1,7 +1,7 @@
-// Sending the sign-in link. One small interface, so the sender can be chosen later without
-// touching the sign-in code: today there is the log sender (prints the link, for `wrangler dev` on
-// this machine only) and no sender (email sign-in is off). Tests pass their own, which keeps what
-// it was given.
+// Sending the sign-in link, behind one small interface: Resend in production (its HTTP API, with
+// the RESEND_API_KEY Worker secret), the log sender for `wrangler dev` on this machine only (prints
+// the link), or no sender (email sign-in is off). Tests pass their own, which keeps what it was
+// given, and never reach Resend.
 
 export interface Mail {
   to: string;
@@ -20,11 +20,30 @@ export const logMailer: Mailer = {
   },
 };
 
+/** The address sign-in links come from (its domain is verified at Resend). */
+export const FROM = 'vxr <vxr@jrnxf.co>';
+const RESEND = 'https://api.resend.com/emails';
+
+/** Sends through Resend's HTTP API with `key`; `post` is `fetch` but for the tests. */
+export function resendMailer(key: string, post: typeof fetch = fetch): Mailer {
+  return {
+    async send(mail) {
+      const res = await post(RESEND, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ from: FROM, to: [mail.to], subject: mail.subject, text: mail.text }),
+      });
+      if (!res.ok) throw new Error(`resend answered ${res.status}`);
+    },
+  };
+}
+
 const local = new Set(['localhost', '127.0.0.1', '[::1]']);
 
-/** The sender for this Worker: EMAIL_SENDER=log on a local host, or none. */
-export function mailerFor(env: { EMAIL_SENDER?: string }, url: URL): Mailer | null {
-  if (env.EMAIL_SENDER === 'log' && local.has(url.hostname)) return logMailer;
+/** The sender for this Worker: EMAIL_SENDER=log on a local host, else Resend when RESEND_API_KEY is set, else none. */
+export function mailerFor(env: { EMAIL_SENDER?: string; RESEND_API_KEY?: string }, url: URL): Mailer | null {
+  if (env.EMAIL_SENDER === 'log') return local.has(url.hostname) ? logMailer : null;
+  if (env.RESEND_API_KEY) return resendMailer(env.RESEND_API_KEY);
   return null;
 }
 

@@ -4,7 +4,7 @@ fast voxel scenes: an open-source voxel scene editor (Rust, wgpu) with a one-tag
 
 ## Stack
 
-- Rust core on wgpu (Metal, Vulkan, DX12, WebGPU in the browser). Desktop first; the browser build and the embed come from the same code. No server.
+- Rust core on wgpu (Metal, Vulkan, DX12, WebGPU in the browser). Desktop first; the browser build and the embed come from the same code. No server for the editor: the only server code is the optional account and cloud library, a Cloudflare Worker in TypeScript (`crates/vxr-web/worker/`) behind `/api/*` and `/account`, with D1 and R2.
 - UI drawn in Rust with egui (picked by test 3, see `docs/decisions.md`) so the Hybrid UI runs native and in the browser.
 - The real build is the Cargo workspace at the root (Phase 3, in progress). Run everything through `./dev <command>`, a Nix dev shell (`nix/flake.nix`: Rust with the wasm32 target, wasm-bindgen, wasm-opt, twiggy, brotli). `./dev --fuzz <command>` adds nightly and cargo-fuzz for the open-path fuzz target in `crates/vxr-core/fuzz` (its README has the commands).
 - The Phase 2 spikes in `spikes/` build separately through `spikes/dev <command>`. Wrap timed GPU runs in `spikes/gpu-lock` so benchmarks never share the GPU.
@@ -19,7 +19,8 @@ fast voxel scenes: an open-source voxel scene editor (Rust, wgpu) with a one-tag
 - `./dev cargo build --target wasm32-unknown-unknown` checks the browser target.
 - Browser editor: `crates/vxr-web/build` makes the static site in the git-ignored `crates/vxr-web/dist/`; serve that folder to try it. It needs WebGPU. `crates/vxr-web/check` (after the build; needs `chrome-devtools-axi` on the PATH) checks it end to end in headless Chrome through `check.js`, prints `ok` or `FAIL` per step (exit code 1 on failure) and writes screenshots into the git-ignored `crates/vxr-web/shots/`. The page API it drives (`window.vxr.state()`, `hit(name)`, `color(slot)`, `material(slot)`) and what it covers: `docs/checks.md`.
 - Extend `shot.rs` and `check.js` with each new feature, and add it to `docs/controls.md` and `docs/checks.md`.
-- `crates/vxr-web/deploy` builds and deploys it to https://vxr.jrnxf.co (Cloudflare Workers static assets, `crates/vxr-web/wrangler.jsonc`), only from a clean `main`.
+- The Worker and the account page: `npm ci --prefix crates/vxr-web` once, then `npm --prefix crates/vxr-web run typecheck` and `npm --prefix crates/vxr-web test` (vitest in workerd with local D1 and R2; no test calls Turnstile or Resend). To try sign-in, copy `crates/vxr-web/.dev.vars.example` to `.dev.vars` and run `npx wrangler d1 migrations apply vxr --local` and `npx wrangler dev --local` in `crates/vxr-web` after the build; emailed links print to its log. Never point these at the real D1, R2 or secrets.
+- `crates/vxr-web/deploy` builds and deploys it to https://vxr.jrnxf.co (Cloudflare Workers static assets and the Worker, `crates/vxr-web/wrangler.jsonc`), only from a clean `main`.
 - Fixtures are generated in tests (`vxr_vox::fixtures`), never committed as `.vox` files.
 
 ## Where things live

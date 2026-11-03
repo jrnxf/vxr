@@ -86,4 +86,6 @@ wasm-bindgen --version
 wasm-opt --version
 node --version
 npm ci --prefix "$here" --no-audit --no-fund
-VXR_TOOLS=path "$here/build"
+# The production Turnstile widget's site key (public), for vxr.jrnxf.co; a build variable of the
+# same name overrides it.
+TURNSTILE_SITE_KEY="${TURNSTILE_SITE_KEY:-0x4AAAAAAFyaVEV7xpBkZE27}" VXR_TOOLS=path "$here/build"

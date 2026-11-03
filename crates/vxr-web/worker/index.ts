@@ -18,8 +18,10 @@ export interface Env {
   BETTER_AUTH_SECRET?: string;
   /** Checks the Turnstile challenge on sign-up and email links (a Worker secret). */
   TURNSTILE_SECRET_KEY?: string;
-  /** `log` prints sign-in links in `wrangler dev`; unset, email sign-in is off. */
+  /** `log` prints sign-in links in `wrangler dev` instead of sending them. */
   EMAIL_SENDER?: string;
+  /** Sends sign-in links through Resend (a Worker secret). Without it email sign-in is off. */
+  RESEND_API_KEY?: string;
 }
 
 /** What the tests replace: the email sender, the Turnstile check and the limits. */
