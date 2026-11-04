@@ -4,6 +4,8 @@ name: CI
 # released: the repo's local gate (fmt, clippy, the wasm build, cargo test) with the GPU tests
 # running for real on Mesa's software Vulkan (lavapipe), and the headless `--shot` run of the
 # editor's UI. release.yml calls this workflow for a tag, so a release builds only a tested commit.
+# The UI run takes about half an hour, so on a pull request it runs only when the change can affect
+# it (see the scope step of `shot`); a push to main and a call from release.yml always run it.
 on:
   pull_request:
   push:
@@ -72,6 +74,8 @@ jobs:
   # The editor's UI checks (every tool, flyout, Cmd-K command and world mode through the same
   # pointer path as the window), headless, on lavapipe. Each path-traced frame is a set number of
   # samples, so a slow software GPU takes longer and cannot fail a step on timing.
+  # On a pull request the steps after `scope` run only when the PR changes a file the run builds or
+  # loads; otherwise the job still reports a pass, quickly, so it can stay a required check.
   shot:
     name: UI checks
     runs-on: ubuntu-24.04
@@ -79,16 +83,38 @@ jobs:
     env:
       VXR_SHOT_SAMPLES: "1"
     steps:
+      # The pull request's checkout is its merge into the base, so HEAD^1 is the base and two
+      # commits of history are enough to list what the PR changes.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 2
+
+      # The paths the run depends on: the app and the crates it links (vxr-web is not one of them),
+      # the workspace manifests, the island scene's inputs (prototype/), the font fetch and this file.
+      - name: Decide whether the UI checks apply
+        id: scope
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          run=true
+          if [ "$EVENT" = pull_request ]; then
+            files="$(git diff --name-only HEAD^1 HEAD)"
+            if ! grep -E '^(crates/vxr-(app|core|render|vox|ops|mcp|ai)/|Cargo\.(toml|lock)$|prototype/|\.github/workflows/ci\.yml$)' <<<"$files"; then
+              run=false
+              echo "No file the UI checks depend on changed; skipping them."
+            fi
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
 
       - name: Install the Rust toolchain
+        if: steps.scope.outputs.run == 'true'
         run: |
           rustup toolchain install "$RUST" --profile minimal
           rustup default "$RUST"
 
-      - uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+      - if: steps.scope.outputs.run == 'true'
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: |
             ~/.cargo/registry
@@ -98,12 +124,16 @@ jobs:
           restore-keys: cargo-shot-${{ runner.os }}-${{ env.RUST }}-
 
       - name: Install a software Vulkan driver
+        if: steps.scope.outputs.run == 'true'
         run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers
 
-      - run: node prototype/src/build.mjs
-      - run: crates/vxr-app/fetch-fonts
+      - if: steps.scope.outputs.run == 'true'
+        run: node prototype/src/build.mjs
+      - if: steps.scope.outputs.run == 'true'
+        run: crates/vxr-app/fetch-fonts
 
       - name: Run the UI checks
+        if: steps.scope.outputs.run == 'true'
         run: |
           mkdir -p "$RUNNER_TEMP/shots"
           cargo run --release -p vxr-app -- --shot "$RUNNER_TEMP/shots" prototype/demo/scene.vox | tee "$RUNNER_TEMP/shot.log"
