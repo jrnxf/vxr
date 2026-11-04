@@ -47,8 +47,10 @@ extern "C" {
     /// answers with [`App::fetched`]. `headers` alternates names and values.
     #[wasm_bindgen(js_namespace = vxrHost, js_name = fetch)]
     fn page_fetch(id: u32, method: &str, path: &str, headers: js_sys::Array, body: &[u8]);
-    #[wasm_bindgen(js_namespace = vxrHost, js_name = openAccount)]
-    fn page_open_account();
+    /// Run the bot check (Turnstile) for a sign-in email; the page answers with
+    /// [`App::challenged`].
+    #[wasm_bindgen(js_namespace = vxrHost, js_name = challenge)]
+    fn page_challenge();
     #[wasm_bindgen(js_namespace = vxrHost, js_name = storeHold)]
     fn page_store_hold(id: &str);
     #[wasm_bindgen(js_namespace = vxrHost, js_name = storeHeld)]
@@ -176,8 +178,9 @@ impl Platform for Browser {
         Ok(())
     }
 
-    fn open_account(&mut self) {
-        page_open_account();
+    fn challenge(&mut self) -> Option<String> {
+        page_challenge();
+        None
     }
 
     fn export_vox(&mut self, name: &str, bytes: &[u8]) -> Result<Option<String>, String> {
@@ -713,6 +716,28 @@ impl App {
         self.send_library();
     }
 
+    /// Open the account popover, as the top bar's account control does: the landing page's
+    /// Sign in goes into the editor and here.
+    pub fn open_account(&mut self) {
+        self.woken = true;
+        self.host.editor.ui.open_account();
+    }
+
+    /// The bot check the popover asked for answered: its token, or empty when it did not pass
+    /// (or could not load).
+    pub fn challenged(&mut self, token: String) {
+        self.woken = true;
+        vxr_app::host::challenged(&mut self.host.editor, Some(token));
+        self.send_library();
+    }
+
+    /// The bot check shows its widget (Turnstile wants the user to press it) or hides it again:
+    /// the popover makes room for it, under the page's overlay at `hit_rect("account-challenge")`.
+    pub fn challenge_shown(&mut self, on: bool) {
+        self.woken = true;
+        self.host.editor.ui.sign_in.challenge = on;
+    }
+
     /// The Worker answered library call `id` with `status` (0 when it could not be reached),
     /// the version it names (`x-vxr-version`, empty for none) and its body.
     pub fn fetched(&mut self, id: u32, status: u16, version: &str, body: Vec<u8>) {
@@ -790,7 +815,7 @@ impl App {
         let e = &self.host.editor;
         let (c, h) = (&e.cam, e.scene.history());
         format!(
-            r#"{{"voxels":{},"tool":"{:?}","shape":"{:?}","mirror":{},"mirrorAxes":[{},{},{}],"lock":{},"brushSize":{},"sizePanel":{},"lifting":{},"span":{},"selected":{},"region":"{:?}","hasClip":{},"bounds":[{},{},{}],"boundsPanel":{},"slot":{},"colorEdit":{},"slotOp":"{:?}","undo":{},"redo":{},"cmdk":{},"coach":{},"name":{:?},"size":[{},{}],"ppp":{},"cam":[{},{},{},{},{},{}],"ortho":{},"inView":[{},{}],"cameraHints":{},"view":{},"viewPanel":{},"exportMenu":{},"confirmNew":{},"theme":"{}","themeMenu":{},"touch":{},"paletteOpen":{},"themeShown":{:?},"guides":[{},{},{}],"mode":"{}","objects":{},"models":{},"picked":{},"tree":[{}],"treeOn":{},"renaming":{},"layers":[{}],"layerOn":{},"render":{{"shown":{},"spp":{},"rows":{},"current":{},"restarts":{},"timestamps":{},"panel":{},"full":{},"size":[{},{}],"maxSpp":{},"exposure":{},"gamma":{},"vignette":{},"aperture":{},"sky":{},"physicalSky":{},"export":{}}},"review":{},"undoLabel":{},"asks":{:?},"unsaved":{},"projectsMenu":{},"projects":[{}],"current":{},"restore":{},"confirmClose":{},"storage":[{},{}],"account":{},"agents":{{"panel":{},"available":{},"web":{},"allowed":{},"review":{},"connecting":{},"error":{},"fail":{},"code":{:?},"clients":[{}],"edits":[{}],"chip":{:?},"live":[{}],"calls":[{}]}}}}"#,
+            r#"{{"voxels":{},"tool":"{:?}","shape":"{:?}","mirror":{},"mirrorAxes":[{},{},{}],"lock":{},"brushSize":{},"sizePanel":{},"lifting":{},"span":{},"selected":{},"region":"{:?}","hasClip":{},"bounds":[{},{},{}],"boundsPanel":{},"slot":{},"colorEdit":{},"slotOp":"{:?}","undo":{},"redo":{},"cmdk":{},"coach":{},"name":{:?},"size":[{},{}],"ppp":{},"cam":[{},{},{},{},{},{}],"ortho":{},"inView":[{},{}],"cameraHints":{},"view":{},"viewPanel":{},"exportMenu":{},"confirmNew":{},"theme":"{}","themeMenu":{},"touch":{},"paletteOpen":{},"themeShown":{:?},"guides":[{},{},{}],"mode":"{}","objects":{},"models":{},"picked":{},"tree":[{}],"treeOn":{},"renaming":{},"layers":[{}],"layerOn":{},"render":{{"shown":{},"spp":{},"rows":{},"current":{},"restarts":{},"timestamps":{},"panel":{},"full":{},"size":[{},{}],"maxSpp":{},"exposure":{},"gamma":{},"vignette":{},"aperture":{},"sky":{},"physicalSky":{},"export":{}}},"review":{},"undoLabel":{},"asks":{:?},"unsaved":{},"projectsMenu":{},"projects":[{}],"current":{},"restore":{},"confirmClose":{},"storage":[{},{}],"account":{},"signIn":{{"shown":{},"error":{},"checking":{},"challenge":{}}},"toast":{},"agents":{{"panel":{},"available":{},"web":{},"allowed":{},"review":{},"connecting":{},"error":{},"fail":{},"code":{:?},"clients":[{}],"edits":[{}],"chip":{:?},"live":[{}],"calls":[{}]}}}}"#,
             e.scene.map.voxels,
             e.ui.tool,
             e.ui.shape,
@@ -950,8 +975,18 @@ impl App {
             match &e.library.account {
                 vxr_app::sync::Account::Off => r#""off""#.to_string(),
                 vxr_app::sync::Account::Out => r#""out""#.to_string(),
-                vxr_app::sync::Account::In(u) => format!(r#"{{"user":{:?},"usage":{}}}"#, u.id, u.usage),
+                vxr_app::sync::Account::In(u) => format!(
+                    r#"{{"user":{:?},"email":{},"usage":{}}}"#,
+                    u.id,
+                    u.email.as_ref().map_or("null".into(), |m| format!("{m:?}")),
+                    u.usage
+                ),
             },
+            e.ui.sign_in.shown().map_or("null".into(), |v| format!("{v:?}")),
+            e.ui.sign_in.error.as_ref().map_or("null".into(), |m| format!("{m:?}")),
+            e.ui.sign_in.checking,
+            e.ui.sign_in.challenge,
+            e.ui.toast_text().map_or("null".into(), |m| format!("{m:?}")),
             e.ui.agents_panel,
             e.ui.agents.available,
             e.ui.agents.web,

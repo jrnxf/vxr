@@ -78,7 +78,15 @@ export function Landing() {
       setStatus("Opening the editor")
       await whenReady()
     }
-    void enter()
+    await enter()
+  }
+
+  // Sign in goes into the editor and opens its account popover (app.js listens). With no
+  // script yet it is a plain link to the account page.
+  async function signIn(e: Event) {
+    e.preventDefault()
+    await go()
+    dispatchEvent(new Event("vxr-sign-in"))
   }
 
   // A scene picked before the editor is ready waits for it, then goes in as the editor's own
@@ -129,7 +137,11 @@ export function Landing() {
               </svg>
               GitHub
             </a>
-            <a class="btn ghost" href="/account">
+            <a
+              class="btn ghost"
+              href="/account"
+              onClick={(e) => void signIn(e)}
+            >
               Sign in
             </a>
           </nav>
@@ -192,7 +204,10 @@ export function Landing() {
                 <svg class="i" viewBox="0 0 24 24" aria-hidden="true">
                   <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z" />
                 </svg>
-                <a href="/account">Sign in</a> to sync
+                <a href="/account" onClick={(e) => void signIn(e)}>
+                  Sign in
+                </a>{" "}
+                to sync
               </span>
             </p>
           </div>

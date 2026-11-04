@@ -3,8 +3,8 @@
 # the wasm (profile wasm, wasm-opt -O3), the page and its icons, the UI fonts with their licences, the
 # prototype's island as scene.vox, the landing page (site/, Preact pre-rendered with Vite), and the account page (account/, bundled with esbuild from the npm
 # packages in package.json). Serve dist/ from any static host (the account page needs the Worker,
-# see wrangler.jsonc); deploy with ./deploy. TURNSTILE_SITE_KEY sets the account page's Turnstile
-# site key; unset, it is Cloudflare's always-pass test key.
+# see wrangler.jsonc); deploy with ./deploy. TURNSTILE_SITE_KEY sets the Turnstile site key of the
+# account page and the editor's sign-in popover; unset, it is Cloudflare's always-pass test key.
 # The tools come from the nix dev shell (../../dev); with VXR_TOOLS=path they come from the PATH
 # instead, as ./cloudflare-build sets up where there is no nix.
 set -euo pipefail
@@ -33,6 +33,14 @@ cp "$dist/index.html" "$dist/about.html"
 cp "$fonts"/*.ttf "$fonts"/*.txt "$dist/fonts/"
 site_key="${TURNSTILE_SITE_KEY:-1x00000000000000000000AA}"
 [[ "$site_key" =~ ^[0-9A-Za-z_-]+$ ]] || { echo "build: TURNSTILE_SITE_KEY has unexpected characters" >&2; exit 1; }
+node -e "
+const fs = require('fs');
+const [f, key] = process.argv.slice(1);
+const line = /^const TURNSTILE_SITE_KEY = '[^']*';/m;
+const js = fs.readFileSync(f, 'utf8');
+if (!line.test(js)) throw new Error(f + ' has no TURNSTILE_SITE_KEY line');
+fs.writeFileSync(f, js.replace(line, \"const TURNSTILE_SITE_KEY = '\" + key + \"';\"));
+" "$dist/app.js" "$site_key"
 "$here/node_modules/.bin/esbuild" "$here/account/account.ts" --bundle --minify --format=esm --target=es2022 \
   --define:TURNSTILE_SITE_KEY="\"$site_key\"" --outfile="$dist/account.js" --log-level=warning
 cp "$here/account/index.html" "$dist/account.html"

@@ -16,9 +16,11 @@ use crate::color::{Hsv, hex, parse_hex};
 use crate::render::{EXPORT_SIZES, RenderSettings, SPP_CHOICES};
 use crate::theme::{self, Theme, ThemeChoice, th};
 
+mod account;
 mod activity;
 mod agents;
 mod assistant;
+pub use account::{SignIn, Step, Sync, WRONG_CODE};
 pub use activity::{Item, LIST_ROWS, Live};
 pub use agents::{AgentsView, EditRow, FILES_SETUP, LIVE_SETUP, SETUP};
 pub use assistant::{AiAction, AskBar, ChatView, PANEL_W};
@@ -218,6 +220,10 @@ mod icon {
     pub const PACKAGE_PLUS: char = '\u{e268}';
     pub const CIRCLE_CHECK: char = '\u{e226}';
     pub const MOVE: char = '\u{e121}';
+    pub const LOG_OUT: char = '\u{e10e}';
+    pub const CLOUD: char = '\u{e088}';
+    pub const CLOUD_CHECK: char = '\u{e66e}';
+    pub const REFRESH_CW: char = '\u{e145}';
 }
 
 pub use vxr_core::select::{Region, Transform};
@@ -368,8 +374,13 @@ pub enum Action {
     SaveAndClose,
     /// The close confirm's Don't save: delete the draft and close.
     CloseDiscard,
-    /// Open the account page, to sign in or to see the account (for the host).
-    SignIn,
+    /// The account popover's Email me a sign-in code (and Resend): run the bot check, then
+    /// ask for the email (for the host).
+    SendCode,
+    /// The account popover's six digits are in: check the code (for the host).
+    VerifyCode,
+    /// The account popover's Sign out (for the host).
+    SignOut,
     /// Save the scene to the account's library, even when it has a file of its own here
     /// (for the host).
     AddToLibrary,
@@ -394,10 +405,18 @@ pub struct ProjectRow {
     pub thumb: Option<egui::TextureId>,
 }
 
-/// The projects list's account line, where there is sign-in (the browser): set by the editor.
+/// The account, where there is sign-in (the browser), for the top bar's account control and
+/// its popover: set by the editor.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AccountRow {
     pub signed_in: bool,
+    /// Who is signed in.
+    pub email: Option<String>,
+    /// How the library's sync stands, and how many scenes are in it.
+    pub sync: Sync,
+    pub scenes: usize,
+    /// Asking for a code, checking one or signing out is in flight.
+    pub busy: bool,
     /// The library's use and cap, in bytes.
     pub used: u64,
     pub cap: u64,
@@ -671,8 +690,10 @@ pub struct Hybrid {
     pub projects: Vec<ProjectRow>,
     pub storage: (u64, u64),
     pub clear_armed: bool,
-    /// The account line, where there is sign-in (set by the editor).
+    /// The account, where there is sign-in (set by the editor).
     pub account: Option<AccountRow>,
+    /// The account popover.
+    pub sign_in: SignIn,
     /// The restore prompt, while a draft is offered back.
     pub restore: Option<RestoreAsk>,
     /// The first row the projects list shows.
@@ -926,8 +947,8 @@ const COMMANDS: &[Command] = &[
     Command { label: "Projects", keys: &[], run: |h| h.toggle_projects() },
     Command { label: "Save .vox", keys: &["⌘", "S"], run: |h| h.actions.push(Action::Save) },
     Command { label: "Download .vox", keys: &[], run: |h| h.actions.push(Action::DownloadVox) },
-    Command { label: "Sign in", keys: &[], run: |h| h.actions.push(Action::SignIn) },
-    Command { label: "Account", keys: &[], run: |h| h.actions.push(Action::SignIn) },
+    Command { label: "Sign in", keys: &[], run: |h| h.open_account() },
+    Command { label: "Account", keys: &[], run: |h| h.open_account() },
     Command { label: "Add to library", keys: &[], run: |h| h.actions.push(Action::AddToLibrary) },
     Command { label: "Embed", keys: &[], run: |h| h.actions.push(Action::Embed) },
     Command { label: "Show palette", keys: &[], run: |h| h.toggle_palette() },
@@ -1011,6 +1032,7 @@ impl Hybrid {
             storage: (0, 0),
             clear_armed: false,
             account: None,
+            sign_in: SignIn::default(),
             restore: None,
             projects_scroll: 0,
             export_x: 0.0,
@@ -1324,6 +1346,7 @@ impl Hybrid {
             || std::mem::take(&mut self.export_menu)
             || std::mem::take(&mut self.theme_menu)
             || std::mem::take(&mut self.projects_open)
+            || std::mem::take(&mut self.sign_in.open)
             || std::mem::take(&mut self.palette_open)
         {
             return;
@@ -1441,6 +1464,7 @@ impl Hybrid {
         self.fitted(ctx, |s| s.export_menu(ctx));
         self.fitted(ctx, |s| s.theme_menu(ctx));
         self.fitted(ctx, |s| s.projects_menu(ctx));
+        self.fitted(ctx, |s| s.account_popover(ctx));
         self.fitted(ctx, |s| s.restore_prompt(ctx, screen));
         self.fitted(ctx, |s| s.close_confirm(ctx, screen));
         self.marquee(ctx);
@@ -1511,6 +1535,11 @@ impl Hybrid {
             }
             if self.ai.focus && i.consume_key(Modifiers::NONE, Key::Escape) {
                 self.ai.focus = false;
+                return;
+            }
+            // The account popover closes on Escape, from its fields too.
+            if self.sign_in.open && i.consume_key(Modifiers::NONE, Key::Escape) {
+                self.sign_in.open = false;
                 return;
             }
             // The restore prompt takes every key: Enter restores. Escape does nothing, so a
@@ -1895,12 +1924,22 @@ impl Hybrid {
         // The right island, laid out from the right edge.
         let embed_label = ctx.fonts_mut(|f| f.layout_no_wrap("Embed".into(), sans_semibold(13.0), th().on_accent));
         let ew = if slim { 0.0 } else { 10.0 + 16.0 + 6.0 + embed_label.size().x + 10.0 + 4.0 };
-        let rw = 4.0 + 36.0 + 4.0 + 36.0 + 4.0 + 36.0 + 4.0 + ew;
+        // The account control, at the far right after a divider, where there is sign-in.
+        let cw = self.account_chip_width(ctx);
+        let aw = if self.account.is_some() { cw + 14.0 } else { 0.0 };
+        let rw = 4.0 + 36.0 + 4.0 + 36.0 + 4.0 + 36.0 + 4.0 + ew + aw;
         let right = Rect::from_min_size(pos2(screen.right() - 12.0 - rw, 12.0), vec2(rw, 40.0));
         let mut theme_tip = None;
         Self::panel(ctx, "top-right", right, Order::Middle, |ui, rect| {
             let cy = rect.center().y;
-            let edge = rect.right() - ew;
+            let edge = rect.right() - ew - aw;
+            if self.account.is_some() {
+                let x = (edge + ew + 2.0).round();
+                ui.painter()
+                    .line_segment([pos2(x + 0.5, cy - 10.0), pos2(x + 0.5, cy + 10.0)], Stroke::new(1.0, th().line));
+                let chip = Rect::from_min_size(pos2(edge + ew + 9.0, cy - 15.0), vec2(cw, 30.0));
+                self.account_chip(ui, chip);
+            }
             if !slim {
                 let embed = Rect::from_min_size(pos2(edge, cy - 16.0), vec2(ew - 4.0, 32.0));
                 let resp = ui.interact(embed, Id::unique("embed"), Sense::click());
@@ -3361,9 +3400,9 @@ impl Hybrid {
         (rows, 36.0 + PROJECT_STEP * rows as f32 + 4.0 + foot)
     }
 
-    /// The footer's height: the Storage line, and the account line above it.
+    /// The footer's height: the Storage line.
     fn projects_foot(&self) -> f32 {
-        if self.account.is_some() { 2.0 * PROJECTS_FOOT } else { PROJECTS_FOOT }
+        PROJECTS_FOOT
     }
 
     // The projects list, under the scene name: every scene opened or made here, its draft and
@@ -3386,8 +3425,6 @@ impl Hybrid {
         let armed = self.clear_armed;
         let mut open = None;
         let mut clear = false;
-        let mut account_press = None;
-        let account = self.account.clone();
         let mut wheel = 0.0;
         let mut hits = Vec::new();
         Self::panel_filled(ctx, "projects-menu", rect, Order::Foreground, th().panel_solid, |ui, rect| {
@@ -3467,45 +3504,6 @@ impl Hybrid {
                     open = Some(k);
                 }
             }
-            // The account: sign in, or the library's use and Add to library (or Account).
-            if let Some(a) = &account {
-                let fy = rect.bottom() - 2.0 * PROJECTS_FOOT;
-                ui.painter().line_segment(
-                    [pos2(rect.left() + 1.0, fy + 0.5), pos2(rect.right() - 1.0, fy + 0.5)],
-                    Stroke::new(1.0, th().line),
-                );
-                let cy = fy + PROJECTS_FOOT / 2.0;
-                let p = ui.painter();
-                let g = p.layout_no_wrap("Library".into(), sans(12.0), th().muted);
-                p.galley(pos2(rect.left() + 12.0, cy - g.size().y / 2.0), g.clone(), th().muted);
-                let (note, font) = if a.signed_in {
-                    (format!("{} of {}", crate::projects::bytes(a.used), crate::projects::bytes(a.cap)), mono(11.0))
-                } else {
-                    ("Sync between browsers".to_string(), sans(11.0))
-                };
-                let note = p.layout_no_wrap(note, font, th().faint);
-                p.galley(pos2(rect.left() + 12.0 + g.size().x + 8.0, cy - note.size().y / 2.0), note, th().faint);
-                let (text, id, action) = match (a.signed_in, a.can_add) {
-                    (false, _) => ("Sign in", "projects-sign-in", Action::SignIn),
-                    (true, true) => ("Add to library", "projects-add", Action::AddToLibrary),
-                    (true, false) => ("Account", "projects-account", Action::SignIn),
-                };
-                let label = p.layout_no_wrap(text.into(), sans(12.0), th().muted);
-                let bw = label.size().x + 20.0;
-                let b = Rect::from_min_size(pos2(rect.right() - 8.0 - bw, cy - 13.0), vec2(bw, 26.0));
-                let resp = ui.interact(b, Id::unique(id), Sense::click());
-                hits.push((id.to_string(), b));
-                let p = ui.painter();
-                p.rect_stroke(b, CornerRadius::same(7), Stroke::new(1.0, th().line), StrokeKind::Inside);
-                if resp.hovered() {
-                    p.rect_filled(b, CornerRadius::same(7), th().hover);
-                }
-                let color = if resp.hovered() { th().text } else { th().muted };
-                p.galley(pos2(b.left() + 10.0, cy - label.size().y / 2.0), label, color);
-                if resp.clicked() {
-                    account_press = Some(action);
-                }
-            }
             // The store: what it holds, and Clear.
             let fy = rect.bottom() - PROJECTS_FOOT;
             ui.painter().line_segment(
@@ -3563,10 +3561,6 @@ impl Hybrid {
                 self.clear_armed = true;
             }
         }
-        if let Some(action) = account_press {
-            self.projects_open = false;
-            self.actions.push(action);
-        }
         if let Some(k) = open {
             self.projects_open = false;
             if !self.projects[k].current {
@@ -3578,7 +3572,6 @@ impl Hybrid {
         }
     }
 
-    /// Open or close the projects list.
     /// Whether Cmd-K offers the command: the account's only where there is sign-in.
     fn command_shown(&self, label: &str) -> bool {
         let signed_in = self.account.as_ref().map(|a| a.signed_in);
@@ -3591,8 +3584,10 @@ impl Hybrid {
         }
     }
 
+    /// Open or close the projects list.
     pub fn toggle_projects(&mut self) {
         self.cmdk = None;
+        self.sign_in.open = false;
         self.projects_open = !self.projects_open;
         self.projects_scroll = 0;
         self.theme_menu = false;

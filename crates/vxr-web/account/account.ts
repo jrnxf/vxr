@@ -1,8 +1,8 @@
 // The account page: sign in by email, through Better Auth's client. One email carries a link and
 // a 6-digit code; the link signs in where it is opened, the code is typed here. The Worker
 // (worker/index.ts) checks the Turnstile token sent as the x-turnstile-token header before it sends
-// the email. The editor opens this page with ?from=editor and checks /api/me again when its tab
-// comes back.
+// the email. A sign-in link the editor's popover asked for opens this page with ?from=editor, and the
+// editor checks /api/me again when this page says so on the vxr-account channel.
 import { createAuthClient } from 'better-auth/client';
 import { emailOTPClient, magicLinkClient } from 'better-auth/client/plugins';
 
@@ -139,9 +139,14 @@ async function me(): Promise<Me | null> {
   }
 }
 
+// Editor tabs of this site listen here: a sign-in (a link opened in this tab, or a code) or a
+// sign-out on this page reaches them at once, without waiting for their tab to come back.
+const editors = typeof BroadcastChannel === 'function' ? new BroadcastChannel('vxr-account') : null;
+
 async function refresh() {
   const m = await me();
   if (!m || !m.signIn) return show('off');
+  editors?.postMessage({ user: m.user?.id ?? null });
   for (const el of document.querySelectorAll<HTMLElement>('[data-limit]')) {
     el.textContent = size(m.limits[el.dataset.limit as 'account' | 'file']);
   }

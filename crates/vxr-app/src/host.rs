@@ -14,7 +14,9 @@
 //! Signed in (in the browser), Save puts a new scene, or one already in the account's
 //! library, in the library ([`crate::sync`]); a file opened from this device stays a file
 //! until Add to library. The page sends the library's calls and hands each reply to
-//! [`fetched`].
+//! [`fetched`]. Signing in from the account popover asks the [`Platform`] for the bot check
+//! first ([`Platform::challenge`], answered here or later through [`challenged`]), then sends
+//! the email; the code and Sign out go through the same queue.
 
 use std::path::{Path, PathBuf};
 
@@ -25,7 +27,7 @@ use crate::Editor;
 use crate::editor::Button;
 use crate::files::{File, obj_files, slices_png, vox_bytes};
 use crate::projects::{Project, Read, THUMB};
-use crate::sync::{Event, Reply};
+use crate::sync::{Auth, Event, Reply};
 use crate::ui::{Action, FontBytes};
 
 /// A scene file the user picked to open.
@@ -101,8 +103,11 @@ pub trait Platform {
     /// Keep the picked theme (by its id) for the next start.
     fn persist_theme(&mut self, id: &str) -> Result<(), String>;
 
-    /// Open the account page, where the user signs in or out (the browser's, in a new tab).
-    fn open_account(&mut self) {}
+    /// The bot check's answer that asking for a sign-in email needs (the page's Turnstile
+    /// token): at once, or None when the page answers later through [`challenged`].
+    fn challenge(&mut self) -> Option<String> {
+        None
+    }
 
     /// Download the scene's `.vox` bytes as `name`, beside its place in the library; returns
     /// the name it was given.
@@ -212,7 +217,16 @@ pub fn run_action(ed: &mut Editor, p: &mut dyn Platform, action: Action) {
             ed.mark_saved();
             ed.quit = true;
         }
-        Action::SignIn => p.open_account(),
+        Action::SendCode => {
+            if let Some(token) = p.challenge() {
+                challenged(ed, Some(token));
+            }
+        }
+        Action::VerifyCode => {
+            let (email, code) = (ed.ui.sign_in.email.trim().to_string(), ed.ui.sign_in.code.clone());
+            ed.library.verify_code(&email, &code);
+        }
+        Action::SignOut => ed.library.sign_out(),
         Action::DownloadVox => {
             let bytes = match vox_bytes(&ed.scene) {
                 Ok(b) => b,
@@ -331,6 +345,20 @@ fn library_save(ed: &mut Editor, p: &mut dyn Platform, id: &str, name: String, b
     ed.library.upload(&mut ed.projects, id, bytes, thumb);
 }
 
+/// The bot check answered for the sign-in email the popover asked for: its token, or None
+/// when it did not pass.
+pub fn challenged(ed: &mut Editor, token: Option<String>) {
+    ed.ui.sign_in.checking = false;
+    match token.filter(|t| !t.is_empty()) {
+        // The field may have changed while the check ran.
+        Some(token) => match ed.ui.sign_in.email_to_send() {
+            Some(email) => ed.library.send_code(&email, &token),
+            None => ed.ui.sign_in.failed("Check the email address and try again."),
+        },
+        None => ed.ui.sign_in.failed("The check did not pass. Try again."),
+    }
+}
+
 /// The page's answer to the library call `id` (see [`crate::sync::Library::take_out`]).
 pub fn fetched(ed: &mut Editor, p: &mut dyn Platform, id: u32, reply: Reply) {
     let ctx = ed.ctx.clone();
@@ -379,6 +407,9 @@ pub fn fetched(ed: &mut Editor, p: &mut dyn Platform, id: u32, reply: Reply) {
                 }
             }
             Event::Listed => catch_up(ed),
+            Event::Auth(Auth::Sent) => ed.ui.sign_in.sent(ctx.input(|i| i.time)),
+            Event::Auth(Auth::WrongCode) => ed.ui.sign_in.wrong_code(ctx.input(|i| i.time)),
+            Event::Auth(Auth::Failed(why)) => ed.ui.sign_in.failed(&why),
         }
     }
 }

@@ -80,7 +80,9 @@ fn tool(a: &Action) -> Option<&'static str> {
         | Action::CloseDiscard
         // The account and its library, and Download .vox beside a library save: where the
         // user's files are kept, not the scene (an agent's save is Save).
-        | Action::SignIn
+        | Action::SendCode
+        | Action::VerifyCode
+        | Action::SignOut
         | Action::AddToLibrary
         | Action::DownloadVox
         | Action::Theme => None,

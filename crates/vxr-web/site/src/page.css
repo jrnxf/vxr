@@ -66,6 +66,19 @@ canvas#c {
   border: 0;
   padding: 0;
 }
+/* Turnstile's widget, over its slot in the account popover while it wants a press (app.js). */
+#challenge {
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 300px;
+  height: 65px;
+  transform: translate(-400px, 0);
+  pointer-events: none;
+}
+#challenge.shown {
+  pointer-events: auto;
+}
 #msg {
   position: fixed;
   inset: 0;

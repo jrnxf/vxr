@@ -20,7 +20,7 @@ use crate::review::{Answer, Review, Script};
 use crate::touch::Touches;
 use crate::ui::{
     AccountRow, Action, AiAction, ChatView, EditRow, FontBytes, Hybrid, LayerRow, Named, ProjectRow, RestoreAsk, Stats,
-    TreeRow, group_thousands,
+    Sync, TreeRow, group_thousands,
 };
 
 /// Input quiet for this long raises the preview's budget (spikes/preview/RESULTS.md).
@@ -432,21 +432,46 @@ impl Editor {
             when: crate::projects::ago(now, o.saved),
             changed: o.changed,
         });
-        // The Cmd-K account commands read this with the menu shut too.
+        // The top bar's account control and the Cmd-K account commands read this with the
+        // list shut too.
+        let busy = self.library.signing_in();
         self.ui.account = match &self.library.account {
             crate::sync::Account::Off => None,
-            crate::sync::Account::Out => Some(AccountRow { signed_in: false, used: 0, cap: 0, can_add: false }),
-            crate::sync::Account::In(u) => Some(AccountRow {
-                signed_in: true,
-                used: u.usage,
-                cap: u.limit,
-                can_add: !self
-                    .projects
-                    .current
-                    .as_ref()
-                    .and_then(|id| self.projects.get(id))
-                    .is_some_and(|p| p.library(&u.id).is_some()),
+            crate::sync::Account::Out => Some(AccountRow {
+                signed_in: false,
+                email: None,
+                sync: Sync::Synced,
+                scenes: 0,
+                busy,
+                used: 0,
+                cap: 0,
+                can_add: false,
             }),
+            crate::sync::Account::In(u) => {
+                let kept: Vec<_> = self.projects.list().iter().filter_map(|p| p.library(&u.id)).collect();
+                let sync = if self.library.syncing() {
+                    Sync::Syncing
+                } else if kept.iter().any(|c| c.dirty) {
+                    Sync::Waiting
+                } else {
+                    Sync::Synced
+                };
+                Some(AccountRow {
+                    signed_in: true,
+                    email: u.email.clone(),
+                    sync,
+                    scenes: kept.len(),
+                    busy,
+                    used: u.usage,
+                    cap: u.limit,
+                    can_add: !self
+                        .projects
+                        .current
+                        .as_ref()
+                        .and_then(|id| self.projects.get(id))
+                        .is_some_and(|p| p.library(&u.id).is_some()),
+                })
+            }
         };
         let opening = self.ui.projects_open && !self.projects_shown;
         self.projects_shown = self.ui.projects_open;

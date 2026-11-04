@@ -8,8 +8,10 @@
 # key remembered in the browser come back in a new page (check-restore.js for the draft), check that a tablet-sized touch screen starts in the touch layout, pair the
 # page with a real `vxr bridge` (a debug build, which takes pages from 127.0.0.1, on its fixed
 # port) and edit it from a real `vxr mcp --live` driven by a scripted MCP client
-# (check-agent.js), check the no-WebGPU message in a browser without WebGPU, and write 1x and
-# 2x screenshots into the git-ignored crates/vxr-web/shots/.
+# (check-agent.js), sign in from the account popover against the Worker under a local
+# `wrangler dev` (check-account.js; needs `npm ci --prefix crates/vxr-web`), check the no-WebGPU
+# message in a browser without WebGPU, and write 1x and 2x screenshots into the git-ignored
+# crates/vxr-web/shots/.
 # Prints ok or FAIL per step and exits 1 on any failure. Run crates/vxr-web/build first.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -35,6 +37,7 @@ vxr="$root/target/debug/vxr"
 ./dev node "$here/check-server.js" "$dist" "$port" "$fixtures" &
 server=$!
 bridge=""
+worker=""
 gpu=vxr-check-$$
 nogpu=vxr-check-nogpu-$$
 cleanup() {
@@ -42,6 +45,7 @@ cleanup() {
   CHROME_DEVTOOLS_AXI_SESSION=$nogpu chrome-devtools-axi stop >/dev/null 2>&1 || true
   kill "$server" 2>/dev/null || true
   [ -z "$bridge" ] || kill "$bridge" 2>/dev/null || true
+  [ -z "$worker" ] || kill "$worker" 2>/dev/null || true
   rm -rf "$fixtures"
 }
 trap cleanup EXIT
@@ -316,6 +320,61 @@ else
 fi
 kill "$bridge" 2>/dev/null || true
 bridge=""
+
+# Sign-in from the account popover against the Worker under `wrangler dev --local` (local D1
+# and R2 in the temporary folder, the always-pass Turnstile test secret, emails printed to its
+# log, never sent): a code, a wrong code, the menu, Sign out, then a link opened in another tab
+# (check-account.js, one stage per call so each can be screenshotted).
+wrangler="$here/node_modules/.bin/wrangler"
+if [ ! -x "$wrangler" ]; then
+  fail "the account popover signs in against wrangler dev" "no $wrangler: run npm ci --prefix crates/vxr-web"
+else
+  aport="${VXR_CHECK_ACCOUNT_PORT:-4802}"
+  aurl="http://127.0.0.1:$aport/"
+  wlog="$fixtures/wrangler.log"
+  # From crates/vxr-web, where wrangler keeps its git-ignored .wrangler/ cache.
+  (cd "$here" && exec "$wrangler" d1 migrations apply vxr --local --persist-to "$fixtures/wrangler") >"$wlog" 2>&1
+  (cd "$here" && exec "$wrangler" dev --local --ip 127.0.0.1 --port "$aport" --local-upstream "127.0.0.1:$aport" \
+    --persist-to "$fixtures/wrangler" --show-interactive-dev-session=false \
+    --var "BETTER_AUTH_SECRET:$(openssl rand -hex 32)" --var TURNSTILE_SECRET_KEY:1x0000000000000000000000000000000AA \
+    --var EMAIL_SENDER:log) >>"$wlog" 2>&1 &
+  worker=$!
+  for _ in $(seq 300); do curl -sf "${aurl}api/me" >/dev/null && break; sleep 0.1; done
+  account() { axi eval --full "async () => ($(cat "$here/check-account.js"))('$1', '${2:-}')" | unwrap; }
+  # Wait for the nth email in the wrangler log.
+  mail() { for _ in $(seq 200); do [ "$(grep -c '^\[vxr mail\]' "$wlog")" -ge "$1" ] && break; sleep 0.1; done; }
+  ashot() { axi screenshot "$shots/web-account-$1.png" >/dev/null; echo "wrote $shots/web-account-$1.png"; }
+  axi open "$aurl" >/dev/null
+  axi emulate --viewport "1280x800x2" >/dev/null
+  axi open "${aurl}about" >/dev/null
+  results+=$'\n'"$(account landing)"
+  axi open "$aurl" >/dev/null
+  results+=$'\n'"$(account open)"
+  ashot email
+  results+=$'\n'"$(account ask ada@example.com)"
+  mail 1
+  ashot code
+  results+=$'\n'"$(account wrong)"
+  ashot wrong-code
+  results+=$'\n'"$(account code "$(sed -n 's/^\[vxr mail\] to ada@example.com: Sign in to vxr: \([0-9]\{6\}\)$/\1/p' "$wlog" | tail -1)")"
+  ashot signed-in
+  results+=$'\n'"$(account menu)"
+  ashot menu
+  results+=$'\n'"$(account out)"
+  results+=$'\n'"$(account listen)"
+  results+=$'\n'"$(account ask ada@example.com)"
+  mail 2
+  editor="$(axi pages | grep -F ",$aurl," | cut -d, -f1 | tr -d ' ')"
+  # The link redirects to the account page, which newpage reports as a failed load; the link
+  # stage checks what came of it.
+  axi newpage "$(grep -oE "http://127\.0\.0\.1:$aport/api/auth/magic-link/verify\?[^ ]+" "$wlog" | tail -1)" >/dev/null || true
+  axi selectpage "$editor" >/dev/null
+  results+=$'\n'"$(account link)"
+  ashot link
+  kill "$worker" 2>/dev/null || true
+  worker=""
+fi
+axi emulate --viewport "1280x800x1" >/dev/null
 
 export CHROME_DEVTOOLS_AXI_SESSION=$nogpu
 export CHROME_DEVTOOLS_AXI_CHROME_ARGS='--disable-gpu --disable-webgpu'
