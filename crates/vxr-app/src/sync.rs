@@ -636,6 +636,24 @@ impl Library {
                     events.push(Event::Toast("Signed out. Your scenes stay on this device.".into()));
                 }
             }
+            // The session was already gone on the Worker.
+            Want::SignOut if reply.status == 401 => {
+                if matches!(self.account, Account::In(_)) {
+                    self.forget(projects, &mut events);
+                    events.push(Event::Toast("Signed out. Your scenes stay on this device.".into()));
+                }
+            }
+            // Offline, or the Worker failed: the desktop app still lets its token go, so a Mac
+            // with no network can be signed out. The page cannot drop its cookie, so it waits.
+            Want::SignOut if self.native && (reply.status == 0 || reply.status >= 500) => {
+                if matches!(self.account, Account::In(_)) {
+                    self.forget(projects, &mut events);
+                    events.push(Event::Toast(
+                        "Signed out on this device. vxr could not be reached, so the session ends there when it expires."
+                            .into(),
+                    ));
+                }
+            }
             Want::SignOut => {
                 events.push(Event::Toast("Could not sign out: the library could not be reached. Try again.".into()))
             }
@@ -1138,6 +1156,58 @@ mod tests {
         assert!(s.account.user().is_some());
         let reply = FakeLibrary::signed_out().answer(&stale);
         assert!(s.answer(stale.id, reply, &mut p).is_empty());
+        assert!(s.account.user().is_some());
+    }
+
+    #[test]
+    fn the_desktop_app_signs_out_here_when_the_worker_is_out_of_reach() {
+        let (_, mut p, _) = device();
+        let mut lib = FakeLibrary::signed_in("u1");
+        lib.put(Some("c1"), "castle", vox(1));
+        lib.session = Some("s1.sig".into());
+        let mut s = Library::native(Some("s1.sig".into()));
+        s.check();
+        lib.serve(&mut s, &mut p);
+        assert!(p.get("c1").is_some());
+
+        // Offline: the token and the library's rows still go.
+        lib.offline = true;
+        s.sign_out();
+        let events = lib.serve(&mut s, &mut p);
+        assert_eq!(events[0], Event::Session(None), "the host deletes the token");
+        assert!(events.iter().any(|e| matches!(e, Event::Toast(t) if t.contains("ends there when it expires"))));
+        assert_eq!(s.account, Account::Out);
+        assert!(p.get("c1").is_none(), "the library's rows went");
+        assert_eq!(lib.session.as_deref(), Some("s1.sig"), "the Worker never heard");
+
+        // The Worker failing does the same; another refusal keeps the session.
+        let answer = |status: u16, p: &mut Projects| {
+            let mut s = Library::native(Some("s1.sig".into()));
+            s.account = Account::In(User { id: "u1".into(), email: None, usage: 0, limit: 0, file_limit: 0 });
+            s.sign_out();
+            let call = s.take_out().remove(0);
+            (s.answer(call.id, Reply { status, ..Reply::default() }, p), s)
+        };
+        let (events, s) = answer(503, &mut p);
+        assert_eq!((events[0].clone(), s.account), (Event::Session(None), Account::Out));
+        let (events, s) = answer(401, &mut p);
+        assert_eq!((events[0].clone(), s.account), (Event::Session(None), Account::Out));
+        let (events, s) = answer(400, &mut p);
+        assert_eq!(
+            events,
+            vec![Event::Toast("Could not sign out: the library could not be reached. Try again.".into())]
+        );
+        assert!(s.account.user().is_some());
+
+        // The page cannot drop its cookie, so offline it keeps the session and asks again.
+        let mut s = Library {
+            account: Account::In(User { id: "u1".into(), email: None, usage: 0, limit: 0, file_limit: 0 }),
+            ..Library::default()
+        };
+        s.sign_out();
+        let call = s.take_out().remove(0);
+        let events = s.answer(call.id, Reply::default(), &mut p);
+        assert!(matches!(events.as_slice(), [Event::Toast(t)] if t.contains("Try again")));
         assert!(s.account.user().is_some());
     }
 
