@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build the browser editor as a static site in crates/vxr-web/dist/ (git-ignored):
 # the wasm (profile wasm, wasm-opt -O3), the page and its icons, the UI fonts with their licences, the
-# prototype's island as scene.vox, the landing page (site/, Preact pre-rendered with Vite), and the account page (account/, bundled with esbuild from the npm
+# prototype's island as scene.vox, the landing page and the account page (site/, Preact pre-rendered with Vite from the npm
 # packages in package.json). Serve dist/ from any static host (the account page needs the Worker,
 # see wrangler.jsonc); deploy with ./deploy. TURNSTILE_SITE_KEY sets the Turnstile site key of the
 # account page and the editor's sign-in popover; unset, it is Cloudflare's always-pass test key.
@@ -41,10 +41,9 @@ const js = fs.readFileSync(f, 'utf8');
 if (!line.test(js)) throw new Error(f + ' has no TURNSTILE_SITE_KEY line');
 fs.writeFileSync(f, js.replace(line, \"const TURNSTILE_SITE_KEY = '\" + key + \"';\"));
 " "$dist/app.js" "$site_key"
-"$here/node_modules/.bin/esbuild" "$here/account/account.ts" --bundle --minify --format=esm --target=es2022 \
-  --define:TURNSTILE_SITE_KEY="\"$site_key\"" --outfile="$dist/account.js" --log-level=warning
-cp "$here/account/index.html" "$dist/account.html"
-cp "$here/account/account.css" "$dist/account.css"
+# The account page (site/account.html), pre-rendered the same way; the site key is baked into its script.
+TURNSTILE_SITE_KEY="$site_key" VITE_CONFIG_NATIVE_IGNORE_WARNING=true "$here/node_modules/.bin/vite" build "$here/site" \
+  --config "$here/site/vite.account.config.mts" --logLevel warn
 node --input-type=module -e "
 import fs from 'node:fs';
 const core = fs.readFileSync('prototype/src/core.js', 'utf8');
@@ -70,4 +69,4 @@ for (const f of process.argv.slice(1)) {
   const br = zlib.brotliCompressSync(raw, { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 11 } });
   console.log(path.basename(f).padEnd(20) + ' ' + String(raw.length).padStart(9) + ' B raw ' + String(br.length).padStart(9) + ' B brotli');
 }
-" "$dist/pkg/vxr_web_bg.wasm" "$dist/pkg/vxr_web.js" "$dist/scene.vox" "$dist/account.js"
+" "$dist/pkg/vxr_web_bg.wasm" "$dist/pkg/vxr_web.js" "$dist/scene.vox"

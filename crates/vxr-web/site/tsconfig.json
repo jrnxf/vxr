@@ -4,7 +4,7 @@
     "module": "es2022",
     "moduleResolution": "bundler",
     "lib": ["es2023", "dom", "dom.iterable"],
-    "types": ["vite/client"],
+    "types": ["vite/client", "node"],
     "jsx": "react-jsx",
     "jsxImportSource": "preact",
     "strict": true,
@@ -13,5 +13,5 @@
     "isolatedModules": true,
     "verbatimModuleSyntax": true
   },
-  "include": ["src", "vite.config.mts"]
+  "include": ["src", "vite.config.mts", "vite.account.config.mts"]
 }

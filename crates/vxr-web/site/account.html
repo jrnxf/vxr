@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>vxr account</title>
+    <meta
+      name="description"
+      content="Sign in to vxr to keep your projects in sync between browsers"
+    />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <!--
+  The optional vxr account (built into dist/account.html and served at /account by the Worker).
+  Sign in by email: the email has a link and a code, either one signs in; the session cookie it
+  sets is the one the editor's /api/projects calls carry. The page is Preact (src/account/),
+  pre-rendered into this file at build time and hydrated in the browser. A strict policy
+  (worker/index.ts) allows no inline script or style.
+-->
+    <script
+      src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit"
+      id="turnstile-js"
+      async
+      defer
+    ></script>
+    <script type="module" src="/src/account/entry.tsx" prerender></script>
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>

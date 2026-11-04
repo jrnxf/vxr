@@ -4,7 +4,7 @@
 //   /api/me          whether sign-in is on, who is signed in, their bytes used and the limits
 //   /api/auth/*      Better Auth (worker/auth.ts): emailed links and codes, sessions
 //   /api/projects*   the account's cloud projects (worker/projects.ts)
-//   /account         the sign-in page (account/, built into dist/account.html)
+//   /account         the sign-in page (site/src/account/, built into dist/account.html)
 import { type Auth, fromApp, makeAuth } from './auth';
 import { type Mailer, mailerFor } from './mail';
 import { LIMITS, type Limits, json, problem, projects, usage } from './projects';
