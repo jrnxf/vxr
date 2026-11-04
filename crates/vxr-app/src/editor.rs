@@ -69,7 +69,7 @@ pub const TOUCH_SCALE: f32 = 1.3;
 const TOUCH_SLOP: f32 = 10.0;
 
 /// This machine, as the projects list names where a file is.
-const HERE: &str = if cfg!(target_os = "macos") { "this Mac" } else { "this computer" };
+pub const HERE: &str = if cfg!(target_os = "macos") { "this Mac" } else { "this computer" };
 
 /// A finger's change, from the host's touch events.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

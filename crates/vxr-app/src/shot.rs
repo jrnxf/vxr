@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use vxr_app::Editor;
-use vxr_app::editor::{Button, NEW_SIZE};
+use vxr_app::editor::{Button, HERE, NEW_SIZE};
 use vxr_app::host::{Opened, Platform, Saved, run_action};
 use vxr_app::projects::Project;
 use vxr_app::ui::{Action, Live, Region, Shape, Tool};
@@ -1942,7 +1942,7 @@ fn app_library(dir: &Path) -> Result<(), String> {
             && copy == Some(0)
             && up.as_ref().is_some_and(|u| Scene::from_vox(&u.bytes).is_ok_and(|s| s.world_voxels(false).len() == 2))
             && !a.ed.is_unsaved()
-            && when.ends_with("· this Mac and library"),
+            && when.ends_with(&format!("· {HERE} and library")),
         format!("in the app, Save writes the .vox and puts it in the library ({when:?}, {:?})", a.ed.path),
     )?;
     a.save_png(&dir.join("app-2x-app-library.png"))?;
@@ -1968,7 +1968,7 @@ fn app_library(dir: &Path) -> Result<(), String> {
             && pa.vox == newer
             && a.ed.scene.world_voxels(false) == house().world_voxels(false)
             && !a.ed.is_unsaved()
-            && when.ends_with("· this Mac and library"),
+            && when.ends_with(&format!("· {HERE} and library")),
         format!("a newer version in the library is written over the file and opens ({when:?})"),
     )?;
     a.ed.ui.projects_open = false;
@@ -1992,12 +1992,12 @@ fn app_library(dir: &Path) -> Result<(), String> {
     let after = server.projects.iter().find(|p| p.id == id).map(|p| p.bytes.clone());
     let synced = menu(&mut a)?;
     check(
-        when.ends_with("· newer on this Mac")
+        when.ends_with(&format!("· newer on {HERE}"))
             && a.ed.projects.current.as_deref() == Some(id.as_str())
             && after.is_some_and(|b| {
                 Scene::from_vox(&b).is_ok_and(|s| s.world_voxels(false) == a.ed.scene.world_voxels(false))
             })
-            && synced.ends_with("· this Mac and library"),
+            && synced.ends_with(&format!("· {HERE} and library")),
         format!(
             "a file changed on disk says it is newer on this Mac and goes up as it opens ({when:?}, then {synced:?})"
         ),
