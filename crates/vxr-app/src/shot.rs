@@ -291,7 +291,7 @@ fn run_steps(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
         format!("pick: slot {} (voxel under the pointer is {under})", s.ed.ui.slot),
     )?;
 
-    // "?" (as the coach card says) opens the command list, which lists every key.
+    // "?" opens the command list, which lists every key.
     let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
     s.frames_with(2, vec![key(egui::Key::Questionmark, egui::Modifiers::SHIFT)]);
     check(s.ed.ui.cmdk.is_some(), "? opens the command list".into())?;
@@ -409,7 +409,6 @@ fn touch(dir: &Path, load: &dyn Fn() -> Result<(Scene, String), String>) -> Resu
 
     let (scene, name) = load()?;
     let mut s = Shot::sized(scene, &name, 2.0, (1180, 820))?;
-    s.ed.ui.coach = false;
     s.ed.set_touch(true);
     s.frames(3);
     let mid = [s.ed.width as f32 / 2.0, s.ed.height as f32 / 2.0];
@@ -601,16 +600,9 @@ fn phone(dir: &Path, load: &dyn Fn() -> Result<(Scene, String), String>) -> Resu
         s.save_png(&dir.join(format!("app-3x-phone-{tag}.png")))?;
 
         // The assistant open: the dock stays reachable, so the colour button still opens the
-        // palette over the assistant. The tips card hides under it rather than show through.
-        let welcome = |s: &Shot| {
-            let id = egui::LayerId::new(egui::Order::Middle, egui::Id::unique("welcome"));
-            s.ed.ctx.memory(|m| m.areas().visible_last_frame(&id))
-        };
-        check(s.ed.ui.coach && welcome(&s), format!("{tag}: the tips card shows"))?;
+        // palette over the assistant.
         s.ui_click("ai-toggle")?;
         s.frames(2);
-        check(!welcome(&s), format!("{tag}: the tips card hides under the assistant"))?;
-        s.ed.ui.coach = false;
         fits(&s, "assistant open")?;
         s.save_png(&dir.join(format!("app-3x-phone-{tag}-assistant.png")))?;
         s.ui_click("dock-color")?;
@@ -650,10 +642,10 @@ fn phone(dir: &Path, load: &dyn Fn() -> Result<(Scene, String), String>) -> Resu
         fits(&s, "colour editor open")?;
         s.save_png(&dir.join(format!("app-3x-phone-{tag}-colour.png")))?;
 
-        // The keyboard button opens the command list, the only way to it without a keyboard.
+        // The command button opens the command list, the only way to it without a keyboard.
         s.ui_click("keys")?;
         s.frames(2);
-        check(s.ed.ui.cmdk.is_some(), format!("{tag}: the keyboard button opens the command list"))?;
+        check(s.ed.ui.cmdk.is_some(), format!("{tag}: the command button opens the command list"))?;
         fits(&s, "command list open")?;
         s.save_png(&dir.join(format!("app-3x-phone-{tag}-commands.png")))?;
     }
@@ -670,7 +662,6 @@ fn themes(dir: &Path, load: &dyn Fn() -> Result<(Scene, String), String>) -> Res
     let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
     let (scene, name) = load()?;
     let mut s = Shot::new(scene, &name, 1.0)?;
-    s.ed.ui.coach = false;
     s.frames(3);
     let neutral = vxr_render::ViewColors::NEUTRAL;
     check(
@@ -827,7 +818,6 @@ fn new_scene_save(dir: &Path) -> Result<(), String> {
     use vxr_core::history::At;
     let mut s = Shot::new(Scene::new(NEW_SIZE), "Untitled", 2.0)?;
     s.frames(3);
-    s.ed.ui.coach = false;
     s.tool(Tool::Add, Shape::Box);
     // A box on the ground from 10 cells before the world origin to 10 after it.
     let o = s.ed.scene.to_map([0, 0, 0]).map(|c| c as f32);
@@ -1010,7 +1000,6 @@ fn new_scene_command(dir: &Path) -> Result<(), String> {
     use vxr_core::history::At;
     let mut s = Shot::new(Scene::new(NEW_SIZE), "Untitled", 2.0)?;
     s.frames(3);
-    s.ed.ui.coach = false;
     s.tool(Tool::Add, Shape::Voxel);
     let key = |key, modifiers| Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
     let fresh = format!("{:?}", s.ed.cam);
@@ -1191,7 +1180,6 @@ fn projects(dir: &Path) -> Result<(), String> {
     let key = |key, modifiers| Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
 
     let mut s = Shot::new(Scene::new(NEW_SIZE), "Untitled", 2.0)?;
-    s.ed.ui.coach = false;
     relaunch(&mut s)?;
     let bytes = house().to_vox()?;
     let files = dir.join("projects");
@@ -1479,7 +1467,6 @@ fn library(dir: &Path) -> Result<(), String> {
         mem.clock.set(clock);
         s.ed.projects = Projects::load(Box::new(mem));
         s.ed.projects.reset(s.ed.scene.history().position());
-        s.ed.ui.coach = false;
         s.frames(3);
     };
     let edit = |s: &mut Shot, at: [i32; 3], slot: u8| {
@@ -1872,7 +1859,6 @@ fn app_library(dir: &Path) -> Result<(), String> {
         s.ed.projects = Projects::load(Box::new(mem));
         s.ed.projects.reset(s.ed.scene.history().position());
         s.ed.library = Library::native(session);
-        s.ed.ui.coach = false;
         s.frames(3);
         p
     };
@@ -2049,7 +2035,6 @@ fn brushes(dir: &Path) -> Result<(), String> {
         modifiers: egui::Modifiers::NONE,
     };
     s.ed.ui.tool = Tool::Add;
-    s.ed.ui.coach = false;
 
     // L, then a drag that shows the line live and shrinks it again before the release.
     s.frames_with(2, vec![key(egui::Key::L)]);
@@ -2157,7 +2142,6 @@ fn brush_size(dir: &Path) -> Result<(), String> {
     let mid = [s.ed.width as f32 / 2.0, s.ed.height as f32 / 2.0];
     let k = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
     let none = egui::Modifiers::NONE;
-    s.ed.ui.coach = false;
     s.tool(Tool::Add, Shape::Box);
     s.frames_with(2, vec![k(egui::Key::V, none)]);
     let closed = !s.ed.ui.hits.contains_key("size-plus");
@@ -2253,7 +2237,6 @@ fn box_height(dir: &Path) -> Result<(), String> {
     let mid = [s.ed.width as f32 / 2.0, s.ed.height as f32 / 2.0];
     let k = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
     let none = egui::Modifiers::NONE;
-    s.ed.ui.coach = false;
     s.tool(Tool::Add, Shape::Voxel);
     s.frames_with(2, vec![k(egui::Key::B, none)]);
     let end = [mid[0] + 160.0, mid[1] + 40.0];
@@ -2360,7 +2343,6 @@ fn project(ed: &Editor, p: [f32; 3]) -> [f32; 2] {
 /// and a whole-model flip, all through the pointer path, keys and egui clicks.
 fn selection(dir: &Path) -> Result<(), String> {
     let mut s = Shot::new(Scene::new(NEW_SIZE), "Untitled", 2.0)?;
-    s.ed.ui.coach = false;
     // Block A: 4 x 2 x 3 of slot 12 with one marker voxel of slot 13 in a top corner, so
     // flips and loops show. Block B: 2 x 2 x 2 of slot 40, 12 cells along +x.
     let mut cells = Vec::new();
@@ -2584,7 +2566,6 @@ fn selection(dir: &Path) -> Result<(), String> {
 /// `app-2x-bounds.png` with the Bounds panel open.
 fn model_tools(dir: &Path) -> Result<(), String> {
     let mut s = Shot::new(Scene::new(NEW_SIZE), "Untitled", 2.0)?;
-    s.ed.ui.coach = false;
     let mut cells = Vec::new();
     for (x, y, z) in (60..65).flat_map(|x| (0..5).flat_map(move |y| (60..65).map(move |z| (x, y, z)))) {
         cells.push(([x, y, z], 12));
@@ -2680,7 +2661,6 @@ fn world(dir: &Path) -> Result<(), String> {
         .build()
         .write();
     let mut s = Shot::new(Scene::from_vox(&bytes)?, "22-world.vox", 2.0)?;
-    s.ed.ui.coach = false;
     s.frames(3);
     let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
     let tab = |s: &mut Shot| s.frames_with(2, vec![key(egui::Key::Tab, egui::Modifiers::NONE)]);
@@ -2831,7 +2811,6 @@ fn scene_tree(dir: &Path) -> Result<(), String> {
         "a single model or a new scene shows no scene tree".into(),
     )?;
     let mut s = Shot::new(Scene::from_vox(&bytes)?, "22-world.vox", 2.0)?;
-    s.ed.ui.coach = false;
     s.frames(3);
     let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
     let node = |s: &Shot, name: &str| {
@@ -2955,7 +2934,6 @@ fn organize(dir: &Path) -> Result<(), String> {
     };
     // No key yet: the key settings open and the request waits in the composer.
     let mut s = Shot::new(Scene::from_vox(&bytes)?, "23-desk.vox", 2.0)?;
-    s.ed.ui.coach = false;
     s.frames(2);
     run(&mut s);
     check(
@@ -2964,7 +2942,6 @@ fn organize(dir: &Path) -> Result<(), String> {
     )?;
 
     let mut s = Shot::new(Scene::from_vox(&bytes)?, "23-desk.vox", 2.0)?;
-    s.ed.ui.coach = false;
     let fake = s.fake_assistant(0);
     s.ed.assistant.set_key(vxr_ai::Kind::Anthropic, "sk-ant-test-not-a-real-key", false)?;
     s.frames(3);
@@ -3057,7 +3034,6 @@ fn organize_island(file: Option<&[u8]>) -> Result<(), String> {
         println!("skip organize on the island: fewer than three colours");
         return Ok(());
     }
-    s.ed.ui.coach = false;
     let fake = s.fake_assistant(0);
     s.ed.assistant.set_key(vxr_ai::Kind::Anthropic, "sk-ant-test-not-a-real-key", false)?;
     s.frames(3);
@@ -3121,7 +3097,6 @@ fn to_object(dir: &Path) -> Result<(), String> {
         .build()
         .write();
     let mut s = Shot::new(Scene::from_vox(&bytes)?, "23-desk.vox", 2.0)?;
-    s.ed.ui.coach = false;
     s.frames(3);
     let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
     let (none, cmd) = (egui::Modifiers::NONE, egui::Modifiers::COMMAND);
@@ -3518,7 +3493,6 @@ fn layers(s: &mut Shot, bytes: &[u8], dir: &Path) -> Result<(), String> {
 fn views(dir: &Path) -> Result<(), String> {
     use vxr_render::View;
     let mut s = Shot::new(Scene::new(NEW_SIZE), "Untitled", 2.0)?;
-    s.ed.ui.coach = false;
     let mut cells = Vec::new();
     for (x, y, z) in (60..68).flat_map(|x| (0..8).flat_map(move |y| (60..68).map(move |z| (x, y, z)))) {
         cells.push(([x, y, z], 12));
@@ -3680,7 +3654,6 @@ fn camera(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
         }
     };
     let mut s = Shot::new(scene, &name, 2.0)?;
-    s.ed.ui.coach = false;
     s.frames(3);
     let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
     let press = |s: &mut Shot, k, m| s.frames_with(2, vec![key(k, m)]);
@@ -3892,7 +3865,6 @@ fn camera(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
         ((900, 420), true, "beside"),
     ] {
         let mut t = Shot::sized(Scene::new(NEW_SIZE), "Untitled", 1.0, points)?;
-        t.ed.ui.coach = false;
         t.ed.ui.show_render = corner;
         t.frames(3);
         t.ui_click("nav-views")?;
@@ -3967,7 +3939,6 @@ fn camera(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     let at = glam::Vec3::new(100.5, 0.5, 100.5);
     one.edit(vec![([100, 0, 100], 12)]);
     let mut s = Shot::new(one, "Untitled", 2.0)?;
-    s.ed.ui.coach = false;
     s.frames(2);
     let framed = s.ed.cam.distance;
     s.ed.pointer_moved(Some(mid));
@@ -4428,7 +4399,6 @@ fn visible_faces(voxels: &std::collections::BTreeMap<[i32; 3], u8>) -> usize {
 fn export(s: &mut Shot, dir: &Path) -> Result<(), String> {
     use vxr_app::files::{obj_files, slices_png};
     let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
-    s.ed.ui.coach = false;
     s.ui_click("export")?;
     s.frames(2);
     check(
@@ -4616,7 +4586,6 @@ fn palette_beside_flyouts() -> Result<(), String> {
     let rect = |s: &Shot, name: &str| s.ed.ui.hits.get(name).copied().ok_or(format!("no {name} on screen"));
     let on_screen = |s: &Shot, r: egui::Rect| r.top() >= 0.0 && r.bottom() <= s.ed.height as f32 / 2.0;
     let mut s = Shot::new(house(), "house.vox", 2.0)?;
-    s.ed.ui.coach = false;
     s.frames(2);
     s.ui_click("mirror")?;
     s.ui_click("rail-color")?;
@@ -4642,7 +4611,6 @@ fn palette_beside_flyouts() -> Result<(), String> {
         .build()
         .write();
     let mut s = Shot::new(Scene::from_vox(&bytes)?, "22-world.vox", 2.0)?;
-    s.ed.ui.coach = false;
     s.frames(3);
     s.ui_click("rail-color")?;
     s.ui_click("edit-color")?;
@@ -4667,7 +4635,6 @@ fn palette_beside_flyouts() -> Result<(), String> {
 /// Escape closes the editor, then the palette. At 1280x800.
 fn assistant_column(dir: &Path) -> Result<(), String> {
     let mut s = Shot::new(house(), "house.vox", 2.0)?;
-    s.ed.ui.coach = false;
     s.ed.cam.distance *= 1.9;
     let h = s.ed.height as f32;
     s.ed.cam.pan(-420.0, 0.0, h);
@@ -4773,7 +4740,6 @@ fn agent_chip_squeezed(dir: &Path) -> Result<(), String> {
             (1..=96u8).map(|v| (many.to_map([i32::from(v % 12) - 6, 8 + i32::from(v / 12), 0]), v)).collect();
         many.edit(cells);
         let mut s = Shot::sized(many, "house.vox", 2.0, (900, h))?;
-        s.ed.ui.coach = false;
         s.frames(2);
         let now = s.ed.ctx.input(|i| i.time);
         let a = &mut s.ed.agents;
@@ -4935,7 +4901,6 @@ fn agent_chip_states(dir: &Path) -> Result<(), String> {
     let mut widths = Vec::new();
     for (name, agents, text, first) in cases {
         let mut s = Shot::new(house(), "house.vox", 2.0)?;
-        s.ed.ui.coach = false;
         s.frames(2);
         let now = s.ed.ctx.input(|i| i.time);
         let a = &mut s.ed.agents;
@@ -5040,7 +5005,6 @@ fn agent_activity(dir: &Path) -> Result<(), String> {
     for (theme, tag) in [(ThemeChoice::Neutral, ""), (ThemeChoice::Paper, "-paper")] {
         let mut s = Shot::sized(house(), "house.vox", 2.0, (1280, 1000))?;
         s.ed.ui.theme = theme;
-        s.ed.ui.coach = false;
         s.frames(2);
         connect(&mut s);
         let flag = json!({"from": [9, 7, 8], "to": [12, 9, 8], "slot": 50});
@@ -5179,7 +5143,6 @@ fn agent_activity(dir: &Path) -> Result<(), String> {
     // live state, and the edit's Undo works; opening a file forgets them.
     {
         let mut s = Shot::sized(house(), "house.vox", 2.0, (1280, 1000))?;
-        s.ed.ui.coach = false;
         s.frames(2);
         connect(&mut s);
         ask(&mut s, "box", json!({"from": [9, 7, 8], "to": [12, 9, 8], "slot": 50}))?;
@@ -5259,7 +5222,6 @@ fn agent_waiting(dir: &Path) -> Result<(), String> {
     let mut s = Shot::sized(house(), "house.vox", 2.0, (1280, 1000))?;
     s.ed.wall_clock = shot_wall;
     set_wall(0.0);
-    s.ed.ui.coach = false;
     s.frames(2);
     let now = s.ed.ctx.input(|i| i.time);
     let a = &mut s.ed.agents;
@@ -5400,7 +5362,6 @@ fn agents_states(dir: &Path) -> Result<(), String> {
             }
             let mut s = Shot::new(house(), "house.vox", 2.0)?;
             s.ed.ui.theme = theme;
-            s.ed.ui.coach = false;
             s.frames(2);
             let now = s.ed.ctx.input(|i| i.time);
             let a = &mut s.ed.agents;
@@ -5458,7 +5419,6 @@ fn agents_states(dir: &Path) -> Result<(), String> {
     }
     // The code field: a paste in any form fills every cell, and the eighth character connects.
     let mut s = Shot::new(house(), "house.vox", 2.0)?;
-    s.ed.ui.coach = false;
     s.frames(2);
     let a = &mut s.ed.agents;
     (a.available, a.web) = (true, true);
@@ -5489,7 +5449,6 @@ fn column_short_window(dir: &Path) -> Result<(), String> {
         (0..120u8).map(|i| (scene.to_map([i as i32 % 32 - 16, 0, -10 - i as i32 / 32]), 100 + i)).collect();
     scene.edit(cells.clone());
     let mut s = Shot::new(scene, "house.vox", 2.0)?;
-    s.ed.ui.coach = false;
     s.ed.ui.palette_open = true;
     s.ed.ui.ai_open = true;
     s.frames(2);
@@ -5520,7 +5479,6 @@ fn column_short_window(dir: &Path) -> Result<(), String> {
     let mut scene = house();
     scene.edit(cells);
     let mut s = Shot::sized(scene, "house.vox", 2.0, (1280, 520))?;
-    s.ed.ui.coach = false;
     s.frames(2);
     let (tool, lock, color) = (rect(&s, "select")?, rect(&s, "lock")?, rect(&s, "rail-color")?);
     let stats_top = 520.0 - 12.0 - 28.0;
@@ -5540,7 +5498,6 @@ fn column_short_window(dir: &Path) -> Result<(), String> {
     // rail in two columns and in one.
     for h in [520, 620] {
         let mut s = Shot::sized(house(), "house.vox", 2.0, (1280, h))?;
-        s.ed.ui.coach = false;
         s.frames(2);
         s.ui_click("select")?;
         s.ui_click("mirror")?;
@@ -5565,7 +5522,6 @@ fn column_short_window(dir: &Path) -> Result<(), String> {
 /// after the request, a change over 10,000 cells held until Allow or Stop, and the ask field.
 fn review(dir: &Path) -> Result<(), String> {
     let mut s = Shot::new(house(), "house.vox", 2.0)?;
-    s.ed.ui.coach = false;
     // Back off so the house, its flag and the card all show.
     s.ed.cam.distance *= 1.9;
     let h = s.ed.height as f32;
@@ -5723,7 +5679,6 @@ fn review(dir: &Path) -> Result<(), String> {
 fn review_phone(dir: &Path) -> Result<(), String> {
     let mut s = Shot::sized(house(), "house.vox", 3.0, (390, 844))?;
     s.ed.set_touch(true);
-    s.ed.ui.coach = false;
     s.frames(3);
     let plain = view_pixels(&mut s);
     let position = s.ed.scene.history().position();
@@ -5822,7 +5777,6 @@ fn differ(a: &[u8], b: &[u8]) -> usize {
 fn review_times(scene: &Path) -> Result<(), String> {
     let (sc, name) = crate::native::open(scene)?;
     let mut s = Shot::sized(sc, &name, 2.0, (1512, 982))?;
-    s.ed.ui.coach = false;
     s.ed.ui.show_render = false;
     s.frames(4);
     let script = r#"{"prompt": "change a lot", "calls": [
@@ -5897,7 +5851,6 @@ fn review_times(scene: &Path) -> Result<(), String> {
 fn frame_times(scene: &Path) -> Result<(), String> {
     let (sc, name) = crate::native::open(scene)?;
     let mut s = Shot::sized(sc, &name, 2.0, (1512, 982))?;
-    s.ed.ui.coach = false;
     s.frames(4);
     let mid = [s.ed.width as f32 / 2.0, s.ed.height as f32 / 2.0];
     // The least share of the render image showing the current view, over the orbiting frames.
@@ -6121,7 +6074,6 @@ fn assistant(dir: &Path) -> Result<(), String> {
     use vxr_app::assistant::fake::anthropic;
     use vxr_app::assistant::{CallState, Progress};
     let mut s = Shot::new(house(), "house.vox", 2.0)?;
-    s.ed.ui.coach = false;
     // Back off and move the house left, clear of the card, the palette and the panel.
     s.ed.cam.distance *= 2.6;
     let h = s.ed.height as f32;
@@ -6398,7 +6350,6 @@ fn assistant(dir: &Path) -> Result<(), String> {
 fn ai_refused() -> Result<(), String> {
     use vxr_core::history::At;
     let mut s = Shot::new(Scene::from_vox(&house().to_vox()?)?, "house.vox", 1.0)?;
-    s.ed.ui.coach = false;
     let fake = s.fake_assistant(0);
     s.ed.assistant.set_key(vxr_ai::Kind::Anthropic, "sk-ant-test-not-a-real-key", false)?;
     s.frames(2);
@@ -6430,7 +6381,6 @@ fn ai_new_chat() -> Result<(), String> {
     use vxr_app::assistant::Progress;
     use vxr_app::assistant::fake::anthropic;
     let mut s = Shot::new(house(), "house.vox", 1.0)?;
-    s.ed.ui.coach = false;
     let fake = s.fake_assistant(0);
     s.ed.assistant.set_key(vxr_ai::Kind::Anthropic, "sk-ant-test-not-a-real-key", false)?;
     s.ed.ui.ai_open = true;
@@ -6494,7 +6444,6 @@ fn ai_bar_failed() -> Result<(), String> {
     use vxr_app::assistant::Progress;
     use vxr_app::assistant::fake::anthropic;
     let mut s = Shot::new(house(), "house.vox", 1.0)?;
-    s.ed.ui.coach = false;
     let fake = s.fake_assistant(0);
     s.ed.assistant.set_key(vxr_ai::Kind::Anthropic, "sk-ant-test-not-a-real-key", false)?;
     s.frames(2);
@@ -6560,7 +6509,6 @@ fn live_steps(dir: &Path) -> Result<(), String> {
             }
             Err(_) => Shot::new(house(), "house.vox", 2.0)?,
         };
-        s.ed.ui.coach = false;
         s.ed.cam.distance *= 2.6;
         let h = s.ed.height as f32;
         s.ed.cam.pan(-640.0, 40.0, h);
@@ -6877,7 +6825,6 @@ fn agents_live(dir: &Path) -> Result<(), String> {
     let mut live = vxr_app::live::Live::new(sock_dir.clone()).downloads_to(downloads.clone());
     let r = (|| -> Result<(), String> {
         let mut s = Shot::new(house(), "house.vox", 2.0)?;
-        s.ed.ui.coach = false;
         s.ed.cam.distance *= 1.9;
         let h = s.ed.height as f32;
         s.ed.cam.pan(-420.0, 0.0, h);
@@ -7393,7 +7340,6 @@ fn agents_bridge(dir: &Path) -> Result<(), String> {
         let mut script = PageScript { addr: bridge.addr(), ws: None };
         let mut page = Page::new();
         let mut s = Shot::new(house(), "house.vox", 2.0)?;
-        s.ed.ui.coach = false;
         s.ed.cam.distance *= 1.9;
         let h = s.ed.height as f32;
         s.ed.cam.pan(-420.0, 0.0, h);
@@ -7586,7 +7532,6 @@ fn agents_steps(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
         None => (house(), "house.vox".into()),
     };
     let mut s = Shot::new(scene, &name, 2.0)?;
-    s.ed.ui.coach = false;
     s.ed.cam.distance *= 1.9;
     let h = s.ed.height as f32;
     s.ed.cam.pan(-420.0, 0.0, h);

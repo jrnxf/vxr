@@ -68,7 +68,7 @@ async (stage, view) => {
     reachable('with the colour editor open');
   } else if (stage === 'commands') {
     await tap('keys');
-    step('the keyboard button opens the command list', window.vxr.hit('cmdk').length > 0);
+    step('the command button opens the command list', window.vxr.hit('cmdk').length > 0);
     shown('cmdk', 'the command list');
   }
   return out.join('\n');
