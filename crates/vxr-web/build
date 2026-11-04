@@ -69,4 +69,4 @@ for (const f of process.argv.slice(1)) {
   const br = zlib.brotliCompressSync(raw, { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 11 } });
   console.log(path.basename(f).padEnd(20) + ' ' + String(raw.length).padStart(9) + ' B raw ' + String(br.length).padStart(9) + ' B brotli');
 }
-" "$dist/pkg/vxr_web_bg.wasm" "$dist/pkg/vxr_web.js" "$dist/scene.vox" "$dist/account.js"
+" "$dist/pkg/vxr_web_bg.wasm" "$dist/pkg/vxr_web.js" "$dist/scene.vox"
