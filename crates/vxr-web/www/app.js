@@ -522,20 +522,23 @@ async function main() {
     show('This browser has no WebGPU.', 'vxr needs WebGPU: try a recent Chrome, Edge or Safari on a desktop, or download the desktop app when it ships.');
     return;
   }
-  await init();
-  fit();
   const get = async (u) => {
     const r = await fetch(u);
     if (!r.ok) throw new Error(`${u}: ${r.status}`);
     return new Uint8Array(await r.arrayBuffer());
   };
   const font = (n) => get('fonts/' + n).catch(() => new Uint8Array());
-  const [vox, ...fonts] = await Promise.all([
+  // The scene and fonts do not need the module: fetch them alongside the wasm, not after it.
+  const assets = Promise.all([
     get('scene.vox'),
     font('Geist-Regular.ttf'), font('Geist-Medium.ttf'), font('Geist-SemiBold.ttf'),
     font('GeistMono-Regular.ttf'), font('GeistMono-Medium.ttf'), font('GeistMono-UltraBlack.ttf'),
     font('Inter-Regular.ttf'), font('lucide.ttf'),
   ]);
+  assets.catch(() => {}); // if init() throws first, its error is the one shown
+  await init();
+  fit();
+  const [vox, ...fonts] = await assets;
   app = await start(canvas, vox, 'island.vox', dpr(), ...fonts);
   window.vxr = app; // for the console and crates/vxr-web/check
   // The System theme follows the page's light or dark setting; a picked theme is kept here.
