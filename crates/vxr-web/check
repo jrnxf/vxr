@@ -2,7 +2,9 @@
 # Check the browser build end to end in headless Chrome (chrome-devtools-axi on the PATH):
 # serve crates/vxr-web/dist/ on 127.0.0.1 with the deploy's headers (check-server.js, with a
 # stand-in model provider), run check.js in the page (every tool, camera, undo/redo, Cmd-K,
-# the assistant, Open, Save, resize, the projects list and drafts), check that a draft and a
+# the assistant, Open, Save, resize, the projects list and drafts), check the landing page and
+# the boot skeleton (check-landing.js: first visit with progress and an early click, /about, the
+# returning-visit skip, ?open= ?project= ?embed), check that a draft and a
 # key remembered in the browser come back in a new page (check-restore.js for the draft), check that a tablet-sized touch screen starts in the touch layout, pair the
 # page with a real `vxr bridge` (a debug build, which takes pages from 127.0.0.1, on its fixed
 # port) and edit it from a real `vxr mcp --live` driven by a scripted MCP client
@@ -17,6 +19,7 @@ shots="$here/shots"
 port="${VXR_CHECK_PORT:-4801}"
 url="http://127.0.0.1:$port/"
 [ -f "$dist/pkg/vxr_web_bg.wasm" ] || { echo "no $dist: run crates/vxr-web/build first" >&2; exit 1; }
+npm --prefix "$here" run -s lint >&2 && npm --prefix "$here" run -s format:check >&2 || { echo "FAIL oxlint or oxfmt on site/" >&2; exit 1; }
 command -v chrome-devtools-axi >/dev/null || { echo "chrome-devtools-axi is not on the PATH" >&2; exit 1; }
 mkdir -p "$shots"
 
@@ -53,6 +56,29 @@ axi() { chrome-devtools-axi "$@"; }
 # Empty the page's projects store (and take its scene as saved, so nothing is kept as the
 # page goes): each page here starts with nothing to restore unless a step left it on purpose.
 forget() { axi eval "async () => { window.vxr?.forget_projects(); await window.vxrProjects?.clear(); return 'ok' }" >/dev/null || true; }
+# The landing page and the boot skeleton (check-landing.js): this profile's first visit, then
+# its returning and deep-link visits, before anything else opens the page. The first visit holds
+# the wasm back for 6 s, so the progress and an early click can be seen.
+landing() { axi eval --full "async () => ($(cat "$here/check-landing.js"))('$1')" | unwrap; }
+curl -sf "http://127.0.0.1:$port/__hold/6000" >/dev/null
+axi open "$url" >/dev/null
+axi emulate --viewport "1280x800x1" >/dev/null
+land_results="$(landing first)"
+axi screenshot "$shots/web-landing-loading.png" >/dev/null
+land_results+=$'\n'"$(landing early)"
+axi open "${url}about" >/dev/null
+land_results+=$'\n'"$(landing ready)"
+axi screenshot "$shots/web-landing.png" >/dev/null
+land_results+=$'\n'"$(landing ready-click)"
+axi open "$url" >/dev/null
+land_results+=$'\n'"$(landing again)"
+axi screenshot "$shots/web-boot-skeleton.png" >/dev/null
+landing again-done >/dev/null
+for q in "?open=scene.vox" "?project=abc" "?embed"; do
+  land_results+=$'\n'"$(landing clear)"
+  axi open "$url$q" >/dev/null
+  land_results+=$'\n'"$(landing deep)"
+done
 axi open "$url" >/dev/null
 axi eval "async () => { for (let i = 0; i < 300 && !window.vxr; i++) await new Promise(r => setTimeout(r, 50)); return 'ready' }" >/dev/null
 forget
@@ -107,6 +133,7 @@ for _ in $(seq 600); do
 done
 [ -n "$results" ] || results="FAIL check.js did not finish in 10 minutes"
 results+="$touch_results"
+results+=$'\n'"$land_results"
 axi screenshot "$shots/web-1x-checked.png" >/dev/null
 
 # A draft outlives its page: an edit, a new page that offers it back, and Restore.

@@ -11,7 +11,7 @@ const path = require('node:path');
 const [dist, port, fixtures] = process.argv.slice(2);
 const types = {
   '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.wasm': 'application/wasm',
-  '.ttf': 'font/ttf', '.txt': 'text/plain', '.vox': 'application/octet-stream',
+  '.ttf': 'font/ttf', '.webp': 'image/webp', '.json': 'application/json', '.txt': 'text/plain', '.vox': 'application/octet-stream',
 };
 
 // Cloudflare's _headers: a path pattern, then indented "Name: value" lines.
@@ -96,8 +96,17 @@ function standIn(req, res, body) {
   res.end('data: [DONE]\n\n');
 }
 
+// /__hold/<ms> holds back every wasm response for that long from now (the landing page's
+// progress and early click: a slow connection, with the rest of the page already in).
+let holdUntil = 0;
+
 http.createServer((req, res) => {
   const u = decodeURIComponent(new URL(req.url, 'http://x').pathname);
+  if (u.startsWith('/__hold/')) {
+    holdUntil = Date.now() + +u.slice(8);
+    res.writeHead(200);
+    return res.end('held');
+  }
   if (u === '/__fake/v1/chat/completions' && req.method === 'POST') {
     let body = '';
     req.on('data', (d) => { body += d; });
@@ -109,10 +118,15 @@ http.createServer((req, res) => {
     return res.end(JSON.stringify(seen));
   }
   const p = u.startsWith('/__fixtures/') ? path.join(fixtures, u.slice(12)) : path.join(dist, u);
-  const f = p.endsWith('/') ? p + 'index.html' : p;
+  // A path without an extension is its .html file (Cloudflare's /about for about.html).
+  const f = p.endsWith('/') ? p + 'index.html' : !path.extname(p) && fs.existsSync(p + '.html') ? p + '.html' : p;
   fs.readFile(f, (err, data) => {
     if (err) { res.writeHead(404); res.end(); return; }
-    res.writeHead(200, { ...headersFor(u), 'content-type': types[path.extname(f)] || 'application/octet-stream' });
-    res.end(data);
+    const send = () => {
+      res.writeHead(200, { ...headersFor(u), 'content-type': types[path.extname(f)] || 'application/octet-stream' });
+      res.end(data);
+    };
+    if (f.endsWith('.wasm') && holdUntil > Date.now()) setTimeout(send, holdUntil - Date.now());
+    else send();
   });
 }).listen(+port, '127.0.0.1');

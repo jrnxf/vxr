@@ -15,3 +15,4 @@ prototype/demo/
 /crates/vxr-web/node_modules/
 /crates/vxr-web/.dev.vars
 /crates/vxr-web/shots/
+/crates/vxr-web/site/node_modules/

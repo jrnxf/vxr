@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build the browser editor as a static site in crates/vxr-web/dist/ (git-ignored):
 # the wasm (profile wasm, wasm-opt -O3), the page and its icons, the UI fonts with their licences, the
-# prototype's island as scene.vox, and the account page (account/, bundled with esbuild from the npm
+# prototype's island as scene.vox, the landing page (site/, Preact pre-rendered with Vite), and the account page (account/, bundled with esbuild from the npm
 # packages in package.json). Serve dist/ from any static host (the account page needs the Worker,
 # see wrangler.jsonc); deploy with ./deploy. TURNSTILE_SITE_KEY sets the account page's Turnstile
 # site key; unset, it is Cloudflare's always-pass test key.
@@ -24,12 +24,15 @@ mkdir -p "$dist/pkg" "$dist/fonts"
 run wasm-bindgen --target web --no-typescript --out-dir "$dist/pkg" target/wasm32-unknown-unknown/wasm/vxr_web.wasm
 run wasm-opt -O3 --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext \
   --enable-mutable-globals --enable-reference-types -o "$dist/pkg/vxr_web_bg.wasm" "$dist/pkg/vxr_web_bg.wasm"
-cp "$here/www/index.html" "$here/www/app.js" "$here/www/style.css" "$here/www/_headers" \
-  "$here/www/favicon.svg" "$here/www/apple-touch-icon.png" "$dist/"
+[ -d "$here/node_modules" ] || npm ci --prefix "$here" --no-audit --no-fund
+# The page: site/ (Preact, the landing page and the boot skeleton pre-rendered into index.html)
+# plus www/ (app.js, gate.js, _headers and the icons, copied as they are).
+VITE_CONFIG_NATIVE_IGNORE_WARNING=true "$here/node_modules/.bin/vite" build "$here/site" --logLevel warn
+# /about is the same page with the landing forced on (www/gate.js reads the path).
+cp "$dist/index.html" "$dist/about.html"
 cp "$fonts"/*.ttf "$fonts"/*.txt "$dist/fonts/"
 site_key="${TURNSTILE_SITE_KEY:-1x00000000000000000000AA}"
 [[ "$site_key" =~ ^[0-9A-Za-z_-]+$ ]] || { echo "build: TURNSTILE_SITE_KEY has unexpected characters" >&2; exit 1; }
-[ -d "$here/node_modules" ] || npm ci --prefix "$here" --no-audit --no-fund
 "$here/node_modules/.bin/esbuild" "$here/account/account.ts" --bundle --minify --format=esm --target=es2022 \
   --define:TURNSTILE_SITE_KEY="\"$site_key\"" --outfile="$dist/account.js" --log-level=warning
 cp "$here/account/index.html" "$dist/account.html"
@@ -42,6 +45,14 @@ const w = new api.VoxelWorld();
 api.generateIsland(w);
 fs.writeFileSync(process.argv[1], api.writeVox(w, api.defaultPalette()));
 " "$dist/scene.vox"
+# The sizes the landing page's progress is counted against (site/src/landing/preload.ts).
+node --input-type=module -e "
+import fs from 'node:fs';
+const sizes = {};
+for (const f of ['pkg/vxr_web_bg.wasm', 'scene.vox', ...fs.readdirSync(process.argv[1] + '/fonts').filter((n) => n.endsWith('.ttf')).map((n) => 'fonts/' + n)])
+  sizes[f] = fs.statSync(process.argv[1] + '/' + f).size;
+fs.writeFileSync(process.argv[1] + '/preload.json', JSON.stringify(sizes));
+" "$dist"
 node --input-type=module -e "
 import fs from 'node:fs';
 import path from 'node:path';

@@ -109,7 +109,7 @@ jobs:
           cargo run --release -p vxr-app -- --shot "$RUNNER_TEMP/shots" prototype/demo/scene.vox | tee "$RUNNER_TEMP/shot.log"
           echo "$(grep -c '^ok' "$RUNNER_TEMP/shot.log") steps ok"
 
-  # The Worker behind /api/* and /account, and the account page: types, and the tests in workerd
+  # The Worker behind /api/* and /account, the account page and the landing page (site/): types, oxlint, oxfmt, and the tests in workerd
   # with local D1 and R2 (no test calls Turnstile or Resend). NODE matches the NODE_VERSION build
   # variable of Workers Builds.
   worker:
@@ -132,4 +132,6 @@ jobs:
 
       - run: npm ci --no-audit --no-fund
       - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run format:check
       - run: npm test
