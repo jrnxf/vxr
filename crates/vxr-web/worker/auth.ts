@@ -2,11 +2,14 @@
 // a one-time link (the `magicLink` plugin) and a 6-digit code (the `emailOTP` plugin), so a person
 // can open the link, or read the code on one device and type it on another. Either one makes the
 // account on first use. Sessions are a same-site cookie on this origin, so the editor's fetch to
-// /api/projects carries it with no token handling of its own.
+// /api/projects carries it with no token handling of its own. The desktop app has no cookie jar:
+// it signs in by code only and keeps the session as a bearer token (the `bearer` plugin), and only
+// its own requests get that token back (see `fromApp`).
 import { betterAuth, type BetterAuthOptions } from 'better-auth';
+import { bearer } from 'better-auth/plugins/bearer';
 import { emailOTP } from 'better-auth/plugins/email-otp';
 import { magicLink } from 'better-auth/plugins/magic-link';
-import { type Mailer, signInMail } from './mail';
+import { appSignInMail, type Mailer, signInMail } from './mail';
 
 /** How long the link and the code in a sign-in email work, in seconds. */
 export const SIGN_IN_TTL = 600;
@@ -27,8 +30,17 @@ export const OTP_OFF = [
   '/email-otp/change-email',
 ];
 
-/** Sends the sign-in email for `email` with its link; null when there is no sender. */
-export type SendSignIn = ((email: string, link: string) => Promise<void>) | null;
+/** Sends the sign-in email for `email` with its link (only the code for the app); null when there is no sender. */
+export type SendSignIn = ((email: string, link: string, app: boolean) => Promise<void>) | null;
+
+/**
+ * A request from the desktop app: it says so with `x-vxr-client: app` and has no Origin. Every
+ * browser sends Origin on a POST, and the custom header needs a CORS preflight this Worker never
+ * allows, so no web page can make one.
+ */
+export function fromApp(req: Request | undefined): boolean {
+  return req?.headers.get('x-vxr-client') === 'app' && !req.headers.has('origin');
+}
 
 /** The Better Auth options for a Worker answering on `origin`. */
 export function authOptions(origin: string, secret: string, database: BetterAuthOptions['database'], send: SendSignIn) {
@@ -59,9 +71,9 @@ export function authOptions(origin: string, secret: string, database: BetterAuth
     plugins: [
       magicLink({
         expiresIn: SIGN_IN_TTL,
-        async sendMagicLink({ email, url: link }) {
+        async sendMagicLink({ email, url: link }, ctx) {
           if (!send) throw new Error('no email sender');
-          await send(email, link);
+          await send(email, link, fromApp(ctx?.request));
         },
       }),
       emailOTP({
@@ -74,6 +86,8 @@ export function authOptions(origin: string, secret: string, database: BetterAuth
           throw new Error('codes are sent with a sign-in link');
         },
       }),
+      // Only signed tokens: the session cookie's value, as `set-auth-token` gave it to the app.
+      bearer({ requireSignature: true }),
     ],
   } satisfies BetterAuthOptions;
 }
@@ -87,10 +101,11 @@ export function makeAuth(origin: string, secret: string, db: D1Database, mailer:
       secret,
       db,
       mailer &&
-        (async (email: string, link: string): Promise<void> => {
-          // A fresh code for this address (it replaces any earlier one), mailed beside the link.
+        (async (email: string, link: string, app: boolean): Promise<void> => {
+          // A fresh code for this address (it replaces any earlier one), mailed beside the link,
+          // or alone for the app, where a link would sign in a browser instead.
           const code: string = await auth.api.createVerificationOTP({ body: { email, type: 'sign-in' } });
-          await mailer.send(signInMail(email, link, code));
+          await mailer.send(app ? appSignInMail(email, code) : signInMail(email, link, code));
         }),
     ),
   );

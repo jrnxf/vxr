@@ -312,6 +312,7 @@ fn run_steps(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     new_scene_command(dir)?;
     projects(dir)?;
     library(dir)?;
+    app_library(dir)?;
     scene_tree(dir)?;
     to_object(dir)?;
     organize(dir)?;
@@ -868,6 +869,10 @@ struct Fake {
     calls: Vec<String>,
     vox: Vec<u8>,
     obj: Vec<String>,
+    /// The desktop's files, as the projects store sees them: each save changes its file there.
+    disk: Option<vxr_app::projects::Memory>,
+    /// The session token kept, as the desktop keeps it in the keychain.
+    session: Option<String>,
 }
 
 impl Platform for Fake {
@@ -886,16 +891,22 @@ impl Platform for Fake {
         self.vox = bytes.to_vec();
         // A scene with a file saves over it, as the window does; one without picks chosen.vox.
         let path = current.map_or_else(|| PathBuf::from("chosen.vox"), Path::to_path_buf);
+        if let Some(disk) = &self.disk {
+            disk.touch(&path);
+        }
         let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
         Ok(Some(Saved { name, path: Some(path), ..Default::default() }))
     }
     /// Opens what was saved last, as the project's file.
     fn open_project(&mut self, project: &Project) -> Result<Option<Opened>, String> {
         self.calls.push(format!("open_project {}", project.name));
+        let modified =
+            self.disk.as_ref().zip(project.path.as_deref()).and_then(|(d, f)| vxr_app::projects::Store::modified(d, f));
         Ok(Some(Opened {
             name: project.name.clone(),
             bytes: self.vox.clone(),
             path: project.path.clone(),
+            modified,
             ..Default::default()
         }))
     }
@@ -928,6 +939,10 @@ impl Platform for Fake {
         self.calls.push(format!("export_vox {name}"));
         self.vox = bytes.to_vec();
         Ok(Some(name.into()))
+    }
+    fn keep_session(&mut self, token: Option<&str>) {
+        self.calls.push(format!("keep_session {}", token.is_some()));
+        self.session = token.map(str::to_string);
     }
 }
 
@@ -1493,7 +1508,7 @@ fn library(dir: &Path) -> Result<(), String> {
     menu(&mut a)?;
     check(
         a.ed.ui.account.is_none() && !a.ed.ui.hits.contains_key("account"),
-        "with sign-in off (the desktop, or a page with no Worker) there is no account control".into(),
+        "with sign-in off (no Worker, or none reached yet) there is no account control".into(),
     )?;
     a.ed.ui.projects_open = false;
 
@@ -1822,6 +1837,201 @@ fn library(dir: &Path) -> Result<(), String> {
     check(
         shown == Some("done") && !a.ed.ui.sign_in.open && a.ed.ui.toast_text() == Some("Signed in as ada@example.com"),
         format!("a link clicked in another tab signs this one in, with the check ({shown:?})"),
+    )
+}
+
+/// The desktop app's account and library (`Library::native`, a store with files): sign-in by
+/// code with no bot check, the session token kept and sent with every call; Save writes the
+/// .vox and puts it in the library, and the projects list says where each copy is and which is
+/// newer; a newer version from the library is written over the file, and a file changed on
+/// disk goes up as it opens; a relaunch is signed in by the kept token, and Sign out deletes
+/// it, here and for the other window.
+fn app_library(dir: &Path) -> Result<(), String> {
+    use vxr_app::host::{fetched, open};
+    use vxr_app::projects::{Memory, Projects, Store};
+    use vxr_app::sync::{Account, FakeLibrary, Library};
+    // One round: the calls the editor queued so far, answered; the ones they queue wait.
+    let step = |s: &mut Shot, p: &mut Fake, server: &mut FakeLibrary| {
+        for call in s.ed.library.take_out() {
+            let reply = server.answer(&call);
+            fetched(&mut s.ed, p, call.id, reply);
+        }
+        s.frames(2);
+    };
+    let sync = |s: &mut Shot, p: &mut Fake, server: &mut FakeLibrary| {
+        while s.ed.library.busy() {
+            step(s, p, server);
+        }
+        step(s, p, server);
+    };
+    // A launch of the app on this Mac, with the token the keychain holds.
+    let launch = |s: &mut Shot, session: Option<String>| -> Fake {
+        let mem = Memory::desktop();
+        mem.clock.set(1.8e9);
+        let p = Fake { disk: Some(mem.clone()), session: session.clone(), ..Default::default() };
+        s.ed.projects = Projects::load(Box::new(mem));
+        s.ed.projects.reset(s.ed.scene.history().position());
+        s.ed.library = Library::native(session);
+        s.ed.ui.coach = false;
+        s.frames(3);
+        p
+    };
+    let menu = |s: &mut Shot| -> Result<String, String> {
+        if !s.ed.ui.projects_open {
+            s.ui_click("scene-select")?;
+        }
+        s.frames(2);
+        Ok(s.ed.ui.projects.iter().find(|r| r.current).map(|r| r.when.clone()).unwrap_or_default())
+    };
+    let email = |s: &Shot| s.ed.library.account.user().and_then(|u| u.email.clone());
+
+    let mut a = Shot::new(Scene::new(NEW_SIZE), "Untitled", 2.0)?;
+    let mut pa = launch(&mut a, None);
+    let mut server = FakeLibrary::signed_out();
+    a.ed.library.check();
+    sync(&mut a, &mut pa, &mut server);
+    check(
+        matches!(a.ed.library.account, Account::Out) && a.ed.ui.hits.contains_key("account"),
+        "in the app, signed out, the top bar offers Sign in".into(),
+    )?;
+
+    // The code, with no bot check and an email with no link.
+    a.ui_click("account")?;
+    a.frames(20);
+    a.type_into("account-email", "ada@example.com")?;
+    serve(&mut a, &mut pa);
+    sync(&mut a, &mut pa, &mut server);
+    a.frames(20);
+    let shown = a.ed.ui.sign_in.shown();
+    check(
+        !pa.calls.iter().any(|c| c == "challenge")
+            && server.sent == ["ada@example.com"]
+            && shown == Some("code")
+            && a.ed.ui.sign_in.app,
+        format!("in the app, Enter sends the email with no bot check; the popover asks for the code ({shown:?})"),
+    )?;
+    a.save_png(&dir.join("app-2x-app-account-code.png"))?;
+    a.frames_with(2, vec![egui::Event::Text("123456".into())]);
+    serve(&mut a, &mut pa);
+    sync(&mut a, &mut pa, &mut server);
+    a.frames(100);
+    check(
+        email(&a).as_deref() == Some("ada@example.com")
+            && pa.session.is_some()
+            && pa.session == server.session
+            && pa.calls.iter().any(|c| c == "keep_session true"),
+        format!("the right code signs the app in and it keeps the session token ({:?})", pa.calls.last()),
+    )?;
+
+    // Save: the .vox, then the library.
+    for x in 0..2 {
+        let cell = a.ed.scene.to_map([x, 0, 0]);
+        a.ed.scene.edit([(cell, 3)]);
+    }
+    a.frames(2);
+    run_action(&mut a.ed, &mut pa, Action::Save);
+    sync(&mut a, &mut pa, &mut server);
+    let file = Some(PathBuf::from("chosen.vox"));
+    let id = a.ed.projects.current.clone().unwrap_or_default();
+    let copy = a.ed.projects.get(&id).map(|p| p.copy);
+    let up = server.projects.first().cloned();
+    let when = menu(&mut a)?;
+    check(
+        pa.calls.iter().any(|c| c.starts_with("save_vox") && c.ends_with("over None"))
+            && a.ed.path == file
+            && copy == Some(0)
+            && up.as_ref().is_some_and(|u| Scene::from_vox(&u.bytes).is_ok_and(|s| s.world_voxels(false).len() == 2))
+            && !a.ed.is_unsaved()
+            && when.ends_with("· this Mac and library"),
+        format!("in the app, Save writes the .vox and puts it in the library ({when:?}, {:?})", a.ed.path),
+    )?;
+    a.save_png(&dir.join("app-2x-app-library.png"))?;
+
+    // Saved from another device: the row says the library's is newer, and the file takes it.
+    let newer = house().to_vox()?;
+    server.put(up.as_ref().map(|u| u.id.as_str()), "chosen", newer.clone());
+    a.ed.library.check();
+    let mut behind = false;
+    for _ in 0..6 {
+        step(&mut a, &mut pa, &mut server);
+        if menu(&mut a)?.ends_with("· newer in library") {
+            behind = true;
+            a.save_png(&dir.join("app-2x-app-newer-library.png"))?;
+            break;
+        }
+    }
+    sync(&mut a, &mut pa, &mut server);
+    let when = menu(&mut a)?;
+    check(
+        behind
+            && pa.calls.iter().any(|c| c.starts_with("save_vox") && c.ends_with(r#"over Some("chosen.vox")"#))
+            && pa.vox == newer
+            && a.ed.scene.world_voxels(false) == house().world_voxels(false)
+            && !a.ed.is_unsaved()
+            && when.ends_with("· this Mac and library"),
+        format!("a newer version in the library is written over the file and opens ({when:?})"),
+    )?;
+    a.ed.ui.projects_open = false;
+
+    // The file changes on disk (another app): it opens as it is and goes up.
+    let mut changed = house();
+    changed.edit([(changed.to_map([0, 9, 0]), 3u8)]);
+    let changed = changed.to_vox()?;
+    let disk = pa.disk.clone().ok_or("no disk")?;
+    disk.clock.set(1.8e9 + 60.0);
+    disk.touch(Path::new("chosen.vox"));
+    let modified = disk.modified(Path::new("chosen.vox"));
+    open(
+        &mut a.ed,
+        &mut pa,
+        Opened { name: "chosen.vox".into(), bytes: changed.clone(), path: file, modified, ..Default::default() },
+    );
+    let when = menu(&mut a)?;
+    a.save_png(&dir.join("app-2x-app-newer-here.png"))?;
+    sync(&mut a, &mut pa, &mut server);
+    let after = server.projects.iter().find(|p| p.id == id).map(|p| p.bytes.clone());
+    let synced = menu(&mut a)?;
+    check(
+        when.ends_with("· newer on this Mac")
+            && a.ed.projects.current.as_deref() == Some(id.as_str())
+            && after.is_some_and(|b| {
+                Scene::from_vox(&b).is_ok_and(|s| s.world_voxels(false) == a.ed.scene.world_voxels(false))
+            })
+            && synced.ends_with("· this Mac and library"),
+        format!(
+            "a file changed on disk says it is newer on this Mac and goes up as it opens ({when:?}, then {synced:?})"
+        ),
+    )?;
+    a.ed.ui.projects_open = false;
+
+    // A relaunch: the kept token signs it in.
+    let mut b = Shot::new(Scene::new(NEW_SIZE), "Untitled", 1.0)?;
+    let mut pb = launch(&mut b, pa.session.clone());
+    b.ed.library.check();
+    sync(&mut b, &mut pb, &mut server);
+    check(
+        email(&b).as_deref() == Some("ada@example.com"),
+        format!("a relaunch with the kept token is signed in ({:?})", email(&b)),
+    )?;
+
+    // Sign out: the Worker ends the session and the token goes from the keychain.
+    a.ui_click("account")?;
+    a.frames(2);
+    a.ui_click("account-sign-out")?;
+    serve(&mut a, &mut pa);
+    sync(&mut a, &mut pa, &mut server);
+    check(
+        matches!(a.ed.library.account, Account::Out)
+            && pa.session.is_none()
+            && server.session.is_none()
+            && pa.calls.last().is_some_and(|c| c == "keep_session false"),
+        format!("Sign out ends the session and deletes the token ({:?})", pa.calls.last()),
+    )?;
+    b.ed.library.check();
+    sync(&mut b, &mut pb, &mut server);
+    check(
+        matches!(b.ed.library.account, Account::Out) && pb.session.is_none(),
+        "the other launch's next check finds the session gone and deletes its token".into(),
     )
 }
 

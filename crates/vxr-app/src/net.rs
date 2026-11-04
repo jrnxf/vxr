@@ -1,6 +1,7 @@
 //! The assistant's native host: requests on their own threads with a blocking HTTPS client
 //! (ureq over rustls, without gzip so streamed answers arrive as they are sent), and keys in
-//! the OS keychain (macOS Keychain, Windows Credential Manager, Secret Service on Linux).
+//! the OS keychain (macOS Keychain, Windows Credential Manager, Secret Service on Linux). The
+//! account's session token is kept there too ([`Session`]).
 
 use std::io::Read;
 use std::path::PathBuf;
@@ -140,5 +141,63 @@ impl Keys for Keychain {
 
     fn place(&self) -> KeyPlace {
         KeyPlace::Keychain
+    }
+}
+
+/// The account's session token in the OS keychain, under the service "vxr": the entry
+/// `account-session`, or `account-session@<server>` for a Worker other than the default one
+/// (so signing in to a local one leaves the real sign-in alone).
+pub struct Session {
+    account: String,
+}
+
+impl Session {
+    /// The session for the Worker at `server`, `default` being the one the app ships with.
+    pub fn new(server: &str, default: &str) -> Session {
+        let account = if server == default { "account-session".into() } else { format!("account-session@{server}") };
+        Session { account }
+    }
+
+    fn entry(&self) -> Result<keyring::Entry, String> {
+        keyring::Entry::new("vxr", &self.account).map_err(|e| e.to_string())
+    }
+
+    /// The token kept, if any.
+    pub fn get(&self) -> Option<String> {
+        self.entry().ok()?.get_password().ok().filter(|t| !t.is_empty())
+    }
+
+    /// Keep `token`, or delete the one kept (None).
+    pub fn set(&self, token: Option<&str>) -> Result<(), String> {
+        let entry = self.entry()?;
+        match token {
+            Some(t) => entry.set_password(t).map_err(|e| e.to_string()),
+            None => match entry.delete_credential() {
+                Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+                Err(e) => Err(e.to_string()),
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Session;
+
+    #[test]
+    fn session_token_kept_per_server_and_deleted() {
+        // The mock store in place of the keychain: the real one is set up first, as the first
+        // entry would, so it cannot replace the mock later.
+        _ = keyring::Entry::store_status();
+        keyring_core::set_default_store(keyring_core::mock::Store::new().expect("a mock store"));
+        let default = "https://vxr.example.com";
+        let (real, local) = (Session::new(default, default), Session::new("http://localhost:8787", default));
+        assert_eq!(real.get(), None);
+        real.set(Some("s1.sig")).expect("kept");
+        local.set(Some("s2.sig")).expect("kept");
+        assert_eq!(Session::new(default, default).get().as_deref(), Some("s1.sig"), "a relaunch finds it");
+        local.set(None).expect("deleted");
+        assert_eq!((real.get().as_deref(), local.get()), (Some("s1.sig"), None), "a local Worker's is its own");
+        local.set(None).expect("deleting what is gone is fine");
     }
 }

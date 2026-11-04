@@ -11,12 +11,17 @@
 //! a scene opened becomes (or finds) its project and is offered its draft back, a save
 //! deletes the draft, and the scene being replaced keeps its newest edits as a draft first.
 //!
-//! Signed in (in the browser), Save puts a new scene, or one already in the account's
-//! library, in the library ([`crate::sync`]); a file opened from this device stays a file
-//! until Add to library. The page sends the library's calls and hands each reply to
-//! [`fetched`]. Signing in from the account popover asks the [`Platform`] for the bot check
-//! first ([`Platform::challenge`], answered here or later through [`challenged`]), then sends
-//! the email; the code and Sign out go through the same queue.
+//! Signed in, Save puts a new scene, or one already in the account's library, in the library
+//! ([`crate::sync`]); a file opened from this device stays a file until Add to library. In the
+//! browser the library's copy is the scene's file. On the desktop Save always writes the real
+//! `.vox` too, and the library keeps it in step: a file changed on disk goes up when it is
+//! opened, and a newer version in the library is written over the file when it comes down,
+//! unless the file changed since (then both are kept, as a conflict is). The host sends the
+//! library's calls and hands each reply to [`fetched`]. Signing in from the account popover
+//! asks the page for the bot check first ([`Platform::challenge`], answered here or later
+//! through [`challenged`]), then sends the email; the desktop app has no bot check and sends it
+//! at once. The code and Sign out go through the same queue, and the desktop app keeps the
+//! session the code gets ([`Platform::keep_session`]).
 
 use std::path::{Path, PathBuf};
 
@@ -109,6 +114,9 @@ pub trait Platform {
         None
     }
 
+    /// Keep the desktop app's session token for the next start (Some), or delete it (None).
+    fn keep_session(&mut self, _token: Option<&str>) {}
+
     /// Download the scene's `.vox` bytes as `name`, beside its place in the library; returns
     /// the name it was given.
     fn export_vox(&mut self, _name: &str, _bytes: &[u8]) -> Result<Option<String>, String> {
@@ -180,13 +188,7 @@ pub fn run_action(ed: &mut Editor, p: &mut dyn Platform, action: Action) {
                 // A scene never saved: its draft is all there is.
                 return load_draft(ed, p, &project.id);
             }
-            match p.open_project(&project) {
-                Ok(Some(file)) => {
-                    open(ed, p, file);
-                }
-                Ok(None) => {}
-                Err(e) => toast(ed, format!("Could not open {}: {e}", project.name)),
-            }
+            open_here(ed, p, &project);
         }
         Action::RestoreDraft => {
             if let Some(offer) = ed.projects.offer.take() {
@@ -218,7 +220,9 @@ pub fn run_action(ed: &mut Editor, p: &mut dyn Platform, action: Action) {
             ed.quit = true;
         }
         Action::SendCode => {
-            if let Some(token) = p.challenge() {
+            if ed.library.native {
+                send_to(ed, None);
+            } else if let Some(token) = p.challenge() {
                 challenged(ed, Some(token));
             }
         }
@@ -279,10 +283,39 @@ pub fn run_action(ed: &mut Editor, p: &mut dyn Platform, action: Action) {
     }
 }
 
+/// Open `project` from what this device has of it: its file, else (on the desktop, a library
+/// project not saved to a file here yet) the copy the library's download left.
+fn open_here(ed: &mut Editor, p: &mut dyn Platform, project: &Project) {
+    let ctx = ed.ctx.clone();
+    if ed.projects.files() && project.path.is_none() && project.copy > 0 {
+        let Read::Here(bytes) = ed.projects.read_copy(&project.id) else {
+            return ed.ui.toast(&ctx, format!("Could not open {}: its copy is gone", project.name));
+        };
+        let file = Opened {
+            name: project.name.clone(),
+            bytes,
+            id: Some(project.id.clone()),
+            copy: project.copy,
+            ..Default::default()
+        };
+        open(ed, p, file);
+        return;
+    }
+    match p.open_project(project) {
+        Ok(Some(file)) => {
+            open(ed, p, file);
+        }
+        Ok(None) => {}
+        Err(e) => ed.ui.toast(&ctx, format!("Could not open {}: {e}", project.name)),
+    }
+}
+
 /// Replace the scene with a file the user picked, or say why not; true when it opened. It
-/// becomes its project in the list, which offers its draft back when it has one. A file
-/// picked from this device's files that lands in a library project takes it out of the
-/// library here (its copy is that file now), and the library's version is listed again.
+/// becomes its project in the list, which offers its draft back when it has one. In the
+/// browser, a file picked from this device's files that lands in a library project takes it
+/// out of the library here (its copy is that file now), and the library's version is listed
+/// again. On the desktop the file is the project's own: one changed on disk since vxr last saw
+/// it goes up to the library.
 pub fn open(ed: &mut Editor, p: &mut dyn Platform, file: Opened) -> bool {
     let ctx = ed.ctx.clone();
     let Opened { name, bytes, path, modified, id, handle, copy, picked } = file;
@@ -291,8 +324,16 @@ pub fn open(ed: &mut Editor, p: &mut dyn Platform, file: Opened) -> bool {
             p.named(&name);
             ed.ui.toast(&ctx, format!("Opened {name}"));
             let id = ed.projects.opened(&name, path.as_deref(), id.as_deref(), modified, handle, copy);
-            if picked && ed.projects.get(&id).is_some_and(|p| p.cloud.is_some()) {
+            let cloud = ed.projects.get(&id).and_then(|p| p.cloud.clone());
+            if picked && path.is_none() && cloud.is_some() {
                 ed.projects.update(&id, |p| p.cloud = None);
+                ed.library.list();
+            } else if cloud.is_some_and(|c| c.dirty) {
+                // The file changed since vxr last saw it: its row shows it as it is now.
+                if let Ok(t) = vxr_ops::look::thumbnail(&ed.scene, THUMB) {
+                    ed.projects.set_thumb(&id, &t);
+                }
+                // The list says whether the library moved on meanwhile, then it goes up.
                 ed.library.list();
             }
             ed.path = path;
@@ -325,37 +366,56 @@ fn to_library(ed: &Editor, id: &str, add: bool) -> bool {
     add || ed.projects.get(id).is_none_or(|p| p.library(&user.id).is_some() || !p.has_file())
 }
 
-/// Save the scene to the library: the page keeps its copy (so it opens offline) and the
-/// upload goes; [`fetched`] says how it went.
+/// Save the scene to the library and the upload goes; [`fetched`] says how it went. The page
+/// keeps its copy (so it opens offline); the desktop writes the `.vox` file, as any save does
+/// (asking where for a scene with no file yet), and the library's copy here is no longer
+/// needed.
 fn library_save(ed: &mut Editor, p: &mut dyn Platform, id: &str, name: String, bytes: Vec<u8>) {
     let ctx = ed.ctx.clone();
-    if let Err(e) = ed.projects.keep_copy(id, &bytes) {
-        return ed.ui.toast(&ctx, format!("Could not save: {e}"));
-    }
     let position = ed.scene.history().position();
-    ed.projects.saved(&name, None, false, bytes.len() as u64, position);
+    if ed.projects.files() {
+        match p.save_vox(ed.path.as_deref(), id, &name, &bytes) {
+            Ok(Some(s)) => saved(ed, p, s, position),
+            Ok(None) => return,
+            Err(e) => return ed.ui.toast(&ctx, format!("Could not save: {e}")),
+        }
+        ed.projects.drop_copy(id);
+    } else {
+        if let Err(e) = ed.projects.keep_copy(id, &bytes) {
+            return ed.ui.toast(&ctx, format!("Could not save: {e}"));
+        }
+        ed.projects.saved(&name, None, false, bytes.len() as u64, position);
+        p.named(&name);
+        ed.ui.scene_name = name;
+        ed.path = None;
+        ed.mark_saved_at(position);
+    }
     let thumb = vxr_ops::look::thumbnail(&ed.scene, THUMB).ok();
     if let Some(t) = &thumb {
         ed.projects.set_thumb(id, t);
     }
-    p.named(&name);
-    ed.ui.scene_name = name;
-    ed.path = None;
-    ed.mark_saved_at(position);
     ed.library.upload(&mut ed.projects, id, bytes, thumb);
 }
 
 /// The bot check answered for the sign-in email the popover asked for: its token, or None
 /// when it did not pass.
 pub fn challenged(ed: &mut Editor, token: Option<String>) {
-    ed.ui.sign_in.checking = false;
     match token.filter(|t| !t.is_empty()) {
-        // The field may have changed while the check ran.
-        Some(token) => match ed.ui.sign_in.email_to_send() {
-            Some(email) => ed.library.send_code(&email, &token),
-            None => ed.ui.sign_in.failed("Check the email address and try again."),
-        },
-        None => ed.ui.sign_in.failed("The check did not pass. Try again."),
+        Some(token) => send_to(ed, Some(&token)),
+        None => {
+            ed.ui.sign_in.checking = false;
+            ed.ui.sign_in.failed("The check did not pass. Try again.");
+        }
+    }
+}
+
+/// Send the sign-in email to the address in the popover, with the page's bot check `token`.
+fn send_to(ed: &mut Editor, token: Option<&str>) {
+    ed.ui.sign_in.checking = false;
+    // The field may have changed while the check ran.
+    match ed.ui.sign_in.email_to_send() {
+        Some(email) => ed.library.send_code(&email, token),
+        None => ed.ui.sign_in.failed("Check the email address and try again."),
     }
 }
 
@@ -372,12 +432,44 @@ pub fn fetched(ed: &mut Editor, p: &mut dyn Platform, id: u32, reply: Reply) {
                 if reload && (!here || ed.is_unsaved() || ed.projects.current_draft().is_some()) {
                     continue;
                 }
-                if let Err(e) = ed.projects.keep_copy(&project, &bytes) {
-                    ed.ui.toast(&ctx, format!("Could not keep a copy: {e}"));
-                }
-                let Some(name) = ed.projects.get(&project).map(|p| p.name.clone()) else { continue };
-                let copy = bytes.len() as u64;
-                let file = Opened { name: name.clone(), bytes, id: Some(project.clone()), copy, ..Default::default() };
+                let Some(here) = ed.projects.get(&project).cloned() else { continue };
+                let name = here.name.clone();
+                let file = match here.path.clone().filter(|_| ed.projects.files()) {
+                    // The project's file on the desktop: the library's version is written over
+                    // it, unless it changed since vxr last saw it. Then the file opens as it
+                    // is, and goes up beside the library's version as a conflicted copy.
+                    Some(path) => {
+                        let on_disk = ed.projects.disk_modified(&path);
+                        if on_disk.is_some_and(|m| here.modified.is_none_or(|seen| m > seen + 1.0)) {
+                            ed.projects.update(&project, |p| {
+                                if let Some(c) = &mut p.cloud {
+                                    c.dirty = true;
+                                }
+                            });
+                            open_here(ed, p, &here);
+                            continue;
+                        }
+                        match p.save_vox(Some(&path), &project, &name, &bytes) {
+                            Ok(Some(_)) => {}
+                            Ok(None) => continue,
+                            Err(e) => {
+                                ed.ui.toast(&ctx, format!("Could not write {name}: {e}"));
+                                continue;
+                            }
+                        }
+                        let modified = ed.projects.disk_modified(&path);
+                        // Written by vxr, so not a change to send back up.
+                        ed.projects.update(&project, |p| p.modified = modified);
+                        Opened { name: name.clone(), bytes, path: Some(path), modified, ..Default::default() }
+                    }
+                    None => {
+                        if let Err(e) = ed.projects.keep_copy(&project, &bytes) {
+                            ed.ui.toast(&ctx, format!("Could not keep a copy: {e}"));
+                        }
+                        let copy = bytes.len() as u64;
+                        Opened { name: name.clone(), bytes, id: Some(project.clone()), copy, ..Default::default() }
+                    }
+                };
                 if open(ed, p, file) {
                     ed.projects.update(&project, |p| {
                         if let Some(c) = &mut p.cloud {
@@ -392,13 +484,7 @@ pub fn fetched(ed: &mut Editor, p: &mut dyn Platform, id: u32, reply: Reply) {
             }
             Event::OpenHere { project } => {
                 let Some(project) = ed.projects.get(&project).cloned() else { continue };
-                match p.open_project(&project) {
-                    Ok(Some(file)) => {
-                        open(ed, p, file);
-                    }
-                    Ok(None) => {}
-                    Err(e) => ed.ui.toast(&ctx, format!("Could not open {}: {e}", project.name)),
-                }
+                open_here(ed, p, &project);
             }
             Event::Renamed { project, name } => {
                 if ed.projects.current.as_deref() == Some(project.as_str()) {
@@ -410,6 +496,7 @@ pub fn fetched(ed: &mut Editor, p: &mut dyn Platform, id: u32, reply: Reply) {
             Event::Auth(Auth::Sent) => ed.ui.sign_in.sent(ctx.input(|i| i.time)),
             Event::Auth(Auth::WrongCode) => ed.ui.sign_in.wrong_code(ctx.input(|i| i.time)),
             Event::Auth(Auth::Failed(why)) => ed.ui.sign_in.failed(&why),
+            Event::Session(token) => p.keep_session(token.as_deref()),
         }
     }
 }
@@ -426,6 +513,9 @@ fn catch_up(ed: &mut Editor) {
     if cloud.dirty {
         if let Ok(bytes) = vox_bytes(&ed.scene) {
             let thumb = vxr_ops::look::thumbnail(&ed.scene, THUMB).ok();
+            if let Some(t) = &thumb {
+                ed.projects.set_thumb(&id, t);
+            }
             ed.library.upload(&mut ed.projects, &id, bytes, thumb);
         }
     } else if cloud.behind() && !cloud.held {

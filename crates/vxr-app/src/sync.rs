@@ -1,21 +1,25 @@
-//! The optional account and its library of projects, in the browser.
+//! The optional account and its library of projects, in the browser and the desktop app.
 //!
-//! Signed in on the page's `/account`, the editor's projects go to the account's library on the
-//! vxr Worker (`crates/vxr-web/worker`): Save uploads the scene there, the projects list shows
-//! the library's projects too, and opening one this device does not have downloads it. Each
-//! save names the version it replaces; when another device saved first, the Worker keeps both,
-//! this save as "<name> (conflicted copy)" ([`Event::Renamed`]).
+//! Signed in, the editor's projects go to the account's library on the vxr Worker
+//! (`crates/vxr-web/worker`): Save uploads the scene there, the projects list shows the
+//! library's projects too, and opening one this device does not have downloads it. Each save
+//! names the version it replaces; when another device saved first, the Worker keeps both, this
+//! save as "<name> (conflicted copy)" ([`Event::Renamed`]).
 //!
-//! [`Library`] has no network of its own: it queues [`Call`]s, the page sends them
+//! [`Library`] has no network of its own: it queues [`Call`]s, the host sends them
 //! ([`Library::take_out`]) and hands each [`Reply`] back to [`Library::answer`], which says what the
-//! editor should do ([`Event`]). The desktop never signs in, so its account stays
-//! [`Account::Off`]. [`FakeLibrary`] answers the calls in memory, as the Worker does, for the tests
-//! and the headless check.
+//! editor should do ([`Event`]). The page sends them same-origin with the session cookie; the
+//! desktop app (`crate::courier`) over HTTPS with the session as a bearer token.
+//! [`FakeLibrary`] answers the calls in memory, as the Worker does, for the tests and the headless
+//! check.
 //!
-//! Signing in and out goes through the same calls, from the editor's account popover: one email
-//! carries a link and a 6-digit code ([`Library::send_code`], behind the page's Turnstile check),
-//! the code signs in here ([`Library::verify_code`]), and the link signs in wherever it is opened,
-//! which the page hears of and checks `/api/me` again ([`Library::check`]).
+//! Signing in and out goes through the same calls, from the editor's account popover. On the page
+//! one email carries a link and a 6-digit code ([`Library::send_code`], behind the page's Turnstile
+//! check), the code signs in here ([`Library::verify_code`]), and the link signs in wherever it is
+//! opened, which the page hears of and checks `/api/me` again ([`Library::check`]). The desktop
+//! app ([`Library::native`]) has no page for Turnstile or a link: its calls say they are the app,
+//! its email has only the code, and the Worker hands it the session token, which the host keeps in
+//! the Keychain ([`Event::Session`]).
 
 use std::collections::HashMap;
 
@@ -26,7 +30,8 @@ use crate::projects::{Cloud, Projects};
 /// Where the account is.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum Account {
-    /// No sign-in here: the desktop, or a page whose Worker has none.
+    /// No sign-in here (a page whose Worker has none), or not known yet: the Worker has not been
+    /// reached.
     #[default]
     Off,
     /// Sign-in is there, and nobody is signed in.
@@ -72,7 +77,8 @@ pub struct Remote {
     pub updated: f64,
 }
 
-/// A request for the page to send, same-origin with the session cookie.
+/// A request for the host to send: same-origin with the session cookie on the page, to the
+/// Worker with the bearer token in the desktop app.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Call {
     pub id: u32,
@@ -83,12 +89,14 @@ pub struct Call {
 }
 
 /// What came back: `status` 0 when the request did not get through. `version` is the
-/// `x-vxr-version` header of a download.
+/// `x-vxr-version` header of a download, `token` the `set-auth-token` header of a sign-in (which
+/// the Worker sends only to the desktop app).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Reply {
     pub status: u16,
     pub body: Vec<u8>,
     pub version: Option<String>,
+    pub token: Option<String>,
 }
 
 /// What a reply asks of the editor.
@@ -116,6 +124,8 @@ pub enum Event {
     Listed,
     /// How a sign-in step went.
     Auth(Auth),
+    /// The desktop app's session token to keep (signed in) or to delete (signed out).
+    Session(Option<String>),
 }
 
 /// How asking for a sign-in email, or typing its code, went.
@@ -131,9 +141,11 @@ pub enum Auth {
 
 /// What a call in flight is for.
 enum Want {
-    /// `confirm`: asked right after a code was accepted, to learn who signed in.
+    /// `confirm`: asked right after a code was accepted, to learn who signed in. `session` is
+    /// the desktop app's token it went with: an answer for an older one is stale.
     Me {
         confirm: bool,
+        session: Option<String>,
     },
     /// The list asked for as the `generation`th.
     List {
@@ -164,6 +176,9 @@ type Queued = Option<(Vec<u8>, Option<Vec<u8>>)>;
 #[derive(Default)]
 pub struct Library {
     pub account: Account,
+    /// The desktop app: no Turnstile, code only, and `session` as a bearer token.
+    pub native: bool,
+    session: Option<String>,
     out: Vec<Call>,
     next: u32,
     waiting: HashMap<u32, Want>,
@@ -234,11 +249,22 @@ struct AuthProblem {
 }
 
 impl Library {
-    /// Ask the Worker who is signed in (at launch, and when the page comes back into view).
+    /// The desktop app's library, signed in with the `session` token it kept, if any.
+    pub fn native(session: Option<String>) -> Self {
+        Self { native: true, session, ..Self::default() }
+    }
+
+    /// Ask the Worker who is signed in (at launch, and when the page or the window comes back
+    /// into view).
     pub fn check(&mut self) {
         if !self.waiting.values().any(|w| matches!(w, Want::Me { .. })) {
-            self.send(Want::Me { confirm: false }, "GET", "/api/me".into(), Vec::new(), Vec::new());
+            self.me(false);
         }
+    }
+
+    fn me(&mut self, confirm: bool) {
+        let session = self.session.clone();
+        self.send(Want::Me { confirm, session }, "GET", "/api/me".into(), Vec::new(), Vec::new());
     }
 
     /// The calls to send now.
@@ -261,9 +287,15 @@ impl Library {
         want: Want,
         method: &'static str,
         path: String,
-        headers: Vec<(&'static str, String)>,
+        mut headers: Vec<(&'static str, String)>,
         body: Vec<u8>,
     ) {
+        if self.native {
+            headers.push(("x-vxr-client", "app".into()));
+            if let Some(token) = &self.session {
+                headers.push(("authorization", format!("Bearer {token}")));
+            }
+        }
         self.next += 1;
         self.out.push(Call { id: self.next, method, path, headers, body });
         self.waiting.insert(self.next, want);
@@ -273,7 +305,7 @@ impl Library {
     pub fn signing_in(&self) -> bool {
         self.waiting
             .values()
-            .any(|w| matches!(w, Want::Code | Want::Verify | Want::SignOut | Want::Me { confirm: true }))
+            .any(|w| matches!(w, Want::Code | Want::Verify | Want::SignOut | Want::Me { confirm: true, .. }))
     }
 
     /// Whether the library is moving a scene: an upload, a download or a list in flight.
@@ -283,14 +315,22 @@ impl Library {
     }
 
     /// Email `email` a sign-in link and code. `token` is the page's Turnstile answer, which the
-    /// Worker checks before it sends anything.
-    pub fn send_code(&mut self, email: &str, token: &str) {
-        let body = serde_json::json!({
-            "email": email,
-            "callbackURL": "/account?from=editor",
-            "errorCallbackURL": "/account?from=editor&link=expired",
-        });
-        let headers = vec![("content-type", "application/json".into()), ("x-turnstile-token", token.into())];
+    /// Worker checks before it sends anything; the desktop app has none, and its email has only
+    /// the code.
+    pub fn send_code(&mut self, email: &str, token: Option<&str>) {
+        let body = if self.native {
+            serde_json::json!({ "email": email })
+        } else {
+            serde_json::json!({
+                "email": email,
+                "callbackURL": "/account?from=editor",
+                "errorCallbackURL": "/account?from=editor&link=expired",
+            })
+        };
+        let mut headers = vec![("content-type", "application/json".into())];
+        if let Some(token) = token {
+            headers.push(("x-turnstile-token", token.into()));
+        }
         let body = serde_json::to_vec(&body).unwrap_or_default();
         self.send(Want::Code, "POST", "/api/auth/sign-in/magic-link".into(), headers, body);
     }
@@ -386,7 +426,9 @@ impl Library {
         let ok = (200..300).contains(&reply.status);
         let mut events = Vec::new();
         match want {
-            Want::Me { confirm } => {
+            // Asked with a token signed out (or replaced) since: whatever it says is old.
+            Want::Me { session, .. } if session != self.session => {}
+            Want::Me { confirm, .. } => {
                 let me = if ok { serde_json::from_slice::<Me>(&reply.body).ok() } else { None };
                 if confirm && !me.as_ref().is_some_and(|m| m.user.is_some()) {
                     events.push(Event::Auth(Auth::Failed(
@@ -409,6 +451,10 @@ impl Library {
                     None => return events,
                 };
                 let user = account.user().map(|u| u.id.clone());
+                if account == Account::Out {
+                    // The kept token no longer signs in: it expired or was signed out elsewhere.
+                    self.end_session(&mut events);
+                }
                 if account != self.account {
                     projects.signed_out(user.as_deref());
                     self.account = account;
@@ -567,10 +613,19 @@ impl Library {
             Want::PutThumb => {}
             Want::Code if ok => events.push(Event::Auth(Auth::Sent)),
             Want::Code => events.push(Event::Auth(Auth::Failed(auth_reason(&reply)))),
-            // Signed in: who as, and the library, come with the next /api/me.
-            Want::Verify if ok => {
-                self.send(Want::Me { confirm: true }, "GET", "/api/me".into(), Vec::new(), Vec::new())
-            }
+            // Signed in: who as, and the library, come with the next /api/me, which the desktop
+            // app asks with its new token.
+            Want::Verify if ok && self.native => match reply.token.filter(|t| !t.is_empty()) {
+                Some(token) => {
+                    self.session = Some(token.clone());
+                    events.push(Event::Session(Some(token)));
+                    self.me(true);
+                }
+                None => events.push(Event::Auth(Auth::Failed(
+                    "The code was right, but vxr sent no session back. Try again.".into(),
+                ))),
+            },
+            Want::Verify if ok => self.me(true),
             Want::Verify => events.push(Event::Auth(match auth_code(&reply).as_deref() {
                 Some("INVALID_OTP") => Auth::WrongCode,
                 _ => Auth::Failed(auth_reason(&reply)),
@@ -601,14 +656,22 @@ impl Library {
         }
     }
 
-    /// Nobody is signed in now: the library's rows and uploads go.
+    /// Nobody is signed in now: the library's rows and uploads go, and the desktop app's token.
     fn forget(&mut self, projects: &mut Projects, events: &mut Vec<Event>) {
+        self.end_session(events);
         self.account = Account::Out;
         projects.signed_out(None);
         self.uploading.clear();
         self.uploaded.clear();
         self.relist = false;
         events.push(Event::Listed);
+    }
+
+    /// The desktop app's token is no good any more: the host deletes it.
+    fn end_session(&mut self, events: &mut Vec<Event>) {
+        if self.session.take().is_some() {
+            events.push(Event::Session(None));
+        }
     }
 }
 
@@ -653,8 +716,9 @@ fn size(n: u64) -> String {
 
 /// A library in memory that answers [`Call`]s as the Worker does: one account, the version
 /// check, conflicts kept as copies, and the limits. Signing in by code takes any code but
-/// [`FakeLibrary::WRONG_CODE`], for any email a code was sent to. For the tests and the headless
-/// check.
+/// [`FakeLibrary::WRONG_CODE`], for any email a code was sent to. The desktop app's calls need no
+/// Turnstile answer and are signed in only with the token its sign-in got. For the tests and the
+/// headless check.
 #[derive(Default)]
 pub struct FakeLibrary {
     /// None: nobody is signed in.
@@ -663,6 +727,8 @@ pub struct FakeLibrary {
     pub email: Option<String>,
     /// The addresses sign-in emails went to, in order.
     pub sent: Vec<String>,
+    /// The desktop app's session token, once it signed in by code.
+    pub session: Option<String>,
     /// Every project: id, name, version, bytes, thumbnail, updated (ms).
     pub projects: Vec<Stored>,
     pub limit: u64,
@@ -670,6 +736,7 @@ pub struct FakeLibrary {
     /// Answer every call with status 0, as when offline.
     pub offline: bool,
     versions: u32,
+    sessions: u32,
     pub clock: f64,
 }
 
@@ -702,8 +769,11 @@ impl FakeLibrary {
         let body = serde_json::from_slice::<serde_json::Value>(&call.body).unwrap_or_default();
         let field = |k: &str| body.get(k).and_then(|v| v.as_str()).unwrap_or_default().to_string();
         let token = call.headers.iter().any(|(h, v)| *h == "x-turnstile-token" && !v.is_empty());
+        let app = Self::app(call);
         Some(match call.path.as_str() {
-            "/api/auth/sign-in/magic-link" if !token => Self::json(403, serde_json::json!({ "error": "challenge" })),
+            "/api/auth/sign-in/magic-link" if !token && !app => {
+                Self::json(403, serde_json::json!({ "error": "challenge" }))
+            }
             "/api/auth/sign-in/magic-link" => {
                 self.sent.push(field("email"));
                 Self::json(200, serde_json::json!({ "status": true }))
@@ -718,15 +788,36 @@ impl FakeLibrary {
                 }
                 self.user = Some(format!("u-{email}"));
                 self.email = Some(email);
-                Self::json(200, serde_json::json!({ "token": "t" }))
+                self.sessions += 1;
+                let session = app.then(|| format!("s{}.sig", self.sessions));
+                self.session = session.clone();
+                Reply { token: session, ..Self::json(200, serde_json::json!({ "token": "t" })) }
             }
             "/api/auth/sign-out" => {
-                self.user = None;
-                self.email = None;
+                if self.signed_in_for(call) {
+                    self.user = None;
+                    self.email = None;
+                    self.session = None;
+                }
                 Self::json(200, serde_json::json!({ "success": true }))
             }
             _ => return None,
         })
+    }
+
+    /// Whether `call` comes from the desktop app.
+    fn app(call: &Call) -> bool {
+        call.headers.iter().any(|(h, v)| *h == "x-vxr-client" && v == "app")
+    }
+
+    /// Whether `call` is signed in: the desktop app's with its token, the page's always (its
+    /// cookie is not modelled).
+    fn signed_in_for(&self, call: &Call) -> bool {
+        if !Self::app(call) {
+            return self.user.is_some();
+        }
+        let bearer = call.headers.iter().find(|(h, _)| *h == "authorization").map(|(_, v)| v.as_str());
+        self.user.is_some() && self.session.as_ref().is_some_and(|t| bearer == Some(&format!("Bearer {t}")))
     }
 
     fn usage(&self) -> u64 {
@@ -741,7 +832,7 @@ impl FakeLibrary {
     }
 
     fn json(status: u16, v: serde_json::Value) -> Reply {
-        Reply { status, body: serde_json::to_vec(&v).unwrap_or_default(), version: None }
+        Reply { status, body: serde_json::to_vec(&v).unwrap_or_default(), ..Reply::default() }
     }
 
     /// Store `bytes` as a new version (`id` None: a new project).
@@ -772,7 +863,9 @@ impl FakeLibrary {
         }
         let header = |k: &str| call.headers.iter().find(|(h, _)| *h == k).map(|(_, v)| v.as_str());
         if call.path == "/api/me" {
-            let user = self.user.as_ref().map(|id| serde_json::json!({ "id": id, "email": self.email, "name": "" }));
+            let user = (self.user.as_ref())
+                .filter(|_| self.signed_in_for(call))
+                .map(|id| serde_json::json!({ "id": id, "email": self.email, "name": "" }));
             return Self::json(
                 200,
                 serde_json::json!({
@@ -784,7 +877,7 @@ impl FakeLibrary {
         if let Some(reply) = self.auth(call) {
             return reply;
         }
-        if self.user.is_none() {
+        if !self.signed_in_for(call) {
             return Self::json(401, serde_json::json!({ "error": "sign_in" }));
         }
         let rest = call.path.strip_prefix("/api/projects").unwrap_or_default();
@@ -801,10 +894,10 @@ impl FakeLibrary {
         match (call.method, thumb, at) {
             ("GET", false, Some(i)) => {
                 let p = &self.projects[i];
-                Reply { status: 200, body: p.bytes.clone(), version: Some(p.version.clone()) }
+                Reply { status: 200, body: p.bytes.clone(), version: Some(p.version.clone()), token: None }
             }
             ("GET", true, Some(i)) if !self.projects[i].thumb.is_empty() => {
-                Reply { status: 200, body: self.projects[i].thumb.clone(), version: None }
+                Reply { status: 200, body: self.projects[i].thumb.clone(), ..Reply::default() }
             }
             ("PUT", true, Some(i)) => {
                 self.projects[i].thumb = call.body.clone();
@@ -933,12 +1026,12 @@ mod tests {
         assert_eq!(s.account, Account::Out);
 
         // No Turnstile answer, no email.
-        s.send_code("ada@example.com", "");
+        s.send_code("ada@example.com", Some(""));
         assert_eq!(
             lib.serve(&mut s, &mut p),
             vec![Event::Auth(Auth::Failed("The check did not pass. Try again.".into()))]
         );
-        s.send_code("ada@example.com", "token");
+        s.send_code("ada@example.com", Some("token"));
         let call = s.out[0].clone();
         assert_eq!(call.path, "/api/auth/sign-in/magic-link");
         assert!(call.headers.contains(&("x-turnstile-token", "token".into())));
@@ -966,12 +1059,95 @@ mod tests {
     }
 
     #[test]
+    fn the_desktop_app_signs_in_by_code_and_keeps_a_bearer_token() {
+        let (_, mut p, _) = device();
+        let mut s = Library::native(None);
+        let mut lib = FakeLibrary::signed_out();
+        lib.put(Some("c1"), "castle", vox(1));
+        let has = |c: &Call, h: &str| c.headers.iter().any(|(k, _)| *k == h);
+        s.check();
+        assert!(s.out[0].headers.contains(&("x-vxr-client", "app".into())));
+        assert!(!has(&s.out[0], "authorization"));
+        lib.serve(&mut s, &mut p);
+        assert_eq!(s.account, Account::Out);
+
+        // No Turnstile answer, and no link to come back to.
+        s.send_code("ada@example.com", None);
+        let call = s.out[0].clone();
+        assert!(!has(&call, "x-turnstile-token"));
+        assert!(!String::from_utf8_lossy(&call.body).contains("callbackURL"));
+        assert_eq!(lib.serve(&mut s, &mut p), vec![Event::Auth(Auth::Sent)]);
+
+        s.verify_code("ada@example.com", "123456");
+        let events = lib.serve(&mut s, &mut p);
+        let token = lib.session.clone().expect("the Worker made a session");
+        assert_eq!(events[0], Event::Session(Some(token.clone())), "the host keeps the token");
+        assert_eq!(s.account.user().and_then(|u| u.email.as_deref()), Some("ada@example.com"));
+        assert!(p.get("c1").is_some(), "the library is listed with it");
+        s.list();
+        assert!(s.out[0].headers.contains(&("authorization", format!("Bearer {token}"))));
+        lib.serve(&mut s, &mut p);
+
+        // Launched again with the kept token, it is still signed in.
+        let mut again = Library::native(Some(token.clone()));
+        again.check();
+        lib.serve(&mut again, &mut p);
+        assert!(again.account.user().is_some());
+
+        // Signing out ends the session on the Worker and deletes the token here.
+        s.sign_out();
+        let events = lib.serve(&mut s, &mut p);
+        assert_eq!(events[0], Event::Session(None));
+        assert!(events.contains(&Event::Toast("Signed out. Your scenes stay on this device.".into())));
+        assert_eq!((lib.session.clone(), s.account.clone()), (None, Account::Out));
+        again.check();
+        assert_eq!(lib.serve(&mut again, &mut p), vec![Event::Session(None), Event::Listed]);
+    }
+
+    #[test]
+    fn the_desktop_app_keeps_its_token_until_the_worker_says_it_is_gone() {
+        let (_, mut p, _) = device();
+        let mut lib = FakeLibrary::signed_in("u1");
+        lib.session = Some("s1.sig".into());
+
+        // Offline at launch: nothing is known, and the token stays.
+        let mut s = Library::native(Some("s1.sig".into()));
+        lib.offline = true;
+        s.check();
+        assert!(lib.serve(&mut s, &mut p).is_empty());
+        assert_eq!(s.account, Account::Off);
+        lib.offline = false;
+        s.check();
+        lib.serve(&mut s, &mut p);
+        assert!(s.account.user().is_some());
+
+        // Signed out elsewhere (or expired): the next call that needs it lets it go.
+        lib.session = Some("s2.sig".into());
+        s.list();
+        let events = lib.serve(&mut s, &mut p);
+        assert_eq!(events[0], Event::Session(None));
+        assert_eq!(s.account, Account::Out);
+
+        // A /api/me asked before a sign-in and answered after it is stale, not a sign-out.
+        let mut s = Library::native(None);
+        s.check();
+        let stale = s.take_out().remove(0);
+        lib.sent.push("ada@example.com".into());
+        s.verify_code("ada@example.com", "123456");
+        lib.serve(&mut s, &mut p);
+        assert!(s.account.user().is_some());
+        let reply = FakeLibrary::signed_out().answer(&stale);
+        assert!(s.answer(stale.id, reply, &mut p).is_empty());
+        assert!(s.account.user().is_some());
+    }
+
+    #[test]
     fn sign_in_problems_read_as_words() {
         let (_, mut p, mut s) = device();
         let mut failed = |status: u16, body: &str| {
             s.verify_code("ada@example.com", "123456");
             let call = s.take_out().remove(0);
-            let reply = Reply { status, body: body.as_bytes().to_vec(), version: None };
+            let reply = Reply { status, body: body.as_bytes().to_vec(), ..Reply::default() };
             s.answer(call.id, reply, &mut p)
         };
         let words = |e: Vec<Event>| match e.as_slice() {

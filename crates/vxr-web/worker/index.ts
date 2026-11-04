@@ -5,7 +5,7 @@
 //   /api/auth/*      Better Auth (worker/auth.ts): emailed links and codes, sessions
 //   /api/projects*   the account's cloud projects (worker/projects.ts)
 //   /account         the sign-in page (account/, built into dist/account.html)
-import { type Auth, makeAuth } from './auth';
+import { type Auth, fromApp, makeAuth } from './auth';
 import { type Mailer, mailerFor } from './mail';
 import { LIMITS, type Limits, json, problem, projects, usage } from './projects';
 import { turnstile, type Verify } from './turnstile';
@@ -33,6 +33,12 @@ export interface Deps {
 
 /** Sign-in emails one address, and one IP, may ask for in an hour. */
 export const MAIL_PER_HOUR = { email: 5, ip: 20 };
+
+/**
+ * The desktop app's tighter limits on top: it has no Turnstile, so one IP may ask for fewer, and
+ * all app requests together have a ceiling, which caps what a script posing as the app can send.
+ */
+export const APP_MAIL_PER_HOUR = { ip: 5, all: 200 };
 
 // The account page's policy: Turnstile's script and frame, and otherwise only this site.
 const ACCOUNT_CSP = [
@@ -79,12 +85,19 @@ async function who(auth: Auth, req: Request) {
   return s?.user ?? null;
 }
 
-/** Turnstile and the per-address limit before Better Auth sends a sign-in email (a link and a code). */
+/**
+ * Turnstile and the per-address and per-IP limits before Better Auth sends a sign-in email (a link
+ * and a code). The desktop app has no page to solve Turnstile on, so its requests (no Origin, see
+ * `fromApp`) skip it and get the tighter APP_MAIL_PER_HOUR limits instead; a request that says it
+ * is the app but carries an Origin came from a browser and is refused.
+ */
 async function emailLink(req: Request, env: Env, url: URL, deps: Deps): Promise<Response | null> {
   if (!(deps.mailer ?? mailerFor)(env, url)) return problem(503, 'email_off');
+  const app = fromApp(req);
+  if (!app && req.headers.get('x-vxr-client') === 'app') return problem(403, 'origin');
   const verify = verifier(env, deps);
   if (!verify) return problem(503, 'sign_up_off');
-  if (!(await verify(req.headers.get('x-turnstile-token') ?? '', ip(req), url.hostname))) return problem(403, 'challenge');
+  if (!app && !(await verify(req.headers.get('x-turnstile-token') ?? '', ip(req), url.hostname))) return problem(403, 'challenge');
   let email = '';
   try {
     email = String(((await req.clone().json()) as { email?: unknown }).email ?? '').trim().toLowerCase();
@@ -95,17 +108,39 @@ async function emailLink(req: Request, env: Env, url: URL, deps: Deps): Promise<
   const now = Date.now();
   const hour = now - 3600_000;
   const from = ip(req) ?? '';
-  const [byEmail, byIp] = await env.DB.batch<{ n: number }>([
+  const [byEmail, byIp, byAppIp, byApp] = await env.DB.batch<{ n: number }>([
     env.DB.prepare('select count(*) as n from mail_log where email = ? and at > ?').bind(email, hour),
     env.DB.prepare('select count(*) as n from mail_log where ip = ? and at > ?').bind(from, hour),
+    env.DB.prepare('select count(*) as n from mail_log where ip = ? and app = 1 and at > ?').bind(from, hour),
+    env.DB.prepare('select count(*) as n from mail_log where app = 1 and at > ?').bind(hour),
   ]);
-  if ((byEmail.results[0]?.n ?? 0) >= MAIL_PER_HOUR.email) return problem(429, 'too_many_links');
-  if (from && (byIp.results[0]?.n ?? 0) >= MAIL_PER_HOUR.ip) return problem(429, 'too_many_links');
+  const count = (r: D1Result<{ n: number }>) => r.results[0]?.n ?? 0;
+  if (count(byEmail) >= MAIL_PER_HOUR.email) return problem(429, 'too_many_links');
+  if (from && count(byIp) >= MAIL_PER_HOUR.ip) return problem(429, 'too_many_links');
+  if (app && (!from || count(byAppIp) >= APP_MAIL_PER_HOUR.ip)) return problem(429, 'too_many_links');
+  if (app && count(byApp) >= APP_MAIL_PER_HOUR.all) return problem(429, 'too_many_links');
   await env.DB.batch([
-    env.DB.prepare('insert into mail_log (email, ip, at) values (?, ?, ?)').bind(email, from, now),
+    env.DB.prepare('insert into mail_log (email, ip, at, app) values (?, ?, ?, ?)').bind(email, from, now, app ? 1 : 0),
     env.DB.prepare('delete from mail_log where at < ?').bind(now - 86400_000),
   ]);
   return null;
+}
+
+/**
+ * The response without the bearer plugin's `set-auth-token`: the session token is for the app
+ * only, and on the web it stays in its httpOnly cookie, out of reach of the page's scripts.
+ */
+function withoutToken(res: Response): Response {
+  if (!res.headers.has('set-auth-token')) return res;
+  const out = new Response(res.body, res);
+  out.headers.delete('set-auth-token');
+  const exposed = (out.headers.get('access-control-expose-headers') ?? '')
+    .split(',')
+    .map((h) => h.trim())
+    .filter((h) => h && h.toLowerCase() !== 'set-auth-token');
+  if (exposed.length) out.headers.set('access-control-expose-headers', exposed.join(', '));
+  else out.headers.delete('access-control-expose-headers');
+  return out;
 }
 
 /** A write from another site (the cookie is same-site, so this is belt and braces). */
@@ -150,7 +185,7 @@ export async function handle(req: Request, env: Env, deps: Deps = DEFAULT): Prom
       const stop = await emailLink(req, env, url, deps);
       if (stop) return stop;
     }
-    return auth.handler(req);
+    return fromApp(req) ? auth.handler(req) : withoutToken(await auth.handler(req));
   }
   if (path === '/api/projects' || path.startsWith('/api/projects/')) {
     if (req.method !== 'GET' && req.method !== 'HEAD' && foreign(req, url)) return problem(403, 'origin');

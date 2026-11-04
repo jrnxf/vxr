@@ -3787,6 +3787,7 @@ dependencies = [
  "egui-winit",
  "glam",
  "keyring",
+ "keyring-core",
  "png",
  "pollster 1.0.1",
  "rfd",
