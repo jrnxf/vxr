@@ -1,0 +1,235 @@
+/* The page around the editor's canvas (site/index.html): the canvas, the boot skeleton
+   (src/Boot.tsx) and the error message. The landing page's own styles are landing/landing.css. */
+@font-face {
+  font-family: Geist;
+  font-weight: 400;
+  font-display: swap;
+  src: url(/fonts/Geist-Regular.ttf) format("truetype");
+}
+@font-face {
+  font-family: Geist;
+  font-weight: 500;
+  font-display: swap;
+  src: url(/fonts/Geist-Medium.ttf) format("truetype");
+}
+@font-face {
+  font-family: Geist;
+  font-weight: 600;
+  font-display: swap;
+  src: url(/fonts/Geist-SemiBold.ttf) format("truetype");
+}
+@font-face {
+  font-family: "Geist Mono";
+  font-weight: 400;
+  font-display: swap;
+  src: url(/fonts/GeistMono-Regular.ttf) format("truetype");
+}
+@font-face {
+  font-family: "Geist Mono";
+  font-weight: 500;
+  font-display: swap;
+  src: url(/fonts/GeistMono-Medium.ttf) format("truetype");
+}
+
+:root {
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+}
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #0a0a0a;
+  color: #fafafa;
+  font:
+    14px/1.5 system-ui,
+    sans-serif;
+}
+canvas#c {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  touch-action: none;
+  outline: none;
+}
+/* Receives keyboard and IME composition while an egui text field has focus. */
+#ime {
+  position: fixed;
+  left: 50%;
+  top: 30%;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  border: 0;
+  padding: 0;
+}
+/* Turnstile's widget, over its slot in the account popover while it wants a press (app.js). */
+#challenge {
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 300px;
+  height: 65px;
+  transform: translate(-400px, 0);
+  pointer-events: none;
+}
+#challenge.shown {
+  pointer-events: auto;
+}
+#msg {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  text-align: center;
+  z-index: 50;
+  background: inherit;
+}
+#msg[hidden] {
+  display: none;
+}
+#msg p {
+  max-width: 30em;
+  margin: 0;
+  color: #a1a1a1;
+}
+#msg strong {
+  display: block;
+  color: #fafafa;
+  font-size: 16px;
+  margin-bottom: 4px;
+}
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* The boot skeleton: the editor's panels as outlines where they will be, with the cube in the
+   middle, until the editor draws its first frame (app.js sets html[data-booted]). The
+   places follow the top bar, dock, view bar and corners in crates/vxr-app/src/ui.rs. */
+#boot {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: none;
+  background: #0a0a0a;
+}
+html[data-landing="off"] #boot {
+  display: block;
+}
+html[data-booted] #boot {
+  opacity: 0;
+  visibility: hidden;
+  transition:
+    opacity 200ms ease,
+    visibility 0s 200ms;
+}
+#boot .sk {
+  position: absolute;
+  background: #171717;
+  border: 1px solid rgb(255 255 255 / 10%);
+  border-radius: 12px;
+}
+.sk-title {
+  left: 12px;
+  top: 12px;
+  width: 406px;
+  height: 42px;
+}
+.sk-dock {
+  left: 12px;
+  top: 62px;
+  width: 46px;
+  height: 494px;
+}
+.sk-actions {
+  right: 12px;
+  top: 12px;
+  width: 258px;
+  height: 42px;
+}
+.sk-view {
+  right: 12px;
+  bottom: 138px;
+  width: 172px;
+  height: 40px;
+}
+.sk-corner {
+  right: 12px;
+  bottom: 12px;
+  width: 208px;
+  height: 117px;
+}
+.sk-stats {
+  left: 12px;
+  bottom: 12px;
+  width: 306px;
+  height: 26px;
+}
+.sk-mark {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 40px;
+  height: 40px;
+  margin: -20px 0 0 -20px;
+  animation: boot-breathe 1.6s ease-in-out infinite;
+}
+@keyframes boot-breathe {
+  50% {
+    opacity: 0.35;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sk-mark {
+    animation: none;
+  }
+}
+/* The touch layout (a phone) has a different arrangement: keep only the top bar's place. */
+@media (max-width: 700px) {
+  .sk-title {
+    width: calc(100% - 24px);
+  }
+  .sk-dock,
+  .sk-actions,
+  .sk-view,
+  .sk-corner,
+  .sk-stats {
+    display: none;
+  }
+}
+
+/* Before the editor draws: shadcn Neutral, light or dark like the System theme. */
+@media (prefers-color-scheme: light) {
+  html,
+  body {
+    background: #ffffff;
+    color: #0a0a0a;
+  }
+  #msg p {
+    color: #737373;
+  }
+  #msg strong {
+    color: #0a0a0a;
+  }
+  #boot {
+    background: #ffffff;
+  }
+  #boot .sk {
+    background: #fafafa;
+    border-color: rgb(0 0 0 / 10%);
+  }
+  .sk-mark path:nth-of-type(1) {
+    fill: #171717;
+  }
+}

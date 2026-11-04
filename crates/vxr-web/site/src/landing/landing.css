@@ -1,0 +1,351 @@
+/* The landing page: a dark page over the editor, which loads behind it. */
+#landing {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: none;
+  overflow: auto;
+  background: radial-gradient(1200px 600px at 75% 50%, #141a24 0%, #0a0a0a 60%);
+  color: #fafafa;
+  font:
+    14px/1.5 Geist,
+    system-ui,
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  color-scheme: dark;
+}
+html[data-landing="on"] #landing {
+  display: block;
+}
+#landing.leaving {
+  pointer-events: none;
+}
+#landing.gone {
+  opacity: 0;
+  transition: opacity 200ms ease;
+}
+.land-top,
+.land-body {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 1280px;
+  margin: 0 auto;
+  padding-inline: clamp(16px, 4vw, 48px);
+}
+.land-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-top: 28px;
+  transition:
+    opacity 200ms ease,
+    transform 200ms var(--ease-out);
+}
+.land-top nav {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.lock {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: inherit;
+  text-decoration: none;
+  font:
+    600 18px "Geist Mono",
+    ui-monospace,
+    monospace;
+  letter-spacing: -0.02em;
+}
+.lock svg {
+  width: 26px;
+  height: 26px;
+}
+.land-body {
+  display: grid;
+  grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);
+  gap: clamp(24px, 5vw, 64px);
+  align-items: center;
+  min-height: calc(100vh - 80px);
+  padding-block: 24px 48px;
+}
+.land-copy {
+  transition:
+    opacity 200ms ease,
+    transform 200ms var(--ease-out);
+}
+.leaving .land-copy,
+.leaving .land-top {
+  opacity: 0;
+  transform: translateY(-6px);
+}
+.land-copy > * {
+  animation: rise 520ms var(--ease-out) both;
+}
+.land-copy > :nth-child(2) {
+  animation-delay: 60ms;
+}
+.land-copy > :nth-child(3) {
+  animation-delay: 120ms;
+}
+.land-copy > :nth-child(4) {
+  animation-delay: 180ms;
+}
+.land-copy > :nth-child(n + 5) {
+  animation-delay: 240ms;
+}
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+}
+.eyebrow {
+  font:
+    500 12px "Geist Mono",
+    ui-monospace,
+    monospace;
+  color: #737373;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  margin: 0 0 16px;
+}
+.land-copy h1 {
+  font-size: clamp(40px, 5vw, 58px);
+  line-height: 1.02;
+  letter-spacing: -0.04em;
+  font-weight: 600;
+  margin: 0 0 18px;
+}
+.lede {
+  font-size: 17px;
+  color: #a1a1a1;
+  margin: 0 0 30px;
+  line-height: 1.5;
+  max-width: 30em;
+}
+.ctas {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.btn {
+  position: relative;
+  height: 34px;
+  border-radius: 9px;
+  border: 1px solid rgb(255 255 255 / 16%);
+  background: transparent;
+  color: #fafafa;
+  padding: 0 14px;
+  font:
+    500 14px Geist,
+    system-ui,
+    sans-serif;
+  cursor: pointer;
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+  overflow: hidden;
+  transition:
+    transform 160ms var(--ease-out),
+    background-color 140ms ease,
+    color 140ms ease;
+}
+.btn:active {
+  transform: scale(0.97);
+}
+.btn:focus-visible,
+.lock:focus-visible,
+.reassure a:focus-visible {
+  outline: 2px solid #60a5fa;
+  outline-offset: 2px;
+}
+.btn.primary {
+  background: #e5e5e5;
+  color: #171717;
+  border-color: transparent;
+}
+.btn.ghost {
+  border-color: transparent;
+  color: #a1a1a1;
+}
+.btn.big {
+  height: 44px;
+  padding: 0 18px;
+  font-size: 15px;
+  border-radius: 11px;
+}
+@media (hover: hover) and (pointer: fine) {
+  .btn:hover {
+    background: rgb(255 255 255 / 7%);
+  }
+  .btn.primary:hover {
+    background: #fafafa;
+  }
+  .btn.ghost:hover {
+    color: #fafafa;
+  }
+}
+.i {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  flex: none;
+}
+/* The load fills the primary button from the left, linearly; the label never moves. */
+.btn .fill {
+  position: absolute;
+  inset: 0;
+  background: rgb(0 0 0 / 14%);
+  clip-path: inset(0 calc(100% - var(--p, 0%)) 0 0);
+  transition: clip-path 200ms linear;
+}
+.btn.ready .fill {
+  opacity: 0;
+  transition: opacity 200ms ease;
+}
+.btn .lbl {
+  position: relative;
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  transition:
+    opacity 180ms ease,
+    filter 180ms ease;
+}
+.btn .lbl-opening {
+  position: absolute;
+  opacity: 0;
+  filter: blur(2px);
+}
+.btn.opening .lbl-open {
+  opacity: 0;
+  filter: blur(2px);
+}
+.btn.opening .lbl-opening {
+  opacity: 1;
+  filter: none;
+}
+.spin {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  animation: spin 600ms linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.load-line {
+  margin: 12px 0 0;
+  height: 18px;
+  font:
+    12px "Geist Mono",
+    ui-monospace,
+    monospace;
+  color: #737373;
+}
+.reassure {
+  margin: 18px 0 0;
+  font-size: 13px;
+  color: #737373;
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.reassure span {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+.reassure a {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-color: rgb(255 255 255 / 25%);
+}
+@media (hover: hover) and (pointer: fine) {
+  .reassure a:hover {
+    color: #fafafa;
+  }
+}
+/* The island picture: a crop of the editor's own screenshot (landing.webp, 1280x800), which the
+   hero (landing/hero.ts) takes over from and grows into the editor. */
+.frame {
+  position: relative;
+  aspect-ratio: 700 / 520;
+  overflow: hidden;
+  border-radius: 16px;
+  background: #0a0a0a;
+  border: 1px solid rgb(255 255 255 / 10%);
+  box-shadow:
+    0 24px 80px rgb(96 165 250 / 14%),
+    0 2px 12px rgb(0 0 0 / 40%);
+  animation: rise 640ms var(--ease-out) 120ms both;
+}
+.frame img {
+  position: absolute;
+  width: 182.857%;
+  height: auto;
+  left: -42.857%;
+  top: -40.769%;
+  max-width: none;
+}
+.leaving .frame {
+  animation: none;
+}
+.leaving .frame img {
+  visibility: hidden;
+}
+@media (max-width: 860px) {
+  .land-body {
+    grid-template-columns: minmax(0, 1fr);
+    min-height: 0;
+    padding-top: 32px;
+  }
+  .frame {
+    order: 2;
+  }
+}
+/* The island picture grown into the editor: its own layer over the landing and the editor. */
+#hero {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  pointer-events: none;
+  transform-origin: 0 0;
+  will-change: transform, clip-path;
+}
+#hero[hidden] {
+  display: none;
+}
+#hero img {
+  position: absolute;
+  max-width: none;
+}
+
+/* Reduced motion: no movement, only fades. */
+@media (prefers-reduced-motion: reduce) {
+  .land-copy > *,
+  .frame {
+    animation: none;
+  }
+  .leaving .land-copy,
+  .leaving .land-top {
+    transform: none;
+  }
+  .btn:active {
+    transform: none;
+  }
+}
