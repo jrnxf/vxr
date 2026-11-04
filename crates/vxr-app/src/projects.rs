@@ -107,6 +107,11 @@ pub trait Store {
     fn files(&self) -> bool {
         false
     }
+    /// The [`content_hash`] of the file at `path`, or None when there is no such file or the
+    /// store has no files.
+    fn hash(&self, _path: &Path) -> Option<u64> {
+        None
+    }
 }
 
 /// A scene's autosaved edits.
@@ -124,7 +129,7 @@ pub struct Draft {
 }
 
 /// Where a project is in an account's library.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Cloud {
     /// The account's user id.
     pub user: String,
@@ -190,6 +195,11 @@ pub struct Project {
     /// When its file had last changed as it was opened or saved.
     #[serde(default)]
     pub modified: Option<f64>,
+    /// On the desktop: the [`content_hash`] of its file as it was when [`Project::modified`]
+    /// was noted. A file whose time moved but whose bytes did not (touched, restored, synced
+    /// again) has not changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hash: Option<u64>,
     /// The thumbnail's bytes in the store, or 0.
     #[serde(default)]
     pub thumb: u64,
@@ -494,6 +504,7 @@ impl Projects {
             if missing {
                 p.path = None;
                 p.modified = None;
+                p.hash = None;
                 changed = true;
             }
             if !p.kept() {
@@ -597,6 +608,7 @@ impl Projects {
         // Another window may have drafted it since.
         self.refresh();
         let now = self.store.now();
+        let hash = path.filter(|_| modified.is_some()).and_then(|f| self.store.hash(f));
         let found = self
             .index
             .projects
@@ -616,6 +628,7 @@ impl Projects {
                     edited: modified.unwrap_or(now),
                     used: now,
                     modified,
+                    hash: None,
                     thumb: 0,
                     draft: None,
                     cloud: None,
@@ -633,16 +646,21 @@ impl Projects {
             p.copy = copy;
         }
         p.used = now;
-        // A library project's file changed on disk since vxr last saw it: that goes up.
+        // A library project's file changed on disk since vxr last saw it: that goes up. A later
+        // time alone is not a change: the bytes must differ too.
         if path.is_some()
             && let (Some(m), Some(seen), Some(c)) = (modified, p.modified, p.cloud.as_mut())
             && m > seen + 1.0
+            && hash.is_none_or(|h| p.hash != Some(h))
         {
             c.dirty = true;
         }
         // A draft holds edits made on the file as it was when they began: keep that time.
         if p.draft.is_none() || modified.is_some() {
             p.modified = modified.or(p.modified);
+            if modified.is_some() {
+                p.hash = hash.or(p.hash);
+            }
         }
         if let Some(m) = modified {
             p.edited = p.edited.max(m);
@@ -695,6 +713,7 @@ impl Projects {
             }
         }
         let modified = path.and_then(|f| self.store.modified(f)).unwrap_or(now);
+        let hash = path.and_then(|f| self.store.hash(f));
         let had = self.get(&id).is_some_and(|p| p.draft.is_some());
         let p = self.get_mut(&id).expect("ensured");
         p.name = name.into();
@@ -709,6 +728,9 @@ impl Projects {
         p.edited = now;
         p.used = now;
         p.modified = Some(modified);
+        if path.is_some() {
+            p.hash = hash;
+        }
         // Saved to a library project's file (signed out, or before its upload): it goes up
         // when it can.
         if path.is_some()
@@ -743,6 +765,7 @@ impl Projects {
             edited: now,
             used: now,
             modified: None,
+            hash: None,
             thumb: 0,
             draft: None,
             cloud: None,
@@ -948,6 +971,28 @@ impl Projects {
         self.store.modified(path)
     }
 
+    /// Whether `project`'s file changed on disk since vxr last saw it: its time moved on and
+    /// its bytes are not the ones vxr saw (a file touched, restored or synced again is as it
+    /// was). A file that is gone, or a project with no file, has not changed.
+    pub fn changed_on_disk(&self, project: &Project) -> bool {
+        let Some(path) = project.path.as_deref() else { return false };
+        let Some(m) = self.store.modified(path) else { return false };
+        project.modified.is_none_or(|seen| m > seen + 1.0)
+            && self.store.hash(path).is_none_or(|h| project.hash != Some(h))
+    }
+
+    /// Project `id`'s file cannot be written (its folder is gone, or on a drive that is not
+    /// there): it is no longer tied to a place, so the next Save asks where to put it, and
+    /// `vox` is kept as its copy to open from.
+    pub fn copy_instead(&mut self, id: &str, vox: &[u8]) -> Result<(), String> {
+        if let Some(p) = self.get_mut(id) {
+            p.path = None;
+            p.modified = None;
+            p.hash = None;
+        }
+        self.keep_copy(id, vox)
+    }
+
     /// Project `id`'s copy of its file, as [`Projects::keep_copy`] kept it.
     pub fn read_copy(&mut self, id: &str) -> Read {
         self.store.read(&file_key(id))
@@ -1025,6 +1070,7 @@ impl Projects {
                 edited: updated,
                 used: updated,
                 modified: None,
+                hash: None,
                 thumb: 0,
                 draft: None,
                 cloud: Some(Cloud {
@@ -1167,6 +1213,8 @@ pub struct Memory {
     /// For a store that stands in for the desktop's ([`Memory::desktop`]): when each file on
     /// disk last changed, which the test sets. None: a store with no files (the browser's).
     pub disk: Option<std::rc::Rc<std::cell::RefCell<HashMap<PathBuf, f64>>>>,
+    /// The [`content_hash`] of each file on `disk`, for the files the test gave bytes.
+    hashes: std::rc::Rc<std::cell::RefCell<HashMap<PathBuf, u64>>>,
 }
 
 impl Memory {
@@ -1180,6 +1228,17 @@ impl Memory {
         if let Some(disk) = &self.disk {
             disk.borrow_mut().insert(path.into(), self.clock.get());
         }
+    }
+
+    /// The file at `path` now holds `bytes` (it changed now, by the store's clock).
+    pub fn write_file(&self, path: &Path, bytes: &[u8]) {
+        self.touch(path);
+        self.hashes.borrow_mut().insert(path.into(), content_hash(bytes));
+    }
+
+    /// When the file at `path` last changed, as the store has it.
+    pub fn disk_time(&self, path: &Path) -> Option<f64> {
+        self.disk.as_ref()?.borrow().get(path).copied()
     }
 
     /// The same store as another window (or tab) sees it: what each has open is its own.
@@ -1234,6 +1293,10 @@ impl Store for Memory {
 
     fn files(&self) -> bool {
         self.disk.is_some()
+    }
+
+    fn hash(&self, path: &Path) -> Option<u64> {
+        self.hashes.borrow().get(path).copied()
     }
 }
 
@@ -1333,6 +1396,10 @@ impl Store for Folder {
 
     fn files(&self) -> bool {
         true
+    }
+
+    fn hash(&self, path: &Path) -> Option<u64> {
+        std::fs::read(path).ok().map(|b| content_hash(&b))
     }
 }
 
@@ -1606,5 +1673,76 @@ mod tests {
         assert_eq!(bytes(1000), "1 KB");
         assert_eq!(bytes(1_300_000), "1.2 MB");
         assert_eq!(bytes(200 << 20), "200 MB");
+    }
+
+    /// A desktop store with `castle.vox` on disk holding `bytes` at time 100, opened as a
+    /// library project that is up to date.
+    fn library_file(bytes: &[u8]) -> (Memory, Projects, String, PathBuf) {
+        let m = Memory::desktop();
+        m.clock.set(100.0);
+        let mut p = Projects::load(Box::new(m.clone()));
+        let file = PathBuf::from("/home/user/castle.vox");
+        m.write_file(&file, bytes);
+        let id = p.opened("castle.vox", Some(&file), None, m.disk_time(&file), false, 0);
+        p.update(&id, |p| {
+            p.cloud = Some(Cloud { user: "u".into(), id: "c".into(), ..Default::default() });
+        });
+        (m, p, id, file)
+    }
+
+    #[test]
+    fn a_file_touched_but_not_changed_is_not_a_change() {
+        let (m, p, id, file) = library_file(b"one");
+        let project = || p.get(&id).unwrap().clone();
+        assert!(!p.changed_on_disk(&project()));
+        // Touched, restored or synced again: a later time, the same bytes.
+        m.clock.set(500.0);
+        m.write_file(&file, b"one");
+        assert!(!p.changed_on_disk(&project()));
+        // Edited elsewhere.
+        m.clock.set(900.0);
+        m.write_file(&file, b"two");
+        assert!(p.changed_on_disk(&project()));
+    }
+
+    #[test]
+    fn opening_a_touched_file_does_not_send_it_up_again() {
+        let (m, mut p, id, file) = library_file(b"one");
+        m.clock.set(500.0);
+        m.write_file(&file, b"one");
+        p.opened("castle.vox", Some(&file), None, m.disk_time(&file), false, 0);
+        assert!(!p.get(&id).unwrap().cloud.as_ref().unwrap().dirty, "same bytes, nothing to upload");
+        m.clock.set(900.0);
+        m.write_file(&file, b"two");
+        p.opened("castle.vox", Some(&file), None, m.disk_time(&file), false, 0);
+        assert!(p.get(&id).unwrap().cloud.as_ref().unwrap().dirty, "other bytes go up");
+        // What was seen follows the file, so it is not a change twice.
+        p.update(&id, |p| p.cloud.as_mut().unwrap().dirty = false);
+        m.clock.set(1200.0);
+        m.write_file(&file, b"two");
+        p.opened("castle.vox", Some(&file), None, m.disk_time(&file), false, 0);
+        assert!(!p.get(&id).unwrap().cloud.as_ref().unwrap().dirty);
+    }
+
+    #[test]
+    fn a_save_notes_the_bytes_it_wrote() {
+        let (m, mut p, id, file) = library_file(b"one");
+        m.clock.set(500.0);
+        m.write_file(&file, b"two");
+        p.saved("castle.vox", Some(&file), false, 0, 1);
+        assert_eq!(p.get(&id).unwrap().hash, Some(content_hash(b"two")));
+        m.clock.set(900.0);
+        m.write_file(&file, b"two");
+        assert!(!p.changed_on_disk(&p.get(&id).unwrap().clone()));
+    }
+
+    #[test]
+    fn a_file_whose_folder_is_gone_becomes_a_copy_with_no_place() {
+        let (_m, mut p, id, _file) = library_file(b"one");
+        p.copy_instead(&id, b"library's").unwrap();
+        let project = p.get(&id).unwrap();
+        assert!(project.path.is_none() && project.modified.is_none() && project.hash.is_none());
+        assert_eq!(project.copy, 9);
+        assert!(matches!(p.read_copy(&id), Read::Here(b) if b == b"library's"));
     }
 }
