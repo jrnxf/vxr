@@ -4,7 +4,8 @@
 //! email, which gets a link and a code in one message, and takes the code in six cells; a link
 //! clicked in another tab signs this one in too (the page asks the Worker again). The desktop
 //! app's email has only the code ([`SignIn::app`]). Signed in, it shows the email, the
-//! library's use, how sync stands, and Sign out.
+//! library's use, how sync stands, Export library, Sign out and Delete account, which asks for
+//! the account's email typed again before it goes.
 
 use egui::{Galley, Mesh, Painter, Shape, UiBuilder, Vec2};
 
@@ -31,13 +32,14 @@ pub enum Step {
     Done,
 }
 
-/// What the popover shows: a step, or the signed-in menu.
+/// What the popover shows: a step, the signed-in menu, or deleting the account.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum View {
     Email,
     Code,
     Done,
     Menu,
+    Delete,
 }
 
 /// The digits in a sign-in code.
@@ -79,6 +81,10 @@ pub struct SignIn {
     pub challenge: bool,
     /// The desktop app: its email has a code and no link (set by the editor).
     pub app: bool,
+    /// Delete account was chosen: the popover asks to confirm, with the account's email typed
+    /// into `confirm`.
+    pub deleting: bool,
+    pub confirm: String,
     pub error: Option<String>,
     /// When the code was found wrong: the cells shake, then clear.
     bad_at: Option<f64>,
@@ -93,7 +99,7 @@ pub struct SignIn {
     /// The view last drawn, when it came up, and each view's height as last measured.
     view: Option<View>,
     view_at: f64,
-    heights: [f32; 4],
+    heights: [f32; 5],
     /// The height the popover grows or shrinks from, to, and since when.
     h_from: f32,
     h_to: f32,
@@ -145,17 +151,25 @@ impl SignIn {
         true
     }
 
-    /// What the popover shows, for the checks: "email", "code", "done" or "menu".
+    /// What the popover shows, for the checks: "email", "code", "done", "menu" or "delete".
     pub fn shown(&self) -> Option<&'static str> {
         self.view.filter(|_| self.open).map(|v| match v {
             View::Email => "email",
             View::Code => "code",
             View::Done => "done",
             View::Menu => "menu",
+            View::Delete => "delete",
         })
     }
 
+    /// Back from deleting the account to the menu.
+    fn keep_account(&mut self) {
+        self.deleting = false;
+        self.confirm.clear();
+    }
+
     fn back_to_email(&mut self) {
+        self.keep_account();
         self.step = Step::Email;
         self.code.clear();
         self.tried.clear();
@@ -392,6 +406,29 @@ fn primary(ui: &mut Ui, r: Rect, label: &str, id: &str, enabled: bool, busy: boo
     resp
 }
 
+/// The popover's button for what cannot be undone: the danger tint, a spinner while `busy`,
+/// half faded when it cannot be pressed.
+fn danger(ui: &mut Ui, r: Rect, label: &str, id: &str, enabled: bool, busy: bool, now: f64) -> egui::Response {
+    let live = enabled && !busy;
+    let resp = ui.interact(r, Id::unique(id), if live { Sense::click() } else { Sense::hover() });
+    let alpha = if live { 1.0 } else { 0.5 };
+    let fill = if live && resp.hovered() { th().danger_bg.gamma_multiply(1.6) } else { th().danger_bg };
+    let p = ui.painter();
+    p.rect(
+        r,
+        CornerRadius::same(9),
+        fill.gamma_multiply(alpha),
+        Stroke::new(1.0, th().danger_line.gamma_multiply(alpha)),
+        StrokeKind::Inside,
+    );
+    if busy {
+        spinner(p, r.center(), 6.0, th().danger.gamma_multiply(alpha), now);
+    } else {
+        p.text(r.center(), Align2::CENTER_CENTER, label, sans_medium(14.0), th().danger.gamma_multiply(alpha));
+    }
+    resp
+}
+
 /// Underlined small text that can be pressed; returns its rect and whether it was.
 fn link(ui: &mut Ui, at: Pos2, text: &str, id: &str) -> (Rect, bool) {
     let probe = ui.painter().layout_no_wrap(text.into(), sans(12.0), th().muted);
@@ -419,7 +456,15 @@ impl Hybrid {
             self.sign_in.open = true;
             self.sign_in.fresh = true;
             self.sign_in.focus = true;
+            self.sign_in.keep_account();
         }
+    }
+
+    /// Open the account popover at Delete account (Cmd-K's Delete account).
+    pub fn open_delete_account(&mut self) {
+        self.open_account();
+        self.sign_in.deleting = true;
+        self.sign_in.focus = true;
     }
 
     /// How wide the account control is: "Sign in", narrowing to the avatar as the account
@@ -535,6 +580,7 @@ impl Hybrid {
         let screen = ctx.content_rect();
         let w = W.min(screen.width() - 24.0);
         let view = match self.sign_in.step {
+            _ if row.signed_in && self.sign_in.step != Step::Done && self.sign_in.deleting => View::Delete,
             _ if row.signed_in && self.sign_in.step != Step::Done => View::Menu,
             Step::Email => View::Email,
             Step::Code => View::Code,
@@ -593,6 +639,7 @@ impl Hybrid {
                     View::Code => self.code_view(&mut body, o, w, &row, now),
                     View::Done => self.done_view(&mut body, o, w, now),
                     View::Menu => self.menu_view(&mut body, o, w, &row, now),
+                    View::Delete => self.delete_view(&mut body, o, w, &row, now),
                 };
                 let p = ui.painter();
                 p.set(
@@ -616,7 +663,7 @@ impl Hybrid {
             || now - s.h_at < 0.3
             || s.bad_at.is_some_and(|t| now - t < SHAKE + 0.05)
             || measured != s.h_to;
-        if moving || view == View::Done || s.checking || row.busy {
+        if moving || view == View::Done || s.checking || row.busy || row.deleting {
             ctx.request_repaint();
         } else if view == View::Code {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
@@ -874,7 +921,7 @@ impl Hybrid {
     }
 
     // Signed in: who, the library's use, how sync stands, then Add to library (when the scene
-    // is not in it), Open library and Sign out.
+    // is not in it), Open library, Export library, Sign out and Delete account.
     fn menu_view(&mut self, ui: &mut Ui, o: Pos2, w: f32, row: &AccountRow, now: f64) -> f32 {
         let p = ui.painter().clone();
         // Who.
@@ -925,18 +972,27 @@ impl Hybrid {
             items.push(("account-add", icon::CLOUD, "Add to library"));
         }
         items.push(("account-library", icon::FOLDER, "Open library"));
+        let export = if row.exporting { "Exporting library…" } else { "Export library" };
+        items.push(("account-export", icon::DOWNLOAD, export));
         items.push(("account-sign-out", icon::LOG_OUT, "Sign out"));
+        items.push(("account-delete", icon::TRASH, "Delete account"));
         let mut picked = None;
         for (id, glyph, label) in items {
             let r = Rect::from_min_size(pos2(o.x + 6.0, y), vec2(w - 12.0, 34.0));
-            let resp = ui.interact(r, Id::unique(id), Sense::click());
+            let live = !(id == "account-export" && row.exporting);
+            let resp = ui.interact(r, Id::unique(id), if live { Sense::click() } else { Sense::hover() });
             self.hits.insert(id.into(), r);
-            if resp.hovered() {
+            if resp.hovered() && live {
                 p.rect_filled(r, CornerRadius::same(8), th().hover);
             }
-            let color = if resp.hovered() { th().text } else { th().muted };
+            let (ink, color) = match id {
+                "account-delete" => (th().danger, th().danger),
+                _ if !live => (th().faint, th().faint),
+                _ if resp.hovered() => (th().text, th().text),
+                _ => (th().text, th().muted),
+            };
             p.text(pos2(r.left() + 18.0, r.center().y), Align2::CENTER_CENTER, glyph, icon_font(16.0), color);
-            p.text(pos2(r.left() + 36.0, r.center().y), Align2::LEFT_CENTER, label, sans(13.0), th().text);
+            p.text(pos2(r.left() + 36.0, r.center().y), Align2::LEFT_CENTER, label, sans(13.0), ink);
             if resp.clicked() {
                 picked = Some(id);
             }
@@ -953,6 +1009,14 @@ impl Hybrid {
                     self.toggle_projects();
                 }
             }
+            Some("account-export") => {
+                self.sign_in.open = false;
+                self.actions.push(Action::ExportLibrary);
+            }
+            Some("account-delete") => {
+                self.sign_in.deleting = true;
+                self.sign_in.focus = true;
+            }
             Some(_) => {
                 self.sign_in.open = false;
                 self.actions.push(Action::SignOut);
@@ -960,6 +1024,86 @@ impl Hybrid {
             None => {}
         }
         y + 6.0 - o.y
+    }
+
+    // Deleting the account: what goes and what stays, the email typed again, then the red
+    // Delete account; Cancel goes back to the menu.
+    fn delete_view(&mut self, ui: &mut Ui, o: Pos2, w: f32, row: &AccountRow, now: f64) -> f32 {
+        let iw = w - 2.0 * PAD;
+        let x = o.x + PAD;
+        let email = row.email.clone().unwrap_or_default();
+        let scenes = match row.scenes {
+            0 => "your library".to_string(),
+            1 => "the 1 scene in your library".to_string(),
+            n => format!("the {n} scenes in your library"),
+        };
+        let what = format!(
+            "This deletes your account and {scenes} ({}) from vxr. Scenes on this device stay. It cannot be undone.",
+            crate::projects::bytes(row.used)
+        );
+        let mut y = heading(ui, x, o.y + PAD, "Delete your account?", &[(&what, sans(13.0), th().muted)], iw) + 14.0;
+        let ask = para(
+            ui,
+            &[
+                ("Type ", sans(12.0), th().muted),
+                (&email, sans_medium(12.0), th().text),
+                (" to confirm.", sans(12.0), th().muted),
+            ],
+            iw,
+            17.0,
+        );
+        let ah = ask.size().y;
+        ui.painter().galley(pos2(x, y), ask, th().muted);
+        y += ah + 6.0;
+        let f = Rect::from_min_size(pos2(x, y), vec2(iw, 36.0));
+        let id = Id::unique("account-confirm");
+        if take_focus(ui, &mut self.sign_in.focus) {
+            ui.memory_mut(|m| m.request_focus(id));
+        }
+        let focused = ui.memory(|m| m.has_focus(id));
+        input_frame(ui.painter(), f, 9, focused, false);
+        let tr = f.shrink2(vec2(12.0, 9.0));
+        let edit = egui::TextEdit::singleline(&mut self.sign_in.confirm)
+            .id(id)
+            .font(sans(14.0))
+            .text_color(th().text)
+            .frame(egui::Frame::NONE)
+            .margin(egui::Margin::ZERO)
+            .desired_width(tr.width());
+        let resp = ui.put(tr, edit);
+        self.hits.insert("account-confirm".into(), f);
+        let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+        y += 36.0 + 10.0;
+        let ok = !email.is_empty() && self.sign_in.confirm.trim().eq_ignore_ascii_case(email.trim());
+        let b = Rect::from_min_size(pos2(x, y), vec2(iw, 36.0));
+        let pressed = danger(ui, b, "Delete account", "account-delete-confirm", ok, row.deleting, now).clicked();
+        self.hits.insert("account-delete-confirm".into(), b);
+        if (pressed || enter) && ok && !row.deleting {
+            self.actions.push(Action::DeleteAccount);
+        }
+        y += 36.0 + 12.0;
+        let (r, cancel) = link(ui, pos2(x, y), "Cancel", "account-delete-cancel");
+        self.hits.insert("account-delete-cancel".into(), r);
+        if cancel && !row.deleting {
+            self.sign_in.keep_account();
+        }
+        let g = ui.painter().layout_no_wrap(" · ".into(), sans(12.0), th().faint);
+        let dw = g.size().x;
+        ui.painter().galley(pos2(r.right(), y), g, th().faint);
+        let first = if row.exporting { "Exporting library…" } else { "Export your library first" };
+        let at = pos2(r.right() + dw, y);
+        if row.exporting {
+            ui.painter().text(at, Align2::LEFT_TOP, first, sans(12.0), th().faint);
+            self.hits.remove("account-delete-export");
+        } else {
+            let (r, pressed) = link(ui, at, first, "account-delete-export");
+            self.hits.insert("account-delete-export".into(), r);
+            if pressed {
+                self.actions.push(Action::ExportLibrary);
+            }
+        }
+        y += 17.0;
+        y + PAD - o.y
     }
 }
 

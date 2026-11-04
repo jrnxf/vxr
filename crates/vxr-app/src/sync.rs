@@ -20,6 +20,10 @@
 //! app ([`Library::native`]) has no page for Turnstile or a link: its calls say they are the app,
 //! its email has only the code, and the Worker hands it the session token, which the host keeps in
 //! the Keychain ([`Event::Session`]).
+//!
+//! The popover also exports the whole library as one zip of `.vox` files ([`Library::export`],
+//! [`Event::Export`]) and deletes the account with everything in its library
+//! ([`Library::delete_account`]); the scenes on this device stay.
 
 use std::collections::HashMap;
 
@@ -126,6 +130,12 @@ pub enum Event {
     Auth(Auth),
     /// The desktop app's session token to keep (signed in) or to delete (signed out).
     Session(Option<String>),
+    /// The whole library as a zip of `count` `.vox` files, to save as `name`.
+    Export {
+        name: String,
+        bytes: Vec<u8>,
+        count: usize,
+    },
 }
 
 /// How asking for a sign-in email, or typing its code, went.
@@ -168,7 +178,24 @@ enum Want {
     Code,
     Verify,
     SignOut,
+    /// The list an export downloads, then each of its files.
+    ExportList,
+    ExportFile {
+        name: String,
+    },
+    DeleteAccount,
 }
+
+/// An export under way: the files downloaded so far and how many are still to come.
+#[derive(Default)]
+struct Export {
+    files: Vec<crate::files::File>,
+    left: usize,
+    failed: bool,
+}
+
+/// The name an exported library downloads as.
+pub const EXPORT_NAME: &str = "vxr-library.zip";
 
 /// A save waiting for the one before it to finish.
 type Queued = Option<(Vec<u8>, Option<Vec<u8>>)>;
@@ -190,6 +217,7 @@ pub struct Library {
     lists: u32,
     relist: bool,
     uploaded: HashMap<String, u32>,
+    export: Option<Export>,
 }
 
 #[derive(Deserialize)]
@@ -236,6 +264,8 @@ struct Problem {
     error: String,
     #[serde(default)]
     limit: u64,
+    #[serde(default)]
+    usage: Option<u64>,
 }
 
 /// What went wrong with a sign-in call: a Worker problem (`{error}`) or a Better Auth error
@@ -346,6 +376,37 @@ impl Library {
     pub fn sign_out(&mut self) {
         let headers = vec![("content-type", "application/json".into())];
         self.send(Want::SignOut, "POST", "/api/auth/sign-out".into(), headers, b"{}".to_vec());
+    }
+
+    /// Download every project in the library, and hand them over as one zip
+    /// ([`Event::Export`]).
+    pub fn export(&mut self) {
+        if self.account.user().is_none() || self.export.is_some() {
+            return;
+        }
+        self.export = Some(Export::default());
+        self.send(Want::ExportList, "GET", "/api/projects".into(), Vec::new(), Vec::new());
+    }
+
+    /// Whether an export is under way.
+    pub fn exporting(&self) -> bool {
+        self.export.is_some()
+    }
+
+    /// Delete the account and everything in its library, confirmed with its `email` typed
+    /// again. The scenes on this device stay.
+    pub fn delete_account(&mut self, email: &str) {
+        if self.account.user().is_none() || self.deleting() {
+            return;
+        }
+        let body = serde_json::to_vec(&serde_json::json!({ "email": email.trim() })).unwrap_or_default();
+        let headers = vec![("content-type", "application/json".into())];
+        self.send(Want::DeleteAccount, "DELETE", "/api/account".into(), headers, body);
+    }
+
+    /// Whether deleting the account is in flight.
+    pub fn deleting(&self) -> bool {
+        self.waiting.values().any(|w| matches!(w, Want::DeleteAccount))
     }
 
     /// Ask for the library's list, once the one in flight (if any) has answered.
@@ -557,14 +618,25 @@ impl Library {
                             }
                         });
                         let problem = serde_json::from_slice::<Problem>(&reply.body).ok();
-                        let why = match problem.as_ref().map(|p| (p.error.as_str(), p.limit)) {
-                            Some(("file_too_large", limit)) => {
+                        let why = match problem.as_ref().map(|p| (p.error.as_str(), p.limit, p.usage)) {
+                            Some(("file_too_large", limit, _)) => {
                                 format!("it is over the {} a file the library takes", size(limit))
                             }
-                            Some(("quota", limit)) => format!("the library is full ({})", size(limit)),
+                            Some(("quota", limit, used)) => {
+                                if let (Account::In(user), Some(used)) = (&mut self.account, used) {
+                                    user.usage = used;
+                                }
+                                let used = used.map(|u| format!("{} of {} used", size(u), size(limit)));
+                                format!(
+                                    "the library is full ({}). Delete scenes from it to make room.",
+                                    used.unwrap_or_else(|| size(limit))
+                                )
+                            }
                             _ => "the library did not take it as a .vox file".into(),
                         };
                         events.push(Event::Toast(format!("Kept {name} on this device: {why}")));
+                        // The usage line shows the library's own count.
+                        events.push(Event::Listed);
                         return events;
                     }
                     _ => {
@@ -657,6 +729,82 @@ impl Library {
             Want::SignOut => {
                 events.push(Event::Toast("Could not sign out: the library could not be reached. Try again.".into()))
             }
+            Want::ExportList => match (ok, serde_json::from_slice::<List>(&reply.body)) {
+                (true, Ok(list)) if list.projects.is_empty() => {
+                    self.export = None;
+                    events.push(Event::Toast("Your library is empty: there is nothing to export".into()));
+                }
+                (true, Ok(list)) => {
+                    let names = zip_names(list.projects.iter().map(|p| p.name.as_str()));
+                    if let Some(export) = &mut self.export {
+                        export.left = list.projects.len();
+                    }
+                    for (p, name) in list.projects.iter().zip(names) {
+                        let path = format!("/api/projects/{}", p.id);
+                        self.send(Want::ExportFile { name }, "GET", path, Vec::new(), Vec::new());
+                    }
+                }
+                _ if reply.status == 401 => {
+                    self.export = None;
+                    self.signed_out(projects, &mut events);
+                }
+                _ => {
+                    self.export = None;
+                    events.push(Event::Toast(
+                        "Could not export your library: it could not be reached. Try again.".into(),
+                    ));
+                }
+            },
+            Want::ExportFile { name } => {
+                if reply.status == 401 {
+                    self.export = None;
+                    self.signed_out(projects, &mut events);
+                    return events;
+                }
+                let Some(export) = &mut self.export else { return events };
+                match reply.status {
+                    200 => export.files.push((name, reply.body)),
+                    // Deleted from the library since it was listed.
+                    404 => {}
+                    _ => export.failed = true,
+                }
+                export.left -= 1;
+                if export.left == 0 {
+                    let export = self.export.take().unwrap_or_default();
+                    if export.failed {
+                        events.push(Event::Toast(
+                            "Could not export your library: a file could not be downloaded. Try again.".into(),
+                        ));
+                    } else if export.files.is_empty() {
+                        events.push(Event::Toast("Your library is empty: there is nothing to export".into()));
+                    } else {
+                        let count = export.files.len();
+                        let bytes = crate::files::zip(&export.files);
+                        events.push(Event::Export { name: EXPORT_NAME.into(), bytes, count });
+                    }
+                }
+            }
+            Want::DeleteAccount if ok => {
+                let user = match &self.account {
+                    Account::In(u) => Some(u.id.clone()),
+                    _ => None,
+                };
+                self.forget(projects, &mut events);
+                if let Some(user) = user {
+                    projects.leave_library(&user);
+                }
+                events.push(Event::Toast(
+                    "Deleted your account and its library. Your scenes stay on this device.".into(),
+                ));
+            }
+            Want::DeleteAccount if reply.status == 401 => self.signed_out(projects, &mut events),
+            Want::DeleteAccount => events.push(Event::Toast(
+                match serde_json::from_slice::<Problem>(&reply.body).ok().map(|p| p.error).as_deref() {
+                    Some("confirm") => "Could not delete your account: the email did not match it.",
+                    _ => "Could not delete your account: vxr could not be reached. Try again.",
+                }
+                .into(),
+            )),
         }
         events
     }
@@ -677,6 +825,7 @@ impl Library {
     /// Nobody is signed in now: the library's rows and uploads go, and the desktop app's token.
     fn forget(&mut self, projects: &mut Projects, events: &mut Vec<Event>) {
         self.end_session(events);
+        self.export = None;
         self.account = Account::Out;
         projects.signed_out(None);
         self.uploading.clear();
@@ -726,6 +875,33 @@ fn encode(name: &str) -> String {
         }
     }
     out
+}
+
+/// The file names `names` take in an exported zip: `.vox` on the end, no path separators, and
+/// a number after a name already taken ("Castle.vox", "Castle (2).vox").
+fn zip_names<'a>(names: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let mut taken = std::collections::HashSet::new();
+    names
+        .map(|name| {
+            let clean: String =
+                name.chars().map(|c| if matches!(c, '/' | '\\' | ':') || c.is_control() { '_' } else { c }).collect();
+            let clean = clean.trim();
+            let stem = match clean.len().checked_sub(4) {
+                Some(at) if clean.is_char_boundary(at) && clean[at..].eq_ignore_ascii_case(".vox") => &clean[..at],
+                _ => clean,
+            }
+            .trim();
+            let stem = if stem.is_empty() || stem.chars().all(|c| c == '.') { "Untitled" } else { stem };
+            let mut n = 1;
+            loop {
+                let name = if n == 1 { format!("{stem}.vox") } else { format!("{stem} ({n}).vox") };
+                if taken.insert(name.to_lowercase()) {
+                    return name;
+                }
+                n += 1;
+            }
+        })
+        .collect()
 }
 
 fn size(n: u64) -> String {
@@ -898,6 +1074,18 @@ impl FakeLibrary {
         if !self.signed_in_for(call) {
             return Self::json(401, serde_json::json!({ "error": "sign_in" }));
         }
+        if call.path == "/api/account" {
+            let body = serde_json::from_slice::<serde_json::Value>(&call.body).unwrap_or_default();
+            let typed = body.get("email").and_then(|v| v.as_str()).unwrap_or_default().trim().to_lowercase();
+            if call.method != "DELETE" || Some(typed) != self.email.as_ref().map(|e| e.to_lowercase()) {
+                return Self::json(400, serde_json::json!({ "error": "confirm" }));
+            }
+            self.user = None;
+            self.email = None;
+            self.session = None;
+            self.projects.clear();
+            return Reply { status: 204, ..Reply::default() };
+        }
         let rest = call.path.strip_prefix("/api/projects").unwrap_or_default();
         if rest.is_empty() {
             let list: Vec<_> = self.projects.iter().map(Self::show).collect();
@@ -940,7 +1128,10 @@ impl FakeLibrary {
                 };
                 if matches {
                     if !fits(self, old) {
-                        return Self::json(413, serde_json::json!({ "error": "quota", "limit": self.limit }));
+                        return Self::json(
+                            413,
+                            serde_json::json!({ "error": "quota", "limit": self.limit, "usage": self.usage() }),
+                        );
                     }
                     let p = self.put(Some(id), &name, call.body.clone());
                     return Self::json(
@@ -952,7 +1143,10 @@ impl FakeLibrary {
                     return Self::json(200, serde_json::json!({ "project": Self::show(current.as_ref().unwrap()) }));
                 }
                 if !fits(self, 0) {
-                    return Self::json(413, serde_json::json!({ "error": "quota", "limit": self.limit }));
+                    return Self::json(
+                        413,
+                        serde_json::json!({ "error": "quota", "limit": self.limit, "usage": self.usage() }),
+                    );
                 }
                 let copy = self.put(None, &format!("{name} (conflicted copy)"), call.body.clone());
                 Self::json(
@@ -1456,6 +1650,116 @@ mod tests {
         lib.serve(&mut s, &mut p);
         assert!(p.get("gone").is_none(), "a row with nothing here goes");
         assert!(p.get(&id).is_some_and(|r| r.cloud.is_none() && r.has_file()), "a project with a copy here stays");
+    }
+
+    #[test]
+    fn exports_the_library_as_one_zip() {
+        let (_, mut p, mut s) = device();
+        let mut lib = FakeLibrary::signed_in("u1");
+        lib.put(Some("c1"), "Castle", vox(2));
+        lib.put(Some("c2"), "castle.vox", vox(3));
+        lib.put(Some("c3"), "a/b", vox(4));
+        lib.put(Some("c4"), "gone", vox(5));
+        s.check();
+        lib.serve(&mut s, &mut p);
+
+        s.export();
+        assert!(s.exporting());
+        s.export();
+        let calls = s.take_out();
+        assert_eq!(calls.len(), 1, "one export at a time");
+        let reply = lib.answer(&calls[0]);
+        assert!(s.answer(calls[0].id, reply, &mut p).is_empty());
+        // Deleted on another device after the list: it is left out.
+        lib.projects.retain(|x| x.id != "c4");
+        let events = lib.serve(&mut s, &mut p);
+        let files =
+            [("Castle.vox", vox(2)), ("castle (2).vox", vox(3)), ("a_b.vox", vox(4))].map(|(n, b)| (n.to_string(), b));
+        assert_eq!(
+            events,
+            vec![Event::Export { name: EXPORT_NAME.into(), bytes: crate::files::zip(&files), count: 3 }]
+        );
+        assert!(!s.exporting());
+    }
+
+    #[test]
+    fn export_says_when_there_is_nothing_or_it_fails() {
+        let (_, mut p, mut s) = device();
+        let mut lib = FakeLibrary::signed_in("u1");
+        s.check();
+        lib.serve(&mut s, &mut p);
+        s.export();
+        let events = lib.serve(&mut s, &mut p);
+        assert!(matches!(&events[..], [Event::Toast(t)] if t.contains("library is empty")), "{events:?}");
+
+        lib.put(Some("c1"), "Castle", vox(2));
+        lib.offline = true;
+        s.export();
+        let events = lib.serve(&mut s, &mut p);
+        assert!(matches!(&events[..], [Event::Toast(t)] if t.contains("could not be reached")), "{events:?}");
+        assert!(!s.exporting(), "it can be tried again");
+
+        // Signed out: nothing to send.
+        lib.offline = false;
+        s.sign_out();
+        lib.serve(&mut s, &mut p);
+        s.export();
+        assert!(s.take_out().is_empty());
+    }
+
+    #[test]
+    fn names_in_the_export_are_safe_and_unique() {
+        let names = ["Island", "island.VOX", "..", "", "x:y\\z\u{7}", "Island (2)"];
+        assert_eq!(
+            zip_names(names.into_iter()),
+            ["Island.vox", "island (2).vox", "Untitled.vox", "Untitled (2).vox", "x_y_z_.vox", "Island (2) (2).vox"]
+        );
+    }
+
+    #[test]
+    fn deletes_the_account_once_its_email_is_typed() {
+        let (_, mut p, mut s) = device();
+        let mut lib = FakeLibrary::signed_in("u1");
+        lib.email = Some("me@example.com".into());
+        s.check();
+        lib.serve(&mut s, &mut p);
+        let id = save(&mut p, &mut s, "castle.vox", vox(2));
+        lib.serve(&mut s, &mut p);
+        assert_eq!(lib.projects.len(), 1);
+
+        s.delete_account("someone@example.com");
+        assert!(s.deleting());
+        let events = lib.serve(&mut s, &mut p);
+        assert!(matches!(&events[..], [Event::Toast(t)] if t.contains("email did not match")), "{events:?}");
+        assert!(matches!(s.account, Account::In(_)) && !s.deleting());
+
+        s.delete_account(" ME@example.com ");
+        let events = lib.serve(&mut s, &mut p);
+        assert!(events.iter().any(|e| matches!(e, Event::Toast(t) if t.starts_with("Deleted your account"))));
+        assert_eq!(s.account, Account::Out);
+        assert!(lib.user.is_none() && lib.projects.is_empty());
+        let row = p.get(&id).expect("the scene stays on this device");
+        assert!(row.cloud.is_none() && row.has_file(), "{row:?}");
+    }
+
+    #[test]
+    fn a_full_library_names_its_use() {
+        let (_, mut p, mut s) = device();
+        let mut lib = FakeLibrary::signed_in("u1");
+        lib.put(Some("c1"), "old", vec![0; 900]);
+        lib.limit = 1000;
+        s.check();
+        lib.serve(&mut s, &mut p);
+        save(&mut p, &mut s, "big.vox", vox(9));
+        let events = lib.serve(&mut s, &mut p);
+        assert!(events.contains(&Event::Listed));
+        let toast = events.iter().find_map(|e| match e {
+            Event::Toast(t) => Some(t.clone()),
+            _ => None,
+        });
+        assert!(toast.as_deref().is_some_and(|t| t.contains("the library is full (1 KB of 1 KB used)")), "{toast:?}");
+        let Account::In(user) = &s.account else { panic!("signed in") };
+        assert_eq!(user.usage, 900, "the usage line takes the library's count");
     }
 
     #[test]

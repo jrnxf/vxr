@@ -386,6 +386,12 @@ pub enum Action {
     AddToLibrary,
     /// Download the scene as a `.vox` file, wherever its project is kept (for the host).
     DownloadVox,
+    /// The account popover's Export library: every scene in the library as one zip of `.vox`
+    /// files (for the host).
+    ExportLibrary,
+    /// The account popover's confirmed Delete account, with the email typed in
+    /// `sign_in.confirm` (for the host).
+    DeleteAccount,
 }
 
 /// The projects list's row pitch, and its footer's height (the Storage line).
@@ -422,6 +428,9 @@ pub struct AccountRow {
     pub cap: u64,
     /// The open scene is not in the library yet.
     pub can_add: bool,
+    /// Export library, or deleting the account, is in flight.
+    pub exporting: bool,
+    pub deleting: bool,
 }
 
 /// What the restore prompt says (set by the editor while a draft is offered).
@@ -950,6 +959,8 @@ const COMMANDS: &[Command] = &[
     Command { label: "Sign in", keys: &[], run: |h| h.open_account() },
     Command { label: "Account", keys: &[], run: |h| h.open_account() },
     Command { label: "Add to library", keys: &[], run: |h| h.actions.push(Action::AddToLibrary) },
+    Command { label: "Export library", keys: &[], run: |h| h.actions.push(Action::ExportLibrary) },
+    Command { label: "Delete account", keys: &[], run: |h| h.open_delete_account() },
     Command { label: "Embed", keys: &[], run: |h| h.actions.push(Action::Embed) },
     Command { label: "Show palette", keys: &[], run: |h| h.toggle_palette() },
     Command { label: "Edit color", keys: &[], run: |h| h.open_color_edit() },
@@ -3578,7 +3589,7 @@ impl Hybrid {
         match label {
             "Download .vox" => signed_in.is_some(),
             "Sign in" => signed_in == Some(false),
-            "Account" => signed_in == Some(true),
+            "Account" | "Export library" | "Delete account" => signed_in == Some(true),
             "Add to library" => signed_in == Some(true) && self.account.as_ref().is_some_and(|a| a.can_add),
             _ => true,
         }

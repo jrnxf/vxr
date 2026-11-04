@@ -4,7 +4,9 @@
 //   /api/me          whether sign-in is on, who is signed in, their bytes used and the limits
 //   /api/auth/*      Better Auth (worker/auth.ts): emailed links and codes, sessions
 //   /api/projects*   the account's cloud projects (worker/projects.ts)
+//   /api/account     deleting the account and everything it keeps (worker/account.ts)
 //   /account         the sign-in page (site/src/account/, built into dist/account.html)
+import { deleteAccount } from './account';
 import { type Auth, fromApp, makeAuth } from './auth';
 import { type Mailer, mailerFor } from './mail';
 import { LIMITS, type Limits, json, problem, projects, usage } from './projects';
@@ -196,6 +198,12 @@ export async function handle(req: Request, env: Env, deps: Deps = DEFAULT): Prom
     if (!user) return problem(401, 'signed_out');
     const rest = path.slice('/api/projects'.length).split('/').filter(Boolean);
     return projects(req, env, user.id, rest, limits);
+  }
+  if (path === '/api/account') {
+    if (foreign(req, url)) return problem(403, 'origin');
+    const user = await who(auth, req);
+    if (!user) return problem(401, 'signed_out');
+    return deleteAccount(req, env, auth, user);
   }
   return problem(404, 'not_found');
 }
