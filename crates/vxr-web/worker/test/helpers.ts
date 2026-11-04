@@ -1,10 +1,9 @@
 // What the Worker tests share: a browser-like client (one origin, a cookie jar), the Worker with
-// its email and Turnstile replaced, passkey and email-link sign-in, and generated .vox files.
+// its email and Turnstile replaced, sign-in by emailed link or code, and generated .vox files.
 import { env } from 'cloudflare:workers';
 import { type Deps, handle } from '../index';
 import type { Mail } from '../mail';
 import type { Limits } from '../projects';
-import { Authenticator } from './authenticator';
 
 export const ORIGIN = 'https://vxr.test';
 /** The Turnstile token the replaced check accepts. */
@@ -30,11 +29,17 @@ export class World {
     if (!url) throw new Error(`no link mailed to ${to}`);
     return url;
   }
+  /** The sign-in code in the last mail to `to`. */
+  code(to: string): string {
+    const m = [...this.mail].reverse().find((x) => x.to === to);
+    const code = m?.text.match(/^\d{6}$/m)?.[0];
+    if (!code) throw new Error(`no code mailed to ${to}`);
+    return code;
+  }
 }
 
 export class Client {
   jar = new Map<string, string>();
-  passkeys = new Authenticator(ORIGIN);
   constructor(
     readonly world: World,
     readonly ip: string,
@@ -69,26 +74,7 @@ export class Client {
     return { status: res.status, body: text ? JSON.parse(text) : null, res };
   }
 
-  /** Signs up with a new passkey, as the account page does. */
-  async passkeySignUp(token = PASS): Promise<Response> {
-    const opts = await this.fetch('/api/auth/passkey/generate-register-options');
-    if (opts.status !== 200) return opts;
-    const response = await this.passkeys.create(await opts.json());
-    return this.fetch('/api/auth/passkey/verify-registration', {
-      method: 'POST',
-      headers: { 'x-turnstile-token': token },
-      json: { response, createSession: true },
-    });
-  }
-
-  /** Signs in with this client's passkey. */
-  async passkeySignIn(): Promise<Response> {
-    const opts = await this.fetch('/api/auth/passkey/generate-authenticate-options');
-    const response = await this.passkeys.get(await opts.json());
-    return this.fetch('/api/auth/passkey/verify-authentication', { method: 'POST', json: { response } });
-  }
-
-  /** Asks for an email link to `email`. */
+  /** Asks for a sign-in email (a link and a code) to `email`. */
   askLink(email: string, token = PASS): Promise<Response> {
     return this.fetch('/api/auth/sign-in/magic-link', {
       method: 'POST',
@@ -103,6 +89,18 @@ export class Client {
     if (asked.status !== 200) throw new Error(`asking for a link: ${asked.status} ${await asked.text()}`);
     const link = new URL(this.world.link(email));
     return this.fetch(link.pathname + link.search);
+  }
+
+  /** Types `otp` as the emailed code for `email`, as the account page does. */
+  enterCode(email: string, otp: string): Promise<Response> {
+    return this.fetch('/api/auth/sign-in/email-otp', { method: 'POST', json: { email, otp } });
+  }
+
+  /** Signs in by the emailed code. */
+  async codeSignIn(email: string): Promise<Response> {
+    const asked = await this.askLink(email);
+    if (asked.status !== 200) throw new Error(`asking for a code: ${asked.status} ${await asked.text()}`);
+    return this.enterCode(email, this.world.code(email));
   }
 
   async me() {
