@@ -350,10 +350,11 @@ fn library_save(ed: &mut Editor, p: &mut dyn Platform, id: &str, name: String, b
 pub fn challenged(ed: &mut Editor, token: Option<String>) {
     ed.ui.sign_in.checking = false;
     match token.filter(|t| !t.is_empty()) {
-        Some(token) => {
-            let email = ed.ui.sign_in.email.trim().to_string();
-            ed.library.send_code(&email, &token);
-        }
+        // The field may have changed while the check ran.
+        Some(token) => match ed.ui.sign_in.email_to_send() {
+            Some(email) => ed.library.send_code(&email, &token),
+            None => ed.ui.sign_in.failed("Check the email address and try again."),
+        },
         None => ed.ui.sign_in.failed("The check did not pass. Try again."),
     }
 }

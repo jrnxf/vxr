@@ -123,6 +123,25 @@ impl SignIn {
         self.error = Some(why.into());
     }
 
+    /// The address the sign-in email goes to, while the field still holds a plausible one.
+    pub fn email_to_send(&self) -> Option<String> {
+        looks_like_email(&self.email).then(|| self.email.trim().to_string())
+    }
+
+    /// Whether the code typed goes now: once all six are in, and again once it was edited, so
+    /// the same code can go again after the network or the rate limit failed it.
+    fn code_to_send(&mut self, busy: bool) -> bool {
+        if self.code.len() < CODE_LEN {
+            self.tried.clear();
+            return false;
+        }
+        if self.code == self.tried || busy {
+            return false;
+        }
+        self.tried = self.code.clone();
+        true
+    }
+
     /// What the popover shows, for the checks: "email", "code", "done" or "menu".
     pub fn shown(&self) -> Option<&'static str> {
         self.view.filter(|_| self.open).map(|v| match v {
@@ -804,8 +823,7 @@ impl Hybrid {
                 s.error = None;
             }
         }
-        if s.code.len() == CODE_LEN && s.code != s.tried && !busy {
-            s.tried = s.code.clone();
+        if s.code_to_send(busy) {
             s.error = None;
             self.actions.push(Action::VerifyCode);
         }
@@ -950,6 +968,20 @@ mod tests {
         for bad in ["", "you", "you@", "@example.com", "you@example", "you @example.com", "a@b@c.com"] {
             assert!(!looks_like_email(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_code_goes_once_and_again_after_an_edit() {
+        let mut s = SignIn { code: "123456".into(), ..Default::default() };
+        assert!(!s.code_to_send(true), "not while a call is out");
+        assert!(s.code_to_send(false));
+        assert!(!s.code_to_send(false), "not twice");
+        s.failed("Could not reach vxr.");
+        assert!(!s.code_to_send(false), "a failure alone does not resend");
+        s.code.pop();
+        assert!(!s.code_to_send(false));
+        s.code.push('6');
+        assert!(s.code_to_send(false), "the same code goes again once retyped");
     }
 
     #[test]
