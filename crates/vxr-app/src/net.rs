@@ -115,8 +115,8 @@ impl Stream for Thread {
 /// Keys in the OS keychain, one entry per provider under the service "vxr".
 pub struct Keychain;
 
-fn entry(kind: Kind) -> Result<keyring::Entry, String> {
-    keyring::Entry::new("vxr", &format!("{}-api-key", kind.id())).map_err(|e| e.to_string())
+fn entry(kind: Kind) -> Result<keyring_core::Entry, String> {
+    keychain(&format!("{}-api-key", kind.id()))
 }
 
 impl Keys for Keychain {
@@ -130,7 +130,7 @@ impl Keys for Keychain {
 
     fn remove(&mut self, kind: Kind) -> Result<(), String> {
         match entry(kind)?.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Ok(()) | Err(keyring_core::Error::NoEntry) => Ok(()),
             Err(e) => Err(e.to_string()),
         }
     }
@@ -142,6 +142,13 @@ impl Keys for Keychain {
     fn place(&self) -> KeyPlace {
         KeyPlace::Keychain
     }
+}
+
+/// The entry `account` under the service "vxr" in the OS keychain, set up the first time (as
+/// `keyring::Entry::new` would); a store set before it (the tests' mock) is kept.
+fn keychain(account: &str) -> Result<keyring_core::Entry, String> {
+    _ = keyring::Entry::store_status();
+    keyring_core::Entry::new("vxr", account).map_err(|e| e.to_string())
 }
 
 /// The account's session token in the OS keychain, under the service "vxr": the entry
@@ -158,8 +165,8 @@ impl Session {
         Session { account }
     }
 
-    fn entry(&self) -> Result<keyring::Entry, String> {
-        keyring::Entry::new("vxr", &self.account).map_err(|e| e.to_string())
+    fn entry(&self) -> Result<keyring_core::Entry, String> {
+        keychain(&self.account)
     }
 
     /// The token kept, if any.
@@ -173,7 +180,7 @@ impl Session {
         match token {
             Some(t) => entry.set_password(t).map_err(|e| e.to_string()),
             None => match entry.delete_credential() {
-                Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+                Ok(()) | Err(keyring_core::Error::NoEntry) => Ok(()),
                 Err(e) => Err(e.to_string()),
             },
         }
