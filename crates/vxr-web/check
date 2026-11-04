@@ -323,7 +323,8 @@ bridge=""
 
 # Sign-in from the account popover against the Worker under `wrangler dev --local` (local D1
 # and R2 in the temporary folder, the always-pass Turnstile test secret, emails printed to its
-# log, never sent): a code, a wrong code, the menu, Sign out, then a link opened in another tab
+# log, never sent): a code, a wrong code, the menu, Sign out, then a link opened in another tab,
+# then signed in again: Save to the library, Export library and Delete account
 # (check-account.js, one stage per call so each can be screenshotted).
 wrangler="$here/node_modules/.bin/wrangler"
 if [ ! -x "$wrangler" ]; then
@@ -386,6 +387,18 @@ else
   axi selectpage "$(newest)" >/dev/null
   results+=$'\n'"$(account expired)"
   ashot expired
+  # Back in the editor tab: sign in again by code, then Export library and Delete account.
+  axi selectpage "$editor" >/dev/null
+  results+=$'\n'"$(account again)"
+  results+=$'\n'"$(account ask ada@example.com)"
+  mail 3
+  results+=$'\n'"$(account code "$(sed -n 's/^\[vxr mail\] to ada@example.com: Sign in to vxr: \([0-9]\{6\}\)$/\1/p' "$wlog" | tail -1)")"
+  results+=$'\n'"$(account save)"
+  results+=$'\n'"$(account export)"
+  results+=$'\n'"$(account delete)"
+  ashot delete
+  results+=$'\n'"$(account deleted)"
+  ashot deleted
   kill "$worker" 2>/dev/null || true
   worker=""
 fi

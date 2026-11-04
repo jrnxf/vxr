@@ -450,6 +450,8 @@ impl Editor {
                 used: 0,
                 cap: 0,
                 can_add: false,
+                exporting: false,
+                deleting: false,
             }),
             crate::sync::Account::In(u) => {
                 let kept: Vec<_> = self.projects.list().iter().filter_map(|p| p.library(&u.id)).collect();
@@ -474,6 +476,8 @@ impl Editor {
                         .as_ref()
                         .and_then(|id| self.projects.get(id))
                         .is_some_and(|p| p.library(&u.id).is_some()),
+                    exporting: self.library.exporting(),
+                    deleting: self.library.deleting(),
                 })
             }
         };

@@ -858,6 +858,8 @@ struct Fake {
     stem: Option<&'static str>,
     calls: Vec<String>,
     vox: Vec<u8>,
+    /// The last library export saved.
+    zip: Vec<u8>,
     obj: Vec<String>,
     /// The desktop's files, as the projects store sees them: each save changes its file there.
     disk: Option<vxr_app::projects::Memory>,
@@ -928,6 +930,11 @@ impl Platform for Fake {
     fn export_vox(&mut self, name: &str, bytes: &[u8]) -> Result<Option<String>, String> {
         self.calls.push(format!("export_vox {name}"));
         self.vox = bytes.to_vec();
+        Ok(Some(name.into()))
+    }
+    fn save_zip(&mut self, name: &str, bytes: &[u8]) -> Result<Option<String>, String> {
+        self.calls.push(format!("save_zip {name} {}", bytes.len()));
+        self.zip = bytes.to_vec();
         Ok(Some(name.into()))
     }
     fn keep_session(&mut self, token: Option<&str>) {
@@ -1824,6 +1831,86 @@ fn library(dir: &Path) -> Result<(), String> {
     check(
         shown == Some("done") && !a.ed.ui.sign_in.open && a.ed.ui.toast_text() == Some("Signed in as ada@example.com"),
         format!("a link clicked in another tab signs this one in, with the check ({shown:?})"),
+    )?;
+
+    // Export library: every scene in it, as one zip of .vox files.
+    let scenes = server.projects.len();
+    a.ui_click("account")?;
+    a.frames(30);
+    let offered = a.ed.ui.hits.contains_key("account-export") && a.ed.ui.hits.contains_key("account-delete");
+    a.save_png(&dir.join("app-2x-account-menu-export.png"))?;
+    a.ui_click("account-export")?;
+    serve(&mut a, &mut pa);
+    sync(&mut a, &mut pa, &mut server);
+    let toast = a.ed.ui.toast_text().map(str::to_string);
+    check(
+        offered
+            && !a.ed.ui.sign_in.open
+            && pa.calls.last().is_some_and(|c| c.starts_with("save_zip vxr-library.zip "))
+            && pa.zip.starts_with(b"PK\x03\x04")
+            && toast.as_deref() == Some(&format!("Exported {scenes} scenes as vxr-library.zip")),
+        format!("Export library saves every scene in it as one zip ({toast:?})"),
+    )?;
+    // While the files download, Export library waits.
+    run_action(&mut a.ed, &mut pa, Action::ExportLibrary);
+    a.ui_click("account")?;
+    a.frames(2);
+    a.ui_click("account-export")?;
+    let waits = a.ed.library.exporting() && a.ed.ui.account.as_ref().is_some_and(|r| r.exporting) && a.host.is_empty();
+    a.ui_click("account")?;
+    sync(&mut a, &mut pa, &mut server);
+    check(waits, "while the files download, Export library waits".into())?;
+
+    // Delete account: it asks for the email typed again, and Cancel goes back.
+    let local = a.ed.projects.list().iter().filter(|p| !p.stub()).count();
+    let voxels = a.voxels();
+    a.ui_click("account")?;
+    a.frames(2);
+    a.ui_click("account-delete")?;
+    a.frames(30);
+    let shown = a.ed.ui.sign_in.shown();
+    let field = a.ed.ui.hits.contains_key("account-confirm") && a.ed.ui.hits.contains_key("account-delete-export");
+    a.save_png(&dir.join("app-2x-account-delete.png"))?;
+    a.ui_click("account-delete-confirm")?;
+    a.frames(2);
+    let held = !a.host.contains(&Action::DeleteAccount);
+    a.type_into("account-confirm", "someone@example.com")?;
+    let wrong = !a.host.contains(&Action::DeleteAccount);
+    a.ui_click("account-delete-cancel")?;
+    a.frames(30);
+    check(
+        shown == Some("delete")
+            && field
+            && held
+            && wrong
+            && a.ed.ui.sign_in.shown() == Some("menu")
+            && a.ed.ui.sign_in.confirm.is_empty()
+            && server.user.is_some(),
+        format!("Delete account asks for the email typed again, and Cancel goes back ({shown:?})"),
+    )?;
+
+    // The email typed: the account and its library go, the scenes here stay.
+    a.ui_click("account-delete")?;
+    a.frames(2);
+    a.type_into("account-confirm", "ADA@example.com")?;
+    a.frames(2);
+    a.save_png(&dir.join("app-2x-account-delete-typed.png"))?;
+    a.ui_click("account-delete-confirm")?;
+    serve(&mut a, &mut pa);
+    sync(&mut a, &mut pa, &mut server);
+    let toast = a.ed.ui.toast_text().map(str::to_string);
+    let kept = a.ed.projects.list().iter().filter(|p| !p.stub() && p.cloud.is_none()).count();
+    check(
+        matches!(a.ed.library.account, Account::Out)
+            && server.user.is_none()
+            && server.projects.is_empty()
+            && !a.ed.ui.sign_in.open
+            && kept == local
+            && a.voxels() == voxels
+            && toast.as_deref() == Some("Deleted your account and its library. Your scenes stay on this device."),
+        format!(
+            "the email typed, Delete account deletes it and its library; the scenes here stay ({toast:?}, {kept} of {local})"
+        ),
     )
 }
 
@@ -2018,6 +2105,51 @@ fn app_library(dir: &Path) -> Result<(), String> {
     check(
         matches!(b.ed.library.account, Account::Out) && pb.session.is_none(),
         "the other launch's next check finds the session gone and deletes its token".into(),
+    )?;
+
+    // Signed in again: Export library saves the zip where the user picks, with the token.
+    a.ui_click("account")?;
+    a.frames(20);
+    a.type_into("account-email", "ada@example.com")?;
+    serve(&mut a, &mut pa);
+    sync(&mut a, &mut pa, &mut server);
+    a.frames_with(2, vec![egui::Event::Text("123456".into())]);
+    serve(&mut a, &mut pa);
+    sync(&mut a, &mut pa, &mut server);
+    a.frames(100);
+    let scenes = server.projects.len();
+    a.ui_click("account")?;
+    a.frames(2);
+    a.ui_click("account-export")?;
+    serve(&mut a, &mut pa);
+    sync(&mut a, &mut pa, &mut server);
+    check(
+        scenes > 0
+            && pa.calls.last().is_some_and(|c| c.starts_with("save_zip vxr-library.zip "))
+            && a.ed.ui.toast_text().is_some_and(|t| t.starts_with(&format!("Exported {scenes} scene"))),
+        format!("in the app, Export library saves the zip ({:?})", a.ed.ui.toast_text()),
+    )?;
+
+    // Delete account: the token goes from the keychain, and the files here stay.
+    let files = |s: &Shot| s.ed.projects.list().iter().filter(|p| p.path.is_some()).count();
+    let on_disk = files(&a);
+    a.ui_click("account")?;
+    a.frames(2);
+    a.ui_click("account-delete")?;
+    a.frames(2);
+    a.type_into("account-confirm", "ada@example.com")?;
+    serve(&mut a, &mut pa);
+    sync(&mut a, &mut pa, &mut server);
+    check(
+        on_disk > 0
+            && matches!(a.ed.library.account, Account::Out)
+            && server.user.is_none()
+            && server.projects.is_empty()
+            && pa.session.is_none()
+            && pa.calls.last().is_some_and(|c| c == "keep_session false")
+            && files(&a) == on_disk
+            && a.ed.projects.list().iter().all(|p| p.cloud.is_none()),
+        format!("in the app, Delete account deletes the token and keeps the files ({:?})", pa.calls.last()),
     )
 }
 

@@ -187,6 +187,11 @@ impl Platform for Browser {
         page_download(bytes, name, "application/octet-stream");
         Ok(Some(name.into()))
     }
+
+    fn save_zip(&mut self, name: &str, bytes: &[u8]) -> Result<Option<String>, String> {
+        page_download(bytes, name, "application/zip");
+        Ok(Some(name.into()))
+    }
 }
 
 /// The editor on a canvas. Positions from the page are in CSS pixels; the canvas is sized in
