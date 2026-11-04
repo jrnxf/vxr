@@ -518,12 +518,13 @@ function challenged(token) {
   app.challenged(token);
 }
 function challengeShown(on) {
-  challengeBox.classList.toggle('shown', on);
+  challengeBox?.classList.toggle('shown', on);
   app.challenge_shown(on);
 }
 async function challenge() {
   asking = true;
   try {
+    if (!challengeBox) throw new Error('the page has no #challenge box');
     const t = await turnstileJs();
     if (widget === null) {
       widget = t.render(challengeBox, {
@@ -552,6 +553,7 @@ async function challenge() {
 // the rest of the time it waits off screen (not hidden, so the check still runs).
 let slot = '';
 function placeChallenge() {
+  if (!challengeBox) return;
   const r = challengeBox.classList.contains('shown') ? app.hit_rect('account-challenge') : [];
   const at = r.length === 4 ? `translate(${r[0]}px, ${r[1]}px)` : '';
   if (at === slot) return;
@@ -636,6 +638,8 @@ async function main() {
   addEventListener('pagehide', () => app.flush());
   // A sign-in link opened in another tab (the account page) says so here: who is signed in now.
   if (typeof BroadcastChannel === 'function') new BroadcastChannel('vxr-account').onmessage = () => app.check_account();
+  // The landing page's Sign in opens the account popover once the editor is in.
+  addEventListener('vxr-sign-in', () => app.open_account());
   // Back from the account page or another tab: who is signed in, and what the library has now.
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') app.flush();

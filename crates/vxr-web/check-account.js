@@ -1,11 +1,12 @@
 async (stage, arg) => {
   // Sign-in from the editor's account popover, against `wrangler dev --local` (check runs it in
   // this order, reading each email's code and link from the wrangler log between stages):
-  // 'open' finds Sign in and opens the popover; 'ask' types the email and presses Enter, which
-  // runs Turnstile (the always-pass test key) and has the Worker send the email; 'wrong' types
-  // a wrong code; 'code' types the code from the email (arg); 'menu' opens the signed-in menu;
-  // 'out' signs out; 'listen' notes the account channel; 'link' finds this page signed in after
-  // the email's link was opened in another tab.
+  // 'landing' (at /about) presses the landing page's Sign in, which goes into the editor and
+  // opens the popover; 'open' finds Sign in and opens the popover; 'ask' types the email and
+  // presses Enter, which runs Turnstile (the always-pass test key) and has the Worker send the
+  // email; 'wrong' types a wrong code; 'code' types the code from the email (arg); 'menu' opens
+  // the signed-in menu; 'out' signs out; 'listen' notes the account channel; 'link' finds this
+  // page signed in after the email's link was opened in another tab.
   for (let i = 0; i < 300 && !window.vxr; i++) await new Promise((r) => setTimeout(r, 50));
   const c = document.getElementById('c');
   const frames = (n = 3) => new Promise((r) => { const f = () => (--n > 0 ? requestAnimationFrame(f) : r()); requestAnimationFrame(f); });
@@ -37,7 +38,14 @@ async (stage, arg) => {
   const step = (what, ok, extra = '') => out.push(`${ok ? 'ok' : 'FAIL'} ${what}${ok ? '' : ': ' + extra}`);
   await frames(10);
   const shown = () => st().signIn.shown;
-  if (stage === 'open') {
+  if (stage === 'landing') {
+    const root = document.documentElement;
+    await until(() => document.getElementById('land-open')?.classList.contains('ready'), 20000);
+    document.querySelector('.land-top a[href="/account"]').click();
+    await until(() => 'entered' in root.dataset && shown() === 'email');
+    step('the landing page\'s Sign in goes into the editor and opens the popover at its email step',
+      'entered' in root.dataset && location.pathname === '/' && shown() === 'email', JSON.stringify([location.pathname, root.dataset.landing, st().signIn]));
+  } else if (stage === 'open') {
     await until(() => st().account !== 'off' && at('account').length === 2);
     let s = st();
     step('with the Worker, signed out, the top bar offers Sign in', s.account === 'out' && at('account').length === 2, JSON.stringify(s.account));

@@ -346,6 +346,8 @@ else
   ashot() { axi screenshot "$shots/web-account-$1.png" >/dev/null; echo "wrote $shots/web-account-$1.png"; }
   axi open "$aurl" >/dev/null
   axi emulate --viewport "1280x800x2" >/dev/null
+  axi open "${aurl}about" >/dev/null
+  results+=$'\n'"$(account landing)"
   axi open "$aurl" >/dev/null
   results+=$'\n'"$(account open)"
   ashot email

@@ -716,6 +716,13 @@ impl App {
         self.send_library();
     }
 
+    /// Open the account popover, as the top bar's account control does: the landing page's
+    /// Sign in goes into the editor and here.
+    pub fn open_account(&mut self) {
+        self.woken = true;
+        self.host.editor.ui.open_account();
+    }
+
     /// The bot check the popover asked for answered: its token, or empty when it did not pass
     /// (or could not load).
     pub fn challenged(&mut self, token: String) {
