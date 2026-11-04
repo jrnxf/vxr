@@ -81,9 +81,9 @@ async (stage, arg) => {
     await until(() => st().account !== 'off' && at('account').length === 2);
     let s = st();
     step('with the Worker, signed out, the top bar offers Sign in', s.account === 'out' && at('account').length === 2, JSON.stringify(s.account));
-    await click('scene-select');
+    await click('library');
     s = st();
-    step('the projects list has no account row', s.projectsMenu && !at('projects-sign-in').length && !at('projects-account').length, JSON.stringify(s.projectsMenu));
+    step('the library has no account row', s.projectsMenu && !at('projects-sign-in').length && !at('projects-account').length, JSON.stringify(s.projectsMenu));
     await key('Escape');
     await click('account');
     await until(() => shown() === 'email');

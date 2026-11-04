@@ -117,8 +117,8 @@ pub trait Platform {
     /// Keep the desktop app's session token for the next start (Some), or delete it (None).
     fn keep_session(&mut self, _token: Option<&str>) {}
 
-    /// Download the scene's `.vox` bytes as `name`, beside its place in the library; returns
-    /// the name it was given.
+    /// Write the scene's `.vox` bytes as a copy named `name` (a download in the browser, a save
+    /// dialog on the desktop); returns the name it was given.
     fn export_vox(&mut self, _name: &str, _bytes: &[u8]) -> Result<Option<String>, String> {
         Err("there is no download here".into())
     }

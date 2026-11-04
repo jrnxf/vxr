@@ -195,7 +195,6 @@ mod icon {
     pub const EYE_OFF: char = '\u{e0bb}';
     pub const FOLDER: char = '\u{e0d7}';
     pub const LINK: char = '\u{e102}';
-    pub const FILE_OUTPUT: char = '\u{e0c8}';
     pub const FILE_PLUS: char = '\u{e0c9}';
     pub const MAXIMIZE_2: char = '\u{e113}';
     pub const MINIMIZE_2: char = '\u{e11b}';
@@ -388,9 +387,17 @@ pub enum Action {
     DownloadVox,
 }
 
-/// The projects list's row pitch, and its footer's height (the Storage line).
-const PROJECT_STEP: f32 = 50.0;
-const PROJECTS_FOOT: f32 = 44.0;
+/// The library's card grid: the card's width and height, the gap between cards, the panel's
+/// padding and its header and footer heights.
+const CARD_W: f32 = 148.0;
+const CARD_H: f32 = 132.0;
+const CARD_GAP: f32 = 4.0;
+const LIB_PAD: f32 = 14.0;
+const LIB_HEAD: f32 = 44.0;
+const LIB_FOOT: f32 = 36.0;
+
+/// The gap the top bar's breadcrumb slash takes.
+const SLASH_W: f32 = 14.0;
 
 /// A row of the projects list (set by the editor while it is open).
 #[derive(Clone, Debug, PartialEq)]
@@ -671,8 +678,8 @@ pub struct Hybrid {
     pub camera_hints: bool,
     /// A Cmd-K camera gesture was chosen: toast how the camera moves.
     camera_tip: bool,
-    /// The Export menu under the top bar's Export button is open.
-    pub export_menu: bool,
+    /// The file menu under the scene name (New, Open, Save, Export) is open.
+    pub file_menu: bool,
     /// The picked theme (System follows the system's light or dark setting), and the Theme
     /// menu under the top bar's theme button.
     pub theme: ThemeChoice,
@@ -683,8 +690,9 @@ pub struct Hybrid {
     pub confirm_new: bool,
     /// The close confirm is open: the window is closing with edits not saved (desktop).
     pub confirm_close: bool,
-    /// The projects list under the scene name is open, its rows and the store's use and cap
-    /// in bytes (set by the editor while it is open), and whether Clear was pressed once.
+    /// The library under the top bar's Library crumb is open, its projects and the store's
+    /// use and cap in bytes (set by the editor while it is open), and whether Clear was
+    /// pressed once.
     pub projects_open: bool,
     pub projects: Vec<ProjectRow>,
     pub storage: (u64, u64),
@@ -695,10 +703,14 @@ pub struct Hybrid {
     pub sign_in: SignIn,
     /// The restore prompt, while a draft is offered back.
     pub restore: Option<RestoreAsk>,
-    /// The first row the projects list shows.
+    /// The first row of cards the library shows.
     projects_scroll: usize,
-    /// Left edge of the top bar's Export button, where the Export menu lines up.
-    export_x: f32,
+    /// What the library's search box holds, and whether it takes the focus on the next frame.
+    pub lib_query: String,
+    lib_focus: bool,
+    /// The file menu or the library was opened from the keyboard (Cmd-K): it appears at once,
+    /// without growing from its trigger.
+    menu_instant: bool,
     /// Guides drawn in the view: the ground grid, the ground plane and the bounds frame.
     pub grid: bool,
     pub ground: bool,
@@ -943,9 +955,9 @@ const COMMANDS: &[Command] = &[
     Command { label: "Redo", keys: &["⌘", "⇧", "Z"], run: |h| h.actions.push(Action::Redo) },
     Command { label: "New scene", keys: &["⌘", "N"], run: |h| h.request_new() },
     Command { label: "Open .vox", keys: &["⌘", "O"], run: |h| h.actions.push(Action::Open) },
-    Command { label: "Projects", keys: &[], run: |h| h.toggle_projects() },
+    Command { label: "Library", keys: &[], run: |h| h.toggle_projects_by_key() },
     Command { label: "Save .vox", keys: &["⌘", "S"], run: |h| h.actions.push(Action::Save) },
-    Command { label: "Download .vox", keys: &[], run: |h| h.actions.push(Action::DownloadVox) },
+    Command { label: "Save a copy…", keys: &["⇧", "⌘", "S"], run: |h| h.actions.push(Action::DownloadVox) },
     Command { label: "Sign in", keys: &[], run: |h| h.open_account() },
     Command { label: "Account", keys: &[], run: |h| h.open_account() },
     Command { label: "Add to library", keys: &[], run: |h| h.actions.push(Action::AddToLibrary) },
@@ -1019,7 +1031,7 @@ impl Hybrid {
             view_panel: false,
             camera_hints: false,
             camera_tip: false,
-            export_menu: false,
+            file_menu: false,
             theme: ThemeChoice::default(),
             theme_menu: false,
             styled: None,
@@ -1033,7 +1045,9 @@ impl Hybrid {
             sign_in: SignIn::default(),
             restore: None,
             projects_scroll: 0,
-            export_x: 0.0,
+            lib_query: String::new(),
+            lib_focus: false,
+            menu_instant: false,
             grid: true,
             ground: true,
             frame: true,
@@ -1341,7 +1355,7 @@ impl Hybrid {
             return;
         }
         if std::mem::take(&mut self.view_panel)
-            || std::mem::take(&mut self.export_menu)
+            || std::mem::take(&mut self.file_menu)
             || std::mem::take(&mut self.theme_menu)
             || std::mem::take(&mut self.projects_open)
             || std::mem::take(&mut self.sign_in.open)
@@ -1457,7 +1471,7 @@ impl Hybrid {
         self.fitted(ctx, |s| s.selection_panel(ctx));
         self.fitted(ctx, |s| s.bounds_panel(ctx));
         self.fitted(ctx, |s| s.new_confirm(ctx, screen));
-        self.fitted(ctx, |s| s.export_menu(ctx));
+        self.fitted(ctx, |s| s.file_menu(ctx));
         self.fitted(ctx, |s| s.theme_menu(ctx));
         self.fitted(ctx, |s| s.projects_menu(ctx));
         self.fitted(ctx, |s| s.account_popover(ctx));
@@ -1527,6 +1541,11 @@ impl Hybrid {
             }
             if self.ai.focus && i.consume_key(Modifiers::NONE, Key::Escape) {
                 self.ai.focus = false;
+                return;
+            }
+            // The library closes on Escape, from its search box too.
+            if self.projects_open && i.consume_key(Modifiers::NONE, Key::Escape) {
+                self.projects_open = false;
                 return;
             }
             // The account popover closes on Escape, from its fields too.
@@ -1601,6 +1620,9 @@ impl Hybrid {
             }
             if i.consume_key(Modifiers::COMMAND, Key::O) {
                 self.actions.push(Action::Open);
+            }
+            if i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::S) {
+                self.actions.push(Action::DownloadVox);
             }
             if i.consume_key(Modifiers::COMMAND, Key::S) {
                 self.actions.push(Action::Save);
@@ -1796,27 +1818,33 @@ impl Hybrid {
         });
     }
 
-    // #top: two 40 px islands, so the scene shows between them. The left one has the scene,
-    // the file actions as icons and undo/redo; the right one the assistant, the keys and Embed.
+    // #top: two 40 px islands, so the scene shows between them. The left one reads
+    // `vxr  Library / scene.vox`: the Library crumb opens the grid of projects, the name the
+    // file menu (New, Open, Save, Export); then undo/redo. The right one has the assistant,
+    // the keys and Embed.
     fn top_bar(&mut self, ctx: &Context, screen: Rect) {
         let name = ctx.fonts_mut(|f| f.layout_no_wrap(self.scene_name.clone(), sans(13.0), th().text));
         let brand = ctx.fonts_mut(|f| f.layout_no_wrap("vxr".into(), brand_font(13.0), th().text));
-        let sel_w = name.size().x + 34.0;
+        let crumb = ctx.fonts_mut(|f| f.layout_no_wrap("Library".into(), sans(13.0), th().muted));
+        let crumb_w = 8.0 + 16.0 + 6.0 + crumb.size().x + 8.0;
+        // The name, a slot for the unsaved dot (kept so the bar does not shift with each edit)
+        // and the chevron.
+        let sel_w = 10.0 + name.size().x + 8.0 + 7.0 + 8.0 + 13.0 + 8.0;
         // Over the dock, undo and redo are on it.
         let history = !self.touch;
-        // Held upright a phone has room for the file buttons, the theme, the assistant and the
-        // command button only: no name, no New and no Embed (both in the command list, which the
-        // command button opens).
+        // Held upright a phone has room for the library and file buttons, the theme, the
+        // assistant and the command button only: no name, no New and no Embed (both in the
+        // command list, which the command button opens).
         let slim = self.narrow;
         let w = if slim {
-            4.0 + 3.0 * 36.0 + 4.0
+            4.0 + 2.0 * 36.0 + 4.0
         } else {
             12.0 + LOGO_STEP
                 + brand.size().x
                 + 10.0
+                + crumb_w
+                + SLASH_W
                 + sel_w
-                + 13.0
-                + 4.0 * 36.0
                 + if history { 13.0 + 2.0 * 36.0 } else { 0.0 }
                 + 4.0
         };
@@ -1833,62 +1861,81 @@ impl Hybrid {
             };
             if slim {
                 x = rect.left() + 4.0;
+                let r = tbtn_on(ui, &mut x, cy, Some(icon::FOLDER), "", "library", true, self.projects_open);
+                self.hits.insert("library".into(), r.rect);
+                if r.clicked() {
+                    self.toggle_projects();
+                }
+                let r = tbtn_on(ui, &mut x, cy, Some(icon::DOWNLOAD), "", "scene-select", true, self.file_menu);
+                self.hits.insert("scene-select".into(), r.rect);
+                if self.unsaved {
+                    ui.painter().circle_filled(pos2(r.rect.right() - 7.0, r.rect.top() + 7.0), 3.0, th().mid);
+                }
+                if r.clicked() {
+                    self.toggle_file_menu();
+                }
             } else {
                 logo(ui, pos2(x, cy - 9.0), 18.0);
                 x += LOGO_STEP;
                 ui.painter().galley(pos2(x, cy - brand.size().y / 2.0), brand.clone(), th().text);
                 x += brand.size().x + 10.0;
-                // #scene-select
+                // #library: the crumb that opens the grid of projects.
+                let lib = Rect::from_min_size(pos2(x, cy - 14.0), vec2(crumb_w, 28.0));
+                let resp = ui.interact(lib, Id::unique("library"), Sense::click());
+                self.hits.insert("library".into(), lib);
+                if resp.clicked() {
+                    self.toggle_projects();
+                }
+                let (fill, ink) = if self.projects_open {
+                    (Some(th().accent_bg), th().accent)
+                } else if resp.hovered() {
+                    (Some(th().hover), th().text)
+                } else {
+                    (None, th().muted)
+                };
+                let plate = pressed(lib, &resp);
+                let p = ui.painter();
+                if let Some(fill) = fill {
+                    p.rect_filled(plate, CornerRadius::same(7), fill);
+                }
+                p.text(pos2(plate.left() + 16.0, cy), Align2::CENTER_CENTER, icon::FOLDER, icon_font(16.0), ink);
+                let g = p.layout_no_wrap("Library".into(), sans(13.0), ink);
+                p.galley(pos2(plate.left() + 30.0, cy - g.size().y / 2.0), g, ink);
+                if resp.hovered() && !self.projects_open {
+                    tip = Some((lib, "All projects", &[]));
+                }
+                x = lib.right();
+                ui.painter().text(pos2(x + SLASH_W / 2.0, cy), Align2::CENTER_CENTER, "/", sans(13.0), th().faint);
+                x += SLASH_W;
+                // #scene-select: the scene's name, which opens the file menu.
                 let sel = Rect::from_min_size(pos2(x, cy - 14.0), vec2(sel_w, 28.0));
                 let resp = ui.interact(sel, Id::unique("scene-select"), Sense::click());
                 self.hits.insert("scene-select".into(), sel);
                 if resp.clicked() {
-                    self.toggle_projects();
+                    self.toggle_file_menu();
                 }
+                let plate = pressed(sel, &resp);
                 let p = ui.painter();
-                p.rect(sel, CornerRadius::same(7), th().tint(10), Stroke::new(1.0, th().line), StrokeKind::Inside);
-                if self.projects_open {
-                    p.rect_filled(sel, CornerRadius::same(7), th().accent_bg);
+                p.rect(plate, CornerRadius::same(7), th().tint(10), Stroke::new(1.0, th().line), StrokeKind::Inside);
+                if self.file_menu {
+                    p.rect_filled(plate, CornerRadius::same(7), th().accent_bg);
                 } else if resp.hovered() {
-                    p.rect_filled(sel, CornerRadius::same(7), th().hover);
+                    p.rect_filled(plate, CornerRadius::same(7), th().hover);
                 }
-                p.galley(pos2(sel.left() + 10.0, cy - name.size().y / 2.0), name, th().text);
+                let nx = plate.left() + 10.0;
+                let name_w = name.size().x;
+                p.galley(pos2(nx, cy - name.size().y / 2.0), name, th().text);
+                if self.unsaved {
+                    p.circle_filled(pos2(nx + name_w + 8.0 + 3.5, cy), 3.5, th().mid);
+                }
                 p.text(
-                    pos2(sel.right() - 13.0, cy),
+                    pos2(plate.right() - 13.0, cy),
                     Align2::CENTER_CENTER,
                     icon::CHEVRON_DOWN,
                     icon_font(12.0),
                     th().muted,
                 );
                 x = sel.right();
-                sep(ui, &mut x);
-            }
-            let file: [(&str, char, &'static str, &'static [&'static str]); 4] = [
-                ("new", icon::FILE_PLUS, "New scene", &[]),
-                ("open", icon::FOLDER_OPEN, "Open .vox", &["⌘", "O"]),
-                ("save", icon::DOWNLOAD, "Save .vox", &["⌘", "S"]),
-                ("export", icon::FILE_OUTPUT, "Export", &[]),
-            ];
-            for (id, glyph, label, keys) in file {
-                if slim && id == "new" {
-                    continue;
-                }
-                if id == "export" {
-                    self.export_x = x;
-                }
-                let r = tbtn_on(ui, &mut x, cy, Some(glyph), "", id, true, id == "export" && self.export_menu);
-                self.hits.insert(id.into(), r.rect);
-                if r.hovered() && !(id == "export" && self.export_menu) {
-                    tip = Some((r.rect, label, keys));
-                }
-                if r.clicked() {
-                    match id {
-                        "new" => self.request_new(),
-                        "open" => self.actions.push(Action::Open),
-                        "save" => self.actions.push(Action::Save),
-                        _ => self.export_menu = !self.export_menu,
-                    }
-                }
             }
             if !history {
                 return;
@@ -2677,72 +2724,125 @@ impl Hybrid {
         }
     }
 
-    // The Export menu under the top bar's Export button: one row per export, each with what
-    // it writes. A row runs its export and closes the menu; so do Escape and a click outside.
-    fn export_menu(&mut self, ctx: &Context) {
-        if !self.export_menu {
+    // The file menu under the scene name: New, Open, Save, Save a copy, then the exports,
+    // each with its key or what it writes. A row runs its action and closes the menu; so do
+    // Escape and a click outside.
+    fn file_menu(&mut self, ctx: &Context) {
+        const KEY: [&str; 4] = ["⌘N", "⌘O", "⌘S", "⇧⌘S"];
+        enum Entry {
+            Head(&'static str),
+            Sep,
+            Row(&'static str, char, &'static str, &'static str),
+        }
+        let key = Id::unique("file-menu-grow");
+        if !self.file_menu {
+            ctx.animate_bool_with_time(key, false, 0.0);
             return;
         }
-        let rows = [
-            ("export-render", icon::IMAGE_DOWN, "Render PNG", "R"),
-            ("export-obj", icon::BOX, "OBJ with palette texture", ".obj .mtl .png"),
-            ("export-slices", icon::LAYERS, "PNG slices", ".png"),
+        let entries = [
+            Entry::Row("file-new", icon::FILE_PLUS, "New scene", KEY[0]),
+            Entry::Row("file-open", icon::FOLDER_OPEN, "Open from disk…", KEY[1]),
+            Entry::Sep,
+            Entry::Row("file-save", icon::DOWNLOAD, "Save", KEY[2]),
+            Entry::Row("file-copy", icon::COPY, "Save a copy…", KEY[3]),
+            Entry::Sep,
+            Entry::Head("EXPORT"),
+            Entry::Row("export-render", icon::IMAGE_DOWN, "Render PNG", "R"),
+            Entry::Row("export-obj", icon::BOX, "OBJ with palette texture", ".obj .mtl .png"),
+            Entry::Row("export-slices", icon::LAYERS, "PNG slices", ".png"),
         ];
-        let rect = Rect::from_min_size(
-            pos2(self.export_x, 12.0 + 44.0 + 6.0),
-            vec2(340.0, 36.0 + 34.0 * rows.len() as f32 + 6.0),
-        );
+        let height = |e: &Entry| match e {
+            Entry::Head(_) => 26.0,
+            Entry::Sep => 9.0,
+            Entry::Row(..) => 32.0,
+        };
+        let screen = ctx.content_rect();
+        let button = self.hits.get("scene-select").copied().unwrap_or(Rect::NOTHING);
+        let w = 300.0_f32.min(screen.width() - 24.0);
+        let h = 12.0 + entries.iter().map(height).sum::<f32>();
+        let x = if button.is_positive() { button.left() } else { 12.0 }.min(screen.right() - 12.0 - w).max(12.0);
+        let rect = Rect::from_min_size(pos2(x, 12.0 + 44.0 + 6.0), vec2(w, h));
+        self.hits.insert("file-menu".into(), rect);
         let mut run = None;
         let mut hits = Vec::new();
-        Self::panel(ctx, "export-menu", rect, Order::Foreground, |ui, rect| {
-            let hy = rect.top() + 18.0;
-            let g = ui.painter().layout_job(spaced("EXPORT", sans(9.0), th().faint, 0.72));
-            ui.painter().galley(pos2(rect.left() + 12.0, hy - g.size().y / 2.0), g, th().faint);
-            for (k, (id, glyph, label, hint)) in rows.into_iter().enumerate() {
-                let r = Rect::from_min_size(
-                    pos2(rect.left() + 6.0, rect.top() + 36.0 + 34.0 * k as f32),
-                    vec2(rect.width() - 12.0, 32.0),
-                );
-                let resp = ui.interact(r, Id::unique(id), Sense::click());
-                hits.push((id.to_string(), r));
-                let p = ui.painter();
-                let color = if resp.hovered() {
-                    p.rect_filled(r, CornerRadius::same(7), th().hover);
-                    th().text
-                } else {
-                    th().muted
-                };
-                let cy = r.center().y;
-                p.text(pos2(r.left() + 16.0, cy), Align2::CENTER_CENTER, glyph, icon_font(15.0), color);
-                p.text(pos2(r.left() + 32.0, cy), Align2::LEFT_CENTER, label, sans(13.0), th().text);
-                if hint.len() == 1 {
-                    kbd(ui, pos2(r.right() - 8.0, cy), hint, true);
-                } else {
-                    ui.painter().text(pos2(r.right() - 8.0, cy), Align2::RIGHT_CENTER, hint, mono(10.5), th().faint);
+        Self::panel_filled(ctx, "file-menu", rect, Order::Foreground, th().panel_solid, |ui, rect| {
+            ui.allocate_rect(rect, Sense::click());
+            let mut y = rect.top() + 6.0;
+            for entry in &entries {
+                let eh = height(entry);
+                match entry {
+                    Entry::Sep => {
+                        let ly = (y + eh / 2.0).round() + 0.5;
+                        ui.painter().line_segment(
+                            [pos2(rect.left() + 1.0, ly), pos2(rect.right() - 1.0, ly)],
+                            Stroke::new(1.0, th().line),
+                        );
+                    }
+                    Entry::Head(text) => {
+                        let g = ui.painter().layout_job(spaced(text, sans(9.0), th().faint, 0.72));
+                        ui.painter().galley(pos2(rect.left() + 14.0, y + 12.0 - g.size().y / 2.0), g, th().faint);
+                    }
+                    Entry::Row(id, glyph, label, hint) => {
+                        let r = Rect::from_min_size(pos2(rect.left() + 6.0, y), vec2(rect.width() - 12.0, 32.0));
+                        let resp = ui.interact(r, Id::unique(*id), Sense::click());
+                        hits.push((id.to_string(), r));
+                        let plate = pressed(r, &resp);
+                        let p = ui.painter();
+                        let color = if resp.hovered() {
+                            p.rect_filled(plate, CornerRadius::same(7), th().hover);
+                            th().text
+                        } else {
+                            th().muted
+                        };
+                        let cy = r.center().y;
+                        p.text(pos2(r.left() + 16.0, cy), Align2::CENTER_CENTER, *glyph, icon_font(15.0), color);
+                        p.text(pos2(r.left() + 34.0, cy), Align2::LEFT_CENTER, *label, sans(13.0), th().text);
+                        let font = if hint.starts_with('.') { mono(10.5) } else { sans(12.0) };
+                        p.text(pos2(r.right() - 10.0, cy), Align2::RIGHT_CENTER, *hint, font, th().faint);
+                        if resp.clicked() {
+                            run = Some(*id);
+                        }
+                    }
                 }
-                if resp.clicked() {
-                    run = Some(k);
-                }
+                y += eh;
             }
         });
         self.hits.extend(hits);
-        let button = self.hits.get("export").copied().unwrap_or(Rect::NOTHING);
+        self.grow(ctx, "file-menu", key, pos2(rect.left() + 14.0, rect.top()), 0.96, 0.15);
         let outside = ctx.input(|i| {
             i.pointer.any_pressed()
                 && i.pointer.interact_pos().is_some_and(|p| !rect.contains(p) && !button.contains(p))
         });
         match run {
-            Some(0) => {
+            Some("file-new") => self.request_new(),
+            Some("file-open") => self.actions.push(Action::Open),
+            Some("file-save") => self.actions.push(Action::Save),
+            Some("file-copy") => self.actions.push(Action::DownloadVox),
+            Some("export-render") => {
                 if !self.render_panel {
                     self.toggle_render_panel();
                 }
             }
-            Some(1) => self.actions.push(Action::ExportObj),
-            Some(_) => self.actions.push(Action::ExportSlices),
-            None => {}
+            Some("export-obj") => self.actions.push(Action::ExportObj),
+            Some("export-slices") => self.actions.push(Action::ExportSlices),
+            _ => {}
         }
         if run.is_some() || outside {
-            self.export_menu = false;
+            self.file_menu = false;
+        }
+    }
+
+    /// Scale the open menu `id` from `origin` (its trigger's corner), from `from` to 1 over
+    /// `secs` with a strong ease-out; at once when it was opened from the keyboard, or on a
+    /// phone, where the fitted panels keep their own scale. Call it after the panel is drawn.
+    fn grow(&self, ctx: &Context, id: &str, key: Id, origin: Pos2, from: f32, secs: f32) {
+        let time = if self.menu_instant { 0.0 } else { secs };
+        let t = ctx.animate_bool_with_time_and_easing(key, true, time, egui::emath::easing::exponential_out);
+        let fitted = ctx.data(|d| d.get_temp::<Option<Rect>>(Id::unique("fit-region"))).flatten().is_some();
+        if t < 1.0 && !fitted {
+            let s = from + (1.0 - from) * t;
+            let layer = egui::LayerId::new(Order::Foreground, Id::unique(id));
+            ctx.set_transform_layer(layer, TSTransform::new(origin.to_vec2() * (1.0 - s), s));
         }
     }
 
@@ -3384,136 +3484,201 @@ impl Hybrid {
         picked
     }
 
-    /// The rows the projects list shows at once, and its height, for a screen this tall.
-    fn projects_layout(&self, screen: Rect) -> (usize, f32) {
-        let foot = self.projects_foot();
-        let fits = ((screen.height() - 62.0 - 12.0 - 36.0 - 6.0 - foot) / PROJECT_STEP).floor().max(1.0);
-        let rows = self.projects.len().clamp(1, (fits as usize).min(7));
-        (rows, 36.0 + PROJECT_STEP * rows as f32 + 4.0 + foot)
+    /// The library's columns, its width and the rows of cards it shows at once, for a screen
+    /// this big and this many cards.
+    fn library_layout(&self, screen: Rect, cards: usize) -> (usize, f32, usize) {
+        let cols = if screen.width() - 24.0 >= 3.0 * CARD_W + 2.0 * CARD_GAP + 2.0 * LIB_PAD { 3 } else { 2 };
+        let w = cols as f32 * CARD_W + (cols - 1) as f32 * CARD_GAP + 2.0 * LIB_PAD;
+        let fits = ((screen.height() - 62.0 - 12.0 - LIB_HEAD - LIB_FOOT) / (CARD_H + CARD_GAP)).floor().max(1.0);
+        let rows = cards.div_ceil(cols).clamp(1, (fits as usize).min(3));
+        (cols, w.min(screen.width() - 24.0), rows)
     }
 
-    /// The footer's height: the Storage line.
-    fn projects_foot(&self) -> f32 {
-        PROJECTS_FOOT
-    }
-
-    // The projects list, under the scene name: every scene opened or made here, its draft and
-    // the store's use.
+    // The library, under the Library crumb: search, what the store holds, a New scene card and
+    // a card for every scene opened or made here (its preview, name and last edit), the open
+    // one outlined. A card opens its project.
     fn projects_menu(&mut self, ctx: &Context) {
+        let key = Id::unique("library-grow");
         if !self.projects_open {
             self.clear_armed = false;
+            ctx.animate_bool_with_time(key, false, 0.0);
             return;
         }
-        let button = self.hits.get("scene-select").copied().unwrap_or(Rect::NOTHING);
+        let button = self.hits.get("library").copied().unwrap_or(Rect::NOTHING);
         let screen = ctx.content_rect();
-        let w = 300.0_f32.min(screen.width() - 24.0);
-        let (rows, h) = self.projects_layout(screen);
-        self.projects_scroll = self.projects_scroll.min(self.projects.len().saturating_sub(rows));
-        let x = if button.is_positive() { button.left() } else { 12.0 }.min(screen.right() - 12.0 - w);
+        let query = self.lib_query.trim().to_lowercase();
+        // The cards: New scene first, then the projects whose names match the search.
+        let shown: Vec<usize> = (0..self.projects.len())
+            .filter(|&k| query.is_empty() || self.projects[k].name.to_lowercase().contains(&query))
+            .collect();
+        let with_new = query.is_empty();
+        let count = shown.len() + usize::from(with_new);
+        let (cols, w, rows) = self.library_layout(screen, count);
+        let total_rows = count.div_ceil(cols).max(1);
+        self.projects_scroll = self.projects_scroll.min(total_rows.saturating_sub(rows));
+        let h = LIB_HEAD + (CARD_H + CARD_GAP) * rows as f32 + LIB_FOOT;
+        let x = if button.is_positive() { button.left() } else { 12.0 }.min(screen.right() - 12.0 - w).max(12.0);
         let rect = Rect::from_min_size(pos2(x, 12.0 + 44.0 + 6.0), vec2(w, h));
         self.hits.insert("projects-menu".into(), rect);
         let scroll = self.projects_scroll;
         let (used, cap) = self.storage;
         let armed = self.clear_armed;
         let mut open = None;
+        let mut new = false;
         let mut clear = false;
         let mut wheel = 0.0;
+        let mut reset = false;
         let mut hits = Vec::new();
+        let mut query_text = std::mem::take(&mut self.lib_query);
+        let focus = std::mem::take(&mut self.lib_focus);
         Self::panel_filled(ctx, "projects-menu", rect, Order::Foreground, th().panel_solid, |ui, rect| {
             ui.allocate_rect(rect, Sense::click());
-            let hy = rect.top() + 18.0;
-            let g = ui.painter().layout_job(spaced("PROJECTS", sans(9.0), th().faint, 0.72));
-            ui.painter().galley(pos2(rect.left() + 12.0, hy - g.size().y / 2.0), g, th().faint);
-            if self.projects.len() > rows {
-                let more = format!("{}–{} of {}", scroll + 1, scroll + rows, self.projects.len());
-                ui.painter().text(pos2(rect.right() - 12.0, hy), Align2::RIGHT_CENTER, more, sans(11.0), th().faint);
+            // The header: title, search, what the store holds.
+            let hy = rect.top() + LIB_PAD + 16.0;
+            let g = ui.painter().layout_no_wrap("Library".into(), sans_semibold(14.0), th().text);
+            ui.painter().galley(pos2(rect.left() + LIB_PAD, hy - g.size().y / 2.0), g.clone(), th().text);
+            let usage = ui.painter().layout_no_wrap(
+                format!("{} of {}", crate::projects::bytes(used), crate::projects::bytes(cap)),
+                sans(11.5),
+                th().muted,
+            );
+            let ux = rect.right() - LIB_PAD - usage.size().x;
+            ui.painter().galley(pos2(ux, hy - usage.size().y / 2.0), usage, th().muted);
+            let sx = rect.left() + LIB_PAD + g.size().x + 12.0;
+            let field = Rect::from_min_max(pos2(sx, hy - 15.0), pos2((ux - 12.0).max(sx + 60.0), hy + 15.0));
+            let focused = ui.memory(|m| m.has_focus(Id::unique("library-search")));
+            ui.painter().rect(
+                field,
+                CornerRadius::same(8),
+                th().tint(7),
+                Stroke::new(1.0, if focused { th().ring } else { th().line }),
+                StrokeKind::Inside,
+            );
+            ui.painter().text(
+                pos2(field.left() + 15.0, field.center().y),
+                Align2::CENTER_CENTER,
+                icon::SEARCH,
+                icon_font(14.0),
+                th().faint,
+            );
+            let text_rect = Rect::from_min_max(
+                pos2(field.left() + 29.0, field.top() + 6.0),
+                pos2(field.right() - 8.0, field.bottom() - 6.0),
+            );
+            let edit = egui::TextEdit::singleline(&mut query_text)
+                .id(Id::unique("library-search"))
+                .font(sans(13.0))
+                .frame(egui::Frame::NONE)
+                .margin(egui::Margin::ZERO)
+                .hint_text(egui::RichText::new("Search library").color(th().faint).font(sans(13.0)))
+                .desired_width(text_rect.width());
+            let resp = ui.put(text_rect, edit);
+            if focus {
+                resp.request_focus();
+            }
+            hits.push(("library-search".to_string(), field));
+            if resp.changed() {
+                reset = true;
             }
             let body = Rect::from_min_size(
-                pos2(rect.left() + 6.0, rect.top() + 36.0),
-                vec2(rect.width() - 12.0, PROJECT_STEP * rows as f32),
+                pos2(rect.left() + LIB_PAD, rect.top() + LIB_HEAD),
+                vec2(rect.width() - 2.0 * LIB_PAD, (CARD_H + CARD_GAP) * rows as f32),
             );
             if ui.rect_contains_pointer(body) {
                 wheel = ui.input(|i| i.smooth_scroll_delta.y);
             }
-            if self.projects.is_empty() {
-                let mut job = LayoutJob::default();
-                job.append(
-                    "Scenes you open or edit here show up in this list.",
-                    0.0,
-                    TextFormat {
-                        font_id: sans(12.0),
-                        color: th().muted,
-                        line_height: Some(17.0),
-                        ..Default::default()
-                    },
-                );
-                job.wrap.max_width = body.width() - 12.0;
-                let g = ui.fonts_mut(|f| f.layout_job(job));
-                ui.painter().galley(pos2(body.left() + 6.0, body.center().y - g.size().y / 2.0), g, th().muted);
+            let cw = (body.width() - (cols - 1) as f32 * CARD_GAP) / cols as f32;
+            if count == 0 {
+                let g = ui.painter().layout_no_wrap("No project matches.".into(), sans(12.0), th().muted);
+                ui.painter().galley(pos2(body.left() + 6.0, body.top() + 12.0), g, th().muted);
             }
-            for (k, row) in self.projects.iter().enumerate().skip(scroll).take(rows) {
+            let clip = ui.painter().with_clip_rect(body.expand2(vec2(LIB_PAD / 2.0, 0.0)).intersect(ui.clip_rect()));
+            for slot in scroll * cols..count.min((scroll + rows) * cols) {
+                let (col, row) = (slot % cols, slot / cols - scroll);
                 let r = Rect::from_min_size(
-                    pos2(body.left(), body.top() + PROJECT_STEP * (k - scroll) as f32),
-                    vec2(body.width(), PROJECT_STEP - 2.0),
+                    pos2(body.left() + col as f32 * (cw + CARD_GAP), body.top() + row as f32 * (CARD_H + CARD_GAP)),
+                    vec2(cw, CARD_H),
                 );
-                let id = format!("project-{k}");
+                let card = slot.checked_sub(usize::from(with_new));
+                let id = match card {
+                    None => "library-new".to_string(),
+                    Some(i) => format!("project-{}", shown[i]),
+                };
                 let resp = ui.interact(r, Id::unique(&id), Sense::click());
                 hits.push((id, r));
-                let p = ui.painter();
-                if row.current {
-                    p.rect_filled(r, CornerRadius::same(7), th().accent_bg);
-                } else if resp.hovered() {
-                    p.rect_filled(r, CornerRadius::same(7), th().hover);
+                let row = card.map(|i| &self.projects[shown[i]]);
+                let current = row.is_some_and(|row| row.current);
+                let plate = pressed(r, &resp);
+                let p = clip.clone();
+                if resp.hovered() {
+                    p.rect_filled(plate, CornerRadius::same(10), th().hover);
                 }
-                // The thumbnail, 4:3.
-                let t = Rect::from_min_size(pos2(r.left() + 6.0, r.center().y - 18.0), vec2(48.0, 36.0));
-                p.rect_filled(t, CornerRadius::same(5), th().tint(10));
-                if let Some(tex) = row.thumb {
-                    let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
-                    egui::Image::new((tex, t.size())).uv(uv).corner_radius(CornerRadius::same(5)).paint_at(ui, t);
-                } else {
-                    p.text(t.center(), Align2::CENTER_CENTER, icon::BOX, icon_font(14.0), th().faint);
+                // The preview, 4:3.
+                let pw = plate.width() - 12.0;
+                let pv = Rect::from_min_size(plate.min + vec2(6.0, 6.0), vec2(pw, (pw * 0.75).round()));
+                match row {
+                    None => {
+                        p.rect_stroke(pv, CornerRadius::same(8), Stroke::new(1.0, th().line2), StrokeKind::Inside);
+                        p.text(pv.center(), Align2::CENTER_CENTER, icon::PLUS, icon_font(20.0), th().muted);
+                    }
+                    Some(row) => {
+                        p.rect_filled(pv, CornerRadius::same(8), th().tint(10));
+                        if let Some(tex) = row.thumb {
+                            let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+                            egui::Image::new((tex, pv.size()))
+                                .uv(uv)
+                                .corner_radius(CornerRadius::same(8))
+                                .paint_at(ui, pv);
+                        } else {
+                            // No preview kept for it yet: a cube stands in.
+                            p.text(pv.center(), Align2::CENTER_CENTER, icon::BOX, icon_font(22.0), th().faint);
+                        }
+                        p.rect_stroke(pv, CornerRadius::same(8), Stroke::new(1.0, th().line), StrokeKind::Inside);
+                        if current {
+                            p.rect_stroke(
+                                pv.expand(1.0),
+                                CornerRadius::same(9),
+                                Stroke::new(2.0, th().accent),
+                                StrokeKind::Outside,
+                            );
+                        }
+                        if row.unsaved {
+                            p.circle_filled(pv.right_top() + vec2(-9.0, 9.0), 3.5, th().mid);
+                        }
+                    }
                 }
-                let p = ui.painter();
-                p.rect_stroke(t, CornerRadius::same(5), Stroke::new(1.0, th().line), StrokeKind::Inside);
-                let tx = t.right() + 10.0;
-                let mut right = r.right() - 10.0;
-                if row.unsaved {
-                    let g = p.layout_no_wrap("Unsaved".into(), sans(11.0), th().accent);
-                    right -= g.size().x;
-                    p.galley(pos2(right, r.center().y - g.size().y / 2.0), g, th().accent);
-                    p.circle_filled(pos2(right - 7.0, r.center().y), 3.0, th().accent);
-                    right -= 16.0;
-                }
-                let color = if row.current || resp.hovered() { th().text } else { th().muted };
-                let name = p.layout_no_wrap(row.name.clone(), sans(13.0), color);
-                let clip = Rect::from_min_max(pos2(tx, r.top()), pos2(right - 4.0, r.bottom()));
-                let shown = p.with_clip_rect(clip.intersect(p.clip_rect()));
-                shown.galley(pos2(tx, r.center().y - 1.0 - name.size().y), name, color);
-                let when = p.layout_no_wrap(row.when.clone(), sans(11.0), th().faint);
-                shown.galley(pos2(tx, r.center().y + 2.0), when, th().faint);
+                let (name, when) = match row {
+                    None => ("New scene".to_string(), "Start blank".to_string()),
+                    Some(row) => (row.name.clone(), row.when.clone()),
+                };
+                let ink = if current || resp.hovered() || row.is_none() { th().text } else { th().muted };
+                let tx = plate.left() + 8.0;
+                let text_clip = Rect::from_min_max(pos2(tx, plate.top()), pos2(plate.right() - 6.0, plate.bottom()));
+                let t = p.with_clip_rect(text_clip.intersect(p.clip_rect()));
+                let name = p.layout_no_wrap(name, sans_medium(12.5), ink);
+                t.galley(pos2(tx, pv.bottom() + 7.0), name, ink);
+                let when = p.layout_no_wrap(when, sans(11.0), th().faint);
+                t.galley(pos2(tx, pv.bottom() + 24.0), when, th().faint);
                 if resp.clicked() {
-                    open = Some(k);
+                    match card {
+                        None => new = true,
+                        Some(i) => open = Some(shown[i]),
+                    }
                 }
             }
-            // The store: what it holds, and Clear.
-            let fy = rect.bottom() - PROJECTS_FOOT;
+            // The foot: where the window of cards stands, and Clear.
+            let fy = rect.bottom() - LIB_FOOT;
             ui.painter().line_segment(
                 [pos2(rect.left() + 1.0, fy + 0.5), pos2(rect.right() - 1.0, fy + 0.5)],
                 Stroke::new(1.0, th().line),
             );
-            let cy = fy + PROJECTS_FOOT / 2.0;
-            let p = ui.painter();
-            let g = p.layout_no_wrap("Storage".into(), sans(12.0), th().muted);
-            p.galley(pos2(rect.left() + 12.0, cy - g.size().y / 2.0), g.clone(), th().muted);
-            let usage = p.layout_no_wrap(
-                format!("{} of {}", crate::projects::bytes(used), crate::projects::bytes(cap)),
-                mono(11.0),
-                th().faint,
-            );
-            p.galley(pos2(rect.left() + 12.0 + g.size().x + 8.0, cy - usage.size().y / 2.0), usage, th().faint);
+            let cy = fy + LIB_FOOT / 2.0;
+            if total_rows > rows {
+                let more = format!("Rows {}–{} of {}", scroll + 1, scroll + rows, total_rows);
+                ui.painter().text(pos2(rect.left() + LIB_PAD, cy), Align2::LEFT_CENTER, more, sans(11.0), th().faint);
+            }
             let (text, ink) = if armed { ("Clear everything", th().danger) } else { ("Clear", th().muted) };
-            let label = p.layout_no_wrap(text.into(), sans(12.0), ink);
+            let label = ui.painter().layout_no_wrap(text.into(), sans(12.0), ink);
             let bw = label.size().x + 20.0;
             let b = Rect::from_min_size(pos2(rect.right() - 8.0 - bw, cy - 13.0), vec2(bw, 26.0));
             let resp = ui.interact(b, Id::unique("projects-clear"), Sense::click());
@@ -3534,12 +3699,17 @@ impl Hybrid {
             p.galley(pos2(b.left() + 10.0, cy - label.size().y / 2.0), label, color);
             clear = resp.clicked();
         });
+        self.lib_query = query_text;
+        if reset {
+            self.projects_scroll = 0;
+        }
         self.hits.extend(hits);
+        self.grow(ctx, "projects-menu", key, pos2(rect.left() + 20.0, rect.top()), 0.97, 0.18);
         if wheel != 0.0 {
-            let steps = (wheel / PROJECT_STEP).round() as isize;
-            let steps = if steps == 0 { -(wheel.signum() as isize) } else { -steps };
+            let steps =
+                if wheel.abs() < CARD_H { -wheel.signum() as isize } else { -(wheel / CARD_H).round() as isize };
             self.projects_scroll =
-                self.projects_scroll.saturating_add_signed(steps).min(self.projects.len().saturating_sub(rows));
+                self.projects_scroll.saturating_add_signed(steps).min(total_rows.saturating_sub(rows));
         }
         let outside = ctx.input(|i| {
             i.pointer.any_pressed()
@@ -3552,6 +3722,10 @@ impl Hybrid {
             } else {
                 self.clear_armed = true;
             }
+        }
+        if new {
+            self.projects_open = false;
+            self.request_new();
         }
         if let Some(k) = open {
             self.projects_open = false;
@@ -3568,7 +3742,6 @@ impl Hybrid {
     fn command_shown(&self, label: &str) -> bool {
         let signed_in = self.account.as_ref().map(|a| a.signed_in);
         match label {
-            "Download .vox" => signed_in.is_some(),
             "Sign in" => signed_in == Some(false),
             "Account" => signed_in == Some(true),
             "Add to library" => signed_in == Some(true) && self.account.as_ref().is_some_and(|a| a.can_add),
@@ -3576,14 +3749,37 @@ impl Hybrid {
         }
     }
 
-    /// Open or close the projects list.
+    /// Open or close the library (the Library crumb).
     pub fn toggle_projects(&mut self) {
+        self.menu_instant = false;
+        self.toggle_library();
+    }
+
+    /// The same from the keyboard (Cmd-K): the library appears at once.
+    fn toggle_projects_by_key(&mut self) {
+        self.menu_instant = true;
+        self.toggle_library();
+    }
+
+    /// Open or close the file menu (the scene name).
+    pub fn toggle_file_menu(&mut self) {
+        self.menu_instant = false;
         self.cmdk = None;
+        self.sign_in.open = false;
+        self.projects_open = false;
+        self.theme_menu = false;
+        self.file_menu = !self.file_menu;
+    }
+
+    fn toggle_library(&mut self) {
+        self.cmdk = None;
+        self.lib_query.clear();
+        self.lib_focus = true;
         self.sign_in.open = false;
         self.projects_open = !self.projects_open;
         self.projects_scroll = 0;
         self.theme_menu = false;
-        self.export_menu = false;
+        self.file_menu = false;
     }
 
     fn bounds_note(ctx: &Context) -> Arc<egui::Galley> {
@@ -5795,6 +5991,11 @@ fn tbtn_on(
     resp
 }
 
+/// The plate to draw for a pressed control: 3% smaller about its centre while the button is down.
+fn pressed(r: Rect, resp: &egui::Response) -> Rect {
+    if resp.is_pointer_button_down_on() { Rect::from_center_size(r.center(), r.size() * 0.97) } else { r }
+}
+
 /// A camera bar button: an icon, or a label, hovered like the top bar's buttons.
 fn nav_button(
     ui: &mut Ui,
@@ -6213,9 +6414,8 @@ mod tests {
             "center",
             "mirror",
             "lock",
-            "open",
-            "save",
-            "export",
+            "library",
+            "scene-select",
             "theme",
             "ai-toggle",
             "keys",
@@ -6256,7 +6456,7 @@ mod tests {
             ("assistant+select", |h| (h.ai_open, h.tool) = (true, super::Tool::Select)),
             ("size", |h| h.size_panel = true),
             ("bounds", |h| h.bounds_panel = Some(["1".into(), "1".into(), "1".into()])),
-            ("export", |h| h.export_menu = true),
+            ("file menu", |h| h.file_menu = true),
             ("theme", |h| h.theme_menu = true),
             ("view", |h| h.view_panel = true),
             ("render", |h| h.render_panel = true),
