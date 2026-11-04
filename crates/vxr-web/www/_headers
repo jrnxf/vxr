@@ -6,3 +6,7 @@
   Cache-Control: public, max-age=300, must-revalidate
 /fonts/*
   Cache-Control: public, max-age=31536000, immutable
+/scene.vox
+  Cache-Control: public, max-age=300, must-revalidate
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable

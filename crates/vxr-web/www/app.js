@@ -289,6 +289,9 @@ function bridgeFlush() {
 }
 
 function show(title, text) {
+  // An error replaces the landing page and the boot skeleton.
+  document.documentElement.dataset.landing = 'off';
+  document.documentElement.dataset.booted = '';
   msg.hidden = false;
   const p = document.createElement('p');
   const s = document.createElement('strong');
@@ -496,6 +499,8 @@ let cursor = '';
 function step(now) {
   app.frame(now / 1000);
   bridgeFlush();
+  // The first drawn frame ends the boot skeleton (www/style.css).
+  document.documentElement.dataset.booted = '';
 }
 
 function tick(now) {
@@ -567,6 +572,14 @@ async function main() {
   msg.hidden = true;
   wire();
   canvas.focus();
+  step(performance.now());
+  // landing.js waits for this to open the editor; a visit that skipped the landing counts as
+  // having opened it, so the next one does too (www/gate.js).
+  document.documentElement.dataset.ready = '';
+  if (document.documentElement.dataset.landing === 'off') {
+    try { localStorage.setItem('vxr-visited', '1'); } catch {}
+  }
+  dispatchEvent(new Event('vxr-ready'));
   requestAnimationFrame(tick);
 }
 main().catch((e) => { console.error(e); show('vxr could not start.', String(e)); });

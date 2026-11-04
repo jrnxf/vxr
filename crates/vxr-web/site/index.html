@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>vxr</title>
+    <meta name="description" content="fast voxel scenes" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <!--
+  The vxr editor in the browser. Everything on the canvas (scene and UI) is the Rust editor
+  (pkg/, built by crates/vxr-web/build); app.js forwards input, opens files and downloads saves.
+  The boot skeleton and the landing page (#root) are Preact, pre-rendered into this file at
+  build time (src/entry.tsx). First visits start on the landing page while the editor loads
+  behind it; later visits show the boot skeleton until the editor draws. gate.js picks which.
+-->
+    <script src="/gate.js"></script>
+    <link rel="modulepreload" href="/pkg/vxr_web.js" />
+    <script type="module" src="/src/entry.tsx" prerender></script>
+  </head>
+  <body>
+    <canvas id="c" tabindex="0"></canvas>
+    <input id="ime" autocomplete="off" aria-hidden="true" />
+    <input id="file" type="file" accept=".vox" hidden />
+    <div id="root"></div>
+    <div id="msg" hidden></div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
