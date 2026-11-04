@@ -68,6 +68,9 @@ pub const TOUCH_SCALE: f32 = 1.3;
 /// Movement below this many points is a finger resting (see `Touches`).
 const TOUCH_SLOP: f32 = 10.0;
 
+/// This machine, as the projects list names where a file is.
+pub const HERE: &str = if cfg!(target_os = "macos") { "this Mac" } else { "this computer" };
+
 /// A finger's change, from the host's touch events.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Finger {
@@ -435,6 +438,7 @@ impl Editor {
         // The top bar's account control and the Cmd-K account commands read this with the
         // list shut too.
         let busy = self.library.signing_in();
+        self.ui.sign_in.app = self.library.native;
         self.ui.account = match &self.library.account {
             crate::sync::Account::Off => None,
             crate::sync::Account::Out => Some(AccountRow {
@@ -486,6 +490,9 @@ impl Editor {
         let unsaved = self.ui.unsaved;
         let user = self.library.account.user().map(|u| u.id.clone());
         let library = &self.library;
+        // On the desktop each row says where the project lives: a file on this machine, the
+        // library, or both, and which copy is newer.
+        let files = self.projects.files();
         let rows: Vec<(String, ProjectRow)> = self
             .projects
             .list()
@@ -493,12 +500,21 @@ impl Editor {
             .map(|p| {
                 let here = current.as_ref() == Some(&p.id);
                 let ago = crate::projects::ago(now, p.edited);
-                let when = match user.as_deref().and_then(|u| p.library(u)) {
+                let when = match user.as_deref().map(|u| p.library(u)) {
                     None => ago,
-                    Some(_) if p.stub() => format!("{ago} · in library"),
-                    Some(c) if c.dirty || library.uploading(&p.id) => format!("{ago} · not in library yet"),
-                    Some(c) if c.behind() => format!("{ago} · newer in library"),
-                    Some(_) => format!("{ago} · library"),
+                    Some(None) if files && p.path.is_some() => format!("{ago} · {HERE}"),
+                    Some(None) => ago,
+                    Some(Some(_)) if p.stub() => format!("{ago} · in library"),
+                    Some(Some(c)) if c.dirty || library.uploading(&p.id) => {
+                        if files {
+                            format!("{ago} · newer on {HERE}")
+                        } else {
+                            format!("{ago} · not in library yet")
+                        }
+                    }
+                    Some(Some(c)) if c.behind() => format!("{ago} · newer in library"),
+                    Some(Some(_)) if files && p.path.is_some() => format!("{ago} · {HERE} and library"),
+                    Some(Some(_)) => format!("{ago} · library"),
                 };
                 let row = ProjectRow {
                     name: p.name.clone(),

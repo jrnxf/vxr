@@ -7,13 +7,14 @@
 //!   independent of the window. The native host is `src/main.rs`.
 //! - [`ui::Hybrid`]: the Hybrid UI (direction D), drawn with egui.
 //! - [`color`]: hex, RGB and HSV for the palette editor.
+//! - `courier`: the desktop app's HTTPS calls to the vxr Worker for [`sync`].
 //! - [`files`]: OBJ export files, and a zip to download several files at once.
 //! - [`fonts`]: loading the UI fonts.
 //! - [`host`]: what the native window and the browser page share: the surface, pointer routing
 //!   and Open, Save and the exports, with a `Platform` for what differs.
 //! - [`projects`]: the projects list and the autosaved drafts, in a `Store` per platform.
 //! - [`render`]: the Render panel's settings and the PNG render export.
-//! - [`sync`]: the optional account (in the browser) and the library its projects sync with.
+//! - [`sync`]: the optional account and the library its projects sync with.
 //! - [`review`]: the review step of an AI change, and scripts that drive it.
 //! - [`theme`]: the UI themes' colour tokens and the editor view's colours.
 
@@ -21,6 +22,8 @@ pub mod agents;
 pub mod assistant;
 pub mod bridge;
 pub mod color;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod courier;
 pub mod editor;
 pub mod files;
 pub mod fonts;

@@ -1,13 +1,17 @@
 //! The native window: winit and egui-winit around the [`Editor`], with file dialogs for
-//! open and save, and the projects list and drafts kept in the config folder.
+//! open and save, the projects list and drafts kept in the config folder, and the account's
+//! library on the vxr Worker (`VXR_SERVER`, else [`SERVER`]) with its session in the OS
+//! keychain.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use vxr_app::editor::{Button, Finger, NEW_SIZE};
 use vxr_app::files::{File, save_atomic};
 use vxr_app::host::{Drawn, Host, Opened, Platform, Saved, run_action};
 use vxr_app::projects::{Folder, Project, Projects, modified};
+use vxr_app::sync::Library;
 use vxr_app::theme::ThemeChoice;
 use vxr_core::Scene;
 use vxr_render::Gpu;
@@ -83,7 +87,20 @@ fn save_theme(id: &str) -> Result<(), String> {
     std::fs::write(dir.join("theme"), format!("{id}\n")).map_err(|e| e.to_string())
 }
 
-/// Sent to the event loop by the live host's threads when an agent's request arrives.
+/// The vxr Worker the account and its library are on.
+pub const SERVER: &str = "https://vxr.jrnxf.co";
+
+/// How often the library is asked again while the window stays open (it is also asked at
+/// launch and whenever the window comes to the front).
+const CHECK_EVERY: Duration = Duration::from_secs(5 * 60);
+
+/// The Worker to sign in to: `VXR_SERVER` (a local `wrangler dev`, say), else [`SERVER`].
+fn server() -> String {
+    std::env::var("VXR_SERVER").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| SERVER.into())
+}
+
+/// Sent to the event loop by the live host's and the library's threads when an agent's
+/// request or a library reply arrives, and by a timer for the next library check.
 struct Wake;
 
 struct App {
@@ -99,11 +116,17 @@ struct State {
     egui: egui_winit::State,
     host: Host,
     desktop: Desktop,
+    /// Sends the library's calls to the Worker.
+    courier: vxr_app::courier::Courier,
+    /// When the library was last asked who is signed in.
+    checked: Instant,
 }
 
-/// What a desktop does for [`run_action`]: file dialogs and files, the window's title.
+/// What a desktop does for [`run_action`]: file dialogs and files, the window's title, and
+/// the account's session in the keychain.
 struct Desktop {
     window: Arc<Window>,
+    session: crate::net::Session,
     /// Terminal agents' socket, while the user allows them (`vxr mcp --live`).
     #[cfg(unix)]
     live: vxr_app::live::Live,
@@ -183,6 +206,12 @@ impl Platform for Desktop {
         self.window.set_title(&format!("{name} - vxr"));
     }
 
+    fn keep_session(&mut self, token: Option<&str>) {
+        if let Err(e) = self.session.set(token) {
+            eprintln!("vxr: could not keep the sign-in in the keychain: {e}");
+        }
+    }
+
     #[cfg(unix)]
     fn intercept(&mut self, action: &vxr_app::ui::Action, editor: &mut vxr_app::Editor) -> bool {
         self.live.act(action, editor)
@@ -236,6 +265,27 @@ impl App {
             Some(p) => _ = editor.projects.opened(&name, Some(p), None, modified(p), false, 0),
             None => vxr_app::host::launch(editor),
         }
+        // The account: signed in with the session kept in the keychain, if any. Who is signed
+        // in, and the library, come with the first answer.
+        let server = server();
+        let session = crate::net::Session::new(&server, SERVER);
+        editor.library = Library::native(session.get());
+        editor.library.check();
+        let courier = {
+            let proxy = self.proxy.clone();
+            vxr_app::courier::Courier::new(&server, Arc::new(move || _ = proxy.send_event(Wake)))
+        };
+        {
+            let proxy = self.proxy.clone();
+            std::thread::spawn(move || {
+                loop {
+                    std::thread::sleep(CHECK_EVERY);
+                    if proxy.send_event(Wake).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
         // The assistant reaches its provider from here, with keys from the OS keychain.
         editor.assistant =
             vxr_app::assistant::Assistant::new(Box::new(crate::net::Net::new()), Box::new(crate::net::Keychain), false);
@@ -252,17 +302,37 @@ impl App {
         );
         let desktop = Desktop {
             window: window.clone(),
+            session,
             #[cfg(unix)]
             live: {
                 let proxy = self.proxy.clone();
                 vxr_app::live::Live::new(vxr_mcp::live::dir()).waking(Arc::new(move || _ = proxy.send_event(Wake)))
             },
         };
-        Ok(State { window, egui, host, desktop })
+        Ok(State { window, egui, host, desktop, courier, checked: Instant::now() })
     }
 }
 
 impl State {
+    /// Hand the library's replies to the editor and send its new calls; ask who is signed in
+    /// again once [`CHECK_EVERY`] has passed.
+    fn sync(&mut self) {
+        let ed = &mut self.host.editor;
+        for (id, reply) in self.courier.replies() {
+            vxr_app::host::fetched(ed, &mut self.desktop, id, reply);
+        }
+        if self.checked.elapsed() >= CHECK_EVERY {
+            self.check();
+        }
+        self.courier.send(self.host.editor.library.take_out());
+    }
+
+    /// Ask who is signed in, and so the library's list.
+    fn check(&mut self) {
+        self.checked = Instant::now();
+        self.host.editor.library.check();
+    }
+
     /// Run what agents asked. Apart from [`State::redraw`], which needs a surface to draw
     /// into, so a hidden window still answers them.
     fn serve_agents(&mut self) {
@@ -282,7 +352,7 @@ impl State {
     /// Draw a frame and run what it asked of the host. Returns how long to wait before the
     /// next draw: none when only an event can change the view.
     fn redraw(&mut self) -> Option<std::time::Duration> {
-        let Self { window, egui, host, desktop } = self;
+        let Self { window, egui, host, desktop, .. } = self;
         match host.frame(|_| egui.take_egui_input(window), || window.pre_present_notify()) {
             Drawn::Yes(actions, platform) => {
                 egui.handle_platform_output(window, *platform);
@@ -318,9 +388,11 @@ impl ApplicationHandler<Wake> for App {
         }
     }
 
-    /// An agent's request arrived: answer it now, whether or not the window can draw.
+    /// An agent's request or a library reply arrived (or the next library check is due):
+    /// answer it now, whether or not the window can draw.
     fn user_event(&mut self, _: &ActiveEventLoop, _: Wake) {
         let Some(s) = &mut self.state else { return };
+        s.sync();
         s.serve_agents();
         s.window.request_redraw();
     }
@@ -366,6 +438,8 @@ impl ApplicationHandler<Wake> for App {
                 ed.ui.confirm_close = true;
             }
             WindowEvent::CloseRequested => event_loop.exit(),
+            // Back at the front: another device may have changed the library meanwhile.
+            WindowEvent::Focused(true) => s.check(),
             WindowEvent::Resized(size) => s.host.resize(size.width, size.height, s.window.scale_factor() as f32),
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => s.host.rescale(scale_factor as f32),
             WindowEvent::CursorMoved { position, .. } => ed.pointer_moved(Some([position.x as f32, position.y as f32])),
@@ -407,6 +481,8 @@ impl ApplicationHandler<Wake> for App {
             WindowEvent::RedrawRequested => {
                 s.serve_agents();
                 let wait = s.redraw();
+                // What the frame asked of the library (a save, a sign-in) goes now.
+                s.sync();
                 if s.host.editor.quit {
                     return event_loop.exit();
                 }

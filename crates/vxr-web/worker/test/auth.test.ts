@@ -1,10 +1,10 @@
 import { env } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
 import { OTP_OFF } from '../auth';
-import { handle, MAIL_PER_HOUR } from '../index';
+import { APP_MAIL_PER_HOUR, handle, MAIL_PER_HOUR } from '../index';
 import { FROM, mailerFor, resendMailer, signInMail } from '../mail';
 import { TEST_SECRET, turnstile } from '../turnstile';
-import { ORIGIN, World } from './helpers';
+import { ORIGIN, vox, World } from './helpers';
 
 describe('sign-in', () => {
   it('reports sign-in off without the secret, and still answers /api/me', async () => {
@@ -164,6 +164,133 @@ describe('sign-in', () => {
     let last = 200;
     for (let i = 0; i <= MAIL_PER_HOUR.ip && last !== 429; i++) last = (await a.askLink(`ip${i}@example.com`)).status;
     expect(last).toBe(429);
+  });
+
+  it('signs the app in by code, with no challenge, and keeps it in by bearer token', async () => {
+    const w = new World();
+    const app = w.app();
+    expect((await app.askCode('fay@example.com')).status).toBe(200);
+    // The app's email has only the code: a link would sign in a browser, not the app.
+    const [m] = w.mail;
+    expect(m.text).not.toMatch(/https?:\/\//);
+    expect(m.text).toContain('vxr app');
+    const code = w.code('fay@example.com');
+    expect(m.subject).toBe(`Sign in to vxr: ${code}`);
+
+    const res = await app.fetch('/api/auth/sign-in/email-otp', { method: 'POST', json: { email: 'fay@example.com', otp: code } });
+    expect(res.status).toBe(200);
+    expect(app.token).toMatch(/\./);
+    expect((await app.me()).user).toMatchObject({ email: 'fay@example.com' });
+    // The token reaches the projects too.
+    expect((await app.json('/api/projects')).status).toBe(200);
+    const put = await app.json('/api/projects/p1', { method: 'PUT', headers: { 'if-none-match': '*', 'x-vxr-name': 'Island' }, body: vox() });
+    expect(put.status).toBe(201);
+  });
+
+  it('revokes the app session on sign-out', async () => {
+    const w = new World();
+    const app = w.app('192.0.2.91');
+    await app.codeSignIn('gus@example.com');
+    const token = app.token;
+    expect((await app.fetch('/api/auth/sign-out', { method: 'POST', json: {} })).status).toBe(200);
+    // The same token, kept by someone else, no longer signs anybody in.
+    app.token = token;
+    expect((await app.me()).user).toBeNull();
+    expect((await app.json('/api/projects')).status).toBe(401);
+  });
+
+  it('takes only signed tokens', async () => {
+    const w = new World();
+    const app = w.app('192.0.2.92');
+    await app.codeSignIn('hal@example.com');
+    const [raw] = app.token!.split('.');
+    app.token = raw;
+    expect((await app.me()).user).toBeNull();
+    app.token = `${raw}.forged`;
+    expect((await app.me()).user).toBeNull();
+  });
+
+  it('never shows the session token to a web page', async () => {
+    const w = new World();
+    const a = w.client('192.0.2.15');
+    const res = await a.codeSignIn('ida@example.com');
+    expect(res.status).toBe(200);
+    expect(res.headers.get('set-auth-token')).toBeNull();
+    expect(res.headers.get('access-control-expose-headers') ?? '').not.toMatch(/set-auth-token/i);
+    expect((await a.me()).user).toMatchObject({ email: 'ida@example.com' });
+
+    const b = w.client('192.0.2.16');
+    const link = await b.emailSignIn('jan@example.com');
+    expect(link.headers.get('set-auth-token')).toBeNull();
+
+    // A same-origin GET carries no Origin and needs no preflight, so page script can send the
+    // app's header with it. A session past updateAge is refreshed, which sets the cookie again,
+    // and the token must not ride along.
+    const soon = new Date(Date.now() + 58 * 24 * 60 * 60 * 1000).toISOString();
+    await env.DB.prepare('update session set expiresAt = ?').bind(soon).run();
+    const refreshed = await handle(
+      new Request(`${ORIGIN}/api/auth/get-session`, {
+        headers: {
+          'x-vxr-client': 'app',
+          'cf-connecting-ip': '192.0.2.15',
+          cookie: [...a.jar].map(([k, v]) => `${k}=${v}`).join('; '),
+        },
+      }),
+      env,
+      w.deps,
+    );
+    expect(refreshed.status).toBe(200);
+    expect(refreshed.headers.getSetCookie().join('\n')).toMatch(/session_token/);
+    expect(refreshed.headers.get('set-auth-token')).toBeNull();
+  });
+
+  it('refuses the app path from a browser, which always sends Origin', async () => {
+    const w = new World();
+    const a = w.client('192.0.2.17');
+    const res = await a.fetch('/api/auth/sign-in/magic-link', { method: 'POST', headers: { 'x-vxr-client': 'app' }, json: { email: 'kim@example.com' } });
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({ error: 'origin' });
+    // And without the app header, a request with no Origin still needs the challenge.
+    const bare = await handle(
+      new Request(`${ORIGIN}/api/auth/sign-in/magic-link`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'cf-connecting-ip': '192.0.2.18' },
+        body: JSON.stringify({ email: 'kim@example.com' }),
+      }),
+      env,
+      w.deps,
+    );
+    expect(bare.status).toBe(403);
+    expect(w.mail).toHaveLength(0);
+  });
+
+  it('limits app codes per address, per IP and for all app requests', async () => {
+    const w = new World();
+    // Per address, shared with the web: the web's links count too.
+    await w.client('198.51.100.50').askLink('lou@example.com');
+    for (let i = 1; i < MAIL_PER_HOUR.email; i++) expect((await w.app(`198.51.100.${50 + i}`).askCode('lou@example.com')).status).toBe(200);
+    expect((await w.app('198.51.100.60').askCode('lou@example.com')).status).toBe(429);
+
+    // Per IP, tighter than the web's.
+    const one = w.app('198.51.100.70');
+    let last = 200;
+    let sent = 0;
+    for (let i = 0; i <= APP_MAIL_PER_HOUR.ip && last === 200; i++) {
+      last = (await one.askCode(`ip${i}@example.com`)).status;
+      if (last === 200) sent++;
+    }
+    expect(last).toBe(429);
+    expect(sent).toBeLessThanOrEqual(APP_MAIL_PER_HOUR.ip);
+
+    // All app requests together, whatever the IP: the web is not held up by it.
+    const at = Date.now();
+    await env.DB.batch(
+      Array.from({ length: APP_MAIL_PER_HOUR.all }, (_, i) =>
+        env.DB.prepare('insert into mail_log (email, ip, at, app) values (?, ?, ?, 1)').bind(`all${i}@example.com`, `203.0.113.${i % 250}`, at),
+      ),
+    );
+    expect((await w.app('198.51.100.80').askCode('mo@example.com')).status).toBe(429);
+    expect((await w.client('198.51.100.81').askLink('mo@example.com')).status).toBe(200);
   });
 
   it('turns email sign-in off without a sender', async () => {

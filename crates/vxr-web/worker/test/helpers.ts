@@ -22,6 +22,9 @@ export class World {
   client(ip = '192.0.2.10') {
     return new Client(this, ip);
   }
+  app(ip = '192.0.2.90') {
+    return new App(this, ip);
+  }
   /** The sign-in link in the last mail to `to`. */
   link(to: string): string {
     const m = [...this.mail].reverse().find((x) => x.to === to);
@@ -113,6 +116,56 @@ export class Client {
     if (base) headers['if-match'] = `"${base}"`;
     else headers['if-none-match'] = '*';
     return this.json(`/api/projects/${id}`, { method: 'PUT', headers, body: bytes });
+  }
+}
+
+/**
+ * The desktop app: no Origin, no cookie jar, `x-vxr-client: app`, and the session as a bearer
+ * token taken from `set-auth-token`, as `crates/vxr-app/src/net.rs` does.
+ */
+export class App {
+  token: string | null = null;
+  constructor(
+    readonly world: World,
+    readonly ip: string,
+  ) {}
+
+  async fetch(path: string, init: RequestInit & { json?: unknown } = {}): Promise<Response> {
+    const headers = new Headers(init.headers);
+    headers.set('x-vxr-client', 'app');
+    headers.set('cf-connecting-ip', this.ip);
+    if (this.token) headers.set('authorization', `Bearer ${this.token}`);
+    let body = init.body;
+    if (init.json !== undefined) {
+      headers.set('content-type', 'application/json');
+      body = JSON.stringify(init.json);
+    }
+    const res = await handle(new Request(new URL(path, ORIGIN), { ...init, headers, body, redirect: 'manual' }), env, this.world.deps);
+    const token = res.headers.get('set-auth-token');
+    if (token) this.token = token;
+    return res;
+  }
+
+  async json<T = any>(path: string, init: RequestInit & { json?: unknown } = {}): Promise<{ status: number; body: T; res: Response }> {
+    const res = await this.fetch(path, init);
+    const text = await res.text();
+    return { status: res.status, body: text ? JSON.parse(text) : null, res };
+  }
+
+  /** Asks for a sign-in code to `email`, with no Turnstile token. */
+  askCode(email: string): Promise<Response> {
+    return this.fetch('/api/auth/sign-in/magic-link', { method: 'POST', json: { email } });
+  }
+
+  /** Signs in by the emailed code. */
+  async codeSignIn(email: string): Promise<Response> {
+    const asked = await this.askCode(email);
+    if (asked.status !== 200) throw new Error(`asking for a code: ${asked.status} ${await asked.text()}`);
+    return this.fetch('/api/auth/sign-in/email-otp', { method: 'POST', json: { email, otp: this.world.code(email) } });
+  }
+
+  async me() {
+    return (await this.json('/api/me')).body;
   }
 }
 

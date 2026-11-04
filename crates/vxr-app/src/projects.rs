@@ -18,9 +18,11 @@
 //! and the cap leave the projects another window or tab has open alone.
 //!
 //! Each project has a stable id and each draft says when and on which device it was made.
-//! Signed in to an account in the browser ([`crate::sync`]), a project can also be in the
-//! account's library ([`Cloud`]): the list then shows the library's projects too, those not
-//! on this device yet as rows with no file ([`Project::stub`]) that download when opened.
+//! Signed in to an account ([`crate::sync`]), a project can also be in the account's library
+//! ([`Cloud`]): the list then shows the library's projects too, those not on this device yet
+//! as rows with no file ([`Project::stub`]) that download when opened. On the desktop a
+//! library project is also a `.vox` file once saved here: a save, or a change on disk seen as
+//! it opens, marks it for upload ([`Cloud::dirty`]).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -631,6 +633,13 @@ impl Projects {
             p.copy = copy;
         }
         p.used = now;
+        // A library project's file changed on disk since vxr last saw it: that goes up.
+        if path.is_some()
+            && let (Some(m), Some(seen), Some(c)) = (modified, p.modified, p.cloud.as_mut())
+            && m > seen + 1.0
+        {
+            c.dirty = true;
+        }
         // A draft holds edits made on the file as it was when they began: keep that time.
         if p.draft.is_none() || modified.is_some() {
             p.modified = modified.or(p.modified);
@@ -700,6 +709,13 @@ impl Projects {
         p.edited = now;
         p.used = now;
         p.modified = Some(modified);
+        // Saved to a library project's file (signed out, or before its upload): it goes up
+        // when it can.
+        if path.is_some()
+            && let Some(c) = &mut p.cloud
+        {
+            c.dirty = true;
+        }
         if had {
             self.store.remove(&draft_key(&id));
         }
@@ -921,6 +937,33 @@ impl Projects {
         }
     }
 
+    /// Whether this device has files of its own (the desktop): a library project is then
+    /// saved to a `.vox` file, and its copy here is only for opening it until it is.
+    pub fn files(&self) -> bool {
+        self.store.files()
+    }
+
+    /// When the file at `path` last changed, where the store can tell ([`Store::modified`]).
+    pub fn disk_modified(&self, path: &Path) -> Option<f64> {
+        self.store.modified(path)
+    }
+
+    /// Project `id`'s copy of its file, as [`Projects::keep_copy`] kept it.
+    pub fn read_copy(&mut self, id: &str) -> Read {
+        self.store.read(&file_key(id))
+    }
+
+    /// Delete project `id`'s copy of its file: it has a file of its own now.
+    pub fn drop_copy(&mut self, id: &str) {
+        let Some(p) = self.get_mut(id) else { return };
+        if p.copy == 0 {
+            return;
+        }
+        p.copy = 0;
+        self.store.remove(&file_key(id));
+        self.keep();
+    }
+
     /// Keep `vox` as project `id`'s copy of its file (a library save or download), in place
     /// of any handle to a file of this device's.
     pub fn keep_copy(&mut self, id: &str, vox: &[u8]) -> Result<(), String> {
@@ -1121,9 +1164,24 @@ pub struct Memory {
     windows: std::rc::Rc<std::cell::Cell<u32>>,
     /// This window.
     window: u32,
+    /// For a store that stands in for the desktop's ([`Memory::desktop`]): when each file on
+    /// disk last changed, which the test sets. None: a store with no files (the browser's).
+    pub disk: Option<std::rc::Rc<std::cell::RefCell<HashMap<PathBuf, f64>>>>,
 }
 
 impl Memory {
+    /// A store as the desktop's is: it can tell when a file changed ([`Store::files`]).
+    pub fn desktop() -> Self {
+        Self { disk: Some(Default::default()), ..Self::default() }
+    }
+
+    /// The file at `path` changed now, by the store's clock.
+    pub fn touch(&self, path: &Path) {
+        if let Some(disk) = &self.disk {
+            disk.borrow_mut().insert(path.into(), self.clock.get());
+        }
+    }
+
     /// The same store as another window (or tab) sees it: what each has open is its own.
     pub fn another(&self) -> Self {
         self.windows.set(self.windows.get() + 1);
@@ -1168,6 +1226,14 @@ impl Store for Memory {
     fn new_id(&mut self) -> String {
         self.next.set(self.next.get() + 1);
         format!("p{}", self.next.get())
+    }
+
+    fn modified(&self, path: &Path) -> Option<f64> {
+        self.disk.as_ref()?.borrow().get(path).copied()
+    }
+
+    fn files(&self) -> bool {
+        self.disk.is_some()
     }
 }
 

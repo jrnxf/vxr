@@ -742,7 +742,8 @@ impl App {
     /// the version it names (`x-vxr-version`, empty for none) and its body.
     pub fn fetched(&mut self, id: u32, status: u16, version: &str, body: Vec<u8>) {
         self.woken = true;
-        let reply = vxr_app::sync::Reply { status, body, version: (!version.is_empty()).then(|| version.into()) };
+        let version = (!version.is_empty()).then(|| version.into());
+        let reply = vxr_app::sync::Reply { status, body, version, token: None };
         vxr_app::host::fetched(&mut self.host.editor, &mut Browser::default(), id, reply);
         self.send_library();
     }

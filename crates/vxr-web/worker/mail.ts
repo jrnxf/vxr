@@ -59,3 +59,15 @@ export function signInMail(to: string, url: string, code: string): Mail {
     ].join('\n\n'),
   };
 }
+
+/** The desktop app's sign-in email: only the code, to type in the app. */
+export function appSignInMail(to: string, code: string): Mail {
+  return {
+    to,
+    subject: `Sign in to vxr: ${code}`,
+    text: [
+      `Enter this code in the vxr app to sign in:\n\n${code}`,
+      'The code works once, for 10 minutes. If you did not ask for it, ignore this email.',
+    ].join('\n\n'),
+  };
+}

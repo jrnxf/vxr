@@ -1,9 +1,10 @@
 //! The account control at the far right of the top bar and its popover, where there is
-//! sign-in (the browser), after the sign-in mocks' direction A ("Front door"): "Sign in", or
-//! the account's initial with a dot for how the library's sync stands. Signed out, the popover
-//! asks for an email, which gets a link and a code in one message, and takes the code in six
-//! cells; a link clicked in another tab signs this one in too (the page asks the Worker again).
-//! Signed in, it shows the email, the library's use, how sync stands, and Sign out.
+//! sign-in, after the sign-in mocks' direction A ("Front door"): "Sign in", or the account's
+//! initial with a dot for how the library's sync stands. Signed out, the popover asks for an
+//! email, which gets a link and a code in one message, and takes the code in six cells; a link
+//! clicked in another tab signs this one in too (the page asks the Worker again). The desktop
+//! app's email has only the code ([`SignIn::app`]). Signed in, it shows the email, the
+//! library's use, how sync stands, and Sign out.
 
 use egui::{Galley, Mesh, Painter, Shape, UiBuilder, Vec2};
 
@@ -76,6 +77,8 @@ pub struct SignIn {
     pub checking: bool,
     /// The bot check has a question for the user, in the space it is given here.
     pub challenge: bool,
+    /// The desktop app: its email has a code and no link (set by the editor).
+    pub app: bool,
     pub error: Option<String>,
     /// When the code was found wrong: the cells shake, then clear.
     bad_at: Option<f64>,
@@ -712,11 +715,20 @@ impl Hybrid {
         let iw = w - 2.0 * PAD;
         let x = o.x + PAD;
         let email = self.sign_in.email.trim().to_string();
-        let body = [
-            ("We sent a link and a code to ", sans(13.0), th().muted),
-            (email.as_str(), sans_medium(13.0), th().text),
-            (". Click the link in any tab, or type the code here.", sans(13.0), th().muted),
-        ];
+        let app = self.sign_in.app;
+        let body = if app {
+            [
+                ("We sent a code to ", sans(13.0), th().muted),
+                (email.as_str(), sans_medium(13.0), th().text),
+                (". Type it here to sign in to this app.", sans(13.0), th().muted),
+            ]
+        } else {
+            [
+                ("We sent a link and a code to ", sans(13.0), th().muted),
+                (email.as_str(), sans_medium(13.0), th().text),
+                (". Click the link in any tab, or type the code here.", sans(13.0), th().muted),
+            ]
+        };
         let mut y = heading(ui, x, o.y + PAD, "Check your email", &body, iw) + 14.0 + 4.0;
         self.code_cells(ui, pos2(x, y), now, row.busy);
         y += CELL_H + 2.0;
@@ -726,19 +738,20 @@ impl Hybrid {
         ui.painter().galley(pos2(x, y + 6.0), g, th().danger);
         y += 6.0 + gh + 10.0;
         // Waiting for the link (the page asks the Worker again when another tab signs in), or
-        // checking the code.
+        // checking the code. The app has no link to wait for: how long the code lasts.
         let cy = y + 7.0;
-        let (text, busy) = if row.busy && self.sign_in.code.len() == CODE_LEN {
-            ("Checking the code…", true)
-        } else {
-            ("Waiting for you to click the link…", false)
-        };
-        if busy {
+        let checking = row.busy && self.sign_in.code.len() == CODE_LEN;
+        if checking {
             spinner(ui.painter(), pos2(x + 5.0, cy), 4.5, th().faint, now);
+            ui.painter().text(pos2(x + 15.0, cy), Align2::LEFT_CENTER, "Checking the code…", sans(12.0), th().faint);
+        } else if app {
+            let text = "The code works for 10 minutes.";
+            ui.painter().text(pos2(x, cy), Align2::LEFT_CENTER, text, sans(12.0), th().faint);
         } else {
             ui.painter().circle_filled(pos2(x + 3.5, cy), 3.5, th().accent.gamma_multiply(pulse(now)));
+            let text = "Waiting for you to click the link…";
+            ui.painter().text(pos2(x + 15.0, cy), Align2::LEFT_CENTER, text, sans(12.0), th().faint);
         }
-        ui.painter().text(pos2(x + 15.0, cy), Align2::LEFT_CENTER, text, sans(12.0), th().faint);
         y += 14.0 + 12.0;
         // Resend, once 30 s have passed, and another address.
         let left = RESEND - (now - self.sign_in.sent_at);
