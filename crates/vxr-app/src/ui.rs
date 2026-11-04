@@ -168,7 +168,7 @@ mod icon {
     pub const SCAN: char = '\u{e257}';
     pub const FOLDER_OPEN: char = '\u{e247}';
     pub const DOWNLOAD: char = '\u{e0b2}';
-    pub const KEYBOARD: char = '\u{e284}';
+    pub const COMMAND: char = '\u{e09a}';
     pub const CODE: char = '\u{e206}';
     pub const UNDO: char = '\u{e2a1}';
     pub const REDO: char = '\u{e2a0}';
@@ -635,7 +635,6 @@ pub struct Hybrid {
     /// Palette indices with voxels in the scene.
     pub used: [bool; 256],
     pub scene_name: String,
-    pub coach: bool,
     /// The Cmd-K query while the palette is open.
     pub cmdk: Option<String>,
     pub cmdk_sel: usize,
@@ -999,7 +998,6 @@ impl Hybrid {
             materials: [Material::default(); 256],
             used,
             scene_name: scene_name.into(),
-            coach: true,
             cmdk: None,
             cmdk_sel: 0,
             can_undo: false,
@@ -1331,7 +1329,7 @@ impl Hybrid {
 
     /// Escape: cancel an armed swap or copy, else close the colour editor, the Bounds panel,
     /// the View flyout, the palette or the Render panel, else leave the full render view, else
-    /// deselect, else the coach card.
+    /// deselect.
     fn escape(&mut self) {
         if self.ask_bar.take().is_some() || std::mem::take(&mut self.ai.menu) {
             return;
@@ -1362,8 +1360,6 @@ impl Hybrid {
             self.actions.push(Action::DiscardReview);
         } else if self.selected > 0 {
             self.actions.push(Action::Deselect);
-        } else {
-            self.coach = false;
         }
     }
 
@@ -1474,10 +1470,6 @@ impl Hybrid {
         // and the Agents tab.
         self.agents_tab(ctx);
         self.review_card(ctx);
-        // On a phone the assistant covers the tips card, which would show through it.
-        if self.coach && !(self.phone && self.ai_open) {
-            self.fitted(ctx, |s| s.coach_card(ctx, screen));
-        }
         if self.touch {
             self.stats_right = screen.left() + 4.0;
         } else {
@@ -1681,7 +1673,7 @@ impl Hybrid {
                 (Key::K, |h| h.cycle_lock()),
                 (Key::R, |h| h.toggle_render_panel()),
                 (Key::Escape, |h| h.escape()),
-                // The coach card's "? for every key": the command list shows every key.
+                // "?" opens the command list, which shows every key.
                 (Key::Questionmark, |h| {
                     h.cmdk = Some(String::new());
                     h.cmdk_sel = 0;
@@ -1813,8 +1805,8 @@ impl Hybrid {
         // Over the dock, undo and redo are on it.
         let history = !self.touch;
         // Held upright a phone has room for the file buttons, the theme, the assistant and the
-        // keyboard button only: no name, no New and no Embed (both in the command list, which the
-        // keyboard button opens).
+        // command button only: no name, no New and no Embed (both in the command list, which the
+        // command button opens).
         let slim = self.narrow;
         let w = if slim {
             4.0 + 3.0 * 36.0 + 4.0
@@ -1959,7 +1951,7 @@ impl Hybrid {
                 }
             }
             let mut kx = edge - 4.0 - 36.0;
-            let r = tbtn(ui, &mut kx, cy, Some(icon::KEYBOARD), "", "keys", true);
+            let r = tbtn(ui, &mut kx, cy, Some(icon::COMMAND), "", "keys", true);
             self.hits.insert("keys".into(), r.rect);
             if r.clicked() {
                 self.cmdk = Some(String::new());
@@ -4778,124 +4770,6 @@ impl Hybrid {
         }
     }
 
-    // #welcome
-    fn coach_card(&mut self, ctx: &Context, screen: Rect) {
-        let w = 440.0_f32.min(screen.width() - 32.0);
-        let text_w = w - 32.0 - 14.0 - 19.0;
-        let mut jobs = Vec::new();
-        let touch: [&[(&str, bool)]; 3] = [
-            &[("Tap", true), (" a surface to add a voxel. ", false), ("Drag", true), (" to draw along it.", false)],
-            &[
-                ("Two fingers", true),
-                (" orbit, ", false),
-                ("pinch", true),
-                (" to zoom, ", false),
-                ("three fingers", true),
-                (" pan.", false),
-            ],
-            &[("Tap with two fingers", true), (" to undo.", false)],
-        ];
-        let mouse: [&[(&str, bool)]; 3] = [
-            &[
-                ("Click", true),
-                (" a surface to add a voxel. ", false),
-                ("Drag", true),
-                (" to draw along that surface.", false),
-            ],
-            &[
-                ("Right-drag", true),
-                (" to orbit, ", false),
-                ("scroll", true),
-                (" to zoom, ", false),
-                ("Shift+right-drag", true),
-                (" to pan.", false),
-            ],
-            &[
-                ("Hold ", false),
-                ("Shift", true),
-                (" to erase, ", false),
-                ("Alt", true),
-                (" to pick a color. ", false),
-                ("?", true),
-                (" for every key.", false),
-            ],
-        ];
-        for line in if self.touch { touch } else { mouse } {
-            let mut job = LayoutJob::default();
-            for (t, b) in line {
-                if *t == "?" {
-                    job.append(
-                        "?",
-                        5.0,
-                        TextFormat {
-                            font_id: mono_medium(10.5),
-                            color: th().muted,
-                            line_height: Some(17.5),
-                            ..Default::default()
-                        },
-                    );
-                    continue;
-                }
-                let lead = if t.starts_with(" for every") { 5.0 } else { 0.0 };
-                let f = if *b {
-                    TextFormat {
-                        font_id: sans_medium(12.5),
-                        color: th().text,
-                        line_height: Some(17.5),
-                        ..Default::default()
-                    }
-                } else {
-                    TextFormat { font_id: sans(12.5), color: th().muted, line_height: Some(17.5), ..Default::default() }
-                };
-                job.append(t, lead, f);
-            }
-            job.wrap.max_width = text_w - 18.0;
-            jobs.push(job);
-        }
-        let galleys: Vec<_> = jobs.into_iter().map(|j| ctx.fonts_mut(|f| f.layout_job(j))).collect();
-        let body: f32 = galleys.iter().map(|g| g.size().y + 4.0).sum();
-        let h = 14.0 + 19.6 + 4.0 + 8.0 - 4.0 + body + 14.0;
-        let rect = Rect::from_min_size(pos2(screen.center().x - w / 2.0, 70.0), vec2(w, h));
-        Self::panel(ctx, "welcome", rect, Order::Middle, |ui, rect| {
-            let p = ui.painter().clone();
-            let left = rect.left() + 16.0;
-            p.text(
-                pos2(left, rect.top() + 14.0 + 9.8),
-                Align2::LEFT_CENTER,
-                "Sculpt in under a minute",
-                sans_semibold(14.0),
-                th().text,
-            );
-            let mut y = rect.top() + 14.0 + 19.6 + 4.0 + 8.0;
-            for (i, g) in galleys.into_iter().enumerate() {
-                y += 2.0;
-                p.text(
-                    pos2(left + 14.0, y + 8.75),
-                    Align2::RIGHT_CENTER,
-                    format!("{}.", i + 1),
-                    sans(12.5),
-                    th().muted,
-                );
-                let h = g.size().y;
-                kbd_frames(&p, pos2(left + 18.0, y), &g, &['?']);
-                p.galley(pos2(left + 18.0, y), g, th().muted);
-                y += h + 2.0;
-            }
-            let x = Rect::from_center_size(pos2(rect.right() - 16.0 - 8.0, rect.top() + 14.0 + 11.0), vec2(16.0, 22.0));
-            let resp = ui.interact(x, Id::unique("welcome-x"), Sense::click());
-            p.text(
-                x.center(),
-                Align2::CENTER_CENTER,
-                "×",
-                sans(18.0),
-                if resp.hovered() { th().text } else { th().faint },
-            );
-            if resp.clicked() {
-                self.coach = false;
-            }
-        });
-    }
-
     // #stats
     fn stats(&mut self, ctx: &Context, screen: Rect, s: &Stats) {
         let fps_color = if s.fps >= 55.0 {
@@ -6020,20 +5894,6 @@ fn kbd_frame(p: &egui::Painter, r: Rect) {
         [pos2(r.left() + 2.5, r.bottom() - 1.5), pos2(r.right() - 2.5, r.bottom() - 1.5)],
         Stroke::new(1.0, th().line2),
     );
-}
-
-/// Draw kbd frames around the given characters of a laid-out paragraph at `origin`.
-fn kbd_frames(p: &egui::Painter, origin: Pos2, g: &egui::Galley, chars: &[char]) {
-    for row in &g.rows {
-        for gl in &row.row.glyphs {
-            if chars.contains(&gl.chr) {
-                let cx = origin.x + row.pos.x + gl.pos.x + gl.advance_width / 2.0;
-                let cy = origin.y + row.pos.y + row.row.size.y / 2.0;
-                let w = (gl.advance_width + 8.0).max(18.0);
-                kbd_frame(p, Rect::from_center_size(pos2(cx, cy + 0.5), vec2(w, 19.0)));
-            }
-        }
-    }
 }
 
 /// Uppercase label with CSS letter-spacing (`em` times the font size, in points).

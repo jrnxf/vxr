@@ -82,7 +82,7 @@ async () => {
   };
   await frames(10);
   let s0 = st();
-  step('starts with the island and the coach card', s0.voxels > 100000 && s0.coach && s0.name === 'island.vox', JSON.stringify(s0));
+  step('starts with the island', s0.voxels > 100000 && s0.name === 'island.vox', JSON.stringify(s0));
   const original = bytes();
   const file = new Uint8Array(await (await fetch('scene.vox')).arrayBuffer());
   step('saving the opened island unedited gives back its bytes', same(original, file), `${original.length} vs ${file.length}`);
@@ -103,7 +103,6 @@ async () => {
   await click(mx, my);
   let s = st();
   step('click adds a voxel', s.voxels === s0.voxels + 1, `${s0.voxels} -> ${s.voxels}`);
-  step('the first edit closes the coach card', !s.coach);
   step('Cmd-Z is kept from the browser', await key('z', cmd));
   step('Cmd-Z undoes', st().voxels === s0.voxels && st().redo);
   await key('z', { metaKey: true, shiftKey: true });
@@ -601,10 +600,10 @@ async () => {
   if (JSON.parse(window.vxr.ai()).open) await key('j', cmd);
   await frames(2);
   await key('?', { shiftKey: true });
-  step('? opens the command list, as the coach card says', st().cmdk);
+  step('? opens the command list', st().cmdk);
   await key('Escape');
   await click(1155, 34);
-  step('the keyboard button opens the command list', st().cmdk);
+  step('the command button opens the command list', st().cmdk);
   await key('Escape');
   await key('v');
 

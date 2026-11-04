@@ -940,7 +940,6 @@ impl Editor {
         if self.review.is_some() {
             return self.ui.toast(&self.ctx, REVIEW_FIRST);
         }
-        self.ui.coach = false;
         // A colour edit still open (a field not yet applied) is its own undo step.
         self.scene.commit();
         let Some(p) = self.pointer else { return };
@@ -1336,7 +1335,6 @@ impl Editor {
         self.ui.color_edit = None;
         self.ui.slot_op = None;
         self.ui.bounds_panel = None;
-        self.ui.coach = false;
         self.scene.commit();
         self.review = Some(match prompt {
             Some(p) => Review::new(&self.scene, p),
