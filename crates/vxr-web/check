@@ -343,6 +343,8 @@ else
   account() { axi eval --full "async () => ($(cat "$here/check-account.js"))('$1', '${2:-}')" | unwrap; }
   # Wait for the nth email in the wrangler log.
   mail() { for _ in $(seq 200); do [ "$(grep -c '^\[vxr mail\]' "$wlog")" -ge "$1" ] && break; sleep 0.1; done; }
+  # The id of the newest tab (newpage does not always select a page whose load failed).
+  newest() { axi pages | awk -F, '/^ +[0-9]+,/ { gsub(/ /, "", $1); id = $1 } END { print id }'; }
   ashot() { axi screenshot "$shots/web-account-$1.png" >/dev/null; echo "wrote $shots/web-account-$1.png"; }
   axi open "$aurl" >/dev/null
   axi emulate --viewport "1280x800x2" >/dev/null
@@ -368,9 +370,22 @@ else
   # The link redirects to the account page, which newpage reports as a failed load; the link
   # stage checks what came of it.
   axi newpage "$(grep -oE "http://127\.0\.0\.1:$aport/api/auth/magic-link/verify\?[^ ]+" "$wlog" | tail -1)" >/dev/null || true
+  # This tab is the account page the link landed on.
+  landed="$(newest)"
+  axi selectpage "$landed" >/dev/null
+  results+=$'\n'"$(account landed)"
+  ashot landed
   axi selectpage "$editor" >/dev/null
   results+=$'\n'"$(account link)"
   ashot link
+  # Sign out on the account page (its tab stays signed in until the editor tab has seen it).
+  axi selectpage "$landed" >/dev/null
+  results+=$'\n'"$(account landed-out)"
+  # The same link a second time (and a failed one) comes back to the page with ?link=expired.
+  axi newpage "${aurl}account?link=expired" >/dev/null || true
+  axi selectpage "$(newest)" >/dev/null
+  results+=$'\n'"$(account expired)"
+  ashot expired
   kill "$worker" 2>/dev/null || true
   worker=""
 fi
