@@ -31,7 +31,7 @@ use vxr_render::Gpu;
 use crate::Editor;
 use crate::editor::Button;
 use crate::files::{File, obj_files, slices_png, vox_bytes};
-use crate::projects::{Project, Read, THUMB};
+use crate::projects::{Project, Read, THUMB, content_hash};
 use crate::sync::{Auth, Event, Reply};
 use crate::ui::{Action, FontBytes};
 
@@ -310,6 +310,17 @@ fn open_here(ed: &mut Editor, p: &mut dyn Platform, project: &Project) {
     }
 }
 
+/// The library's version of `project` as a copy kept here to open from. `detach`: its file
+/// could not be written, so it has no place until the next Save.
+fn copy_file(ed: &mut Editor, ctx: &egui::Context, project: &str, name: &str, bytes: Vec<u8>, detach: bool) -> Opened {
+    let kept = if detach { ed.projects.copy_instead(project, &bytes) } else { ed.projects.keep_copy(project, &bytes) };
+    if let Err(e) = kept {
+        ed.ui.toast(ctx, format!("Could not keep a copy: {e}"));
+    }
+    let copy = bytes.len() as u64;
+    Opened { name: name.into(), bytes, id: Some(project.into()), copy, ..Default::default() }
+}
+
 /// Replace the scene with a file the user picked, or say why not; true when it opened. It
 /// becomes its project in the list, which offers its draft back when it has one. In the
 /// browser, a file picked from this device's files that lands in a library project takes it
@@ -439,8 +450,7 @@ pub fn fetched(ed: &mut Editor, p: &mut dyn Platform, id: u32, reply: Reply) {
                     // it, unless it changed since vxr last saw it. Then the file opens as it
                     // is, and goes up beside the library's version as a conflicted copy.
                     Some(path) => {
-                        let on_disk = ed.projects.disk_modified(&path);
-                        if on_disk.is_some_and(|m| here.modified.is_none_or(|seen| m > seen + 1.0)) {
+                        if ed.projects.changed_on_disk(&here) {
                             ed.projects.update(&project, |p| {
                                 if let Some(c) = &mut p.cloud {
                                     c.dirty = true;
@@ -450,25 +460,26 @@ pub fn fetched(ed: &mut Editor, p: &mut dyn Platform, id: u32, reply: Reply) {
                             continue;
                         }
                         match p.save_vox(Some(&path), &project, &name, &bytes) {
-                            Ok(Some(_)) => {}
+                            Ok(Some(_)) => {
+                                let modified = ed.projects.disk_modified(&path);
+                                // Written by vxr, so not a change to send back up.
+                                let hash = content_hash(&bytes);
+                                ed.projects.update(&project, |p| {
+                                    p.modified = modified;
+                                    p.hash = Some(hash);
+                                });
+                                Opened { name: name.clone(), bytes, path: Some(path), modified, ..Default::default() }
+                            }
                             Ok(None) => continue,
+                            // Its folder is gone, or on a drive that is not there: open the
+                            // library's version as a copy, which the next Save places.
                             Err(e) => {
-                                ed.ui.toast(&ctx, format!("Could not write {name}: {e}"));
-                                continue;
+                                ed.ui.toast(&ctx, format!("Could not write {name}: {e}. Opened as a copy."));
+                                copy_file(ed, &ctx, &project, &name, bytes, true)
                             }
                         }
-                        let modified = ed.projects.disk_modified(&path);
-                        // Written by vxr, so not a change to send back up.
-                        ed.projects.update(&project, |p| p.modified = modified);
-                        Opened { name: name.clone(), bytes, path: Some(path), modified, ..Default::default() }
                     }
-                    None => {
-                        if let Err(e) = ed.projects.keep_copy(&project, &bytes) {
-                            ed.ui.toast(&ctx, format!("Could not keep a copy: {e}"));
-                        }
-                        let copy = bytes.len() as u64;
-                        Opened { name: name.clone(), bytes, id: Some(project.clone()), copy, ..Default::default() }
-                    }
+                    None => copy_file(ed, &ctx, &project, &name, bytes, false),
                 };
                 if open(ed, p, file) {
                     ed.projects.update(&project, |p| {
