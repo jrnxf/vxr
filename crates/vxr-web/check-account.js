@@ -10,7 +10,10 @@ async (stage, arg) => {
   // 'expired' run on the account page itself (/account, Preact pre-rendered, no editor): 'landed'
   // is the tab the email's link opened (signed in, usage, the way back, the strict policy),
   // 'landed-out' presses its Sign out, 'expired' is a link that was used (?link=expired: the
-  // message, the email form).
+  // message, the email form). Then, in the editor tab again: 'again' finds it signed out (the
+  // account page signed out), 'save' puts the scene in the library, 'export' downloads the
+  // library as one zip, 'delete' opens Delete account and checks the email must be typed,
+  // 'deleted' types it and deletes the account.
   if (stage === 'landed' || stage === 'landed-out' || stage === 'expired') {
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const waitFor = async (f, ms = 8000) => { for (let t = 0; !f() && t < ms; t += 30) await sleep(30); return f(); };
@@ -121,6 +124,58 @@ async (stage, arg) => {
     await until(() => st().account === 'out' && shown() === null);
     const s = st();
     step('Sign out signs out and closes the popover', s.account === 'out' && s.signIn.shown === null, JSON.stringify([s.account, s.signIn]));
+  } else if (stage === 'again') {
+    window.vxr.check_account();
+    await until(() => st().account === 'out');
+    step('back in the editor tab, it finds the account page signed it out', st().account === 'out', JSON.stringify(st().account));
+  } else if (stage === 'save') {
+    await key('s', { metaKey: true });
+    await until(() => st().account?.usage > 0 && /library/.test(st().toast ?? ''));
+    const s = st();
+    step('signed in, Save puts the scene in the library', s.account.usage > 0, JSON.stringify([s.account, s.toast]));
+  } else if (stage === 'export') {
+    // The download's name and bytes, as the page hands them over (a blob URL, then a click).
+    let file = null;
+    let blob = null;
+    const anchorClick = HTMLAnchorElement.prototype.click;
+    const objectUrl = URL.createObjectURL;
+    URL.createObjectURL = (b) => { blob = b; return objectUrl(b); };
+    HTMLAnchorElement.prototype.click = function () { file = { name: this.download, blob }; };
+    try {
+      await key('Escape');
+      await click('account');
+      await until(() => shown() === 'menu');
+      await frames(20);
+      await click('account-export');
+      await until(() => file, 10000);
+    } finally {
+      HTMLAnchorElement.prototype.click = anchorClick;
+      URL.createObjectURL = objectUrl;
+    }
+    const bytes = file?.blob ? new Uint8Array(await file.blob.arrayBuffer()) : new Uint8Array();
+    const s = st();
+    step('Export library downloads every scene in it as vxr-library.zip',
+      file?.name === 'vxr-library.zip' && bytes[0] === 0x50 && bytes[1] === 0x4b && /^Exported 1 scene as vxr-library\.zip$/.test(s.toast ?? ''),
+      JSON.stringify([file?.name, bytes.length, s.toast]));
+  } else if (stage === 'delete') {
+    await click('account');
+    await until(() => shown() === 'menu');
+    await click('account-delete');
+    await until(() => shown() === 'delete');
+    await frames(20);
+    await click('account-delete-confirm');
+    await new Promise((r) => setTimeout(r, 500));
+    step('Delete account asks for the email typed again, and does nothing until it is',
+      shown() === 'delete' && at('account-confirm').length === 2 && st().account?.email === 'ada@example.com', JSON.stringify([st().signIn, st().account]));
+  } else if (stage === 'deleted') {
+    await click('account-confirm');
+    await type('ada@example.com');
+    await key('Enter');
+    await until(() => st().account === 'out' && /^Deleted your account/.test(st().toast ?? ''), 10000);
+    const s = st();
+    const me = await (await fetch('/api/me', { cache: 'no-store' })).json();
+    step('the email typed, Delete account deletes the account and its library and signs out',
+      s.account === 'out' && s.signIn.shown === null && !me.user && /^Deleted your account/.test(s.toast ?? ''), JSON.stringify([s.account, s.signIn, s.toast, me]));
   } else if (stage === 'listen') {
     window.__heard = 0;
     new BroadcastChannel('vxr-account').onmessage = () => window.__heard++;

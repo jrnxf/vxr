@@ -232,28 +232,37 @@ pub fn write_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     written
 }
 
-/// CRC-32 (IEEE), as zip stores it.
+/// CRC-32 (IEEE), as zip stores it, a byte at a time through a table: a whole library is up to
+/// 100 MB.
 fn crc32(bytes: &[u8]) -> u32 {
-    let mut c = !0u32;
-    for &b in bytes {
-        c ^= b as u32;
-        for _ in 0..8 {
-            c = if c & 1 != 0 { (c >> 1) ^ 0xedb8_8320 } else { c >> 1 };
+    const TABLE: [u32; 256] = {
+        let mut t = [0u32; 256];
+        let mut i = 0;
+        while i < 256 {
+            let mut c = i as u32;
+            let mut k = 0;
+            while k < 8 {
+                c = if c & 1 != 0 { (c >> 1) ^ 0xedb8_8320 } else { c >> 1 };
+                k += 1;
+            }
+            t[i] = c;
+            i += 1;
         }
-    }
-    !c
+        t
+    };
+    !bytes.iter().fold(!0u32, |c, &b| TABLE[((c ^ b as u32) & 0xff) as usize] ^ (c >> 8))
 }
 
-/// `files` in a zip archive, stored uncompressed, dated 1980-01-01.
+/// `files` in a zip archive, stored uncompressed, dated 1980-01-01, the names in UTF-8.
 pub fn zip(files: &[File]) -> Vec<u8> {
     let (mut out, mut central) = (Vec::new(), Vec::new());
     let u16le = |v: &mut Vec<u8>, x: u16| v.extend_from_slice(&x.to_le_bytes());
     let u32le = |v: &mut Vec<u8>, x: u32| v.extend_from_slice(&x.to_le_bytes());
     for (name, data) in files {
         let (crc, len, offset) = (crc32(data), data.len() as u32, out.len() as u32);
-        // Version 2.0, no flags, stored, time 0, date 1980-01-01.
+        // Version 2.0, names in UTF-8 (flag bit 11), stored, time 0, date 1980-01-01.
         let common = |v: &mut Vec<u8>| {
-            for x in [20, 0, 0, 0, 0x21] {
+            for x in [20, 0x0800, 0, 0, 0x21] {
                 u16le(v, x);
             }
             for x in [crc, len, len] {
@@ -369,6 +378,14 @@ mod tests {
     fn zip_round_trips() {
         let files = vec![("a.obj".to_string(), b"v 0 0 0\n".to_vec()), ("a.png".to_string(), vec![0, 1, 2, 255])];
         assert_eq!(unzip(&zip(&files)), files);
+    }
+
+    #[test]
+    fn zip_marks_names_as_utf8() {
+        let files = vec![("Château.vox".to_string(), vec![7; 3])];
+        let z = zip(&files);
+        assert_eq!(u16::from_le_bytes([z[6], z[7]]), 0x0800);
+        assert_eq!(unzip(&z), files);
     }
 
     #[test]

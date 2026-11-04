@@ -227,22 +227,24 @@ async function save(req: Request, env: Store, user: string, id: string, limits: 
   await env.PROJECTS.put(key, bytes, { httpMetadata: { contentType: 'application/octet-stream' } });
   // Write the row only if nobody saved in between and the account still has room; the bytes go
   // first so a row never points at a missing object.
-  const res = current
-    ? await env.DB.prepare(
+  const res = await kept(env, key, () =>
+    current
+    ? env.DB.prepare(
         `update project set name = ?, version = ?, hash = ?, size = ?, device = ?, updated_at = ?
          where user_id = ? and id = ? and version = ?
            and (select coalesce(sum(size + thumb), 0) from project where user_id = ?) - ? + ? <= ?`,
       )
         .bind(name, version, hash, bytes.length, device, now, user, id, base, user, current.size, bytes.length, limits.account)
         .run()
-    : await env.DB.prepare(
+    : env.DB.prepare(
         `insert into project (user_id, id, name, version, hash, size, device, created_at, updated_at)
          select ?, ?, ?, ?, ?, ?, ?, ?, ?
          where (select coalesce(sum(size + thumb), 0) from project where user_id = ?) + ? <= ?
          on conflict do nothing`,
       )
         .bind(user, id, name, version, hash, bytes.length, device, now, now, user, bytes.length, limits.account)
-        .run();
+        .run(),
+  );
   if (res.meta.changes !== 1) {
     await env.PROJECTS.delete(key);
     const now2 = await row(env.DB, user, id);
@@ -253,6 +255,19 @@ async function save(req: Request, env: Store, user: string, id: string, limits: 
   if (current) await env.PROJECTS.delete(voxKey(user, id, current.version));
   const r = await row(env.DB, user, id);
   return saved(r!, current ? 200 : 201);
+}
+
+/**
+ * Runs the row write for the object at `key`, deleting the object when the write throws: the
+ * account was deleted since the save began, so the row has no user to belong to.
+ */
+async function kept<T>(env: Store, key: string, write: () => Promise<T>): Promise<T> {
+  try {
+    return await write();
+  } catch (e) {
+    await env.PROJECTS.delete(key);
+    throw e;
+  }
 }
 
 function saved(r: Row, status: number): Response {
@@ -276,13 +291,15 @@ async function conflict(
   const version = newVersion();
   const key = voxKey(user, copy, version);
   await env.PROJECTS.put(key, bytes, { httpMetadata: { contentType: 'application/octet-stream' } });
-  const res = await env.DB.prepare(
-    `insert into project (user_id, id, name, version, hash, size, device, created_at, updated_at)
-     select ?, ?, ?, ?, ?, ?, ?, ?, ?
-     where (select coalesce(sum(size + thumb), 0) from project where user_id = ?) + ? <= ?`,
-  )
-    .bind(user, copy, conflictName(name), version, hash, bytes.length, device, now, now, user, bytes.length, limits.account)
-    .run();
+  const res = await kept(env, key, () =>
+    env.DB.prepare(
+      `insert into project (user_id, id, name, version, hash, size, device, created_at, updated_at)
+       select ?, ?, ?, ?, ?, ?, ?, ?, ?
+       where (select coalesce(sum(size + thumb), 0) from project where user_id = ?) + ? <= ?`,
+    )
+      .bind(user, copy, conflictName(name), version, hash, bytes.length, device, now, now, user, bytes.length, limits.account)
+      .run(),
+  );
   if (res.meta.changes !== 1) {
     await env.PROJECTS.delete(key);
     return problem(413, 'quota', { limit: limits.account, usage: await usage(env.DB, user), current: current && show(current) });

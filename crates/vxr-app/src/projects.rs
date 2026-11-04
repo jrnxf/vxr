@@ -1110,6 +1110,21 @@ impl Projects {
         merged
     }
 
+    /// `user`'s account was deleted: the projects with a copy here stay as this device's own,
+    /// out of any library.
+    pub fn leave_library(&mut self, user: &str) {
+        let mut changed = false;
+        for p in &mut self.index.projects {
+            if !p.stub() && p.cloud.as_ref().is_some_and(|c| c.user == user) {
+                p.cloud = None;
+                changed = true;
+            }
+        }
+        if changed {
+            self.keep();
+        }
+    }
+
     /// Signed out, or in as `user`: forget the library projects of anyone else that have
     /// nothing on this device.
     pub fn signed_out(&mut self, user: Option<&str>) {

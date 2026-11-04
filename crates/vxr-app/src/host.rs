@@ -123,6 +123,12 @@ pub trait Platform {
         Err("there is no download here".into())
     }
 
+    /// Save the library's export, a zip of its `.vox` files, as `name` (a download, or a
+    /// file the user picks); returns the name it was given, or None when the user cancelled.
+    fn save_zip(&mut self, _name: &str, _bytes: &[u8]) -> Result<Option<String>, String> {
+        Err("there is no download here".into())
+    }
+
     /// The scene now has this name (the window's title).
     fn named(&mut self, _name: &str) {}
 
@@ -231,6 +237,11 @@ pub fn run_action(ed: &mut Editor, p: &mut dyn Platform, action: Action) {
             ed.library.verify_code(&email, &code);
         }
         Action::SignOut => ed.library.sign_out(),
+        Action::ExportLibrary => ed.library.export(),
+        Action::DeleteAccount => {
+            let email = ed.ui.sign_in.confirm.clone();
+            ed.library.delete_account(&email);
+        }
         Action::DownloadVox => {
             let bytes = match vox_bytes(&ed.scene) {
                 Ok(b) => b,
@@ -504,6 +515,14 @@ pub fn fetched(ed: &mut Editor, p: &mut dyn Platform, id: u32, reply: Reply) {
                 }
             }
             Event::Listed => catch_up(ed),
+            Event::Export { name, bytes, count } => {
+                let what = if count == 1 { "1 scene".to_string() } else { format!("{count} scenes") };
+                match p.save_zip(&name, &bytes) {
+                    Ok(Some(name)) => ed.ui.toast(&ctx, format!("Exported {what} as {name}")),
+                    Ok(None) => {}
+                    Err(e) => ed.ui.toast(&ctx, format!("Could not export your library: {e}")),
+                }
+            }
             Event::Auth(Auth::Sent) => ed.ui.sign_in.sent(ctx.input(|i| i.time)),
             Event::Auth(Auth::WrongCode) => ed.ui.sign_in.wrong_code(ctx.input(|i| i.time)),
             Event::Auth(Auth::Failed(why)) => ed.ui.sign_in.failed(&why),

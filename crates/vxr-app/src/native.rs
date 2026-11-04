@@ -188,6 +188,14 @@ impl Platform for Desktop {
         Ok(Some(file_name(&path)))
     }
 
+    fn save_zip(&mut self, name: &str, bytes: &[u8]) -> Result<Option<String>, String> {
+        let Some(path) = rfd::FileDialog::new().add_filter("Zip", &["zip"]).set_file_name(name).save_file() else {
+            return Ok(None);
+        };
+        std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+        Ok(Some(file_name(&path)))
+    }
+
     fn save_all(
         &mut self,
         stem: &str,
