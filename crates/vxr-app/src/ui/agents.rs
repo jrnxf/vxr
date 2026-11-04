@@ -180,7 +180,7 @@ fn wrapped(ctx: &Context, text: &str, font: FontId, color: Color32, width: f32) 
 }
 
 /// One line, cut with an ellipsis to `width`.
-fn one_line(ui: &Ui, text: &str, font: FontId, color: Color32, width: f32) -> Arc<egui::Galley> {
+pub(super) fn one_line(ui: &Ui, text: &str, font: FontId, color: Color32, width: f32) -> Arc<egui::Galley> {
     let mut job =
         LayoutJob::single_section(text.to_string(), TextFormat { font_id: font, color, ..Default::default() });
     job.wrap = egui::text::TextWrapping {

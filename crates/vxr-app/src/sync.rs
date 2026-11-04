@@ -11,6 +11,11 @@
 //! editor should do ([`Event`]). The desktop never signs in, so its account stays
 //! [`Account::Off`]. [`FakeLibrary`] answers the calls in memory, as the Worker does, for the tests
 //! and the headless check.
+//!
+//! Signing in and out goes through the same calls, from the editor's account popover: one email
+//! carries a link and a 6-digit code ([`Library::send_code`], behind the page's Turnstile check),
+//! the code signs in here ([`Library::verify_code`]), and the link signs in wherever it is opened,
+//! which the page hears of and checks `/api/me` again ([`Library::check`]).
 
 use std::collections::HashMap;
 
@@ -109,11 +114,27 @@ pub enum Event {
     },
     /// The account or the library list changed.
     Listed,
+    /// How a sign-in step went.
+    Auth(Auth),
+}
+
+/// How asking for a sign-in email, or typing its code, went.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Auth {
+    /// The email with the link and the code is on its way.
+    Sent,
+    /// The code does not match the newest email's.
+    WrongCode,
+    /// Anything else, in words: the code expired, the check did not pass, too many tries.
+    Failed(String),
 }
 
 /// What a call in flight is for.
 enum Want {
-    Me,
+    /// `confirm`: asked right after a code was accepted, to learn who signed in.
+    Me {
+        confirm: bool,
+    },
     /// The list asked for as the `generation`th.
     List {
         generation: u32,
@@ -132,6 +153,9 @@ enum Want {
         project: String,
     },
     PutThumb,
+    Code,
+    Verify,
+    SignOut,
 }
 
 /// A save waiting for the one before it to finish.
@@ -199,11 +223,21 @@ struct Problem {
     limit: u64,
 }
 
+/// What went wrong with a sign-in call: a Worker problem (`{error}`) or a Better Auth error
+/// (`{code, message}`).
+#[derive(Default, Deserialize)]
+struct AuthProblem {
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    code: Option<String>,
+}
+
 impl Library {
     /// Ask the Worker who is signed in (at launch, and when the page comes back into view).
     pub fn check(&mut self) {
-        if !self.waiting.values().any(|w| matches!(w, Want::Me)) {
-            self.send(Want::Me, "GET", "/api/me".into(), Vec::new(), Vec::new());
+        if !self.waiting.values().any(|w| matches!(w, Want::Me { .. })) {
+            self.send(Want::Me { confirm: false }, "GET", "/api/me".into(), Vec::new(), Vec::new());
         }
     }
 
@@ -233,6 +267,45 @@ impl Library {
         self.next += 1;
         self.out.push(Call { id: self.next, method, path, headers, body });
         self.waiting.insert(self.next, want);
+    }
+
+    /// Whether a sign-in call is in flight.
+    pub fn signing_in(&self) -> bool {
+        self.waiting
+            .values()
+            .any(|w| matches!(w, Want::Code | Want::Verify | Want::SignOut | Want::Me { confirm: true }))
+    }
+
+    /// Whether the library is moving a scene: an upload, a download or a list in flight.
+    pub fn syncing(&self) -> bool {
+        !self.uploading.is_empty()
+            || self.waiting.values().any(|w| matches!(w, Want::List { .. } | Want::Download { .. }))
+    }
+
+    /// Email `email` a sign-in link and code. `token` is the page's Turnstile answer, which the
+    /// Worker checks before it sends anything.
+    pub fn send_code(&mut self, email: &str, token: &str) {
+        let body = serde_json::json!({
+            "email": email,
+            "callbackURL": "/account?from=editor",
+            "errorCallbackURL": "/account?from=editor&link=expired",
+        });
+        let headers = vec![("content-type", "application/json".into()), ("x-turnstile-token", token.into())];
+        let body = serde_json::to_vec(&body).unwrap_or_default();
+        self.send(Want::Code, "POST", "/api/auth/sign-in/magic-link".into(), headers, body);
+    }
+
+    /// Sign in as `email` with the code from its newest email.
+    pub fn verify_code(&mut self, email: &str, code: &str) {
+        let body = serde_json::to_vec(&serde_json::json!({ "email": email, "otp": code })).unwrap_or_default();
+        let headers = vec![("content-type", "application/json".into())];
+        self.send(Want::Verify, "POST", "/api/auth/sign-in/email-otp".into(), headers, body);
+    }
+
+    /// End the session. The scenes stay on this device.
+    pub fn sign_out(&mut self) {
+        let headers = vec![("content-type", "application/json".into())];
+        self.send(Want::SignOut, "POST", "/api/auth/sign-out".into(), headers, b"{}".to_vec());
     }
 
     /// Ask for the library's list, once the one in flight (if any) has answered.
@@ -313,8 +386,13 @@ impl Library {
         let ok = (200..300).contains(&reply.status);
         let mut events = Vec::new();
         match want {
-            Want::Me => {
+            Want::Me { confirm } => {
                 let me = if ok { serde_json::from_slice::<Me>(&reply.body).ok() } else { None };
+                if confirm && !me.as_ref().is_some_and(|m| m.user.is_some()) {
+                    events.push(Event::Auth(Auth::Failed(
+                        "The code was right, but vxr could not be reached after. Try again.".into(),
+                    )));
+                }
                 let account = match me {
                     // A Worker with no sign-in, or none at all (a plain static server).
                     _ if reply.status == 404 => Account::Off,
@@ -487,6 +565,25 @@ impl Library {
                 }
             }
             Want::PutThumb => {}
+            Want::Code if ok => events.push(Event::Auth(Auth::Sent)),
+            Want::Code => events.push(Event::Auth(Auth::Failed(auth_reason(&reply)))),
+            // Signed in: who as, and the library, come with the next /api/me.
+            Want::Verify if ok => {
+                self.send(Want::Me { confirm: true }, "GET", "/api/me".into(), Vec::new(), Vec::new())
+            }
+            Want::Verify => events.push(Event::Auth(match auth_code(&reply).as_deref() {
+                Some("INVALID_OTP") => Auth::WrongCode,
+                _ => Auth::Failed(auth_reason(&reply)),
+            })),
+            Want::SignOut if ok => {
+                if matches!(self.account, Account::In(_)) {
+                    self.forget(projects, &mut events);
+                    events.push(Event::Toast("Signed out. Your scenes stay on this device.".into()));
+                }
+            }
+            Want::SignOut => {
+                events.push(Event::Toast("Could not sign out: the library could not be reached. Try again.".into()))
+            }
         }
         events
     }
@@ -499,15 +596,42 @@ impl Library {
     /// The session ended (signed out on another tab, or it expired).
     fn signed_out(&mut self, projects: &mut Projects, events: &mut Vec<Event>) {
         if matches!(self.account, Account::In(_)) {
-            self.account = Account::Out;
-            projects.signed_out(None);
-            self.uploading.clear();
-            self.uploaded.clear();
-            self.relist = false;
-            events.push(Event::Listed);
+            self.forget(projects, events);
             events.push(Event::Toast("Signed out: saves stay on this device until you sign in again".into()));
         }
     }
+
+    /// Nobody is signed in now: the library's rows and uploads go.
+    fn forget(&mut self, projects: &mut Projects, events: &mut Vec<Event>) {
+        self.account = Account::Out;
+        projects.signed_out(None);
+        self.uploading.clear();
+        self.uploaded.clear();
+        self.relist = false;
+        events.push(Event::Listed);
+    }
+}
+
+/// The error code of a failed sign-in call, if it has one.
+fn auth_code(reply: &Reply) -> Option<String> {
+    let p = serde_json::from_slice::<AuthProblem>(&reply.body).unwrap_or_default();
+    p.error.or(p.code)
+}
+
+/// What went wrong with a sign-in call, in words (as the account page says it).
+fn auth_reason(reply: &Reply) -> String {
+    match auth_code(reply).as_deref() {
+        Some("challenge") => "The check did not pass. Try again.",
+        Some("too_many_links") => "Too many sign-in emails asked for. Try again in an hour.",
+        Some("email_off" | "sign_up_off" | "sign_in_off") => "Sign-in is off here.",
+        Some("bad_email" | "INVALID_EMAIL") => "That email address does not look right.",
+        Some("INVALID_OTP") => "That code doesn't match. Check the newest email.",
+        Some("OTP_EXPIRED" | "TOO_MANY_ATTEMPTS") => "That code has expired or was tried too often. Send a new email.",
+        _ if reply.status == 429 => "Too many tries. Wait a minute and try again.",
+        _ if reply.status == 0 => "Could not reach vxr. Check your connection and try again.",
+        _ => "Something went wrong. Try again.",
+    }
+    .into()
 }
 
 /// `name` percent-encoded as `encodeURIComponent` does, for a header.
@@ -528,11 +652,17 @@ fn size(n: u64) -> String {
 }
 
 /// A library in memory that answers [`Call`]s as the Worker does: one account, the version
-/// check, conflicts kept as copies, and the limits. For the tests and the headless check.
+/// check, conflicts kept as copies, and the limits. Signing in by code takes any code but
+/// [`FakeLibrary::WRONG_CODE`], for any email a code was sent to. For the tests and the headless
+/// check.
 #[derive(Default)]
 pub struct FakeLibrary {
     /// None: nobody is signed in.
     pub user: Option<String>,
+    /// The signed-in user's email address.
+    pub email: Option<String>,
+    /// The addresses sign-in emails went to, in order.
+    pub sent: Vec<String>,
     /// Every project: id, name, version, bytes, thumbnail, updated (ms).
     pub projects: Vec<Stored>,
     pub limit: u64,
@@ -554,9 +684,49 @@ pub struct Stored {
 }
 
 impl FakeLibrary {
+    /// The code that never matches.
+    pub const WRONG_CODE: &str = "000000";
+
     /// A library for `user`, signed in, with the free tier's limits.
     pub fn signed_in(user: &str) -> Self {
         Self { user: Some(user.into()), limit: 100 << 20, file_limit: 20 << 20, ..Self::default() }
+    }
+
+    /// The same library with nobody signed in.
+    pub fn signed_out() -> Self {
+        Self { user: None, ..Self::signed_in("") }
+    }
+
+    /// A sign-in call's answer, if `call` is one.
+    fn auth(&mut self, call: &Call) -> Option<Reply> {
+        let body = serde_json::from_slice::<serde_json::Value>(&call.body).unwrap_or_default();
+        let field = |k: &str| body.get(k).and_then(|v| v.as_str()).unwrap_or_default().to_string();
+        let token = call.headers.iter().any(|(h, v)| *h == "x-turnstile-token" && !v.is_empty());
+        Some(match call.path.as_str() {
+            "/api/auth/sign-in/magic-link" if !token => Self::json(403, serde_json::json!({ "error": "challenge" })),
+            "/api/auth/sign-in/magic-link" => {
+                self.sent.push(field("email"));
+                Self::json(200, serde_json::json!({ "status": true }))
+            }
+            "/api/auth/sign-in/email-otp" => {
+                let email = field("email");
+                if field("otp") == Self::WRONG_CODE || !self.sent.contains(&email) {
+                    return Some(Self::json(
+                        400,
+                        serde_json::json!({ "code": "INVALID_OTP", "message": "Invalid OTP" }),
+                    ));
+                }
+                self.user = Some(format!("u-{email}"));
+                self.email = Some(email);
+                Self::json(200, serde_json::json!({ "token": "t" }))
+            }
+            "/api/auth/sign-out" => {
+                self.user = None;
+                self.email = None;
+                Self::json(200, serde_json::json!({ "success": true }))
+            }
+            _ => return None,
+        })
     }
 
     fn usage(&self) -> u64 {
@@ -602,7 +772,7 @@ impl FakeLibrary {
         }
         let header = |k: &str| call.headers.iter().find(|(h, _)| *h == k).map(|(_, v)| v.as_str());
         if call.path == "/api/me" {
-            let user = self.user.as_ref().map(|id| serde_json::json!({ "id": id, "email": null, "name": "" }));
+            let user = self.user.as_ref().map(|id| serde_json::json!({ "id": id, "email": self.email, "name": "" }));
             return Self::json(
                 200,
                 serde_json::json!({
@@ -610,6 +780,9 @@ impl FakeLibrary {
                     "limits": { "account": self.limit, "file": self.file_limit },
                 }),
             );
+        }
+        if let Some(reply) = self.auth(call) {
+            return reply;
         }
         if self.user.is_none() {
             return Self::json(401, serde_json::json!({ "error": "sign_in" }));
@@ -748,6 +921,69 @@ mod tests {
             events,
             vec![Event::Open { project: "c-castle".into(), bytes: vox(2), version: castle.version, reload: false }]
         );
+    }
+
+    #[test]
+    fn signs_in_with_a_code_and_out() {
+        let (_, mut p, mut s) = device();
+        let mut lib = FakeLibrary::signed_out();
+        lib.put(Some("c1"), "castle", vox(1));
+        s.check();
+        lib.serve(&mut s, &mut p);
+        assert_eq!(s.account, Account::Out);
+
+        // No Turnstile answer, no email.
+        s.send_code("ada@example.com", "");
+        assert_eq!(
+            lib.serve(&mut s, &mut p),
+            vec![Event::Auth(Auth::Failed("The check did not pass. Try again.".into()))]
+        );
+        s.send_code("ada@example.com", "token");
+        let call = s.out[0].clone();
+        assert_eq!(call.path, "/api/auth/sign-in/magic-link");
+        assert!(call.headers.contains(&("x-turnstile-token", "token".into())));
+        assert!(s.signing_in());
+        assert_eq!(lib.serve(&mut s, &mut p), vec![Event::Auth(Auth::Sent)]);
+        assert_eq!(lib.sent, ["ada@example.com"]);
+
+        s.verify_code("ada@example.com", FakeLibrary::WRONG_CODE);
+        assert_eq!(lib.serve(&mut s, &mut p), vec![Event::Auth(Auth::WrongCode)]);
+        assert_eq!(s.account, Account::Out);
+
+        s.verify_code("ada@example.com", "123456");
+        let events = lib.serve(&mut s, &mut p);
+        assert!(events.contains(&Event::Listed));
+        let user = s.account.user().expect("signed in");
+        assert_eq!(user.email.as_deref(), Some("ada@example.com"));
+        assert!(p.get("c1").is_some(), "the library is listed");
+        assert!(!s.signing_in());
+
+        s.sign_out();
+        let events = lib.serve(&mut s, &mut p);
+        assert_eq!(events, vec![Event::Listed, Event::Toast("Signed out. Your scenes stay on this device.".into())]);
+        assert_eq!((s.account.clone(), lib.user.clone()), (Account::Out, None));
+        assert!(p.get("c1").is_none(), "the library's rows went");
+    }
+
+    #[test]
+    fn sign_in_problems_read_as_words() {
+        let (_, mut p, mut s) = device();
+        let mut failed = |status: u16, body: &str| {
+            s.verify_code("ada@example.com", "123456");
+            let call = s.take_out().remove(0);
+            let reply = Reply { status, body: body.as_bytes().to_vec(), version: None };
+            s.answer(call.id, reply, &mut p)
+        };
+        let words = |e: Vec<Event>| match e.as_slice() {
+            [Event::Auth(Auth::Failed(w))] => w.clone(),
+            other => panic!("{other:?}"),
+        };
+        assert!(words(failed(400, r#"{"code":"OTP_EXPIRED"}"#)).contains("expired"));
+        assert!(words(failed(403, r#"{"code":"TOO_MANY_ATTEMPTS"}"#)).contains("tried too often"));
+        assert!(words(failed(429, r#"{"error":"too_many_links"}"#)).contains("in an hour"));
+        assert!(words(failed(429, "")).contains("Wait a minute"));
+        assert!(words(failed(0, "")).contains("connection"));
+        assert!(words(failed(503, r#"{"error":"email_off"}"#)).contains("off here"));
     }
 
     #[test]

@@ -34,7 +34,7 @@ export interface Deps {
 /** Sign-in emails one address, and one IP, may ask for in an hour. */
 export const MAIL_PER_HOUR = { email: 5, ip: 20 };
 
-// The account page's policy: the editor's (www/_headers) plus Turnstile's script and frame.
+// The account page's policy: Turnstile's script and frame, and otherwise only this site.
 const ACCOUNT_CSP = [
   "default-src 'none'",
   "script-src 'self' https://challenges.cloudflare.com",

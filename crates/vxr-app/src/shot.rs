@@ -920,8 +920,9 @@ impl Platform for Fake {
         self.calls.push(format!("theme {id}"));
         Ok(())
     }
-    fn open_account(&mut self) {
-        self.calls.push("account".into());
+    fn challenge(&mut self) -> Option<String> {
+        self.calls.push("challenge".into());
+        Some("test".into())
     }
     fn export_vox(&mut self, name: &str, bytes: &[u8]) -> Result<Option<String>, String> {
         self.calls.push(format!("export_vox {name}"));
@@ -1426,9 +1427,13 @@ fn projects(dir: &Path) -> Result<(), String> {
 }
 
 /// The account and its library (`sync.rs`), as two browsers signed in to one stand-in library
-/// (`FakeLibrary`, which answers as the Worker does): with sign-in off the projects menu has
-/// no account row; signed out it offers Sign in, which opens the account page; signed in, Save
-/// puts a new scene in the library (no file dialog) and the row says so; the other browser
+/// (`FakeLibrary`, which answers as the Worker does): with sign-in off there is no account
+/// control; signed out the top bar offers Sign in and the projects menu has no account row; the
+/// account popover asks for an email, sends the code (after the bot check), shakes and clears a
+/// wrong code, offers Resend after 30 s, and a right code shows the check, closes by itself and
+/// says who signed in; the signed-in menu shows the email, the library's use and how sync
+/// stands; signed in, Save puts a new scene in the library (no file dialog) and the row says
+/// so; the other browser
 /// lists it, opens it from the library and saves a newer version, which the first one takes
 /// when its tab comes back; a save over a version it never saw keeps both, this one as a
 /// conflicted copy; a file from this device saves to its file until Add to library; Download
@@ -1487,28 +1492,115 @@ fn library(dir: &Path) -> Result<(), String> {
     let mut pa = Fake::default();
     menu(&mut a)?;
     check(
-        a.ed.ui.account.is_none() && !a.ed.ui.hits.contains_key("projects-sign-in"),
-        "with sign-in off (the desktop, or a page with no Worker) the projects menu has no account row".into(),
+        a.ed.ui.account.is_none() && !a.ed.ui.hits.contains_key("account"),
+        "with sign-in off (the desktop, or a page with no Worker) there is no account control".into(),
     )?;
+    a.ed.ui.projects_open = false;
 
-    let mut server = FakeLibrary::signed_in("u1");
-    server.user = None;
+    let mut server = FakeLibrary::signed_out();
     a.ed.library.check();
     sync(&mut a, &mut pa, &mut server);
     menu(&mut a)?;
-    let out = matches!(a.ed.library.account, Account::Out) && a.ed.ui.hits.contains_key("projects-sign-in");
-    a.save_png(&dir.join("app-2x-library-signed-out.png"))?;
-    a.ui_click("projects-sign-in")?;
-    serve(&mut a, &mut pa);
+    let (_, h) = a.ed.ui.hits.get("projects-menu").map(|r| (r.width(), r.height())).unwrap_or_default();
+    let rows = a.ed.ui.projects.len().clamp(1, 7) as f32;
+    let out = matches!(a.ed.library.account, Account::Out) && a.ed.ui.hits.contains_key("account");
     check(
-        out && pa.calls.last().is_some_and(|c| c == "account") && !a.ed.ui.projects_open,
-        format!("signed out, the menu offers Sign in, which opens the account page ({:?})", pa.calls.last()),
+        out && h == 36.0 + 50.0 * rows + 4.0 + 44.0 && !a.ed.ui.hits.contains_key("projects-sign-in"),
+        format!("signed out, the top bar offers Sign in and the projects menu has no account row ({h} tall)"),
+    )?;
+    a.save_png(&dir.join("app-2x-library-signed-out.png"))?;
+    a.ed.ui.projects_open = false;
+
+    // The popover: the email step.
+    a.ui_click("account")?;
+    a.frames(20);
+    let shown = a.ed.ui.sign_in.shown();
+    check(
+        shown == Some("email") && a.ed.ui.hits.contains_key("account-send") && !a.ed.ui.projects_open,
+        format!("Sign in opens the popover at its email step ({shown:?})"),
+    )?;
+    a.save_png(&dir.join("app-2x-account-email.png"))?;
+    a.type_into("account-email", "ada@example.com")?;
+    let asked = a.host.contains(&Action::SendCode);
+    serve(&mut a, &mut pa);
+    sync(&mut a, &mut pa, &mut server);
+    a.frames(20);
+    let shown = a.ed.ui.sign_in.shown();
+    check(
+        asked
+            && pa.calls.iter().any(|c| c == "challenge")
+            && server.sent == ["ada@example.com"]
+            && shown == Some("code")
+            && a.ed.ui.hits.contains_key("account-code")
+            && !a.ed.ui.hits.contains_key("account-resend"),
+        format!("Enter runs the bot check and sends the email; the popover asks for the code ({shown:?})"),
+    )?;
+    a.save_png(&dir.join("app-2x-account-code.png"))?;
+
+    // A wrong code shakes the cells, then they clear for the next try.
+    a.frames_with(2, vec![egui::Event::Text(FakeLibrary::WRONG_CODE.into())]);
+    let tried = a.host.contains(&Action::VerifyCode);
+    serve(&mut a, &mut pa);
+    sync(&mut a, &mut pa, &mut server);
+    a.frames(4);
+    a.save_png(&dir.join("app-2x-account-wrong-code.png"))?;
+    let shaking = a.ed.ui.sign_in.code.len() == 6;
+    a.frames(30);
+    check(
+        tried
+            && shaking
+            && a.ed.ui.sign_in.code.is_empty()
+            && a.ed.ui.sign_in.error.as_deref() == Some(vxr_app::ui::WRONG_CODE)
+            && matches!(a.ed.library.account, Account::Out),
+        format!("a wrong code shakes the cells, then they clear ({:?})", a.ed.ui.sign_in.error),
     )?;
 
-    // Signed in: Save puts the new scene in the library, with no file dialog.
-    server.user = Some("u1".into());
-    a.ed.library.check();
+    // Resend, once 30 s have passed.
+    a.time += 31.0;
+    a.frames(3);
+    let offered = a.ed.ui.hits.contains_key("account-resend");
+    a.save_png(&dir.join("app-2x-account-resend.png"))?;
+    a.ui_click("account-resend")?;
+    serve(&mut a, &mut pa);
     sync(&mut a, &mut pa, &mut server);
+    check(
+        offered && server.sent.len() == 2 && !a.ed.ui.hits.contains_key("account-resend"),
+        format!("after 30 s Resend sends the email again and counts down anew ({} sent)", server.sent.len()),
+    )?;
+
+    // The right code: the check, then the popover closes by itself and says who signed in.
+    a.frames_with(2, vec![egui::Event::Text("123456".into())]);
+    serve(&mut a, &mut pa);
+    sync(&mut a, &mut pa, &mut server);
+    a.frames(30);
+    let shown = a.ed.ui.sign_in.shown();
+    a.save_png(&dir.join("app-2x-account-done.png"))?;
+    a.frames(70);
+    let toast = a.ed.ui.toast_text().map(str::to_string);
+    check(
+        shown == Some("done")
+            && matches!(a.ed.library.account, Account::In(_))
+            && !a.ed.ui.sign_in.open
+            && toast.as_deref() == Some("Signed in as ada@example.com"),
+        format!("the right code shows the check, closes by itself and says who signed in ({shown:?}, {toast:?})"),
+    )?;
+    a.ui_click("account")?;
+    a.frames(45);
+    let account = a.ed.ui.account.clone();
+    check(
+        a.ed.ui.sign_in.shown() == Some("menu")
+            && account.as_ref().is_some_and(|r| r.email.as_deref() == Some("ada@example.com") && r.cap == server.limit)
+            && a.ed.ui.hits.contains_key("account-sign-out")
+            && a.ed.ui.hits.contains_key("account-library"),
+        format!("signed in, the popover shows the email, the library's use and Sign out ({account:?})"),
+    )?;
+    a.save_png(&dir.join("app-2x-account-menu.png"))?;
+    a.ui_click("account-library")?;
+    check(
+        a.ed.ui.projects_open && !a.ed.ui.sign_in.open,
+        "its Open library closes it and opens the projects list".into(),
+    )?;
+    a.ed.ui.projects_open = false;
     edit(&mut a, [0, 0, 0], 3);
     edit(&mut a, [1, 0, 0], 3);
     run_action(&mut a.ed, &mut pa, Action::Save);
@@ -1528,9 +1620,8 @@ fn library(dir: &Path) -> Result<(), String> {
     let when = row(&a, 0);
     check(
         when.ends_with("· library")
-            && a.ed.ui.hits.contains_key("projects-account")
-            && a.ed.ui.account.as_ref().is_some_and(|r| r.signed_in && r.used > 0 && r.cap == server.limit),
-        format!("the row says it is in the library, and the menu shows the library's use and Account ({when:?})"),
+            && a.ed.ui.account.as_ref().is_some_and(|r| r.signed_in && r.used > 0 && r.scenes == 1 && !r.can_add),
+        format!("the row says it is in the library, and the account counts it ({when:?})"),
     )?;
     a.save_png(&dir.join("app-2x-library.png"))?;
     a.ed.ui.projects_open = false;
@@ -1605,9 +1696,10 @@ fn library(dir: &Path) -> Result<(), String> {
     run_action(&mut a.ed, &mut pa, Action::Save);
     sync(&mut a, &mut pa, &mut server);
     let to_file = pa.calls.last().is_some_and(|c| c.starts_with("save_vox house.vox")) && server.projects.len() == 2;
-    menu(&mut a)?;
-    let offered = a.ed.ui.hits.contains_key("projects-add");
-    a.ui_click("projects-add")?;
+    a.ui_click("account")?;
+    a.frames(2);
+    let offered = a.ed.ui.hits.contains_key("account-add");
+    a.ui_click("account-add")?;
     serve(&mut a, &mut pa);
     sync(&mut a, &mut pa, &mut server);
     check(
@@ -1703,6 +1795,33 @@ fn library(dir: &Path) -> Result<(), String> {
             "a file picked from this device saves to its file, and the library's is listed again ({:?})",
             pa.calls.last()
         ),
+    )?;
+
+    // Sign out, from the popover's menu.
+    a.ui_click("account")?;
+    a.frames(2);
+    a.ui_click("account-sign-out")?;
+    serve(&mut a, &mut pa);
+    sync(&mut a, &mut pa, &mut server);
+    check(
+        matches!(a.ed.library.account, Account::Out) && server.user.is_none() && !a.ed.ui.sign_in.open,
+        format!("Sign out signs out and closes the popover ({:?})", a.ed.ui.toast_text()),
+    )?;
+
+    // A link clicked in another tab: the page asks again, and the popover shows the check.
+    a.ui_click("account")?;
+    a.type_into("account-email", "ada@example.com")?;
+    serve(&mut a, &mut pa);
+    sync(&mut a, &mut pa, &mut server);
+    server.user = Some("u-ada@example.com".into());
+    server.email = Some("ada@example.com".into());
+    a.ed.library.check();
+    sync(&mut a, &mut pa, &mut server);
+    let shown = a.ed.ui.sign_in.shown();
+    a.frames(70);
+    check(
+        shown == Some("done") && !a.ed.ui.sign_in.open && a.ed.ui.toast_text() == Some("Signed in as ada@example.com"),
+        format!("a link clicked in another tab signs this one in, with the check ({shown:?})"),
     )
 }
 

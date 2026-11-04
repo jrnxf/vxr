@@ -481,8 +481,80 @@ window.vxrHost = {
   storeHeld: (id) => heldElsewhere.has(id),
   newId: () => crypto.randomUUID(),
   fetch: (id, method, path, headers, body) => libraryFetch(id, method, path, headers, body.slice()),
-  openAccount() { window.open('/account?from=editor', '_blank', 'noopener'); },
+  challenge: () => void challenge(),
 };
+
+// The bot check before a sign-in email: Cloudflare Turnstile, loaded the first time the account
+// popover asks for an email. It runs out of sight unless it wants a press; then the editor makes
+// room in the popover (hit_rect('account-challenge')) and the widget's box sits over that slot.
+const TURNSTILE_SITE_KEY = '1x00000000000000000000AA'; // the build sets it (TURNSTILE_SITE_KEY)
+const TURNSTILE_JS = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+const challengeBox = document.getElementById('challenge');
+let turnstileReady = null;
+let widget = null;
+let asking = false; // the editor waits for an answer to its last ask
+function turnstileJs() {
+  turnstileReady ??= new Promise((resolve, reject) => {
+    // The page takes script URLs only through Trusted Types: this policy passes Turnstile's alone.
+    const policy = window.trustedTypes?.createPolicy('vxr-turnstile', {
+      createScriptURL: (u) => { if (u !== TURNSTILE_JS) throw new TypeError(`not Turnstile: ${u}`); return u; },
+    });
+    const s = document.createElement('script');
+    s.async = true;
+    s.onload = () => (window.turnstile ? resolve(window.turnstile) : reject(new Error('no turnstile')));
+    s.onerror = () => reject(new Error('turnstile did not load'));
+    s.src = policy ? policy.createScriptURL(TURNSTILE_JS) : TURNSTILE_JS;
+    document.head.append(s);
+  });
+  return turnstileReady;
+}
+function challenged(token) {
+  challengeShown(false);
+  if (!asking) return;
+  asking = false;
+  app.challenged(token);
+}
+function challengeShown(on) {
+  challengeBox.classList.toggle('shown', on);
+  app.challenge_shown(on);
+}
+async function challenge() {
+  asking = true;
+  try {
+    const t = await turnstileJs();
+    if (widget === null) {
+      widget = t.render(challengeBox, {
+        sitekey: TURNSTILE_SITE_KEY,
+        action: 'editor',
+        appearance: 'interaction-only',
+        execution: 'execute',
+        theme: 'auto',
+        callback: (token) => challenged(token),
+        'error-callback': () => { challenged(''); return true; },
+        'timeout-callback': () => challenged(''),
+        'before-interactive-callback': () => challengeShown(true),
+        'after-interactive-callback': () => challengeShown(false),
+      });
+    } else {
+      t.reset(widget);
+    }
+    t.execute(widget);
+  } catch (e) {
+    console.warn('vxr: the sign-in check could not load', e);
+    turnstileReady = null;
+    challenged('');
+  }
+}
+// The widget's box follows its slot in the popover, which moves while the popover animates;
+// the rest of the time it waits off screen (not hidden, so the check still runs).
+let slot = '';
+function placeChallenge() {
+  const r = challengeBox.classList.contains('shown') ? app.hit_rect('account-challenge') : [];
+  const at = r.length === 4 ? `translate(${r[0]}px, ${r[1]}px)` : '';
+  if (at === slot) return;
+  slot = at;
+  challengeBox.style.transform = at;
+}
 
 // What terminal agents exported (the editor toasts who exported what).
 function agentDownloads() {
@@ -502,6 +574,7 @@ function tick(now) {
   try {
     // An idle editor owes no frame: input, a call into the app or its own timer asks for one.
     if (app.wants_frame(now / 1000)) step(now);
+    placeChallenge();
     const c = app.cursor();
     if (c !== cursor) canvas.style.cursor = cursor = c;
     // Keep the hidden field focused while egui is typing so the OS IME targets it.
@@ -553,6 +626,8 @@ async function main() {
   // Edits not yet in a draft are written as the page goes or hides; leaving with unsaved
   // edits asks first (the draft stays either way, as after a crash).
   addEventListener('pagehide', () => app.flush());
+  // A sign-in link opened in another tab (the account page) says so here: who is signed in now.
+  if (typeof BroadcastChannel === 'function') new BroadcastChannel('vxr-account').onmessage = () => app.check_account();
   // Back from the account page or another tab: who is signed in, and what the library has now.
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') app.flush();
