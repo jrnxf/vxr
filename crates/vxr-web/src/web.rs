@@ -821,7 +821,7 @@ impl App {
         let e = &self.host.editor;
         let (c, h) = (&e.cam, e.scene.history());
         format!(
-            r#"{{"voxels":{},"tool":"{:?}","shape":"{:?}","mirror":{},"mirrorAxes":[{},{},{}],"lock":{},"brushSize":{},"sizePanel":{},"lifting":{},"span":{},"selected":{},"region":"{:?}","hasClip":{},"bounds":[{},{},{}],"boundsPanel":{},"slot":{},"colorEdit":{},"slotOp":"{:?}","undo":{},"redo":{},"cmdk":{},"name":{:?},"size":[{},{}],"ppp":{},"cam":[{},{},{},{},{},{}],"ortho":{},"inView":[{},{}],"cameraHints":{},"view":{},"viewPanel":{},"exportMenu":{},"confirmNew":{},"theme":"{}","themeMenu":{},"touch":{},"paletteOpen":{},"themeShown":{:?},"guides":[{},{},{}],"mode":"{}","objects":{},"models":{},"picked":{},"tree":[{}],"treeOn":{},"renaming":{},"layers":[{}],"layerOn":{},"render":{{"shown":{},"spp":{},"rows":{},"current":{},"restarts":{},"timestamps":{},"panel":{},"full":{},"size":[{},{}],"maxSpp":{},"exposure":{},"gamma":{},"vignette":{},"aperture":{},"sky":{},"physicalSky":{},"export":{}}},"review":{},"undoLabel":{},"asks":{:?},"unsaved":{},"projectsMenu":{},"projects":[{}],"current":{},"restore":{},"confirmClose":{},"storage":[{},{}],"account":{},"signIn":{{"shown":{},"error":{},"checking":{},"challenge":{}}},"toast":{},"agents":{{"panel":{},"available":{},"web":{},"allowed":{},"review":{},"connecting":{},"error":{},"fail":{},"code":{:?},"clients":[{}],"edits":[{}],"chip":{:?},"live":[{}],"calls":[{}]}}}}"#,
+            r#"{{"voxels":{},"tool":"{:?}","shape":"{:?}","mirror":{},"mirrorAxes":[{},{},{}],"lock":{},"brushSize":{},"sizePanel":{},"lifting":{},"span":{},"selected":{},"region":"{:?}","hasClip":{},"bounds":[{},{},{}],"boundsPanel":{},"slot":{},"colorEdit":{},"slotOp":"{:?}","undo":{},"redo":{},"cmdk":{},"name":{:?},"size":[{},{}],"ppp":{},"cam":[{},{},{},{},{},{}],"ortho":{},"inView":[{},{}],"cameraHints":{},"view":{},"viewPanel":{},"fileMenu":{},"confirmNew":{},"theme":"{}","themeMenu":{},"touch":{},"paletteOpen":{},"themeShown":{:?},"guides":[{},{},{}],"mode":"{}","objects":{},"models":{},"picked":{},"tree":[{}],"treeOn":{},"renaming":{},"layers":[{}],"layerOn":{},"render":{{"shown":{},"spp":{},"rows":{},"current":{},"restarts":{},"timestamps":{},"panel":{},"full":{},"size":[{},{}],"maxSpp":{},"exposure":{},"gamma":{},"vignette":{},"aperture":{},"sky":{},"physicalSky":{},"export":{}}},"review":{},"undoLabel":{},"asks":{:?},"unsaved":{},"projectsMenu":{},"projects":[{}],"current":{},"restore":{},"confirmClose":{},"storage":[{},{}],"account":{},"signIn":{{"shown":{},"error":{},"checking":{},"challenge":{}}},"toast":{},"agents":{{"panel":{},"available":{},"web":{},"allowed":{},"review":{},"connecting":{},"error":{},"fail":{},"code":{:?},"clients":[{}],"edits":[{}],"chip":{:?},"live":[{}],"calls":[{}]}}}}"#,
             e.scene.map.voxels,
             e.ui.tool,
             e.ui.shape,
@@ -863,7 +863,7 @@ impl App {
             e.ui.camera_hints,
             c.view().map_or("null".into(), |v| format!("\"{}\"", v.name())),
             e.ui.view_panel,
-            e.ui.export_menu,
+            e.ui.file_menu,
             e.ui.confirm_new,
             e.ui.theme.id(),
             e.ui.theme_menu,

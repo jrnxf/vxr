@@ -210,7 +210,7 @@ impl Hybrid {
         self.agents_panel = true;
         self.ai_open = true;
         self.ai_setup = false;
-        self.export_menu = false;
+        self.file_menu = false;
         self.view_panel = false;
     }
 

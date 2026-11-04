@@ -144,6 +144,13 @@ impl Shot {
         Ok(())
     }
 
+    /// Open the file menu from the scene name, wait out its 150 ms grow, and click `row`.
+    fn open_file_row(&mut self, row: &str) -> Result<(), String> {
+        self.ui_click("scene-select")?;
+        self.frames(12);
+        self.ui_click(row)
+    }
+
     /// Click a field, replace its text with `text` and press Enter.
     fn type_into(&mut self, name: &str, text: &str) -> Result<(), String> {
         self.ui_click(name)?;
@@ -560,9 +567,8 @@ fn phone(dir: &Path, load: &dyn Fn() -> Result<(Scene, String), String>) -> Resu
         "center",
         "mirror",
         "lock",
-        "open",
-        "save",
-        "export",
+        "library",
+        "scene-select",
         "theme",
         "ai-toggle",
         "keys",
@@ -625,14 +631,22 @@ fn phone(dir: &Path, load: &dyn Fn() -> Result<(Scene, String), String>) -> Resu
         s.ui_click("tool-add")?;
 
         // The Export menu from the top bar.
-        s.ui_click("export")?;
-        s.frames(2);
-        check(s.ed.ui.export_menu, format!("{tag}: the export button opens the Export menu"))?;
-        fits(&s, "Export menu open")?;
+        s.ui_click("scene-select")?;
+        s.frames(12);
+        check(s.ed.ui.file_menu, format!("{tag}: the file button opens the file menu"))?;
+        fits(&s, "file menu open")?;
         s.save_png(&dir.join(format!("app-3x-phone-{tag}-export.png")))?;
-        s.ui_click("export")?;
+        s.ui_click("scene-select")?;
         s.frames(2);
-        check(!s.ed.ui.export_menu, format!("{tag}: the export button closes the Export menu"))?;
+        check(!s.ed.ui.file_menu, format!("{tag}: the file button closes the file menu"))?;
+        s.ui_click("library")?;
+        s.frames(12);
+        check(s.ed.ui.projects_open, format!("{tag}: the library button opens the library"))?;
+        fits(&s, "library open")?;
+        s.save_png(&dir.join(format!("app-3x-phone-{tag}-library.png")))?;
+        s.ui_click("library")?;
+        s.frames(2);
+        check(!s.ed.ui.projects_open, format!("{tag}: the library button closes the library"))?;
 
         // The colour editor over the palette.
         s.ui_click("dock-color")?;
@@ -1030,13 +1044,13 @@ fn new_scene_command(dir: &Path) -> Result<(), String> {
     )?;
     s.save_png(&dir.join("app-2x-new.png"))?;
 
-    // The pointer waits for an answer too: the top bar's Open and the view are behind it.
-    s.ui_click("open")?;
+    // The pointer waits for an answer too: the top bar's scene name and the view are behind it.
+    s.ui_click("scene-select")?;
     let view = egui::pos2(mid[0] / s.ed.ppp, mid[1] / s.ed.ppp + 120.0);
     s.ui_drag(view, view + egui::vec2(40.0, 0.0), Modifiers::NONE);
     check(
-        s.ed.ui.confirm_new && s.host.is_empty() && s.ed.ctx.is_pointer_over_egui(),
-        "the confirm takes the pointer (the top bar's Open and the view do nothing)".into(),
+        s.ed.ui.confirm_new && !s.ed.ui.file_menu && s.host.is_empty() && s.ed.ctx.is_pointer_over_egui(),
+        "the confirm takes the pointer (the top bar's scene name and the view do nothing)".into(),
     )?;
     s.ui_click("new-cancel")?;
     check(!s.ed.ui.confirm_new && s.voxels() == edited && s.host.is_empty(), "Cancel keeps the scene".into())?;
@@ -1076,8 +1090,8 @@ fn new_scene_command(dir: &Path) -> Result<(), String> {
     )?;
     s.host.clear();
     s.stroke(mid, &[]);
-    s.ui_click("new")?;
-    check(s.ed.ui.confirm_new, "the top bar's New asks first".into())?;
+    s.open_file_row("file-new")?;
+    check(s.ed.ui.confirm_new, "the file menu's New scene asks first".into())?;
     s.ed.load(Scene::new(NEW_SIZE), "opened.vox")?;
     s.frames(2);
     check(!s.ed.ui.confirm_new && s.host.is_empty(), "Open behind the confirm closes it".into())?;
@@ -1229,8 +1243,8 @@ fn projects(dir: &Path) -> Result<(), String> {
         ),
     )?;
 
-    s.ui_click("scene-select")?;
-    s.frames(2);
+    s.ui_click("library")?;
+    s.frames(12);
     let row = s.ed.ui.projects.first();
     check(
         s.ed.ui.projects_open
@@ -1240,7 +1254,7 @@ fn projects(dir: &Path) -> Result<(), String> {
             && s.ed.ui.storage.0 > draft.len() as u64
             && s.ed.ui.hits.contains_key("projects-clear"),
         format!(
-            "the scene name opens the projects list: the scene with its thumbnail and unsaved marker, and the Storage line ({:?})",
+            "the Library crumb opens the library: the scene with its thumbnail and unsaved marker, and the Storage line ({:?})",
             s.ed.ui.storage
         ),
     )?;
@@ -1340,8 +1354,8 @@ fn projects(dir: &Path) -> Result<(), String> {
     check(kept == 1, format!("opening another scene first drafts the edits it replaces ({kept} voxels)"))?;
     edit(&mut s, [3, 1, 3]);
     settle(&mut s);
-    s.ui_click("scene-select")?;
-    s.frames(3);
+    s.ui_click("library")?;
+    s.frames(12);
     let rows: Vec<_> = s.ed.ui.projects.iter().map(|r| (r.name.clone(), r.unsaved, r.thumb.is_some())).collect();
     check(
         rows == [
@@ -1366,7 +1380,8 @@ fn projects(dir: &Path) -> Result<(), String> {
     )?;
 
     // Clear asks twice, then forgets every project but the open one.
-    s.ui_click("scene-select")?;
+    s.ui_click("library")?;
+    s.frames(12);
     s.ui_click("projects-clear")?;
     serve(&mut s, &mut p);
     let armed = s.ed.ui.clear_armed && s.ed.projects.list().len() == 3;
@@ -1489,9 +1504,9 @@ fn library(dir: &Path) -> Result<(), String> {
     };
     let menu = |s: &mut Shot| -> Result<(), String> {
         if !s.ed.ui.projects_open {
-            s.ui_click("scene-select")?;
+            s.ui_click("library")?;
         }
-        s.frames(2);
+        s.frames(12);
         Ok(())
     };
     let row = |s: &Shot, k: usize| s.ed.ui.projects.get(k).map(|r| r.when.clone()).unwrap_or_default();
@@ -1511,11 +1526,14 @@ fn library(dir: &Path) -> Result<(), String> {
     sync(&mut a, &mut pa, &mut server);
     menu(&mut a)?;
     let (_, h) = a.ed.ui.hits.get("projects-menu").map(|r| (r.width(), r.height())).unwrap_or_default();
-    let rows = a.ed.ui.projects.len().clamp(1, 7) as f32;
+    // The header and foot (44 + 36) around whole rows of cards (132 + 4), the New scene card first.
+    let rows = ((h - 80.0) / 136.0).round();
     let out = matches!(a.ed.library.account, Account::Out) && a.ed.ui.hits.contains_key("account");
     check(
-        out && h == 36.0 + 50.0 * rows + 4.0 + 44.0 && !a.ed.ui.hits.contains_key("projects-sign-in"),
-        format!("signed out, the top bar offers Sign in and the projects menu has no account row ({h} tall)"),
+        out && (1.0..=3.0).contains(&rows)
+            && h == 80.0 + 136.0 * rows
+            && !a.ed.ui.hits.contains_key("projects-sign-in"),
+        format!("signed out, the top bar offers Sign in and the library has no account row ({h} tall)"),
     )?;
     a.save_png(&dir.join("app-2x-library-signed-out.png"))?;
     a.ed.ui.projects_open = false;
@@ -1951,9 +1969,9 @@ fn app_library(dir: &Path) -> Result<(), String> {
     };
     let menu = |s: &mut Shot| -> Result<String, String> {
         if !s.ed.ui.projects_open {
-            s.ui_click("scene-select")?;
+            s.ui_click("library")?;
         }
-        s.frames(2);
+        s.frames(12);
         Ok(s.ed.ui.projects.iter().find(|r| r.current).map(|r| r.when.clone()).unwrap_or_default())
     };
     let email = |s: &Shot| s.ed.library.account.user().and_then(|u| u.email.clone());
@@ -4531,36 +4549,35 @@ fn visible_faces(voxels: &std::collections::BTreeMap<[i32; 3], u8>) -> usize {
 fn export(s: &mut Shot, dir: &Path) -> Result<(), String> {
     use vxr_app::files::{obj_files, slices_png};
     let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
-    s.ui_click("export")?;
-    s.frames(2);
+    s.ui_click("scene-select")?;
+    s.frames(12);
     check(
-        s.ed.ui.export_menu && s.ed.ui.hits.contains_key("export-obj") && s.ed.ui.hits.contains_key("export-render"),
-        "the top bar's Export button opens the Export menu".into(),
+        s.ed.ui.file_menu && s.ed.ui.hits.contains_key("export-obj") && s.ed.ui.hits.contains_key("export-render"),
+        "the scene name opens the file menu with its Export section".into(),
     )?;
     s.save_png(&dir.join("app-2x-export.png"))?;
     s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
-    let escaped = !s.ed.ui.export_menu;
-    s.ui_click("export")?;
+    let escaped = !s.ed.ui.file_menu;
+    s.ui_click("scene-select")?;
+    s.frames(12);
     let mid = egui::pos2(s.ed.width as f32 / s.ed.ppp / 2.0, s.ed.height as f32 / s.ed.ppp / 2.0);
     let voxels = s.voxels();
     s.ui_drag(mid, mid, egui::Modifiers::NONE);
     check(
-        escaped && !s.ed.ui.export_menu && s.voxels() == voxels,
+        escaped && !s.ed.ui.file_menu && s.voxels() == voxels,
         "Escape closes it, and so does a click outside it, which edits nothing".into(),
     )?;
     if s.voxels() != voxels {
         s.ed.undo();
     }
-    s.ui_click("export")?;
-    s.ui_click("export-render")?;
-    check(s.ed.ui.render_panel && !s.ed.ui.export_menu, "its Render PNG row opens the Render panel".into())?;
+    s.open_file_row("export-render")?;
+    check(s.ed.ui.render_panel && !s.ed.ui.file_menu, "its Render PNG row opens the Render panel".into())?;
     s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
 
     s.host.clear();
-    s.ui_click("export")?;
-    s.ui_click("export-obj")?;
+    s.open_file_row("export-obj")?;
     check(
-        s.host.contains(&Action::ExportObj) && !s.ed.ui.export_menu,
+        s.host.contains(&Action::ExportObj) && !s.ed.ui.file_menu,
         "its OBJ row asks the host to export and closes the menu".into(),
     )?;
     s.host.clear();
@@ -4569,10 +4586,9 @@ fn export(s: &mut Shot, dir: &Path) -> Result<(), String> {
     s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
     check(s.host.contains(&Action::ExportObj), "Cmd-K Export OBJ asks the host too".into())?;
     s.host.clear();
-    s.ui_click("export")?;
-    s.ui_click("export-slices")?;
+    s.open_file_row("export-slices")?;
     check(
-        s.host.contains(&Action::ExportSlices) && !s.ed.ui.export_menu,
+        s.host.contains(&Action::ExportSlices) && !s.ed.ui.file_menu,
         "its PNG slices row asks the host to export and closes the menu".into(),
     )?;
     s.host.clear();

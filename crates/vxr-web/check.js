@@ -839,22 +839,26 @@ async () => {
     // The Export menu and the OBJ export: the top bar's Export button opens the menu, Escape
     // and a click outside close it, its Render PNG row opens the Render panel, and its OBJ row
     // and Cmd-K download island-obj.zip holding the .obj, .mtl and 256x1 palette .png.
-    await click(...hit('export'));
-    step('the Export button opens the Export menu', st().exportMenu && !!hit('export-obj') && !!hit('export-render'));
+    await click(...hit('scene-select'));
+    await frames(14);
+    step('the scene name opens the file menu with its Export section', st().fileMenu && !!hit('export-obj') && !!hit('export-render'));
     await key('Escape');
-    const escaped = !st().exportMenu;
-    await click(...hit('export'));
+    const escaped = !st().fileMenu;
+    await click(...hit('scene-select'));
+    await frames(14);
     await click(1000, 34);
-    step('Escape and a click outside close it', escaped && !st().exportMenu);
-    await click(...hit('export'));
+    step('Escape and a click outside close it', escaped && !st().fileMenu);
+    await click(...hit('scene-select'));
+    await frames(14);
     await click(...hit('export-render'));
-    step('its Render PNG row opens the Render panel', st().render.panel && !st().exportMenu);
+    step('its Render PNG row opens the Render panel', st().render.panel && !st().fileMenu);
     await key('Escape');
     let zipBlob = null, zipName = null;
     URL.createObjectURL = (b) => { zipBlob = b; return realUrl.call(URL, b); };
     HTMLAnchorElement.prototype.click = function () { zipName = this.download; };
     try {
-      await click(...hit('export'));
+      await click(...hit('scene-select'));
+    await frames(14);
       await click(...hit('export-obj'));
       await frames();
       const files = zipBlob ? unzip(new Uint8Array(await zipBlob.arrayBuffer())) : {};
@@ -865,7 +869,7 @@ async () => {
       const png = files['island.png'];
       const pv = png && new DataView(png.buffer, png.byteOffset);
       step('its OBJ row downloads island-obj.zip: island.obj, island.mtl and island.png',
-        zipName === 'island-obj.zip' && Object.keys(files).join(',') === 'island.obj,island.mtl,island.png' && !st().exportMenu,
+        zipName === 'island-obj.zip' && Object.keys(files).join(',') === 'island.obj,island.mtl,island.png' && !st().fileMenu,
         `${zipName} ${Object.keys(files)}`);
       step('island.obj holds every voxel as greedy quads and names its .mtl, which names the 256x1 palette .png',
         header && +header[1] === st().voxels && +header[2] === quads && quads > 1000 && obj.includes('mtllib island.mtl')
@@ -879,13 +883,14 @@ async () => {
       step('Cmd-K Export OBJ downloads it too', zipName === 'island-obj.zip', `${zipName}`);
       // PNG slices: one PNG of every layer side by side, from the row and from Cmd-K.
       zipBlob = null; zipName = null;
-      await click(...hit('export'));
+      await click(...hit('scene-select'));
+    await frames(14);
       await click(...hit('export-slices'));
       await frames();
       const b = st().bounds;
       const sl = zipBlob ? await slicePixels(zipBlob) : null;
       step('its PNG slices row downloads island-slices.png: every layer side by side, every voxel a pixel',
-        zipName === 'island-slices.png' && !st().exportMenu && sl && sl.w === b[0] * b[1] && sl.h === b[2] && sl.filled === st().voxels,
+        zipName === 'island-slices.png' && !st().fileMenu && sl && sl.w === b[0] * b[1] && sl.h === b[2] && sl.filled === st().voxels,
         `${zipName} ${sl && `${sl.w}x${sl.h} ${sl.filled} pixels`} ${b} ${st().voxels} voxels`);
       zipName = null;
       await key('k', cmd);
@@ -1220,12 +1225,12 @@ async () => {
     const kept = others(file);
     step('the saved edit keeps every other chunk of the file', saved && kept.length > 0 && kept.join('|') === others(saved).join('|'), `${kept.length} chunks`);
     blob = null;
-    await clickAt('save');
-    step('the Save button downloads too', !!blob);
+    await clickAt('scene-select'); await frames(14); await clickAt('file-save');
+    step('Save in the file menu downloads too', !!blob);
     await key('z', cmd);
     step('Cmd-O opens the file picker', (await key('o', cmd)) && picked === 1, `${picked}`);
-    await clickAt('open');
-    step('the Open button opens the file picker', picked === 2, `${picked}`);
+    await clickAt('scene-select'); await frames(14); await clickAt('file-open');
+    step('Open from disk in the file menu opens the file picker', picked === 2, `${picked}`);
     const dt = new DataTransfer();
     dt.items.add(new File([saved], 'saved.vox'));
     input.files = dt.files;
@@ -1569,7 +1574,7 @@ async () => {
   let newPicked = 0;
   const inputClick = fileInput.click;
   fileInput.click = () => { newPicked++; };
-  await clickAt('open');
+  await clickAt('scene-select'); await frames(14); await clickAt('file-open');
   await click(mx + 240, my);
   await drag(mx + 240, my, mx + 300, my, 2);
   fileInput.click = inputClick;
@@ -1579,8 +1584,8 @@ async () => {
   await key('n', cmd);
   await key('Escape');
   step('Escape keeps the scene', !st().confirmNew && st().voxels === newEdited);
-  await clickAt('new');
-  step("the top bar's New asks first", st().confirmNew && !!at('new-discard'));
+  await clickAt('scene-select'); await frames(14); await clickAt('file-new');
+  step("New scene in the file menu asks first", st().confirmNew && !!at('new-discard'));
   await clickAt('new-discard');
   s = st();
   step('Start new clears the scene, its history and its name', !s.confirmNew && s.voxels === 0 && !s.undo && s.name === 'Untitled' && s.bounds.join() === '128,128,128', JSON.stringify(s));
@@ -1626,7 +1631,7 @@ async () => {
     const realA = HTMLAnchorElement.prototype.click;
     HTMLAnchorElement.prototype.click = function () { dl = this.download; };
     const fromList = async (k) => {
-      if (!st().projectsMenu) await clickAt('scene-select');
+      if (!st().projectsMenu) { await clickAt('library'); await frames(14); }
       const name = st().projects[k]?.name;
       await clickAt(`project-${k}`);
       await until(() => st().name === name && !st().projectsMenu);
@@ -1650,9 +1655,10 @@ async () => {
       step('about 2 s after the edits settle the scene is kept as a draft in IndexedDB, still unsaved',
         drafted && took > 1500 && took < 4500 && kept instanceof Uint8Array && String.fromCharCode(...kept.slice(0, 4)) === 'VOX ' && st().unsaved && here().thumb > 0,
         JSON.stringify([took, here(), kept && kept.length]));
-      await clickAt('scene-select');
+      await clickAt('library');
+      await frames(14);
       s = st();
-      step('the scene name opens the projects list, newest first, with the Storage line', s.projectsMenu && s.projects[0].name === file && !!at('project-0') && !!at('projects-clear') && s.storage[0] > 0 && s.storage[1] === 200 * 1024 * 1024, JSON.stringify([s.projectsMenu, s.projects.map((p) => p.name), s.storage]));
+      step('the Library crumb opens the library, newest first, with the Storage line', s.projectsMenu && s.projects[0].name === file && !!at('project-0') && !!at('projects-clear') && s.storage[0] > 0 && s.storage[1] === 200 * 1024 * 1024, JSON.stringify([s.projectsMenu, s.projects.map((p) => p.name), s.storage]));
       // The check server has no /api, so /api/me answers 404: sign-in is off and the list has
       // no Library row.
       step('with no /api the account is off and the list has no Library row', s.account === 'off' && !at('projects-sign-in') && !at('projects-account'), JSON.stringify(s.account));
@@ -1711,7 +1717,8 @@ async () => {
       window.showOpenFilePicker = window.showSaveFilePicker = undefined;
       await dir.removeEntry('handle.vox');
 
-      await clickAt('scene-select');
+      await clickAt('library');
+      await frames(14);
       await clickAt('projects-clear');
       s = st();
       step('Clear asks again before it clears', s.projectsMenu && s.projects.length > 1, `${s.projects.length}`);
@@ -1749,7 +1756,8 @@ async () => {
       await new Promise((locked) => navigator.locks.request(`vxr-open-${sameB}`, () => { locked(); return holding; }));
       tab.postMessage({ holds: true });
       await frames(6);
-      await clickAt('scene-select');
+      await clickAt('library');
+      await frames(14);
       await clickAt('projects-clear');
       await clickAt('projects-clear');
       s = st();

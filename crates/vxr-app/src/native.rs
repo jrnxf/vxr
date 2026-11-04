@@ -171,6 +171,15 @@ impl Platform for Desktop {
         Ok(Some(Saved { name: file_name(&path), path: Some(path), ..Default::default() }))
     }
 
+    fn export_vox(&mut self, name: &str, bytes: &[u8]) -> Result<Option<String>, String> {
+        let Some(path) = rfd::FileDialog::new().add_filter("MagicaVoxel", &["vox"]).set_file_name(name).save_file()
+        else {
+            return Ok(None);
+        };
+        save_atomic(&path, bytes)?;
+        Ok(Some(file_name(&path)))
+    }
+
     fn save_png(&mut self, name: &str, bytes: &[u8]) -> Result<Option<String>, String> {
         let Some(path) = rfd::FileDialog::new().add_filter("PNG", &["png"]).set_file_name(name).save_file() else {
             return Ok(None);

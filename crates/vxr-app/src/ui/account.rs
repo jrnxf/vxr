@@ -451,7 +451,7 @@ impl Hybrid {
         self.cmdk = None;
         self.theme_menu = false;
         self.projects_open = false;
-        self.export_menu = false;
+        self.file_menu = false;
         if !self.sign_in.open {
             self.sign_in.open = true;
             self.sign_in.fresh = true;
