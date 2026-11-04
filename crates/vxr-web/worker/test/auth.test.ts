@@ -222,6 +222,26 @@ describe('sign-in', () => {
     const b = w.client('192.0.2.16');
     const link = await b.emailSignIn('jan@example.com');
     expect(link.headers.get('set-auth-token')).toBeNull();
+
+    // A same-origin GET carries no Origin and needs no preflight, so page script can send the
+    // app's header with it. A session past updateAge is refreshed, which sets the cookie again,
+    // and the token must not ride along.
+    const soon = new Date(Date.now() + 58 * 24 * 60 * 60 * 1000).toISOString();
+    await env.DB.prepare('update session set expiresAt = ?').bind(soon).run();
+    const refreshed = await handle(
+      new Request(`${ORIGIN}/api/auth/get-session`, {
+        headers: {
+          'x-vxr-client': 'app',
+          'cf-connecting-ip': '192.0.2.15',
+          cookie: [...a.jar].map(([k, v]) => `${k}=${v}`).join('; '),
+        },
+      }),
+      env,
+      w.deps,
+    );
+    expect(refreshed.status).toBe(200);
+    expect(refreshed.headers.getSetCookie().join('\n')).toMatch(/session_token/);
+    expect(refreshed.headers.get('set-auth-token')).toBeNull();
   });
 
   it('refuses the app path from a browser, which always sends Origin', async () => {

@@ -127,8 +127,9 @@ async function emailLink(req: Request, env: Env, url: URL, deps: Deps): Promise<
 }
 
 /**
- * The response without the bearer plugin's `set-auth-token`: the session token is for the app
- * only, and on the web it stays in its httpOnly cookie, out of reach of the page's scripts.
+ * The response without the bearer plugin's `set-auth-token`: the session token is for the app's
+ * code sign-in only, and on the web it stays in its httpOnly cookie, out of reach of the page's
+ * scripts.
  */
 function withoutToken(res: Response): Response {
   if (!res.headers.has('set-auth-token')) return res;
@@ -185,7 +186,9 @@ export async function handle(req: Request, env: Env, deps: Deps = DEFAULT): Prom
       const stop = await emailLink(req, env, url, deps);
       if (stop) return stop;
     }
-    return fromApp(req) ? auth.handler(req) : withoutToken(await auth.handler(req));
+    // The app reads its token only from its code sign-in; every other answer drops it.
+    const keep = fromApp(req) && path === '/api/auth/sign-in/email-otp';
+    return keep ? auth.handler(req) : withoutToken(await auth.handler(req));
   }
   if (path === '/api/projects' || path.startsWith('/api/projects/')) {
     if (req.method !== 'GET' && req.method !== 'HEAD' && foreign(req, url)) return problem(403, 'origin');

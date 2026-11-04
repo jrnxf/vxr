@@ -34,12 +34,13 @@ export const OTP_OFF = [
 export type SendSignIn = ((email: string, link: string, app: boolean) => Promise<void>) | null;
 
 /**
- * A request from the desktop app: it says so with `x-vxr-client: app` and has no Origin. Every
- * browser sends Origin on a POST, and the custom header needs a CORS preflight this Worker never
- * allows, so no web page can make one.
+ * A request from the desktop app: a POST that says so with `x-vxr-client: app` and has no Origin.
+ * Every browser sends Origin on a POST, and the custom header needs a CORS preflight this Worker
+ * never allows, so no web page can make one. A same-origin GET has no Origin either, which is
+ * why only a POST counts.
  */
 export function fromApp(req: Request | undefined): boolean {
-  return req?.headers.get('x-vxr-client') === 'app' && !req.headers.has('origin');
+  return req?.method === 'POST' && req.headers.get('x-vxr-client') === 'app' && !req.headers.has('origin');
 }
 
 /** The Better Auth options for a Worker answering on `origin`. */
