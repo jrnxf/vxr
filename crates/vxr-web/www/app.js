@@ -320,7 +320,7 @@ function wire() {
     app.touch(e.pointerId, phase, e.offsetX, e.offsetY);
     e.preventDefault();
     if (phase === 2) {
-      step(performance.now());
+      stepAndCopy(performance.now());
       focusIme();
     }
     return true;
@@ -361,6 +361,8 @@ function wire() {
     if (finger(e, 2)) return;
     mods(e);
     app.pointer_button(e.offsetX, e.offsetY, e.button, false);
+    // The click lands on this frame: copy inside the gesture (Safari wants that).
+    stepAndCopy(performance.now());
   });
   canvas.addEventListener('pointerleave', (e) => { if (e.pointerType !== 'touch') app.pointer_leave(); });
   canvas.addEventListener('wheel', (e) => {
@@ -569,6 +571,39 @@ function agentDownloads() {
   }
 }
 
+// Text a button in the page copied (the Agents tab's commands; egui's CopyText), onto the system
+// clipboard. A field's Cmd-C and Cmd-X take theirs inside the copy event instead (above), and
+// find nothing here. The click that asked for it is still the user's gesture, which the
+// clipboard API wants; execCommand covers a page where the API is missing.
+function copyText(text) {
+  // Started synchronously, so it runs inside the user's gesture.
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(text).catch((e) => {
+      console.warn('vxr: the clipboard API refused the copy, trying execCommand', e);
+      copyWithExec(text);
+    });
+    return;
+  }
+  copyWithExec(text);
+}
+
+function copyWithExec(text) {
+  const box = document.createElement('textarea');
+  box.value = text;
+  box.setAttribute('readonly', '');
+  box.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0';
+  document.body.append(box);
+  box.select();
+  try {
+    document.execCommand('copy');
+  } catch (e) {
+    console.warn('vxr: could not copy', e);
+  }
+  box.remove();
+  if (app.wants_keyboard()) focusIme();
+  else canvas.focus();
+}
+
 let cursor = '';
 function step(now) {
   app.frame(now / 1000);
@@ -577,10 +612,19 @@ function step(now) {
   document.documentElement.dataset.booted = '';
 }
 
+// A frame, then whatever a button in it copied, while still inside the event that asked.
+function stepAndCopy(now) {
+  step(now);
+  const copied = app.take_copied();
+  if (copied !== undefined) copyText(copied);
+}
+
 function tick(now) {
   try {
     // An idle editor owes no frame: input, a call into the app or its own timer asks for one.
-    if (app.wants_frame(now / 1000)) step(now);
+    if (app.wants_frame(now / 1000)) {
+      stepAndCopy(now);
+    }
     placeChallenge();
     const c = app.cursor();
     if (c !== cursor) canvas.style.cursor = cursor = c;

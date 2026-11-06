@@ -5531,17 +5531,15 @@ fn agents_states(dir: &Path) -> Result<(), String> {
             }
             let ok = match name {
                 "not-paired" | "typing" => {
-                    has(&s, &["agents-copy-bridge", "agents-code"]) && lacks(&s, &["agents-disconnect", "agents-retry"])
+                    has(&s, &["agents-copy", "agents-code"]) && lacks(&s, &["agents-disconnect", "agents-retry"])
                 }
                 "connecting" => has(&s, &["agents-cancel"]) && lacks(&s, &["agents-retry", "agents-disconnect"]),
                 "wrong-code" | "denied" => has(&s, &["agents-code", "agents-retry"]) && lacks(&s, &["agents-desktop"]),
-                "bridge-stopped" => has(&s, &["agents-copy-bridge", "agents-retry", "agents-code"]),
+                "bridge-stopped" => has(&s, &["agents-copy", "agents-retry", "agents-code"]),
                 "safari" => has(&s, &["agents-desktop", "agents-code"]) && lacks(&s, &["agents-retry"]),
                 "paired" => {
-                    has(
-                        &s,
-                        &["agents-copy", "agents-copy-live", "agents-review", "agents-disconnect", "agents-regenerate"],
-                    ) && lacks(&s, &["agents-code"])
+                    has(&s, &["agents-review", "agents-disconnect", "agents-regenerate"])
+                        && lacks(&s, &["agents-code", "agents-copy"])
                 }
                 "editing" => {
                     has(&s, &["agents-stop-1", "agents-review", "agents-disconnect"]) && lacks(&s, &["agents-copy"])
@@ -6997,8 +6995,8 @@ fn agents_live(dir: &Path) -> Result<(), String> {
         s.live_frames(&mut live, 2);
         s.live_frames(&mut live, 4);
         check(
-            s.ed.ui.hits.contains_key("agents-copy") && s.ed.ui.hits.contains_key("agents-copy-live"),
-            "once it listens the connect step shows the setup lines".into(),
+            s.ed.ui.hits.contains_key("agents-copy") && !s.ed.ui.hits.contains_key("agents-copy-live"),
+            "once it listens the pair step shows the one pair line".into(),
         )?;
         let mode = |p: std::path::PathBuf| std::fs::metadata(p).map(|m| m.permissions().mode() & 0o777).unwrap_or(0);
         check(
@@ -7499,7 +7497,7 @@ fn agents_bridge(dir: &Path) -> Result<(), String> {
             v.web
                 && v.available
                 && !v.allowed
-                && ["agents-copy-bridge", "agents-code"].iter().all(|k| s.ed.ui.hits.contains_key(*k))
+                && ["agents-copy", "agents-code"].iter().all(|k| s.ed.ui.hits.contains_key(*k))
                 && !s.ed.ui.hits.contains_key("agents-disconnect"),
             "the browser's tab says to run vxr bridge and takes its code, not paired".into(),
         )?;
@@ -7650,7 +7648,7 @@ fn agents_bridge(dir: &Path) -> Result<(), String> {
         )?;
         s.bridge_frames(&mut page, &mut script, 4);
         check(
-            ["agents-copy-bridge", "agents-retry", "agents-code"].iter().all(|k| s.ed.ui.hits.contains_key(*k)),
+            ["agents-copy", "agents-retry", "agents-code"].iter().all(|k| s.ed.ui.hits.contains_key(*k)),
             "its step turns red with the command, Try again and the code field for the new code".into(),
         )?;
         s.bridge_frames(&mut page, &mut script, 40);

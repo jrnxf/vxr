@@ -537,10 +537,14 @@ impl App {
         );
         let Drawn::Yes(actions, platform) = drawn else { return };
         self.cursor = platform.cursor_icon;
-        self.copied = platform.commands.into_iter().rev().find_map(|c| match c {
+        // Kept until the page takes it, so a frame drawn in between does not wipe it.
+        let copied = platform.commands.into_iter().rev().find_map(|c| match c {
             egui::OutputCommand::CopyText(text) => Some(text),
             _ => None,
         });
+        if copied.is_some() {
+            self.copied = copied;
+        }
         for a in actions {
             if !self.bridge.act(&a, &mut self.host.editor) {
                 let mut browser = Browser::default();

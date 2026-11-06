@@ -39,7 +39,7 @@ Serves MCP on stdin and stdout for a terminal agent such as Claude Code.
                 (Cmd-K "Terminal agents (MCP)…") allows it, or in a vxr.jrnxf.co tab
                 paired with `vxr bridge`
 
-`vxr setup claude` (or codex) registers both with the agent."#;
+`vxr pair claude` (or codex) registers both with the agent, and runs `vxr bridge` for the browser."#;
 
 /// `vxr mcp`'s arguments (after the subcommand): serve on stdin and stdout until it closes.
 pub fn run(args: &[String]) -> Result<(), String> {

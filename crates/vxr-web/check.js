@@ -574,13 +574,48 @@ async () => {
   await key('k', cmd);
   await key('Escape');
   step('Escape closes the command list', !st().cmdk);
-  // Terminal agents: the panel says to run vxr bridge and takes its code (crates/vxr-web/check
+  // Terminal agents: the panel says to run vxr pair and takes the bridge's code (crates/vxr-web/check
   // pairs it with a real one after this script). Here nothing listens on its port.
   await key('k', cmd);
   for (const ch of 'terminal agents') await key(ch);
   await key('Enter');
   s = st();
-  step('Cmd-K Terminal agents opens the Agents tab: the bridge command and the code field', s.agents.panel && s.agents.available && s.agents.web && !s.agents.allowed && ['agents-copy-bridge', 'agents-code'].every((h) => window.vxr.hit(h).length === 2) && window.vxr.hit('agents-disconnect').length === 0, JSON.stringify(s.agents));
+  step('Cmd-K Terminal agents opens the Agents tab: the pair command and the code field', s.agents.panel && s.agents.available && s.agents.web && !s.agents.allowed && ['agents-copy', 'agents-code'].every((h) => window.vxr.hit(h).length === 2) && window.vxr.hit('agents-disconnect').length === 0, JSON.stringify(s.agents));
+  // The panel's copy button puts its command on the system clipboard (egui's CopyText, which the
+  // page writes after the frame the click drew).
+  const written = [];
+  const writeText = navigator.clipboard?.writeText;
+  if (navigator.clipboard) navigator.clipboard.writeText = (t) => (written.push(t), Promise.resolve());
+  await click(...window.vxr.hit('agents-copy'));
+  await frames(5);
+  step('the copy button puts `vxr pair claude` on the clipboard', written.length === 1 && written[0] === 'vxr pair claude', JSON.stringify(written));
+  // A finger's tap does too, and inside the pointerup itself (Safari and touch browsers drop a
+  // write made later): nothing waits for a frame between the event and the write.
+  {
+    const c = document.querySelector('canvas');
+    const fire = (type, x, y) => c.dispatchEvent(new PointerEvent(type, {
+      clientX: x, clientY: y, pointerId: 77, pointerType: 'touch', isPrimary: true, bubbles: true, cancelable: true,
+    }));
+    // The first finger switches to the touch layout, which moves the panel: a tap to get there,
+    // then the one that counts.
+    const [tx, ty] = window.vxr.hit('agents-copy');
+    fire('pointerdown', tx, ty);
+    await frames(2);
+    fire('pointerup', tx, ty);
+    await frames(3);
+    const [ux, uy] = window.vxr.hit('agents-copy');
+    fire('pointerdown', ux, uy);
+    await frames(2);
+    const before = written.length;
+    fire('pointerup', ux, uy);
+    const sync = written.length === before + 1 && written[before] === 'vxr pair claude';
+    await frames(3);
+    step('a finger tap on the copy button writes the clipboard inside the pointerup', sync, JSON.stringify(written));
+    // A mouse press brings the mouse layout back for the steps that follow.
+    await click(...window.vxr.hit('agents-copy'));
+    await frames(3);
+  }
+  if (navigator.clipboard && writeText) navigator.clipboard.writeText = writeText;
   await click(...window.vxr.hit('agents-code'));
   for (const ch of 'k7u') await key(ch);
   s = st();
