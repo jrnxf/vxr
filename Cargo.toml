@@ -39,10 +39,10 @@ opt-level = "s"
 opt-level = "s"
 
 [profile.wasm.package.fearless_simd]
-opt-level = "s"
+opt-level = 3
 
 [profile.wasm.package.vello_cpu]
-opt-level = "s"
+opt-level = 3
 
 [profile.wasm.package.vello_common]
-opt-level = "s"
+opt-level = 3
