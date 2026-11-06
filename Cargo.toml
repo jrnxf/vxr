@@ -26,7 +26,13 @@ debug = 0
 # The browser build: small and fast to load (same settings as the Phase 2 embed).
 [profile.wasm]
 inherits = "release"
-opt-level = "s"
+opt-level = "z"
 lto = "fat"
 codegen-units = 1
 strip = true
+
+[profile.wasm.package.vxr-core]
+opt-level = "s"
+
+[profile.wasm.package.vxr-vox]
+opt-level = "s"
