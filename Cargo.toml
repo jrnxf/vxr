@@ -37,3 +37,12 @@ opt-level = "s"
 
 [profile.wasm.package.vxr-vox]
 opt-level = "s"
+
+[profile.wasm.package.fearless_simd]
+opt-level = "s"
+
+[profile.wasm.package.vello_cpu]
+opt-level = "s"
+
+[profile.wasm.package.vello_common]
+opt-level = "s"
