@@ -22,7 +22,7 @@ run cargo build --profile wasm --target wasm32-unknown-unknown -p vxr-web
 rm -rf "$dist"
 mkdir -p "$dist/pkg" "$dist/fonts"
 run wasm-bindgen --target web --no-typescript --out-dir "$dist/pkg" target/wasm32-unknown-unknown/wasm/vxr_web.wasm
-run wasm-opt -Oz --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext \
+run wasm-opt -Oz --converge --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext \
   --enable-mutable-globals --enable-reference-types -o "$dist/pkg/vxr_web_bg.wasm" "$dist/pkg/vxr_web_bg.wasm"
 [ -d "$here/node_modules" ] || npm ci --prefix "$here" --no-audit --no-fund
 # The page: site/ (Preact, the landing page and the boot skeleton pre-rendered into index.html)
