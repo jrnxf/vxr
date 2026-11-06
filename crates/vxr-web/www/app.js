@@ -569,6 +569,33 @@ function agentDownloads() {
   }
 }
 
+// Text a button in the page copied (the Agents tab's commands; egui's CopyText), onto the system
+// clipboard. A field's Cmd-C and Cmd-X take theirs inside the copy event instead (above), and
+// find nothing here. The click that asked for it is still the user's gesture, which the
+// clipboard API wants; execCommand covers a page where the API is missing.
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return;
+  } catch (e) {
+    console.warn('vxr: the clipboard API refused the copy, trying execCommand', e);
+  }
+  const box = document.createElement('textarea');
+  box.value = text;
+  box.setAttribute('readonly', '');
+  box.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0';
+  document.body.append(box);
+  box.select();
+  try {
+    document.execCommand('copy');
+  } catch (e) {
+    console.warn('vxr: could not copy', e);
+  }
+  box.remove();
+  if (app.wants_keyboard()) focusIme();
+  else canvas.focus();
+}
+
 let cursor = '';
 function step(now) {
   app.frame(now / 1000);
@@ -580,7 +607,11 @@ function step(now) {
 function tick(now) {
   try {
     // An idle editor owes no frame: input, a call into the app or its own timer asks for one.
-    if (app.wants_frame(now / 1000)) step(now);
+    if (app.wants_frame(now / 1000)) {
+      step(now);
+      const copied = app.take_copied();
+      if (copied !== undefined) copyText(copied);
+    }
     placeChallenge();
     const c = app.cursor();
     if (c !== cursor) canvas.style.cursor = cursor = c;

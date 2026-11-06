@@ -29,13 +29,19 @@ app: adds ~/Applications/vxr.app, so Spotlight opens vxr";
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Agent {
     pub name: &'static str,
+    get: &'static [&'static str],
     remove: &'static [&'static str],
     add: &'static [&'static str],
 }
 
 pub const AGENTS: [Agent; 2] = [
-    Agent { name: "claude", remove: &["mcp", "remove", "--scope", "user"], add: &["mcp", "add", "--scope", "user"] },
-    Agent { name: "codex", remove: &["mcp", "remove"], add: &["mcp", "add"] },
+    Agent {
+        name: "claude",
+        get: &["mcp", "get"],
+        remove: &["mcp", "remove", "--scope", "user"],
+        add: &["mcp", "add", "--scope", "user"],
+    },
+    Agent { name: "codex", get: &["mcp", "get"], remove: &["mcp", "remove"], add: &["mcp", "add"] },
 ];
 
 /// One server to register: its name and the command the agent runs.
@@ -43,6 +49,24 @@ pub const AGENTS: [Agent; 2] = [
 pub struct Server {
     pub name: &'static str,
     pub command: Vec<String>,
+}
+
+/// Whether the agent already has `server` registered as it would be: its `mcp get` succeeds and
+/// shows the command and its arguments. Anything else (a different path or root, the server
+/// missing, an output this does not recognise) is false, and the server is registered again,
+/// which is safe.
+pub fn is_registered(agent: Agent, program: &Path, server: &Server) -> bool {
+    let Ok(out) = Command::new(program).args(agent.get).arg(server.name).output() else { return false };
+    let text = String::from_utf8_lossy(&out.stdout);
+    out.status.success() && text.contains(&server.command[0]) && text.contains(&server.command[1..].join(" "))
+}
+
+/// The folder files mode serves, and the folder's absolute path: `root` or `~/vxr`.
+pub fn files_root(root: Option<PathBuf>) -> Result<PathBuf, String> {
+    match root {
+        Some(r) => std::path::absolute(&r).map_err(|e| format!("{}: {e}", r.display())),
+        None => Ok(home()?.join("vxr")),
+    }
 }
 
 /// `vxr setup`'s arguments (after the subcommand).
@@ -71,10 +95,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         }
     }
     let agent = agent.ok_or(USAGE)?;
-    let root = match root {
-        Some(r) => std::path::absolute(&r).map_err(|e| format!("{}: {e}", r.display()))?,
-        None => home()?.join("vxr"),
-    };
+    let root = files_root(root)?;
     std::fs::create_dir_all(&root).map_err(|e| format!("could not make {}: {e}", root.display()))?;
     let exe = std::env::current_exe().map_err(|e| format!("could not find the vxr binary: {e}"))?;
     for line in register(agent, Path::new(agent.name), &servers(&stable_exe(&exe), &root))? {

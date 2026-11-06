@@ -22,7 +22,7 @@ mod agents;
 mod assistant;
 pub use account::{SignIn, Step, Sync, WRONG_CODE};
 pub use activity::{Item, LIST_ROWS, Live};
-pub use agents::{AgentsView, EditRow, FILES_SETUP, LIVE_SETUP, SETUP};
+pub use agents::{AgentsView, EditRow, FILES_SETUP, PAIR, PAIR_APP};
 pub use assistant::{AiAction, AskBar, ChatView, PANEL_W};
 
 pub(crate) const R: u8 = 12;

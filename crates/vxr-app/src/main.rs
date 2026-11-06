@@ -9,8 +9,10 @@
 //! - `vxr bridge` lets `vxr mcp --live` edit the scene open in the browser editor at
 //!   vxr.jrnxf.co instead: the page pairs with it over a loopback WebSocket with the code it
 //!   prints (see `vxr_mcp::bridge`).
-//! - `vxr setup claude|codex [--root <dir>]` registers both with that agent, and `vxr setup app`
-//!   adds `~/Applications/vxr.app` for Spotlight (see [`setup`]).
+//! - `vxr pair claude|codex [--root <dir>] [--no-bridge]` registers both with that agent when
+//!   they are missing or changed, then runs `vxr bridge` (see [`pair`]).
+//! - `vxr setup claude|codex [--root <dir>]` registers both with that agent always, and `vxr
+//!   setup app` adds `~/Applications/vxr.app` for Spotlight (see [`setup`]).
 //! - `vxr --version` prints the version, which a release build takes from its tag.
 //! - `vxr --shot <dir> [scene.vox]` runs headless: it drives the editor through every tool,
 //!   saves and reopens the result, and writes its screenshots (`app-1x.png`, `app-2x.png` and
@@ -29,6 +31,8 @@ mod native;
 #[cfg(not(target_arch = "wasm32"))]
 mod net;
 #[cfg(not(target_arch = "wasm32"))]
+mod pair;
+#[cfg(not(target_arch = "wasm32"))]
 mod setup;
 #[cfg(not(target_arch = "wasm32"))]
 mod shot;
@@ -38,8 +42,10 @@ const HELP: &str = "\
 usage: vxr [scene.vox]          open the editor, with the scene if one is given
        vxr mcp --root <dir>     serve MCP for a terminal agent on the .vox files under <dir>
        vxr mcp --live           serve MCP on the scene open in the editor
+       vxr pair claude|codex    pair a terminal agent: register both MCP servers if needed,
+                                then run the bridge for the browser editor (--no-bridge: skip it)
        vxr bridge               let vxr mcp --live edit the scene open at vxr.jrnxf.co
-       vxr setup claude|codex   register both MCP servers with that agent
+       vxr setup claude|codex   register both MCP servers with that agent, replacing them
        vxr setup app            add vxr to Spotlight (~/Applications/vxr.app)
        vxr --version";
 
@@ -49,6 +55,7 @@ fn main() {
     let result = match args.first().map(String::as_str) {
         Some("mcp") => vxr_mcp::run(&args[1..]),
         Some("bridge") => vxr_mcp::bridge::run(&args[1..]),
+        Some("pair") => pair::run(&args[1..]),
         Some("setup") => setup::run(&args[1..]),
         Some("-V" | "--version") => {
             println!("vxr {}", env!("CARGO_PKG_VERSION"));

@@ -13,14 +13,13 @@ use super::activity::{self, Item, Live, ago, span};
 
 use super::*;
 
-/// The setup lines the panel shows, for Claude Code: `vxr setup claude` registers files mode as
-/// `vxr` and live mode as `vxr-live`, and the manual line adds only `vxr-live`, so neither
-/// replaces the files mode server.
-pub const SETUP: &str = "vxr setup claude";
-pub const LIVE_SETUP: &str = "claude mcp add vxr-live -- vxr mcp --live";
+/// The one line the panel shows, for Claude Code: `vxr pair claude` registers files mode as
+/// `vxr` and live mode as `vxr-live` when they are missing or changed, then runs the bridge
+/// between a browser tab and `vxr mcp --live`. It is the browser's first step.
+pub const PAIR: &str = "vxr pair claude";
+/// The desktop app's line: the same, without the bridge, which only the browser needs.
+pub const PAIR_APP: &str = "vxr pair claude --no-bridge";
 pub const FILES_SETUP: &str = "claude mcp add vxr -- vxr mcp --root <folder>";
-/// The browser's first step: the bridge between this tab and `vxr mcp --live`.
-pub const BRIDGE_SETUP: &str = "vxr bridge";
 
 /// How tall an ACTIVITY row is: a call, an edit with its Undo, and a gap in the calls.
 const CALL_ROW: f32 = 40.0;
@@ -412,7 +411,7 @@ impl Hybrid {
         self.ai.focus |= tab.focus;
         if let Some(text) = tab.copied {
             ctx.copy_text(text);
-            self.toast(ctx, "Copied the setup line");
+            self.toast(ctx, "Copied the command");
         }
         if let Some(url) = tab.open_url {
             ctx.open_url(egui::OpenUrl::new_tab(url));
@@ -1094,10 +1093,10 @@ impl Tab {
                 + err_g.size().y
                 + 11.0;
         if web {
-            // 1 · Start vxr bridge.
+            // 1 · Run vxr pair (registers the agent, runs the bridge).
             match s1 {
                 St::Done => {
-                    let b = self.step(ui, s1, 1, "Start vxr bridge", None, false, 16.0);
+                    let b = self.step(ui, s1, 1, "Run vxr pair", None, false, 16.0);
                     ui.painter().text(
                         b.left_center(),
                         Align2::LEFT_CENTER,
@@ -1108,15 +1107,10 @@ impl Tab {
                 }
                 _ => {
                     let bad = s1 == St::Bad;
-                    let title = if v.fail == Some(Fail::Lost) { "vxr bridge stopped" } else { "Start vxr bridge" };
+                    let title = if v.fail == Some(Fail::Lost) { "vxr bridge stopped" } else { "Run vxr pair" };
                     let h = 30.0 + if bad { 8.0 + err_h + 8.0 + 30.0 } else { 8.0 + 16.0 };
                     let b = self.step(ui, s1, 1, title, None, false, h);
-                    self.command(
-                        ui,
-                        Rect::from_min_size(b.min, vec2(b.width(), 30.0)),
-                        BRIDGE_SETUP,
-                        "agents-copy-bridge",
-                    );
+                    self.command(ui, Rect::from_min_size(b.min, vec2(b.width(), 30.0)), PAIR, "agents-copy");
                     let mut y = b.top() + 30.0 + 8.0;
                     if bad {
                         let er = Rect::from_min_size(pos2(b.left(), y), vec2(b.width(), err_h));
@@ -1254,7 +1248,7 @@ impl Tab {
         // Connect an agent.
         let (sn, step_n) = if web { (s3, 3) } else { (s2, 2) };
         let title = match clients {
-            0 => "Connect an agent".to_string(),
+            0 => "Pair an agent".to_string(),
             1 => "Agent connected".to_string(),
             n => format!("{n} agents connected"),
         };
@@ -1265,18 +1259,16 @@ impl Tab {
                 self.step(ui, sn, step_n, &title, None, true, 0.0);
             }
             St::Active => {
+                // The browser's first step already ran `vxr pair claude`, which registered the
+                // agent: only the desktop app still shows the line.
                 let note =
                     Self::text_h(ui, "Then start Claude Code. It shows up here when it connects.", sans(11.5), bw);
-                let h = 30.0 + 6.0 + 30.0 + 8.0 + note.size().y;
-                let b = self.step(ui, sn, step_n, &title, None, true, h);
-                self.command(ui, Rect::from_min_size(b.min, vec2(b.width(), 30.0)), SETUP, "agents-copy");
-                self.command(
-                    ui,
-                    Rect::from_min_size(pos2(b.left(), b.top() + 36.0), vec2(b.width(), 30.0)),
-                    LIVE_SETUP,
-                    "agents-copy-live",
-                );
-                ui.painter().galley(pos2(b.left(), b.top() + 74.0), note, th().faint);
+                let line = if web { 0.0 } else { 30.0 + 8.0 };
+                let b = self.step(ui, sn, step_n, &title, None, true, line + note.size().y);
+                if !web {
+                    self.command(ui, Rect::from_min_size(b.min, vec2(b.width(), 30.0)), PAIR_APP, "agents-copy");
+                }
+                ui.painter().galley(pos2(b.left(), b.top() + line), note, th().faint);
             }
             _ => {
                 self.step(ui, sn, step_n, &title, right, true, 0.0);
