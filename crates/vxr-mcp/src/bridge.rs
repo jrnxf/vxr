@@ -138,12 +138,16 @@ pub fn run(args: &[String]) -> Result<(), String> {
         }
     }
     let dev = cfg!(debug_assertions);
+    // A debug build takes another port from VXR_BRIDGE_PORT, so `crates/vxr-web/check` never
+    // collides with a bridge already running on this computer; a release build ignores it.
+    let port =
+        if dev { std::env::var("VXR_BRIDGE_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(PORT) } else { PORT };
     let cfg =
-        Config { addr: std::net::SocketAddr::from(([127, 0, 0, 1], PORT)), dir: crate::live::dir(), dev_origins: dev };
+        Config { addr: std::net::SocketAddr::from(([127, 0, 0, 1], port)), dir: crate::live::dir(), dev_origins: dev };
     let bridge = Bridge::bind(cfg, |line| println!("{line}"))?;
     let shown =
         if dev { format!("{ORIGIN} (and, in this debug build, http://localhost pages)") } else { ORIGIN.into() };
-    println!("vxr bridge is listening on 127.0.0.1:{PORT} for {shown}.\n");
+    println!("vxr bridge is listening on 127.0.0.1:{port} for {shown}.\n");
     println!("  Pairing code: {}\n", show_code(&bridge.code()));
     println!("{NEXT}");
     bridge.serve();

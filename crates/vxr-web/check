@@ -6,8 +6,8 @@
 # the boot skeleton (check-landing.js: first visit with progress and an early click, /about, the
 # returning-visit skip, ?open= ?project= ?embed), check that a draft and a
 # key remembered in the browser come back in a new page (check-restore.js for the draft), check that a tablet-sized touch screen starts in the touch layout, pair the
-# page with a real `vxr bridge` (a debug build, which takes pages from 127.0.0.1, on its fixed
-# port) and edit it from a real `vxr mcp --live` driven by a scripted MCP client
+# page with a real `vxr bridge` (a debug build, which takes pages from 127.0.0.1, on a free port
+# VXR_CHECK_BRIDGE_PORT or a picked one, not the fixed 41723 another bridge may hold) and edit it from a real `vxr mcp --live` driven by a scripted MCP client
 # (check-agent.js), sign in from the account popover against the Worker under a local
 # `wrangler dev` (check-account.js; needs `npm ci --prefix crates/vxr-web`), check the no-WebGPU
 # message in a browser without WebGPU, and write 1x and 2x screenshots into the git-ignored
@@ -19,6 +19,8 @@ root="$(cd "$here/../.." && pwd)"
 dist="$here/dist"
 shots="$here/shots"
 port="${VXR_CHECK_PORT:-4801}"
+# The port the check's vxr bridge listens on and its page connects to, instead of the fixed 41723.
+bridge_port="${VXR_CHECK_BRIDGE_PORT:-$(node -e "const s=require('net').createServer().listen(0,'127.0.0.1',()=>{console.log(s.address().port);s.close()})")}"
 url="http://127.0.0.1:$port/"
 [ -f "$dist/pkg/vxr_web_bg.wasm" ] || { echo "no $dist: run crates/vxr-web/build first" >&2; exit 1; }
 npm --prefix "$here" run -s lint >&2 && npm --prefix "$here" run -s format:check >&2 || { echo "FAIL oxlint or oxfmt on site/" >&2; exit 1; }
@@ -34,7 +36,7 @@ trap 'rm -rf "$fixtures"' EXIT
 ./dev cargo run -q --release -p vxr-vox --example fixture -- 23-desk "$fixtures/23-desk.vox"
 ./dev cargo build -q -p vxr-app
 vxr="$root/target/debug/vxr"
-./dev node "$here/check-server.js" "$dist" "$port" "$fixtures" &
+./dev node "$here/check-server.js" "$dist" "$port" "$fixtures" "$bridge_port" &
 server=$!
 bridge=""
 worker=""
@@ -163,7 +165,7 @@ fi
 # Live mode through a real vxr bridge: its live folder (socket and token) in the temporary
 # folder, the page pairing with the code it printed, and a real `vxr mcp --live` editing.
 export VXR_LIVE_DIR="$fixtures/live"
-"$vxr" bridge >"$fixtures/bridge.log" 2>&1 &
+VXR_BRIDGE_PORT="$bridge_port" "$vxr" bridge >"$fixtures/bridge.log" 2>&1 &
 bridge=$!
 code=""
 for _ in $(seq 100); do
