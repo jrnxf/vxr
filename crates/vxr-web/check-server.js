@@ -3,12 +3,16 @@
 // /__fixtures/, and a stand-in OpenAI-compatible Chat Completions endpoint under /__fake/v1
 // for the assistant: a scripted provider, not a model.
 //
-//   node check-server.js <dist> <port> <fixtures>
+//   node check-server.js <dist> <port> <fixtures> [bridge-port]
+//
+// With bridge-port, the page reaches `vxr bridge` there instead of on its fixed port 41723
+// (the content security policy and app.js are rewritten as they are served), so the check
+// never collides with a bridge already running on this computer.
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const [dist, port, fixtures] = process.argv.slice(2);
+const [dist, port, fixtures, bridgePort] = process.argv.slice(2);
 const types = {
   '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.wasm': 'application/wasm',
   '.ttf': 'font/ttf', '.webp': 'image/webp', '.json': 'application/json', '.txt': 'text/plain', '.vox': 'application/octet-stream',
@@ -24,9 +28,13 @@ for (const line of fs.readFileSync(path.join(dist, '_headers'), 'utf8').split('\
     rules.at(-1).headers[line.slice(0, i).trim()] = line.slice(i + 1).trim();
   }
 }
-const headersFor = (p) => Object.assign({}, ...rules
-  .filter((r) => (r.pattern.endsWith('*') ? p.startsWith(r.pattern.slice(0, -1)) : p === r.pattern))
-  .map((r) => r.headers));
+const headersFor = (p) => {
+  const h = Object.assign({}, ...rules
+    .filter((r) => (r.pattern.endsWith('*') ? p.startsWith(r.pattern.slice(0, -1)) : p === r.pattern))
+    .map((r) => r.headers));
+  if (bridgePort && h['Content-Security-Policy']) h['Content-Security-Policy'] = h['Content-Security-Policy'].replace('ws://127.0.0.1:41723', `ws://127.0.0.1:${bridgePort}`);
+  return h;
+};
 
 // What the stand-in provider was sent: requests, and whether any carried a key.
 const seen = { requests: 0, auth: 0, keyInBody: 0 };
@@ -122,6 +130,11 @@ http.createServer((req, res) => {
   const f = p.endsWith('/') ? p + 'index.html' : !path.extname(p) && fs.existsSync(p + '.html') ? p + '.html' : p;
   fs.readFile(f, (err, data) => {
     if (err) { res.writeHead(404); res.end(); return; }
+    if (bridgePort && f === path.join(dist, 'app.js')) {
+      const src = data.toString().replace('new WebSocket(app.bridge_url())', `new WebSocket(app.bridge_url().replace(':41723', ':${+bridgePort}'))`);
+      if (src === data.toString()) throw new Error('check-server: app.js no longer opens new WebSocket(app.bridge_url())');
+      data = Buffer.from(src);
+    }
     const send = () => {
       res.writeHead(200, { ...headersFor(u), 'content-type': types[path.extname(f)] || 'application/octet-stream' });
       res.end(data);
