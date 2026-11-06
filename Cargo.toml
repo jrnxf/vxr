@@ -23,7 +23,11 @@ debug = 0
 [profile.dev]
 debug = 0
 
-# The browser build: small and fast to load (same settings as the Phase 2 embed).
+# The browser build: small and fast to load. opt-level z everywhere except where measured:
+# vxr-core and vxr-vox stay at s (z makes opening and saving a scene 30-50% slower), and the
+# SIMD fallback crates build at 3, which inlines their generic code away and is smaller than z
+# or s (the wasm is ~100 KB brotli smaller). Change one at a time and rebuild with
+# crates/vxr-web/build, which prints the compressed sizes.
 [profile.wasm]
 inherits = "release"
 opt-level = "z"
