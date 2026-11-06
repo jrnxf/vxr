@@ -59,6 +59,14 @@ pub fn run(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
     println!();
+    // A bridge from an earlier pair, in another terminal, already serves the page: say so
+    // rather than fail on its port.
+    if std::net::TcpStream::connect(("127.0.0.1", vxr_mcp::bridge::PORT)).is_ok() {
+        println!(
+            "vxr bridge is already running in another terminal: type the pairing code it printed there into the page."
+        );
+        return Ok(());
+    }
     vxr_mcp::bridge::run(&[])
 }
 
@@ -88,7 +96,7 @@ mod tests {
             format!(
                 "#!/bin/sh\necho \"$*\" >> '{d}/log'\nfor a; do [ \"$a\" = -- ] && break; name=$a; done\n\
                  case $2 in\n\
-                 get) [ -e '{d}/'\"$name\" ] && {{ echo \"Command: $(sed -n 1p '{d}/'\"$name\")\"; echo \"Args: $(sed -n 2p '{d}/'\"$name\")\"; }};;\n\
+                 get) [ -e '{d}/'\"$name\" ] && {{ echo \"Scope: User config\"; echo \"Command: $(sed -n 1p '{d}/'\"$name\")\"; echo \"Args: $(sed -n 2p '{d}/'\"$name\")\"; }};;\n\
                  remove) [ -e '{d}/'\"$name\" ];;\n\
                  add) shift; shift; while [ \"$1\" != -- ]; do shift; done; shift; echo \"$1\" > '{d}/'\"$name\"; shift; echo \"$*\" >> '{d}/'\"$name\";;\n\
                  esac\n",
@@ -125,6 +133,36 @@ mod tests {
         let fourth = pair(AGENTS[0], &program, &other).unwrap();
         assert_eq!(fourth.len(), 2, "{fourth:?}");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn shown(command: &str, args: &str, extra: &str) -> String {
+        format!("vxr:\n{extra}  Type: stdio\n  Command: {command}\n  Args: {args}\n  Environment:\n")
+    }
+
+    #[test]
+    fn an_entry_must_match_exactly_at_user_scope_and_enabled() {
+        let s = &setup::servers(Path::new("/opt/homebrew/bin/vxr"), Path::new("/home/user/vxr"))[0];
+        let user = "  Scope: User config (available in all your projects)\n";
+        let ok = |text: String| setup::matches_get(&text, s);
+        assert!(ok(shown("/opt/homebrew/bin/vxr", "mcp --root /home/user/vxr", user)));
+        // A root or binary that only shares a prefix is another one.
+        assert!(!ok(shown("/opt/homebrew/bin/vxr", "mcp --root /home/user/vxr-old", user)));
+        assert!(!ok(shown("/opt/homebrew/bin/vxr", "mcp --root /home/user/vxr/sub", user)));
+        assert!(!ok(shown("/opt/homebrew/bin/vxr-dev", "mcp --root /home/user/vxr", user)));
+        // A local or project entry is not the user's.
+        assert!(!ok(shown(
+            "/opt/homebrew/bin/vxr",
+            "mcp --root /home/user/vxr",
+            "  Scope: Local config (private to you in this project)\n"
+        )));
+        // Codex: no scope line, but a disabled server is not paired.
+        let codex = |enabled: &str| {
+            format!(
+                "vxr\n  enabled: {enabled}\n  transport: stdio\n  command: /opt/homebrew/bin/vxr\n  args: mcp --root /home/user/vxr\n"
+            )
+        };
+        assert!(ok(codex("true")));
+        assert!(!ok(codex("false")));
     }
 
     #[test]
