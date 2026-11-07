@@ -801,7 +801,10 @@ impl Tab {
         };
         let edits = self.v.edits.iter().filter(|e| e.conn == conn).count();
         let calls = self.v.made.get(i).copied().unwrap_or(0);
-        let r = self.block(ui, 44.0);
+        // An agent that has not called yet says when it came once, in its "idle" status: a
+        // "since" line under it would only repeat that.
+        let meta = calls > 0 || edits > 0;
+        let r = self.block(ui, if meta { 44.0 } else { 24.0 });
         let r = Rect::from_min_max(pos2(r.left() + 30.0, r.top()), r.max);
         let p = ui.painter().clone();
         let c = pos2(r.left() + 4.0, r.top() + 11.0);
@@ -831,6 +834,9 @@ impl Tab {
             self.actions.push(Action::StopAgent(conn));
         }
         self.hits.push((id, b));
+        if !meta {
+            return;
+        }
         let mut meta = format!("since {}", ago(self.now - since));
         if calls > 0 {
             meta += &format!(" \u{b7} {calls} call{}", if calls == 1 { "" } else { "s" });
