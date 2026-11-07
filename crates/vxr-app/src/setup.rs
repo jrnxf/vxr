@@ -62,6 +62,20 @@ pub fn is_registered(agent: Agent, program: &Path, server: &Server) -> bool {
     out.status.success() && matches_get(&String::from_utf8_lossy(&out.stdout), server)
 }
 
+/// Whether the agent has files mode (`vxr`) registered as [`is_registered`] would accept it,
+/// run by `exe`, on any root: `vxr claude` keeps the folder the user paired with.
+pub fn is_registered_any_root(agent: Agent, program: &Path, exe: &Path) -> bool {
+    let Ok(out) = Command::new(program).args(agent.get).arg("vxr").output() else { return false };
+    if !out.status.success() {
+        return false;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let root = text
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("Args: mcp --root ").or(l.trim().strip_prefix("args: mcp --root ")));
+    root.is_some_and(|r| !r.trim().is_empty() && matches_get(&text, &servers(exe, Path::new(r.trim()))[0]))
+}
+
 /// Whether the text of an `mcp get` shows `server`: see [`is_registered`].
 pub(crate) fn matches_get(text: &str, server: &Server) -> bool {
     let (mut command, mut args, mut scope_ok, mut enabled) = (None, None, true, true);

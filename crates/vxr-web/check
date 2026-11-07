@@ -210,8 +210,8 @@ else
   }" | unwrap)"
   expect "a wrong code turns the step red, and the page pairs with the code vxr bridge printed" "$paired" '["Wrong",true,null]'
   [ -S "$VXR_LIVE_DIR/live.sock" ] && pass "vxr bridge opens the agents' socket once paired" || fail "vxr bridge opens the agents' socket once paired" "no socket"
-  # An agent session that makes no call connects by itself: step 3 turns green with an idle row.
-  ./dev node "$here/check-agent.js" "$vxr" "[\"wait $fixtures/idle-done\"]" >/dev/null &
+  # A session `vxr claude` started connects with no call: step 3 turns green with an idle row.
+  ./dev node "$here/check-agent.js" "$vxr" "[\"wait $fixtures/idle-done\"]" --connect-at-start >/dev/null &
   idler=$!
   idle="$(axi eval "async () => { for (let i = 0; i < 400 && !JSON.parse(window.vxr.state()).agents.clients.length; i++) await window.__frames(3); await window.__frames(4); const a = JSON.parse(window.vxr.state()).agents; return JSON.stringify([a.clients.map(c => c[1]), a.calls.length, a.chip.replace(/ · idle .*/, ' · idle'), window.vxr.hit('agents-dot-' + (a.clients[0] || [0])[0]).length]) }" | unwrap)"
   expect "an open agent session shows as connected and idle before any call" "$idle" '[["Claude Code"],0,"Claude Code connected · idle",2]'

@@ -4,9 +4,11 @@
 //! - It registers vxr's two MCP servers with the agent (see [`crate::setup`]), but only the
 //!   ones that are missing or differ from what it would register: with both in place it changes
 //!   nothing and says so in one line.
+//! - For Claude Code it installs `/vxr` ([`crate::claude::install_command`]): `vxr mcp
+//!   --live` stays quiet until a session asks, and typing `/vxr` in one asks.
 //! - The desktop app needs nothing else: `vxr mcp --live` finds the window's socket by itself,
-//!   and the user allows it from the Agents tab. So `--no-bridge` ends here and says the agent
-//!   can start.
+//!   and the user allows it from the Agents tab. So `--no-bridge` ends here and says how to
+//!   connect.
 //! - The browser editor does: its page cannot host that socket, so without `--no-bridge` pair
 //!   goes on to run `vxr bridge` in the foreground and prints the pairing code to type into the
 //!   page, exactly as `vxr bridge` does.
@@ -23,6 +25,9 @@ Pairs vxr with a terminal agent in one step; run it again any time. It registers
 servers with the agent, only the ones that are missing or changed:
   vxr       files mode on the .vox files under --root (default ~/vxr)
   vxr-live  live mode, the scene open in the vxr window or the browser tab
+A session joins the window only when asked: for Claude Code it also installs /vxr
+(~/.claude/commands/vxr.md, never over a file of yours), which connects an open session, and
+vxr claude starts one already connected.
 Then, for the browser editor at https://vxr.jrnxf.co, it runs the bridge and prints a pairing
 code to type into the Agents tab (Cmd-K, \"Terminal agents (MCP)…\"). Ctrl-C stops it.
 --no-bridge: for the desktop app, which needs no bridge. Registers and exits.";
@@ -54,10 +59,27 @@ pub fn run(args: &[String]) -> Result<(), String> {
     for line in pair(agent, Path::new(agent.name), &setup::servers(&setup::stable_exe(&exe), &root))? {
         println!("{line}");
     }
+    let claude = agent.name == "claude";
+    if claude {
+        match crate::claude::claude_dir() {
+            Ok(d) => println!(
+                "{}",
+                crate::claude::install_command(&d.join("commands"))
+                    .unwrap_or_else(|| "claude: /vxr is already there".into())
+            ),
+            Err(e) => println!("claude: /vxr is not installed: {e}"),
+        }
+    }
+    let how = if claude {
+        "Run vxr claude to start Claude Code connected to it, or type /vxr in a Claude Code session that is open."
+    } else {
+        "A Codex session connects when it first edits, or when you ask it to call vxr-live's connect tool."
+    };
     if !bridge {
-        println!("Start {} when you like: it edits the scene open in the vxr app.", agent.name);
+        println!("{} edits the scene open in the vxr app once it connects. {how}", agent.name);
         return Ok(());
     }
+    println!("Once the page is paired: {how}");
     println!();
     // A bridge from an earlier pair, in another terminal, already serves the page: say so
     // rather than fail on its port.

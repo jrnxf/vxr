@@ -17,8 +17,9 @@ use super::*;
 /// `vxr` and live mode as `vxr-live` when they are missing or changed, then runs the bridge
 /// between a browser tab and `vxr mcp --live`. It is the browser's first step.
 pub const PAIR: &str = "vxr pair claude";
-/// The desktop app's line: the same, without the bridge, which only the browser needs.
-pub const PAIR_APP: &str = "vxr pair claude --no-bridge";
+/// The desktop app's line: `vxr claude` registers as `vxr pair claude --no-bridge` would
+/// (no bridge: only the browser needs it), installs `/vxr`, and starts Claude Code connected.
+pub const START: &str = "vxr claude";
 pub const FILES_SETUP: &str = "claude mcp add vxr -- vxr mcp --root <folder>";
 
 /// How tall an ACTIVITY row is: a call, an edit with its Undo, and a gap in the calls.
@@ -1257,10 +1258,10 @@ impl Tab {
         }
         // Connect an agent.
         let (sn, step_n) = if web { (s3, 3) } else { (s2, 2) };
-        // Green only for a session that is really connected (it connects by itself once it
-        // opens, `vxr_mcp::live::Remote`), never for `vxr pair` having registered it.
+        // Green only for a session that is really connected (`vxr claude`, `/vxr` or its first
+        // edit, `vxr_mcp::live::Remote`), never for `vxr pair` having registered it.
         let title = match clients {
-            0 => "Open Claude Code".to_string(),
+            0 => "Connect Claude Code".to_string(),
             1 => format!("{} connected", v.clients[0].1),
             n => format!("{n} agents connected"),
         };
@@ -1272,17 +1273,17 @@ impl Tab {
             }
             St::Active => {
                 // The browser's first step already ran `vxr pair claude`, which registered the
-                // agent: only the desktop app still shows the line.
+                // agent and installed /vxr: only the desktop app shows the line.
                 let say = if web {
-                    "It connects by itself and shows up here, idle until it edits."
+                    "In another terminal, run vxr claude, or type /vxr in an open Claude Code session. It shows up here, idle until it edits."
                 } else {
-                    "Run this once, then open Claude Code. It connects by itself."
+                    "Starts Claude Code connected here. In a Claude Code session that is already open, type /vxr."
                 };
                 let note = Self::text_h(ui, say, sans(11.5), bw);
                 let line = if web { 0.0 } else { 30.0 + 8.0 };
                 let b = self.step(ui, sn, step_n, &title, None, true, line + note.size().y);
                 if !web {
-                    self.command(ui, Rect::from_min_size(b.min, vec2(b.width(), 30.0)), PAIR_APP, "agents-copy");
+                    self.command(ui, Rect::from_min_size(b.min, vec2(b.width(), 30.0)), START, "agents-copy");
                 }
                 ui.painter().galley(pos2(b.left(), b.top() + line), note, th().faint);
             }

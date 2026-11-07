@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use crate::live::{Ask, Host, Live, NOT_LIVE, REFUSED, Remote, SOCKET, STOPPED, TOKEN};
+use crate::live::{Ask, CONNECTED, Host, Live, NOT_LIVE, REFUSED, Remote, SOCKET, STOPPED, TOKEN, WAITING};
 use crate::protocol::{Reply, Server, VERSION};
 
 /// A folder whose `live` subfolder the host makes, removed at the end of the test. Kept
@@ -38,8 +38,18 @@ struct Agent {
 }
 
 impl Agent {
+    /// `vxr mcp --live`, which connects only when asked.
     fn new(dir: &Dir, client: &str) -> Agent {
-        let mut server = Server::with(Live(Remote::new(dir.0.clone())));
+        Agent::with(Remote::new(dir.0.clone()), client)
+    }
+
+    /// `vxr mcp --live --connect-at-start`, as `vxr claude` runs it.
+    fn at_start(dir: &Dir, client: &str) -> Agent {
+        Agent::with(Remote::connecting_at_start(dir.0.clone()), client)
+    }
+
+    fn with(remote: Remote, client: &str) -> Agent {
+        let mut server = Server::with(Live(remote));
         let init = json!({"jsonrpc": "2.0", "id": 0, "method": "initialize",
             "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": client, "version": "1"}}});
         server.handle(&init).unwrap();
@@ -162,8 +172,8 @@ fn a_call_goes_over_the_socket_and_back() {
     for files_only in ["list_files", "open"] {
         assert!(!names.contains(&files_only), "{files_only} is files mode only");
     }
-    // The session connects by itself, before any call (see `an_agent_session_shows_...`).
-    wait_for(|| host.clients().len() == 1);
+    // Without --connect-at-start nothing connects before the first call.
+    assert!(host.clients().is_empty());
 
     let (t, e) = tool(&host, &mut a, "paint", json!({"slot": 3}));
     assert!(!e);
@@ -793,12 +803,13 @@ fn wait_long(secs: u64, mut f: impl FnMut() -> bool) -> bool {
 }
 
 #[test]
-fn an_agent_session_shows_as_connected_before_any_tool_call() {
+fn a_session_started_to_connect_shows_as_connected_before_any_tool_call() {
     let dir = Dir::new("idle");
     let host = Host::start(&dir.0).unwrap();
-    let a = Agent::new(&dir, "claude-code");
-    let b = Agent::new(&dir, "claude-code");
-    // `initialize` alone, no tool call: both sessions are listed, by the client's name.
+    let a = Agent::at_start(&dir, "claude-code");
+    let b = Agent::at_start(&dir, "claude-code");
+    // With --connect-at-start, `initialize` alone, no tool call: both sessions are listed, by
+    // the client's name.
     assert!(wait_long(5, || host.clients().len() == 2), "the idle sessions connect: {:?}", host.clients());
     assert!(host.clients().iter().all(|c| c.1 == "Claude Code"), "{:?}", host.clients());
     assert!(host.poll().is_empty(), "connecting asks the app nothing");
@@ -808,7 +819,7 @@ fn an_agent_session_shows_as_connected_before_any_tool_call() {
 #[test]
 fn an_agent_started_before_the_window_connects_once_it_listens() {
     let dir = Dir::new("later");
-    let mut a = Agent::new(&dir, "codex");
+    let mut a = Agent::at_start(&dir, "codex");
     std::thread::sleep(Duration::from_millis(300));
     let host = Host::start(&dir.0).unwrap();
     assert!(wait_long(8, || host.clients().len() == 1), "the session connects by itself");
@@ -824,7 +835,7 @@ fn an_agent_started_before_the_window_connects_once_it_listens() {
 fn a_stopped_idle_agent_stays_stopped() {
     let dir = Dir::new("istop");
     let host = Host::start(&dir.0).unwrap();
-    let mut a = Agent::new(&dir, "claude-code");
+    let mut a = Agent::at_start(&dir, "claude-code");
     assert!(wait_long(5, || host.clients().len() == 1));
     host.stop(host.clients()[0].0);
     // It does not come back while idle.
@@ -836,9 +847,10 @@ fn a_stopped_idle_agent_stays_stopped() {
 fn agents_over_the_cap_wait_without_being_turned_away_for_good() {
     let dir = Dir::new("cap");
     let host = Host::start(&dir.0).unwrap();
-    let mut agents: Vec<Agent> = (0..16).map(|_| Agent::new(&dir, "claude-code")).collect();
+    let mut agents: Vec<Agent> = (0..16).map(|_| Agent::at_start(&dir, "claude-code")).collect();
     assert!(wait_long(8, || host.clients().len() == 16), "{}", host.clients().len());
     let mut extra = Agent::new(&dir, "codex");
+    // Its call asks it to connect, and it keeps trying from then on.
     let (t, e) = tool(&host, &mut extra, "paint", json!({}));
     assert!(e && t.contains("Too many") && t.contains("(16)"), "{t}");
     // Once one leaves, the waiting session takes its place by itself.
@@ -846,4 +858,49 @@ fn agents_over_the_cap_wait_without_being_turned_away_for_good() {
     drop(gone);
     assert!(wait_long(10, || host.clients().iter().any(|c| c.1 == "Codex")), "{:?}", host.clients());
     assert!(!tool(&host, &mut extra, "paint", json!({})).1);
+}
+
+#[test]
+fn a_session_that_only_initializes_stays_quiet_without_the_opt_in() {
+    let dir = Dir::new("quiet");
+    let host = Host::start(&dir.0).unwrap();
+    let a = Agent::new(&dir, "claude-code");
+    let b = Agent::new(&dir, "codex");
+    // `initialize` alone: well past the first try a started session would make, nothing is
+    // listed, so every Claude session the user opens elsewhere stays out of the window.
+    assert!(!wait_long(2, || !host.clients().is_empty()), "a session that did not ask connected: {:?}", host.clients());
+    assert!(host.poll().is_empty());
+    drop((a, b));
+}
+
+#[test]
+fn the_connect_tool_connects_a_quiet_session_and_keeps_it_connected() {
+    let dir = Dir::new("join");
+    // /vxr before the window is there: not an error, and the session keeps trying.
+    let mut a = Agent::new(&dir, "claude-code");
+    let r = a.request("tools/list", json!({}));
+    let connect = r["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == "connect").cloned();
+    assert_eq!(connect.unwrap()["annotations"]["readOnlyHint"], true, "connect is offered and changes nothing");
+    let r = a.request("tools/call", json!({"name": "connect", "arguments": {}}));
+    assert_eq!(r["result"]["content"][0]["text"], WAITING);
+    assert_eq!(r["result"]["isError"], false);
+    let host = Host::start(&dir.0).unwrap();
+    assert!(wait_long(8, || host.clients().len() == 1), "it connects once the window listens");
+    assert_eq!(host.clients()[0].1, "Claude Code");
+    // A second /vxr while connected only says so, and asks the app nothing.
+    assert_eq!(tool(&host, &mut a, "connect", json!({})), (CONNECTED.into(), false));
+    assert!(host.poll().is_empty());
+    // Off and on again: it comes back by itself, as a session started to connect does.
+    drop(host);
+    let host = Host::start(&dir.0).unwrap();
+    assert!(wait_long(8, || host.clients().len() == 1), "it reconnects after off and on");
+    assert!(!tool(&host, &mut a, "paint", json!({})).1);
+    // A quiet session that types /vxr with the window open is listed at once.
+    let mut b = Agent::new(&dir, "codex");
+    assert_eq!(tool(&host, &mut b, "connect", json!({})), (CONNECTED.into(), false));
+    assert_eq!(host.clients().len(), 2);
+    // After Stop, /vxr does not bring it back.
+    let id = host.clients().iter().find(|c| c.1 == "Codex").unwrap().0;
+    host.stop(id);
+    wait_for(|| tool(&host, &mut b, "connect", json!({})) == (STOPPED.into(), true));
 }
