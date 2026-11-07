@@ -162,6 +162,7 @@ pub fn client_name(raw: &str) -> String {
 /// Text for the agent when the window is not there to edit.
 pub const NOT_LIVE: &str = "vxr is not open, or live editing is off. Ask the user to open vxr, press Cmd-K, choose \"Terminal agents (MCP)…\" and turn on \"Allow agents to edit this window\"; in the browser editor at vxr.jrnxf.co, to run `vxr bridge` in a terminal and pair the tab there with the code it prints. Then call again.";
 pub const STOPPED: &str = "The user pressed Stop in vxr: this server will not edit the window again. Stop here and tell the user; they can reconnect it (in Claude Code, /mcp) when they want you to edit again.";
+pub const FULL: &str = "Too many agents are connected to vxr at once (16). This server connects by itself once one of them leaves; call again then.";
 pub const REFUSED: &str = "vxr refused this server's pairing token: the user made a new one. Restart this MCP server (in Claude Code, /mcp) to pair again.";
 
 /// The live server's tools and resources, each call forwarded through `L` to the app.
@@ -237,7 +238,7 @@ mod unix {
     const MAX_LINE: u64 = 4 << 20;
     /// How long a new connection has to present the token.
     const HELLO_WAIT: Duration = Duration::from_secs(5);
-    /// Most connections at once.
+    /// Most connections at once ([`FULL`] says the number).
     const MAX_CONNS: usize = 16;
     /// How long a reply may wait for the agent to read it before the connection is dropped.
     const WRITE_WAIT: Duration = Duration::from_secs(5);
@@ -554,7 +555,9 @@ mod unix {
             }
             if conns.len() >= MAX_CONNS {
                 drop(conns);
-                return refuse("too many agents are connected");
+                let _ = write_line(&mut *writer.lock().unwrap(), &json!({"error": FULL, "full": true}));
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+                return;
             }
             let Ok(s) = stream.try_clone() else { return };
             conns.insert(id, Conn { client: client.clone(), stream: s, writer: writer.clone() });
@@ -594,9 +597,26 @@ mod unix {
         }
     }
 
-    /// `vxr mcp --live`'s end: connects when the first request needs it, and again after
-    /// the app turned live editing off and on, but never after Stop or a new token.
+    /// `vxr mcp --live`'s end. Once the client has said its name ([`Remote::start`], on
+    /// `initialize` or the first request's `_meta`), a thread of its own connects at once and,
+    /// while the window or the bridge is not there yet, tries again quietly on a backoff
+    /// ([`FIRST_RETRY`] doubling to [`MAX_RETRY`]), so the user sees the session in the Agents
+    /// tab before it edits and either side can start first. A request connects too if no
+    /// connection is open. It connects again after the app turned live editing off and on,
+    /// but never after Stop or a new token.
     pub struct Remote {
+        link: Arc<Mutex<Link>>,
+        started: bool,
+    }
+
+    /// First wait before trying to connect again, doubled after each failure up to
+    /// [`MAX_RETRY`].
+    pub const FIRST_RETRY: Duration = Duration::from_millis(500);
+    pub const MAX_RETRY: Duration = Duration::from_secs(5);
+    /// How often the background thread looks at an open connection for the app's last word.
+    const TICK: Duration = Duration::from_millis(100);
+
+    struct Link {
         dir: PathBuf,
         client: String,
         /// The token, read from its file the first time it was needed.
@@ -607,11 +627,7 @@ mod unix {
         next: u64,
     }
 
-    impl Remote {
-        pub fn new(dir: PathBuf) -> Remote {
-            Remote { dir, client: "Agent".into(), token: None, conn: None, gone: None, next: 0 }
-        }
-
+    impl Link {
         fn connect(&mut self) -> Result<(), String> {
             if let Some(g) = self.gone {
                 return Err(g.into());
@@ -640,6 +656,8 @@ mod unix {
                     self.conn = Some((r, w));
                     Ok(())
                 }
+                // Too many agents: not this server's fault, so it tries again later.
+                Some(v) if v.get("full").and_then(Value::as_bool) == Some(true) => Err(FULL.into()),
                 Some(v) if v.get("error").is_some() => {
                     self.gone = Some(REFUSED);
                     Err(REFUSED.into())
@@ -648,13 +666,45 @@ mod unix {
             }
         }
 
-        /// Whether a connection is open now.
-        pub fn connected(&self) -> bool {
-            self.conn.is_some()
+        /// The app closed the connection, saying why (or not).
+        fn closed(&mut self, why: Option<&str>) {
+            self.conn = None;
+            match why {
+                Some("stopped") => self.gone = Some(STOPPED),
+                Some("regenerated") => self.gone = Some(REFUSED),
+                _ => {}
+            }
         }
-    }
 
-    impl LiveLink for Remote {
+        /// Between requests the app only ever speaks to close the connection: read its last
+        /// word if it is there, without waiting.
+        fn check(&mut self) {
+            let Some((r, _)) = &mut self.conn else { return };
+            if r.buffer().is_empty() {
+                use std::os::fd::AsRawFd;
+                let mut b = 0u8;
+                // SAFETY: the descriptor is the open socket's, and the buffer is one byte that
+                // lives through the call.
+                let n = unsafe {
+                    libc::recv(r.get_ref().as_raw_fd(), (&raw mut b).cast(), 1, libc::MSG_PEEK | libc::MSG_DONTWAIT)
+                };
+                if n < 0 {
+                    let e = std::io::Error::last_os_error().kind();
+                    if matches!(e, std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted) {
+                        return;
+                    }
+                }
+                if n <= 0 {
+                    return self.closed(None);
+                }
+            }
+            let _ = r.get_ref().set_read_timeout(Some(Duration::from_secs(1)));
+            let line = read_line(r, MAX_LINE).and_then(|l| serde_json::from_str::<Value>(&l).ok());
+            let why = line.as_ref().and_then(|v| v.get("closed")).and_then(Value::as_str).map(str::to_string);
+            // Anything else out of turn is a connection out of step: dropped, and made again.
+            self.closed(why.as_deref());
+        }
+
         fn ask(&mut self, mut msg: Value) -> Result<Value, String> {
             self.connect()?;
             self.next += 1;
@@ -675,19 +725,82 @@ mod unix {
                     Err(NOT_LIVE.into())
                 }
                 Some(why) => {
-                    self.conn = None;
-                    match why {
-                        "stopped" => self.gone = Some(STOPPED),
-                        "regenerated" => self.gone = Some(REFUSED),
-                        _ => {}
-                    }
+                    self.closed(Some(why));
                     Err(self.gone.unwrap_or(NOT_LIVE).into())
                 }
             }
         }
+    }
+
+    /// The background thread: keep a connection open until the server ends or is turned
+    /// away for good. Says nothing: a window that is not open is the normal case.
+    fn keep(link: std::sync::Weak<Mutex<Link>>) {
+        let mut wait = FIRST_RETRY;
+        let mut next_try = std::time::Instant::now();
+        loop {
+            let Some(l) = link.upgrade() else { return };
+            {
+                let mut l = l.lock().unwrap();
+                if l.gone.is_some() {
+                    return;
+                }
+                if l.conn.is_some() {
+                    l.check();
+                    wait = FIRST_RETRY;
+                    next_try = std::time::Instant::now();
+                } else if std::time::Instant::now() >= next_try {
+                    if l.connect().is_ok() {
+                        wait = FIRST_RETRY;
+                    } else {
+                        next_try = std::time::Instant::now() + wait;
+                        wait = (wait * 2).min(MAX_RETRY);
+                    }
+                }
+            }
+            drop(l);
+            std::thread::sleep(TICK);
+        }
+    }
+
+    impl Remote {
+        pub fn new(dir: PathBuf) -> Remote {
+            let link = Link { dir, client: "Agent".into(), token: None, conn: None, gone: None, next: 0 };
+            Remote { link: Arc::new(Mutex::new(link)), started: false }
+        }
+
+        /// Connect now, and keep connecting in the background (see [`Remote`]). Once.
+        pub fn start(&mut self) {
+            if std::mem::replace(&mut self.started, true) {
+                return;
+            }
+            let weak = Arc::downgrade(&self.link);
+            let _ = std::thread::Builder::new().name("vxr-live-link".into()).spawn(move || keep(weak));
+        }
+
+        /// Whether a connection is open now.
+        pub fn connected(&self) -> bool {
+            self.link.lock().unwrap().conn.is_some()
+        }
+    }
+
+    impl Drop for Remote {
+        fn drop(&mut self) {
+            if let Ok(mut l) = self.link.lock()
+                && let Some((_, w)) = l.conn.take()
+            {
+                let _ = w.shutdown(std::net::Shutdown::Both);
+            }
+        }
+    }
+
+    impl LiveLink for Remote {
+        fn ask(&mut self, msg: Value) -> Result<Value, String> {
+            self.link.lock().unwrap().ask(msg)
+        }
 
         fn set_client(&mut self, name: String) {
-            self.client = name;
+            self.link.lock().unwrap().client = name;
+            self.start();
         }
     }
 }

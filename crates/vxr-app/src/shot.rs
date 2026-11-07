@@ -6975,10 +6975,11 @@ fn agents_live(dir: &Path) -> Result<(), String> {
         let h = s.ed.height as f32;
         s.ed.cam.pan(-420.0, 0.0, h);
         s.live_frames(&mut live, 2);
-        let mut claude = LiveAgent::new(&sock_dir, "claude-code");
-        let (t, e) = s.agent_call(&mut live, &mut claude, "scene_summary", serde_json::json!({}));
+        let mut early = LiveAgent::new(&sock_dir, "claude-code");
+        let (t, e) = s.agent_call(&mut live, &mut early, "scene_summary", serde_json::json!({}));
         check(e && t == NOT_LIVE, "off by default: an agent is told how to turn it on".into())?;
         check(!sock_dir.join(SOCKET).exists(), "no socket while off".into())?;
+        drop(early);
 
         s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
         s.frames_with(1, vec![egui::Event::Text("terminal agents".into())]);
@@ -7006,6 +7007,24 @@ fn agents_live(dir: &Path) -> Result<(), String> {
         check(
             mode(sock_dir.clone()) == 0o700 && mode(sock_dir.join(TOKEN)) == 0o600,
             "the folder and the token file are the user's only (700, 600)".into(),
+        )?;
+        // An agent session that opens connects by itself: listed and idle, with no tool call.
+        let mut claude = LiveAgent::new(&sock_dir, "claude-code");
+        let start = std::time::Instant::now();
+        while s.ed.ui.agents.clients.is_empty() && start.elapsed() < std::time::Duration::from_secs(8) {
+            s.live_frames(&mut live, 1);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        s.live_frames(&mut live, 2);
+        let chip = s.ed.ui.agent_chip_text(s.ed.ctx.input(|i| i.time));
+        let conn = s.ed.ui.agents.clients.first().map_or(0, |c| c.0);
+        check(
+            s.ed.ui.agents.clients.iter().map(|c| c.1.as_str()).eq(["Claude Code"])
+                && s.ed.ui.hits.contains_key(&format!("agents-dot-{conn}"))
+                && !s.ed.ui.hits.contains_key("agents-copy")
+                && chip.starts_with("Claude Code connected")
+                && chip.contains("idle"),
+            format!("an opened agent session connects by itself and shows idle, before any call ({chip})"),
         )?;
 
         // Each call applies at once, as one undo step named after the agent.
@@ -7541,6 +7560,21 @@ fn agents_bridge(dir: &Path) -> Result<(), String> {
             paired && s.ed.ui.agents.error.is_none() && sock_dir.join(SOCKET).exists() && bridge.paired(),
             "the right code pairs the tab, and the bridge opens the agents' socket".into(),
         )?;
+        // The session that started before the tab paired connects by itself, with no tool
+        // call: step 3 turns green with an idle row.
+        let idle = (0..5).any(|_| s.bridge_until(&mut page, &mut script, |s| !s.ed.ui.agents.clients.is_empty()));
+        s.bridge_frames(&mut page, &mut script, 3);
+        let chip = s.ed.ui.agent_chip_text(s.ed.ctx.input(|i| i.time));
+        let conn = s.ed.ui.agents.clients.first().map_or(0, |c| c.0);
+        check(
+            idle && s.ed.ui.agents.clients.iter().map(|c| c.1.as_str()).eq(["Claude Code"])
+                && s.ed.ui.hits.contains_key(&format!("agents-dot-{conn}"))
+                && chip.starts_with("Claude Code connected")
+                && chip.contains("idle"),
+            format!("through the bridge, the open session connects by itself and shows idle ({chip})"),
+        )?;
+        s.bridge_frames(&mut page, &mut script, 40);
+        s.save_png(&dir.join("app-2x-agents-web-idle.png"))?;
         let calls = [
             ("box", serde_json::json!({"from": [9, 7, 8], "to": [12, 9, 8], "slot": 50}), "Claude Code: box 12 voxels"),
             ("palette_set", serde_json::json!({"slot": 50, "hex": "#3A7BD9"}), "Claude Code: palette_set slot 50"),
