@@ -30,8 +30,8 @@ const NO_SCENE: &str = "no scene open: call open or new_scene first";
 const NO_RENDER: &str = "kind render is the path-traced picture, made on the GPU by the vxr window, which files mode does not use: ask the user to open the file in vxr and connect vxr mcp --live, or call look for a quick picture";
 
 /// Tools that only read the scene.
-pub const READ_ONLY: [&str; 7] =
-    ["list_files", "scene_summary", "get_voxels", "slice", "find_parts", "look", "review_status"];
+pub const READ_ONLY: [&str; 8] =
+    ["list_files", "scene_summary", "get_voxels", "slice", "find_parts", "look", "review_status", "connect"];
 
 /// The files tools, as `(name, description, input schema)`.
 fn own_tools() -> Vec<(&'static str, String, Value)> {

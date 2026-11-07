@@ -103,7 +103,16 @@ struct Agent(Server<Live<Remote>>);
 
 impl Agent {
     fn new(dir: &Dir, client: &str) -> Agent {
-        let mut server = Server::with(Live(Remote::new(dir.0.clone())));
+        Agent::with(Remote::new(dir.0.clone()), client)
+    }
+
+    /// `vxr mcp --live --connect-at-start`, as `vxr claude` runs it.
+    fn at_start(dir: &Dir, client: &str) -> Agent {
+        Agent::with(Remote::connecting_at_start(dir.0.clone()), client)
+    }
+
+    fn with(remote: Remote, client: &str) -> Agent {
+        let mut server = Server::with(Live(remote));
         let init = json!({"jsonrpc": "2.0", "id": 0, "method": "initialize",
             "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": client, "version": "1"}}});
         server.handle(&init).unwrap();
@@ -444,15 +453,19 @@ fn the_code_field_reads_one_character_as_normalize_code_reads_a_code() {
 fn an_idle_agent_reaches_the_page_through_the_bridge_whichever_starts_first() {
     let dir = Dir::new("idle");
     let (b, _log) = bridge(&dir, false);
-    // The agent session starts before the tab pairs: no socket yet.
-    let agent = Agent::new(&dir, "claude-code");
+    // A session started to connect (`vxr claude`) starts before the tab pairs: no socket yet.
+    let agent = Agent::at_start(&dir, "claude-code");
     let mut page = paired(&b);
     // It connects by itself once the bridge hosts the socket, with no tool call.
     let c = clients(&mut page, &[], 1);
     assert_eq!(c[0][1], "Claude Code");
-    // A second session that starts after the pairing shows as its own row.
-    let other = Agent::new(&dir, "claude-code");
+    // A second one that starts after the pairing shows as its own row.
+    let other = Agent::at_start(&dir, "claude-code");
     assert_eq!(clients(&mut page, &[], 2).len(), 2);
-    drop((agent, other));
+    // A quiet session (`vxr mcp --live` alone) joins when it calls connect, as /vxr does.
+    let mut quiet = Agent::new(&dir, "codex");
+    assert_eq!(quiet.call("connect", json!({})), (crate::live::CONNECTED.into(), false));
+    assert!(clients(&mut page, &[], 3).iter().any(|c| c[1] == "Codex"));
+    drop((agent, other, quiet));
     assert!(clients(&mut page, &[], 0).is_empty(), "closed sessions leave the list");
 }

@@ -28,28 +28,33 @@ pub use protocol::{Backend, Reply, Server, serve};
 
 use std::path::PathBuf;
 
-const USAGE: &str = "usage: vxr mcp --root <dir> | vxr mcp --live";
+const USAGE: &str = "usage: vxr mcp --root <dir> | vxr mcp --live [--connect-at-start]";
 
-const HELP: &str = r#"usage: vxr mcp --root <dir> | vxr mcp --live
+const HELP: &str = r#"usage: vxr mcp --root <dir> | vxr mcp --live [--connect-at-start]
 
 Serves MCP on stdin and stdout for a terminal agent such as Claude Code.
 
-  --root <dir>  open, edit and save the .vox files under <dir>
-  --live        edit the scene open in the vxr window, once the assistant's Agents tab
-                (Cmd-K "Terminal agents (MCP)…") allows it, or in a vxr.jrnxf.co tab
-                paired with `vxr bridge`
+  --root <dir>        open, edit and save the .vox files under <dir>
+  --live              edit the scene open in the vxr window, once the assistant's Agents tab
+                      (Cmd-K "Terminal agents (MCP)…") allows it, or in a vxr.jrnxf.co tab
+                      paired with `vxr bridge`. It connects when the session asks: its
+                      connect tool (/vxr in Claude Code) or its first edit.
+  --connect-at-start  with --live: connect as soon as the session starts (vxr claude)
 
-`vxr pair claude` (or codex) registers both with the agent, and runs `vxr bridge` for the browser."#;
+`vxr pair claude` (or codex) registers both with the agent, and runs `vxr bridge` for the browser.
+`vxr claude` starts Claude Code already connected to the window."#;
 
 /// `vxr mcp`'s arguments (after the subcommand): serve on stdin and stdout until it closes.
 pub fn run(args: &[String]) -> Result<(), String> {
     let mut root = None;
     let mut live = false;
+    let mut at_start = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--root" => root = Some(it.next().ok_or(USAGE)?.clone()),
             "--live" => live = true,
+            "--connect-at-start" => at_start = true,
             "-h" | "--help" => {
                 println!("{HELP}");
                 return Ok(());
@@ -61,7 +66,10 @@ pub fn run(args: &[String]) -> Result<(), String> {
         if root.is_some() {
             return Err(format!("--live edits the open window, not files: give one of them; {USAGE}"));
         }
-        return serve_live();
+        return serve_live(at_start);
+    }
+    if at_start {
+        return Err(format!("--connect-at-start is for --live; {USAGE}"));
     }
     let root = root.ok_or(USAGE)?;
     let root = std::fs::canonicalize(&root).map_err(|e| format!("{root}: {e}"))?;
@@ -72,15 +80,16 @@ pub fn run(args: &[String]) -> Result<(), String> {
 }
 
 #[cfg(unix)]
-fn serve_live() -> Result<(), String> {
+fn serve_live(at_start: bool) -> Result<(), String> {
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
-    let server = Server::with(live::Live(live::Remote::new(live::dir())));
+    let remote = if at_start { live::Remote::connecting_at_start(live::dir()) } else { live::Remote::new(live::dir()) };
+    let server = Server::with(live::Live(remote));
     serve(server, stdin.lock(), stdout.lock()).map_err(|e| e.to_string())
 }
 
 #[cfg(not(unix))]
-fn serve_live() -> Result<(), String> {
+fn serve_live(_: bool) -> Result<(), String> {
     Err("live mode is not built for this platform yet; use files mode (--root <dir>)".into())
 }
 

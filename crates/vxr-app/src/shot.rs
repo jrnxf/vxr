@@ -6736,8 +6736,18 @@ struct LiveAgent(vxr_mcp::Server<vxr_mcp::live::Live<vxr_mcp::live::Remote>>);
 
 #[cfg(unix)]
 impl LiveAgent {
+    /// `vxr mcp --live`, which connects only when asked (`connect`, which `/vxr` calls, or a
+    /// first call).
     fn new(dir: &Path, client: &str) -> LiveAgent {
-        let remote = vxr_mcp::live::Remote::new(dir.to_path_buf());
+        LiveAgent::with(vxr_mcp::live::Remote::new(dir.to_path_buf()), client)
+    }
+
+    /// `vxr mcp --live --connect-at-start`, as `vxr claude` runs it.
+    fn at_start(dir: &Path, client: &str) -> LiveAgent {
+        LiveAgent::with(vxr_mcp::live::Remote::connecting_at_start(dir.to_path_buf()), client)
+    }
+
+    fn with(remote: vxr_mcp::live::Remote, client: &str) -> LiveAgent {
         let mut server = vxr_mcp::Server::with(vxr_mcp::live::Live(remote));
         let init = serde_json::json!({"jsonrpc": "2.0", "id": 0, "method": "initialize",
             "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": client, "version": "1"}}});
@@ -7008,8 +7018,23 @@ fn agents_live(dir: &Path) -> Result<(), String> {
             mode(sock_dir.clone()) == 0o700 && mode(sock_dir.join(TOKEN)) == 0o600,
             "the folder and the token file are the user's only (700, 600)".into(),
         )?;
-        // An agent session that opens connects by itself: listed and idle, with no tool call.
+        // A Claude Code session opened anywhere stays quiet: not listed, and step 3 says how
+        // to connect one (`vxr claude`, or `/vxr`).
         let mut claude = LiveAgent::new(&sock_dir, "claude-code");
+        let start = std::time::Instant::now();
+        while start.elapsed() < std::time::Duration::from_millis(1500) {
+            s.live_frames(&mut live, 1);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        check(
+            s.ed.ui.agents.clients.is_empty() && s.ed.ui.hits.contains_key("agents-copy"),
+            "a session that did not ask to connect is not listed, and step 3 shows vxr claude".into(),
+        )?;
+        s.frames(30);
+        s.save_png(&dir.join("app-2x-agents-connect.png"))?;
+        // `/vxr` calls connect: listed and idle, with no edit.
+        let (t, e) = s.agent_call(&mut live, &mut claude, "connect", serde_json::json!({}));
+        check(!e && t == vxr_mcp::live::CONNECTED, format!("/vxr's connect tool connects the session ({t})"))?;
         let start = std::time::Instant::now();
         while s.ed.ui.agents.clients.is_empty() && start.elapsed() < std::time::Duration::from_secs(8) {
             s.live_frames(&mut live, 1);
@@ -7024,7 +7049,7 @@ fn agents_live(dir: &Path) -> Result<(), String> {
                 && !s.ed.ui.hits.contains_key("agents-copy")
                 && chip.starts_with("Claude Code connected")
                 && chip.contains("idle"),
-            format!("an opened agent session connects by itself and shows idle, before any call ({chip})"),
+            format!("a session connected by /vxr shows idle, before any edit ({chip})"),
         )?;
 
         // Each call applies at once, as one undo step named after the agent.
@@ -7520,7 +7545,8 @@ fn agents_bridge(dir: &Path) -> Result<(), String> {
                 && !s.ed.ui.hits.contains_key("agents-disconnect"),
             "the browser's tab says to run vxr bridge and takes its code, not paired".into(),
         )?;
-        let mut claude = LiveAgent::new(&sock_dir, "claude-code");
+        // A session `vxr claude` started, which connects at start.
+        let mut claude = LiveAgent::at_start(&sock_dir, "claude-code");
         let (t, e) = s.bridge_call(&mut page, &mut script, &mut claude, "scene_summary", serde_json::json!({}));
         check(e && t == NOT_LIVE && !sock_dir.join(SOCKET).exists(), "before pairing an agent finds nothing".into())?;
 
@@ -7560,8 +7586,8 @@ fn agents_bridge(dir: &Path) -> Result<(), String> {
             paired && s.ed.ui.agents.error.is_none() && sock_dir.join(SOCKET).exists() && bridge.paired(),
             "the right code pairs the tab, and the bridge opens the agents' socket".into(),
         )?;
-        // The session that started before the tab paired connects by itself, with no tool
-        // call: step 3 turns green with an idle row.
+        // The session that started before the tab paired connects by itself once it pairs,
+        // with no further call: step 3 turns green with an idle row.
         let idle = (0..5).any(|_| s.bridge_until(&mut page, &mut script, |s| !s.ed.ui.agents.clients.is_empty()));
         s.bridge_frames(&mut page, &mut script, 3);
         let chip = s.ed.ui.agent_chip_text(s.ed.ctx.input(|i| i.time));

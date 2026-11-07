@@ -1,15 +1,16 @@
 // The browser check's terminal agent (crates/vxr-web/check): runs `<vxr> mcp --live` as Claude
 // Code would (MCP on its stdin and stdout), makes the calls given as JSON, and prints each
 // call's result as one JSON line (with its picture's type, for look). A string entry "wait <file>" waits for that file first, so
-// the check can act in the page between two calls of the same server.
+// the check can act in the page between two calls of the same server. Any further arguments go
+// to `vxr mcp --live` (`--connect-at-start` makes the session `vxr claude` starts).
 //
-//   node check-agent.js <vxr binary> '[["scene_summary", {}], "wait /tmp/go", ["box", {...}]]'
+//   node check-agent.js <vxr binary> '[["scene_summary", {}], "wait /tmp/go", ["box", {...}]]' [flags...]
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const readline = require('node:readline');
 
 const [bin, calls] = [process.argv[2], JSON.parse(process.argv[3])];
-const server = spawn(bin, ['mcp', '--live'], { stdio: ['pipe', 'pipe', 'inherit'] });
+const server = spawn(bin, ['mcp', '--live', ...process.argv.slice(4)], { stdio: ['pipe', 'pipe', 'inherit'] });
 const waiting = new Map();
 readline.createInterface({ input: server.stdout }).on('line', (line) => {
   const m = JSON.parse(line);

@@ -37,6 +37,7 @@ pub const TOKEN: &str = "live.token";
 
 pub const INSTRUCTIONS: &str = "vxr live mode edits the scene open in the user's vxr window, while they watch. \
 Coordinates are world cells [x, y, z]: x right, y up, z toward the viewer. \
+When the user types /vxr or asks you to join vxr, call connect. \
 Call scene_summary first. A file with several objects shows as a world: the world tools move, copy, group, hide, layer, rename and delete its objects by node from the summary and add, rename and hide its layers, and edit_object opens one object's model for voxel edits (show_world shows the world again). \
 Every edit applies at once in the window as one undo step the user sees and can take back; when the user asks you to take something back, call undo. \
 When the user turns on \"Review every agent change\", edits wait as a preview instead: a result says so, nothing is in the scene until the user applies it, and review_status (or your next call) tells you whether they applied or discarded it. \
@@ -48,7 +49,7 @@ const UNDO: &str = "Take back your last edit in the vxr window (each edit is one
 const REDO: &str = "Bring back your edit that undo took back last in the vxr window, as Cmd-Shift-Z would, as long as nothing was edited or undone since; while your edits wait for the user's review, it puts your last dropped one back in the preview.";
 const DONE: &str = "Say you are finished, with a one-line summary. The user saves the file in vxr. When you can predict the result of your last edits, call done in the same answer after them instead of waiting for their results.";
 
-/// The tools in live mode: one per `vxr-ops` operation, `edit_object`, `show_world`,
+/// The tools in live mode: `connect`, one per `vxr-ops` operation, `edit_object`, `show_world`,
 /// `review_status`, `render_settings` and `export`, and `save` and `new_scene`, which run the
 /// window's own Save and New scene.
 /// No open or file list: the user picks files in the app's dialog.
@@ -88,6 +89,7 @@ fn render_settings_tool() -> (&'static str, String, Value) {
 
 fn own_tools() -> Vec<(&'static str, String, Value)> {
     vec![
+        connect_tool(),
         edit_object_tool(),
         show_world_tool(),
         review_status_tool(),
@@ -104,6 +106,17 @@ fn own_tools() -> Vec<(&'static str, String, Value)> {
             json!({"type": "object", "properties": {}, "additionalProperties": false}),
         ),
     ]
+}
+
+/// The tool `/vxr` calls: it connects this session to the window and keeps it connected.
+pub const CONNECT: &str = "connect";
+
+fn connect_tool() -> (&'static str, String, Value) {
+    (
+        CONNECT,
+        "Connect this session to the vxr window now, so the user sees it in the Agents tab, and keep it connected. Call it when the user types /vxr or asks you to join vxr. Edit tools connect by themselves too. It changes nothing in the scene.".into(),
+        json!({"type": "object", "properties": {}, "additionalProperties": false}),
+    )
 }
 
 /// The window's own Save and New scene, for an agent.
@@ -163,6 +176,9 @@ pub fn client_name(raw: &str) -> String {
 pub const NOT_LIVE: &str = "vxr is not open, or live editing is off. Ask the user to open vxr, press Cmd-K, choose \"Terminal agents (MCP)…\" and turn on \"Allow agents to edit this window\"; in the browser editor at vxr.jrnxf.co, to run `vxr bridge` in a terminal and pair the tab there with the code it prints. Then call again.";
 pub const STOPPED: &str = "The user pressed Stop in vxr: this server will not edit the window again. Stop here and tell the user; they can reconnect it (in Claude Code, /mcp) when they want you to edit again.";
 pub const FULL: &str = "Too many agents are connected to vxr at once (16). This server connects by itself once one of them leaves; call again then.";
+/// What the `connect` tool answers: connected, or not yet but trying.
+pub const CONNECTED: &str = "Connected to the vxr window: the user sees this session in the Agents tab. Call scene_summary to see the scene, then edit when the user asks.";
+pub const WAITING: &str = "vxr is not open, or live editing is off, so this session is not connected yet. It keeps trying and connects by itself once the user opens vxr and, in the Agents tab (Cmd-K \"Terminal agents (MCP)…\"), turns on \"Allow agents to edit this window\" (in the browser editor, pairs the tab with `vxr bridge`). Tell the user that in one line.";
 pub const REFUSED: &str = "vxr refused this server's pairing token: the user made a new one. Restart this MCP server (in Claude Code, /mcp) to pair again.";
 
 /// The live server's tools and resources, each call forwarded through `L` to the app.
@@ -182,6 +198,14 @@ impl<L: LiveLink> Backend for Live<L> {
     }
 
     fn call(&mut self, name: &str, args: &Value) -> Result<Reply, String> {
+        if name == CONNECT {
+            // Answered here, not by the app: it only opens the connection.
+            return match self.0.connect() {
+                Ok(()) => Ok(Reply::from(CONNECTED.to_string())),
+                Err(e) if e == NOT_LIVE => Ok(Reply::from(WAITING.to_string())),
+                Err(e) => Err(e),
+            };
+        }
         let r = self.0.ask(json!({"call": name, "args": args}))?;
         let text = r.get("text").and_then(Value::as_str).unwrap_or("").to_string();
         if r.get("isError").and_then(Value::as_bool) == Some(true) {
@@ -215,6 +239,8 @@ impl<L: LiveLink> Backend for Live<L> {
 pub trait LiveLink {
     fn ask(&mut self, msg: Value) -> Result<Value, String>;
     fn set_client(&mut self, name: String);
+    /// Connect now and stay connected (the `connect` tool): an error says why not.
+    fn connect(&mut self) -> Result<(), String>;
 }
 
 #[cfg(unix)]
@@ -597,16 +623,19 @@ mod unix {
         }
     }
 
-    /// `vxr mcp --live`'s end. Once the client has said its name ([`Remote::start`], on
-    /// `initialize` or the first request's `_meta`), a thread of its own connects at once and,
-    /// while the window or the bridge is not there yet, tries again quietly on a backoff
-    /// ([`FIRST_RETRY`] doubling to [`MAX_RETRY`]), so the user sees the session in the Agents
-    /// tab before it edits and either side can start first. A request connects too if no
-    /// connection is open. It connects again after the app turned live editing off and on,
+    /// `vxr mcp --live`'s end. It stays quiet until the session asks to connect: the
+    /// `connect` tool (`/vxr`), its first request, or, for a server made with
+    /// [`Remote::connecting_at_start`], the client saying its name (`initialize` or the first
+    /// request's `_meta`). From then on ([`Remote::start`]) a thread of its own connects at
+    /// once and, while the window or the bridge is not there yet, tries again quietly on a
+    /// backoff ([`FIRST_RETRY`] doubling to [`MAX_RETRY`]), so the user sees the session in the
+    /// Agents tab before it edits and either side can start first. A request connects too if
+    /// no connection is open. It connects again after the app turned live editing off and on,
     /// but never after Stop or a new token.
     pub struct Remote {
         link: Arc<Mutex<Link>>,
         started: bool,
+        at_start: bool,
     }
 
     /// First wait before trying to connect again, doubled after each failure up to
@@ -763,9 +792,19 @@ mod unix {
     }
 
     impl Remote {
+        /// A server that connects only when asked: on [`connect`](Remote::connect) (the
+        /// `connect` tool, which `/vxr` calls) or its first request.
         pub fn new(dir: PathBuf) -> Remote {
             let link = Link { dir, client: "Agent".into(), token: None, conn: None, gone: None, next: 0 };
-            Remote { link: Arc::new(Mutex::new(link)), started: false }
+            Remote { link: Arc::new(Mutex::new(link)), started: false, at_start: false }
+        }
+
+        /// A server that connects as soon as the client has said its name (`vxr mcp --live
+        /// --connect-at-start`, which only `vxr claude` asks for).
+        pub fn connecting_at_start(dir: PathBuf) -> Remote {
+            let mut r = Remote::new(dir);
+            r.at_start = true;
+            r
         }
 
         /// Connect now, and keep connecting in the background (see [`Remote`]). Once.
@@ -795,12 +834,21 @@ mod unix {
 
     impl LiveLink for Remote {
         fn ask(&mut self, msg: Value) -> Result<Value, String> {
+            // A request is the session asking to connect: it stays connected from now on.
+            self.start();
             self.link.lock().unwrap().ask(msg)
         }
 
         fn set_client(&mut self, name: String) {
             self.link.lock().unwrap().client = name;
+            if self.at_start {
+                self.start();
+            }
+        }
+
+        fn connect(&mut self) -> Result<(), String> {
             self.start();
+            self.link.lock().unwrap().connect()
         }
     }
 }
