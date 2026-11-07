@@ -210,6 +210,16 @@ else
   }" | unwrap)"
   expect "a wrong code turns the step red, and the page pairs with the code vxr bridge printed" "$paired" '["Wrong",true,null]'
   [ -S "$VXR_LIVE_DIR/live.sock" ] && pass "vxr bridge opens the agents' socket once paired" || fail "vxr bridge opens the agents' socket once paired" "no socket"
+  # An agent session that makes no call connects by itself: step 3 turns green with an idle row.
+  ./dev node "$here/check-agent.js" "$vxr" "[\"wait $fixtures/idle-done\"]" >/dev/null &
+  idler=$!
+  idle="$(axi eval "async () => { for (let i = 0; i < 400 && !JSON.parse(window.vxr.state()).agents.clients.length; i++) await window.__frames(3); await window.__frames(4); const a = JSON.parse(window.vxr.state()).agents; return JSON.stringify([a.clients.map(c => c[1]), a.calls.length, a.chip.replace(/ · idle .*/, ' · idle'), window.vxr.hit('agents-dot-' + (a.clients[0] || [0])[0]).length]) }" | unwrap)"
+  expect "an open agent session shows as connected and idle before any call" "$idle" '[["Claude Code"],0,"Claude Code connected · idle",2]'
+  axi screenshot "$shots/web-agent-idle.png" >/dev/null
+  touch "$fixtures/idle-done"
+  wait "$idler" || true
+  left="$(axi eval "async () => { for (let i = 0; i < 200 && JSON.parse(window.vxr.state()).agents.clients.length; i++) await window.__frames(3); return JSON.stringify(JSON.parse(window.vxr.state()).agents.clients) }" | unwrap)"
+  expect "the session leaves the list when it ends" "$left" '[]'
   before="$(axi eval "() => JSON.stringify(JSON.parse(window.vxr.state()).voxels)" | unwrap)"
   # One agent: a box and two colours in one palette_set, then (after the page's Stop) another
   # call that must be refused.

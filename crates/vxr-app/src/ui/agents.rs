@@ -560,8 +560,12 @@ impl Tab {
         } else {
             p.circle_filled(c, 3.5, tone.color());
         }
-        p.text(pos2(r.left() + 26.0, r.center().y), Align2::LEFT_CENTER, text, sans_medium(12.5), th().text);
-        p.text(pos2(r.right() - 12.0, r.center().y), Align2::RIGHT_CENTER, right, mono(11.0), th().faint);
+        let t = p.text(pos2(r.left() + 26.0, r.center().y), Align2::LEFT_CENTER, text, sans_medium(12.5), th().text);
+        // The time on the right gives way to a long status rather than run into it.
+        let g = p.layout_no_wrap(right.to_string(), mono(11.0), th().faint);
+        if t.right() + 12.0 <= r.right() - 12.0 - g.size().x {
+            p.galley(pos2(r.right() - 12.0 - g.size().x, r.center().y - g.size().y / 2.0), g, th().faint);
+        }
         ui.add_space(8.0);
     }
 
@@ -797,7 +801,10 @@ impl Tab {
         };
         let edits = self.v.edits.iter().filter(|e| e.conn == conn).count();
         let calls = self.v.made.get(i).copied().unwrap_or(0);
-        let r = self.block(ui, 44.0);
+        // An agent that has not called yet says when it came once, in its "idle" status: a
+        // "since" line under it would only repeat that.
+        let meta = calls > 0 || edits > 0;
+        let r = self.block(ui, if meta { 44.0 } else { 24.0 });
         let r = Rect::from_min_max(pos2(r.left() + 30.0, r.top()), r.max);
         let p = ui.painter().clone();
         let c = pos2(r.left() + 4.0, r.top() + 11.0);
@@ -827,6 +834,9 @@ impl Tab {
             self.actions.push(Action::StopAgent(conn));
         }
         self.hits.push((id, b));
+        if !meta {
+            return;
+        }
         let mut meta = format!("since {}", ago(self.now - since));
         if calls > 0 {
             meta += &format!(" \u{b7} {calls} call{}", if calls == 1 { "" } else { "s" });
@@ -1247,9 +1257,11 @@ impl Tab {
         }
         // Connect an agent.
         let (sn, step_n) = if web { (s3, 3) } else { (s2, 2) };
+        // Green only for a session that is really connected (it connects by itself once it
+        // opens, `vxr_mcp::live::Remote`), never for `vxr pair` having registered it.
         let title = match clients {
-            0 => "Pair an agent".to_string(),
-            1 => "Agent connected".to_string(),
+            0 => "Open Claude Code".to_string(),
+            1 => format!("{} connected", v.clients[0].1),
             n => format!("{n} agents connected"),
         };
         let first = v.times.iter().map(|t| t.0).fold(f64::MAX, f64::min);
@@ -1261,8 +1273,12 @@ impl Tab {
             St::Active => {
                 // The browser's first step already ran `vxr pair claude`, which registered the
                 // agent: only the desktop app still shows the line.
-                let note =
-                    Self::text_h(ui, "Then start Claude Code. It shows up here when it connects.", sans(11.5), bw);
+                let say = if web {
+                    "It connects by itself and shows up here, idle until it edits."
+                } else {
+                    "Run this once, then open Claude Code. It connects by itself."
+                };
+                let note = Self::text_h(ui, say, sans(11.5), bw);
                 let line = if web { 0.0 } else { 30.0 + 8.0 };
                 let b = self.step(ui, sn, step_n, &title, None, true, line + note.size().y);
                 if !web {

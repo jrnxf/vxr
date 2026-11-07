@@ -146,7 +146,7 @@ fn a_call_goes_over_the_socket_and_back() {
     assert_eq!(token(&dir).len(), 64);
 
     let mut a = Agent::new(&dir, "claude-code");
-    // Listing tools needs no window: the app is reached on the first call.
+    // Listing tools needs no window.
     let r = a.request("tools/list", json!({}));
     let names: Vec<&str> =
         r["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
@@ -162,7 +162,8 @@ fn a_call_goes_over_the_socket_and_back() {
     for files_only in ["list_files", "open"] {
         assert!(!names.contains(&files_only), "{files_only} is files mode only");
     }
-    assert!(host.clients().is_empty());
+    // The session connects by itself, before any call (see `an_agent_session_shows_...`).
+    wait_for(|| host.clients().len() == 1);
 
     let (t, e) = tool(&host, &mut a, "paint", json!({"slot": 3}));
     assert!(!e);
@@ -213,8 +214,9 @@ fn a_wrong_or_missing_token_is_refused() {
     assert_eq!(token(&dir), wrong, "a token file that holds a token is kept");
     let mut b = Agent::new(&dir, "codex");
     assert!(!tool(&host, &mut b, "scene_summary", json!({})).1, "a new server reads the file");
-    // The old server finds its connection closed, then is refused when it connects again.
-    assert_eq!(tool(&host, &mut a, "scene_summary", json!({})), (NOT_LIVE.into(), true));
+    // The old server finds its connection closed and, connecting again by itself, is
+    // refused for good.
+    wait_for(|| tool(&host, &mut a, "scene_summary", json!({})) == (REFUSED.into(), true));
     assert_eq!(tool(&host, &mut a, "scene_summary", json!({})), (REFUSED.into(), true));
 }
 
@@ -776,4 +778,72 @@ fn answering_with<T: Send>(host: &Host, answer: impl Fn(crate::live::Request), f
         }
         h.join().unwrap()
     })
+}
+
+/// Waits up to `secs` for `f`, for the background connection's retries.
+fn wait_long(secs: u64, mut f: impl FnMut() -> bool) -> bool {
+    let start = Instant::now();
+    while !f() {
+        if start.elapsed() > Duration::from_secs(secs) {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    true
+}
+
+#[test]
+fn an_agent_session_shows_as_connected_before_any_tool_call() {
+    let dir = Dir::new("idle");
+    let host = Host::start(&dir.0).unwrap();
+    let a = Agent::new(&dir, "claude-code");
+    let b = Agent::new(&dir, "claude-code");
+    // `initialize` alone, no tool call: both sessions are listed, by the client's name.
+    assert!(wait_long(5, || host.clients().len() == 2), "the idle sessions connect: {:?}", host.clients());
+    assert!(host.clients().iter().all(|c| c.1 == "Claude Code"), "{:?}", host.clients());
+    assert!(host.poll().is_empty(), "connecting asks the app nothing");
+    drop((a, b));
+}
+
+#[test]
+fn an_agent_started_before_the_window_connects_once_it_listens() {
+    let dir = Dir::new("later");
+    let mut a = Agent::new(&dir, "codex");
+    std::thread::sleep(Duration::from_millis(300));
+    let host = Host::start(&dir.0).unwrap();
+    assert!(wait_long(8, || host.clients().len() == 1), "the session connects by itself");
+    assert_eq!(host.clients()[0].1, "Codex");
+    // Off and on again: it comes back by itself too.
+    drop(host);
+    let host = Host::start(&dir.0).unwrap();
+    assert!(wait_long(8, || host.clients().len() == 1), "it reconnects after off and on");
+    assert!(!tool(&host, &mut a, "paint", json!({})).1);
+}
+
+#[test]
+fn a_stopped_idle_agent_stays_stopped() {
+    let dir = Dir::new("istop");
+    let host = Host::start(&dir.0).unwrap();
+    let mut a = Agent::new(&dir, "claude-code");
+    assert!(wait_long(5, || host.clients().len() == 1));
+    host.stop(host.clients()[0].0);
+    // It does not come back while idle.
+    assert!(!wait_long(2, || host.clients().len() == 1), "a stopped session never reconnects");
+    assert_eq!(tool(&host, &mut a, "erase", json!({})), (STOPPED.into(), true));
+}
+
+#[test]
+fn agents_over_the_cap_wait_without_being_turned_away_for_good() {
+    let dir = Dir::new("cap");
+    let host = Host::start(&dir.0).unwrap();
+    let mut agents: Vec<Agent> = (0..16).map(|_| Agent::new(&dir, "claude-code")).collect();
+    assert!(wait_long(8, || host.clients().len() == 16), "{}", host.clients().len());
+    let mut extra = Agent::new(&dir, "codex");
+    let (t, e) = tool(&host, &mut extra, "paint", json!({}));
+    assert!(e && t.contains("Too many") && t.contains("(16)"), "{t}");
+    // Once one leaves, the waiting session takes its place by itself.
+    let gone = agents.pop().unwrap();
+    drop(gone);
+    assert!(wait_long(10, || host.clients().iter().any(|c| c.1 == "Codex")), "{:?}", host.clients());
+    assert!(!tool(&host, &mut extra, "paint", json!({})).1);
 }
