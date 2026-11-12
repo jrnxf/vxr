@@ -6,6 +6,7 @@
 //! - [`editor::Editor`]: the scene on the GPU, the camera, the UI and the editing gestures,
 //!   independent of the window. The native host is `src/main.rs`.
 //! - [`ui::Hybrid`]: the Hybrid UI (direction D), drawn with egui.
+//! - [`demo`]: Help's demo tiles, scripted edits replayed into small looping renders.
 //! - [`color`]: hex, RGB and HSV for the palette editor.
 //! - `courier`: the desktop app's HTTPS calls to the vxr Worker for [`sync`].
 //! - [`files`]: OBJ export files, and a zip to download several files at once.
@@ -24,6 +25,7 @@ pub mod bridge;
 pub mod color;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod courier;
+pub mod demo;
 pub mod editor;
 pub mod files;
 pub mod fonts;

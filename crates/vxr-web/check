@@ -95,6 +95,13 @@ for scale in 1 2; do
   axi screenshot "$shots/web-${scale}x.png" >/dev/null
   echo "wrote $shots/web-${scale}x.png"
 done
+# Help open at 2x, in Neutral and Paper, its tiles part way through their demos.
+for theme in neutral paper; do
+  axi open "$url" >/dev/null
+  axi eval "async () => { for (let i = 0; i < 300 && !window.vxr; i++) await new Promise(r => setTimeout(r, 50)); window.vxr.set_theme('$theme'); document.getElementById('c').dispatchEvent(new KeyboardEvent('keydown', { key: 'F1', bubbles: true, cancelable: true })); await new Promise(r => setTimeout(r, 1500)); return 'ready' }" >/dev/null
+  axi screenshot "$shots/web-help-$theme.png" >/dev/null
+  echo "wrote $shots/web-help-$theme.png"
+done
 # The touch layout on an iPad-sized touch screen, landscape and portrait, Neutral and Paper:
 # a touch-first page starts in it.
 touch_results=""

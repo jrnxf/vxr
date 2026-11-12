@@ -305,6 +305,7 @@ fn run_steps(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
     check(s.ed.ui.cmdk.is_none(), "Escape closes it".into())?;
 
+    help(dir, &load)?;
     palette(&mut s, dir)?;
     brushes(dir)?;
     brush_size(dir)?;
@@ -6004,7 +6005,9 @@ fn frame_times(scene: &Path) -> Result<(), String> {
     let mut run = |s: &mut Shot, render: bool, editing: bool, orbit: bool| {
         s.ed.ui.show_render = render;
         s.frames(4);
-        if !editing {
+        // A pause lets the render corner sample; without the corner it would only let the GPU
+        // clock down, which swings the idle frame from about 2 to 11 ms.
+        if render && !editing {
             std::thread::sleep(std::time::Duration::from_millis(350));
         }
         let mut t = Vec::new();
@@ -6027,6 +6030,13 @@ fn frame_times(scene: &Path) -> Result<(), String> {
         t[t.len() / 2]
     };
     let off = run(&mut s, false, true, false);
+    // Help open and idle compares with Help closed and idle.
+    let off_idle = run(&mut s, false, false, false);
+    s.ed.ui.open_help();
+    let help = run(&mut s, false, true, false);
+    let help_idle = run(&mut s, false, false, false);
+    s.ed.ui.close_help();
+    let closed = run(&mut s, false, true, false);
     let on = run(&mut s, true, true, false);
     let idle = run(&mut s, true, false, false);
     let orbit = run(&mut s, true, true, true);
@@ -6049,6 +6059,11 @@ fn frame_times(scene: &Path) -> Result<(), String> {
          {full_orbit:.2} ms orbiting it; one 640x360 sample {ms:.2} ms ({})",
         if measured { "timestamps" } else { "assumed" }
     );
+    println!(
+        "info frame time with Help, island at 3024x1964 (median, CPU + GPU, no render corner): \
+         {off:.2} ms before opening it while editing, {off_idle:.2} ms idle, {help:.2} ms open while editing, \
+         {help_idle:.2} ms open and idle, {closed:.2} ms closed again while editing"
+    );
     check(
         current >= 1.0,
         format!(
@@ -6056,6 +6071,292 @@ fn frame_times(scene: &Path) -> Result<(), String> {
             current * 100.0
         ),
     )
+}
+
+/// Help: the top bar button, F1 and Cmd-K "Help" open it, Escape and its close button shut it,
+/// search filters the tiles, each tile plays its demo in a loop, Try closes Help and puts the
+/// user in that tool, and the shortcuts row opens the command list. Closed, Help marches
+/// nothing and asks for no frames. On touch and on a phone it fits the screen.
+fn help(dir: &Path, load: &dyn Fn() -> Result<(Scene, String), String>) -> Result<(), String> {
+    use vxr_app::demo::{DEMOS, Player};
+    use vxr_app::theme::ThemeChoice;
+    let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    let (scene, name) = load()?;
+    let mut s = Shot::new(scene, &name, 2.0)?;
+    s.frames(3);
+    check(
+        s.ed.ui.hits.contains_key("help") && !s.ed.ui.help.open && s.ed.help_stats().0 == 0,
+        "the top bar has a Help button, and Help starts closed".into(),
+    )?;
+    let theme = s.ed.ui.hits["theme"];
+    let button = s.ed.ui.hits["help"];
+    check(
+        button.right() < theme.left() && (button.center().y - theme.center().y).abs() < 0.5,
+        format!("the Help button sits left of the theme button ({button:?}, {theme:?})"),
+    )?;
+    let screen_w = s.ed.width as f32 / s.ed.ppp;
+    let view_before = s.ed.ui.hits.get("render").copied();
+    s.ui_click("help")?;
+    s.frames(3);
+    let panel = s.ed.ui.hits.get("help-panel").copied().ok_or("no help panel")?;
+    check(
+        s.ed.ui.help.open && (panel.width() - vxr_app::ui::HELP_W).abs() < 0.5 && panel.top() > button.bottom(),
+        format!("the Help button opens Help, {:.0} points wide under the top bar ({panel:?})", panel.width()),
+    )?;
+    let corner = s.ed.ui.hits.get("render").copied();
+    check(
+        corner.zip(view_before).is_none_or(|(c, b)| c.right() <= panel.left() && c.right() < b.right()),
+        format!("the render corner moves left of Help ({view_before:?} -> {corner:?})"),
+    )?;
+    check(panel.right() <= screen_w - 7.5, format!("Help stays on screen ({panel:?} in {screen_w} points)"))?;
+    let names: Vec<_> = DEMOS.iter().map(|d| d.id).collect();
+    let missing: Vec<_> = ["add", "orbit", "box", "select", "world"].iter().filter(|id| !names.contains(id)).collect();
+    check(
+        DEMOS.len() >= 10 && missing.is_empty() && s.ed.ui.hits.contains_key("help-search"),
+        format!("Help has {} demos with the four gaps (missing: {missing:?}) and a search field", DEMOS.len()),
+    )?;
+    // The first rows show at once, each with its image.
+    let shown = s.ed.ui.help.shown.clone();
+    let textured = shown.iter().filter(|&&i| s.ed.ui.help.tiles.get(i).is_some_and(|t| t.texture.is_some())).count();
+    check(
+        shown.len() >= 4 && textured == shown.len() && s.ed.help_stats().0 <= shown.len(),
+        format!("{} tiles show, {textured} with an image", shown.len()),
+    )?;
+    for id in ["add", "orbit", "box", "select"] {
+        check(
+            s.ed.ui.hits.contains_key(&format!("help-tile-{id}"))
+                && s.ed.ui.hits.contains_key(&format!("help-try-{id}")),
+            format!("the {id} tile and its Try show without scrolling"),
+        )?;
+    }
+    // Each shown demo plays to its end and starts again.
+    let longest = shown.iter().map(|&i| Player::new(i, 1.75).length()).fold(0.0, f64::max);
+    let mut marched = 0;
+    let n = (longest * 60.0).ceil() as usize + 20;
+    for _ in 0..n {
+        s.frames(1);
+        marched += s.ed.help_stats().0;
+    }
+    let loops = s.ed.help_stats().1;
+    let looped = shown.iter().filter(|&&i| loops.get(i).is_some_and(|&l| l >= 1)).count();
+    check(
+        looped == shown.len() && marched > shown.len() && marched < n * shown.len(),
+        format!(
+            "every shown tile loops ({looped} of {}) within {longest:.1} s, marching {marched} images over {n} frames",
+            shown.len()
+        ),
+    )?;
+    s.save_png(&dir.join("app-2x-help.png"))?;
+    let hidden = (0..DEMOS.len()).filter(|i| !shown.contains(i)).collect::<Vec<_>>();
+    check(
+        hidden.iter().all(|&i| loops.get(i).is_none_or(|&l| l == 0)),
+        format!("tiles scrolled out of view do not play ({hidden:?})"),
+    )?;
+
+    // Search filters the tiles by name, words and keys.
+    s.ui_click("help-search")?;
+    s.frames_with(2, vec![egui::Event::Text("box".into())]);
+    let found: Vec<_> = s.ed.ui.help.shown.iter().map(|&i| DEMOS[i].id).collect();
+    check(
+        s.ed.ui.help.query == "box" && found.contains(&"box") && found.len() < shown.len(),
+        format!("searching \"box\" shows {found:?}"),
+    )?;
+    let tool = s.ed.ui.tool;
+    s.frames_with(2, vec![key(egui::Key::E, egui::Modifiers::NONE), egui::Event::Text("e".into())]);
+    check(s.ed.ui.tool == tool && s.ed.ui.help.query == "boxe", "typing in the search field picks no tool".into())?;
+    s.frames_with(2, vec![egui::Event::Text("zzzz".into())]);
+    check(s.ed.ui.help.shown.is_empty(), format!("a search with no match shows no tiles ({:?})", s.ed.ui.help.shown))?;
+    s.save_png(&dir.join("app-2x-help-none.png"))?;
+    s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+    check(!s.ed.ui.help.open, "Escape in the search field closes Help".into())?;
+
+    // Try: Help closes and the user is in that tool.
+    s.ui_click("help")?;
+    s.frames(3);
+    check(
+        s.ed.ui.help.open && !s.ed.ui.help.query.is_empty() && s.ed.ui.help.shown.is_empty(),
+        "Help opens again on the last search".into(),
+    )?;
+    s.ed.ui.help.query.clear();
+    s.frames(3);
+    s.ui_click("help-try-box")?;
+    check(
+        !s.ed.ui.help.open
+            && s.ed.ui.tool == Tool::Add
+            && s.ed.ui.shape == Shape::Box
+            && s.ed.ui.help.tried == Some("box"),
+        format!("Box's Try closes Help and picks Add with the box brush ({:?} {:?})", s.ed.ui.tool, s.ed.ui.shape),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::F1, egui::Modifiers::NONE)]);
+    check(s.ed.ui.help.open, "F1 opens Help".into())?;
+    s.ui_click("help-try-select")?;
+    check(!s.ed.ui.help.open && s.ed.ui.tool == Tool::Select, "Select's Try picks Select".into())?;
+    s.frames_with(2, vec![key(egui::Key::F1, egui::Modifiers::NONE)]);
+    s.ui_click("help-try-orbit")?;
+    let toast = s.ed.ui.toast_text().map(str::to_string);
+    check(
+        !s.ed.ui.help.open && toast.as_deref().is_some_and(|t| t.starts_with("Right-drag orbits")),
+        format!("the camera tile's Try shows the camera keys ({toast:?})"),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::F1, egui::Modifiers::NONE)]);
+    s.frames_with(2, vec![key(egui::Key::F1, egui::Modifiers::NONE)]);
+    check(!s.ed.ui.help.open, "F1 closes Help again".into())?;
+
+    // Cmd-K "Help", the close button, Escape, and the shortcuts row.
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("help".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    check(s.ed.ui.help.open && s.ed.ui.cmdk.is_none(), "Cmd-K Help opens Help".into())?;
+    s.ui_click("help-close")?;
+    check(!s.ed.ui.help.open, "its close button closes it".into())?;
+    s.frames_with(2, vec![key(egui::Key::F1, egui::Modifiers::NONE)]);
+    s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+    check(!s.ed.ui.help.open, "Escape closes it".into())?;
+    s.frames_with(2, vec![key(egui::Key::F1, egui::Modifiers::NONE)]);
+    s.ui_click("help-shortcuts")?;
+    check(s.ed.ui.cmdk.is_some() && s.ed.ui.help.open, "Help's Keyboard shortcuts row opens the command list".into())?;
+    s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+    check(s.ed.ui.cmdk.is_none() && s.ed.ui.help.open, "Escape closes the command list first".into())?;
+    s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+
+    // Closed, Help costs nothing: no tile marches and no frame is asked for (once the toasts
+    // and fades are over, with the render corner, which converges for a while, hidden).
+    s.ed.ui.show_render = false;
+    s.frames(150);
+    let still = s.ed.repaint_after();
+    check(
+        !s.ed.ui.help.open && s.ed.help_stats().0 == 0 && still.is_none(),
+        format!("closed, Help marches nothing and asks for no frame ({still:?})"),
+    )?;
+
+    // The assistant and Help side by side, and in another theme.
+    s.ed.ui.show_render = true;
+    s.ed.ui.theme = ThemeChoice::Paper;
+    s.ui_click("ai-toggle")?;
+    s.frames_with(2, vec![key(egui::Key::F1, egui::Modifiers::NONE)]);
+    s.frames(3);
+    let (panel, ai) = (s.ed.ui.hits.get("help-panel").copied(), s.ed.ui.hits.get("assistant").copied());
+    check(
+        panel.zip(ai).is_some_and(|(p, a)| p.right() <= a.left()),
+        format!("with the assistant open, Help docks to its left ({panel:?}, {ai:?})"),
+    )?;
+    s.save_png(&dir.join("app-2x-help-paper-ai.png"))?;
+
+    // A new scale (the window moved to another screen) frames the tiles again at their new
+    // size, and the demos play on instead of starting over. The assistant closes first: the
+    // window is narrower in points at the new scale, and there they take turns.
+    s.ui_click("ai-toggle")?;
+    s.frames(2);
+    let loops = s.ed.help_stats().1;
+    let (w, h, ppp) = (s.ed.width, s.ed.height, s.ed.native_ppp);
+    s.ed.resize(w, h, ppp * 1.25);
+    s.frames(480);
+    let after = s.ed.help_stats().1;
+    let textured = s.ed.ui.help.shown.iter().all(|&i| s.ed.ui.help.tiles.get(i).is_some_and(|t| t.texture.is_some()));
+    check(
+        s.ed.ui.help.open
+            && textured
+            && after.iter().zip(&loops).all(|(a, b)| a >= b)
+            && after.iter().zip(&loops).any(|(a, b)| a > b),
+        format!("a new scale keeps the demos playing ({loops:?} -> {after:?}, shown {:?})", s.ed.ui.help.shown),
+    )?;
+    s.ed.resize(w, h, ppp);
+    s.frames_with(2, vec![key(egui::Key::F1, egui::Modifiers::NONE)]);
+
+    // Try in the world edits a model, and only the mirror tile changes the mirror.
+    s.frames_with(2, vec![key(egui::Key::Tab, egui::Modifiers::NONE)]);
+    let world = s.ed.ui.world;
+    s.frames_with(2, vec![key(egui::Key::F1, egui::Modifiers::NONE)]);
+    s.ed.ui.help.query = "box".into();
+    s.frames(3);
+    s.ui_click("help-try-box")?;
+    s.frames(2);
+    check(
+        world && !s.ed.ui.world && s.ed.ui.tool == Tool::Add && s.ed.ui.shape == Shape::Box,
+        format!("in the world, Box's Try edits a model with the box brush (world {world}, now {})", s.ed.ui.world),
+    )?;
+    s.ed.ui.mirror = true;
+    s.ed.ui.mirror_on = [false, false, true];
+    for (id, on) in [("erase", [false, false, true]), ("mirror", [true, false, false])] {
+        s.frames_with(2, vec![key(egui::Key::F1, egui::Modifiers::NONE)]);
+        s.ed.ui.help.query = id.into();
+        s.frames(3);
+        s.ui_click(&format!("help-try-{id}"))?;
+        check(
+            s.ed.ui.mirror && s.ed.ui.mirror_on == on,
+            format!("{id}'s Try leaves the mirror on {on:?} ({:?})", s.ed.ui.mirror_on),
+        )?;
+    }
+    s.ed.ui.mirror = false;
+    s.ed.ui.help.query.clear();
+
+    // A window too narrow for the assistant and Help side by side: one closes the other. And
+    // narrower still, Help stays on screen.
+    for points in [(900, 700), (400, 700)] {
+        let (scene, name) = load()?;
+        let mut s = Shot::sized(scene, &name, 2.0, points)?;
+        s.frames(3);
+        s.ui_click("ai-toggle")?;
+        let ai = s.ed.ui.ai_open;
+        s.frames_with(2, vec![key(egui::Key::F1, egui::Modifiers::NONE)]);
+        s.frames(3);
+        let panel = s.ed.ui.hits.get("help-panel").copied();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(points.0 as f32, points.1 as f32));
+        check(
+            ai && !s.ed.ui.ai_open && s.ed.ui.help.open && panel.is_some_and(|p| screen.contains_rect(p)),
+            format!("{}x{}: Help closes the assistant and fits the window ({panel:?})", points.0, points.1),
+        )?;
+        s.ui_click("ai-toggle")?;
+        check(s.ed.ui.ai_open && !s.ed.ui.help.open, format!("{}x{}: the assistant closes Help", points.0, points.1))?;
+    }
+
+    // Touch: the same panel with finger-sized parts, then a phone's sheet.
+    for (points, tag, theme) in [
+        ((1180, 820), "touch", ThemeChoice::Neutral),
+        ((390, 844), "phone", ThemeChoice::Paper),
+        ((844, 390), "phone-land", ThemeChoice::Neutral),
+    ] {
+        let (scene, name) = load()?;
+        let ppp = if tag == "touch" { 2.0 } else { 3.0 };
+        let mut s = Shot::sized(scene, &name, ppp, points)?;
+        s.ed.ui.theme = theme;
+        s.ed.set_touch(true);
+        s.frames(3);
+        s.ui_click("help")?;
+        s.frames(40);
+        let (w, h) = (s.ed.width as f32 / s.ed.ppp, s.ed.height as f32 / s.ed.ppp);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h)).expand(0.5);
+        let off: Vec<_> =
+            s.ed.ui
+                .hits
+                .iter()
+                .filter(|(n, r)| n.starts_with("help") && !screen.contains_rect(**r))
+                .map(|(n, r)| format!("{n} {r:?}"))
+                .collect();
+        let shown = s.ed.ui.help.shown.len();
+        let whole = s.ed.ui.hits.keys().filter(|n| n.starts_with("help-try-")).count();
+        check(
+            s.ed.ui.help.open && off.is_empty() && whole >= 1 && shown >= whole,
+            format!("{tag}: Help fits the screen ({w}x{h} points, off: {off:?}) with {whole} whole tile(s) of {shown}"),
+        )?;
+        let (dock, panel) = (s.ed.ui.hits.get("dock").copied(), s.ed.ui.hits["help-panel"]);
+        check(
+            tag != "touch" || dock.is_some_and(|d| d.right() <= panel.left() && panel.right() >= w - 12.5),
+            format!("{tag}: Help docks at the right, the dock left of it ({dock:?}, {panel:?})"),
+        )?;
+        check(
+            !s.ed.ui.hits.contains_key("gestures") || tag == "touch",
+            format!("{tag}: the gesture hints hide behind the sheet"),
+        )?;
+        s.save_png(&dir.join(format!("app-help-{tag}.png")))?;
+        let first = s.ed.ui.help.shown.first().map(|&i| DEMOS[i].id).ok_or("no tile")?;
+        s.ui_click(&format!("help-try-{first}"))?;
+        check(
+            !s.ed.ui.help.open && s.ed.ui.help.tried == Some(first),
+            format!("{tag}: the {first} tile's Try closes Help"),
+        )?;
+    }
+    Ok(())
 }
 
 /// The palette editor, through egui input on the drawn UI: live recolour, one undo step per

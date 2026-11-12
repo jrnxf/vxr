@@ -201,6 +201,10 @@ pub struct Editor {
     projects_shown: bool,
     /// The window is to close (the close confirm's Save or Don't save): the native host exits.
     pub quit: bool,
+    /// Help's demo tiles, made the first time Help shows and kept; nothing runs while it is
+    /// closed. And whether Help was open last frame (closing it rewinds every demo).
+    help_tiles: Option<crate::demo::Tiles>,
+    help_was_open: bool,
 }
 
 /// Whether a review has nothing in it: no step and no change.
@@ -327,6 +331,8 @@ impl Editor {
             library: crate::sync::Library::default(),
             projects_shown: false,
             quit: false,
+            help_tiles: None,
+            help_was_open: false,
         };
         e.shape = (e.scene.reshapes(), e.scene.origin);
         e.mark_saved();
@@ -1693,14 +1699,15 @@ impl Editor {
                 (seen.unwrap_or(0.0), last)
             })
             .collect();
+        self.help_frame();
         let stats = self.stats();
         let mut actions = Vec::new();
         let ui = &mut self.ui;
         let out = self.ctx.run_ui(input, |u| actions = ui.ui(u.ctx(), &stats));
         self.egui_delay =
             out.viewport_output.get(&egui::ViewportId::ROOT).map_or(std::time::Duration::ZERO, |v| v.repaint_delay);
-        // The assistant docked or left: keep the scene centred in the space beside it.
-        let dock = self.ui.ai_width();
+        // The assistant or Help docked or left: keep the scene centred in the space beside them.
+        let dock = self.ui.dock_width();
         if dock != self.ai_dock {
             self.shift_left((dock - self.ai_dock) * self.ppp / 2.0);
             self.ai_dock = dock;
@@ -1841,6 +1848,53 @@ impl Editor {
         }
         self.autosave();
         (host, out.platform_output)
+    }
+
+    /// Help's demos: move the ones that showed last frame on to this frame's time, and give
+    /// the UI their images and pointers. The tiles are made (again) at the size the panel last
+    /// asked for. Nothing runs while Help is closed.
+    fn help_frame(&mut self) {
+        let open = self.ui.help.open;
+        let closed = !open && self.help_was_open;
+        self.help_was_open = open;
+        if !open {
+            // Rewound as it closes, so the frame that opens it again draws every demo's start.
+            if let Some(t) = self.help_tiles.as_mut() {
+                t.marched = 0;
+                if closed {
+                    t.rewind();
+                    self.ui.help.tiles = Self::tile_views(t, self.ui.touch);
+                }
+            }
+            return;
+        }
+        let px = self.ui.help.image * self.ppp;
+        let size = (px.x.round() as u32, px.y.round() as u32);
+        if size.0 < 8 || size.1 < 8 {
+            // The panel has not laid out its tiles yet.
+            return;
+        }
+        let tiles = self.help_tiles.get_or_insert_with(|| crate::demo::Tiles::new(size));
+        if tiles.size != size {
+            tiles.resize(size);
+        }
+        tiles.advance(&self.ui.help.shown, self.frame_at.0);
+        self.ui.help.tiles = Self::tile_views(tiles, self.ui.touch);
+    }
+
+    /// What each tile shows now, for the UI.
+    fn tile_views(tiles: &crate::demo::Tiles, touch: bool) -> Vec<crate::ui::TileView> {
+        (0..tiles.players.len())
+            .map(|i| {
+                let p = &tiles.players[i];
+                crate::ui::TileView { texture: tiles.texture(i), pointer: p.pointer(), down: p.down, key: p.key(touch) }
+            })
+            .collect()
+    }
+
+    /// Help's tiles: how many images the last frame marched, and loops played by each demo.
+    pub fn help_stats(&self) -> (usize, Vec<u64>) {
+        self.help_tiles.as_ref().map_or((0, Vec::new()), |t| (t.marched, t.players.iter().map(|p| p.loops).collect()))
     }
 
     /// When the window next has to draw if no input comes first: `Some(ZERO)` while something
@@ -2516,6 +2570,10 @@ impl Editor {
         let full = corner.is_some() && self.ui.full_render;
         if !full {
             self.renderer.march(&mut enc, &self.map, None);
+        }
+        // Help's tiles that show and changed, before the egui pass draws them.
+        if let Some(t) = self.help_tiles.as_mut().filter(|_| self.ui.help.open) {
+            t.encode(&self.gpu, &self.layout, &self.renderer, &mut self.egui, &mut enc, &self.ui.help.shown, ppp);
         }
         if let Some(r) = corner {
             let px = [r.left() * ppp, r.top() * ppp, r.width() * ppp, r.height() * ppp];

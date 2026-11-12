@@ -825,7 +825,7 @@ impl App {
         let e = &self.host.editor;
         let (c, h) = (&e.cam, e.scene.history());
         format!(
-            r#"{{"voxels":{},"tool":"{:?}","shape":"{:?}","mirror":{},"mirrorAxes":[{},{},{}],"lock":{},"brushSize":{},"sizePanel":{},"lifting":{},"span":{},"selected":{},"region":"{:?}","hasClip":{},"bounds":[{},{},{}],"boundsPanel":{},"slot":{},"colorEdit":{},"slotOp":"{:?}","undo":{},"redo":{},"cmdk":{},"name":{:?},"size":[{},{}],"ppp":{},"cam":[{},{},{},{},{},{}],"ortho":{},"inView":[{},{}],"cameraHints":{},"view":{},"viewPanel":{},"fileMenu":{},"confirmNew":{},"theme":"{}","themeMenu":{},"touch":{},"paletteOpen":{},"themeShown":{:?},"guides":[{},{},{}],"mode":"{}","objects":{},"models":{},"picked":{},"tree":[{}],"treeOn":{},"renaming":{},"layers":[{}],"layerOn":{},"render":{{"shown":{},"spp":{},"rows":{},"current":{},"restarts":{},"timestamps":{},"panel":{},"full":{},"size":[{},{}],"maxSpp":{},"exposure":{},"gamma":{},"vignette":{},"aperture":{},"sky":{},"physicalSky":{},"export":{}}},"review":{},"undoLabel":{},"asks":{:?},"unsaved":{},"projectsMenu":{},"projects":[{}],"current":{},"restore":{},"confirmClose":{},"storage":[{},{}],"account":{},"signIn":{{"shown":{},"error":{},"checking":{},"challenge":{}}},"toast":{},"agents":{{"panel":{},"available":{},"web":{},"allowed":{},"review":{},"connecting":{},"error":{},"fail":{},"code":{:?},"clients":[{}],"edits":[{}],"chip":{:?},"live":[{}],"calls":[{}]}}}}"#,
+            r#"{{"voxels":{},"tool":"{:?}","shape":"{:?}","mirror":{},"mirrorAxes":[{},{},{}],"lock":{},"brushSize":{},"sizePanel":{},"lifting":{},"span":{},"selected":{},"region":"{:?}","hasClip":{},"bounds":[{},{},{}],"boundsPanel":{},"slot":{},"colorEdit":{},"slotOp":"{:?}","undo":{},"redo":{},"cmdk":{},"name":{:?},"size":[{},{}],"ppp":{},"cam":[{},{},{},{},{},{}],"ortho":{},"inView":[{},{}],"cameraHints":{},"view":{},"viewPanel":{},"fileMenu":{},"confirmNew":{},"theme":"{}","themeMenu":{},"touch":{},"paletteOpen":{},"themeShown":{:?},"guides":[{},{},{}],"mode":"{}","objects":{},"models":{},"picked":{},"tree":[{}],"treeOn":{},"renaming":{},"layers":[{}],"layerOn":{},"render":{{"shown":{},"spp":{},"rows":{},"current":{},"restarts":{},"timestamps":{},"panel":{},"full":{},"size":[{},{}],"maxSpp":{},"exposure":{},"gamma":{},"vignette":{},"aperture":{},"sky":{},"physicalSky":{},"export":{}}},"review":{},"undoLabel":{},"asks":{:?},"unsaved":{},"projectsMenu":{},"projects":[{}],"current":{},"restore":{},"confirmClose":{},"storage":[{},{}],"account":{},"signIn":{{"shown":{},"error":{},"checking":{},"challenge":{}}},"toast":{},"agents":{{"panel":{},"available":{},"web":{},"allowed":{},"review":{},"connecting":{},"error":{},"fail":{},"code":{:?},"clients":[{}],"edits":[{}],"chip":{:?},"live":[{}],"calls":[{}]}},"help":{}}}"#,
             e.scene.map.voxels,
             e.ui.tool,
             e.ui.shape,
@@ -1032,6 +1032,7 @@ impl App {
                 ))
                 .collect::<Vec<_>>()
                 .join(","),
+            help_state(e),
         )
     }
 
@@ -1158,4 +1159,50 @@ impl App {
         let ctx = self.host.editor.ctx.clone();
         self.host.editor.ui.toast(&ctx, msg);
     }
+}
+
+/// Help's state as JSON, for `state()`: open, the search, the demos on screen with whether each
+/// has its image and how many times it played, the last Try, and how many images the last frame
+/// marched.
+fn help_state(e: &vxr_app::editor::Editor) -> String {
+    use vxr_app::demo::DEMOS;
+    let h = &e.ui.help;
+    let (marched, loops) = e.help_stats();
+    let shown = h
+        .shown
+        .iter()
+        .map(|&i| {
+            format!(
+                r#"{{"id":{:?},"image":{},"loops":{}}}"#,
+                DEMOS[i].id,
+                h.tiles.get(i).is_some_and(|t| t.texture.is_some()),
+                loops.get(i).copied().unwrap_or(0)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        r#"{{"open":{},"query":{},"demos":{},"shown":[{shown}],"tried":{},"marched":{marched}}}"#,
+        h.open,
+        json_str(&h.query),
+        DEMOS.len(),
+        h.tried.map_or("null".into(), |t| format!("{t:?}")),
+    )
+}
+
+/// `s` as a JSON string. Rust's `{:?}` is not JSON for control characters (`\u{7}`), and the
+/// search holds whatever the user typed or pasted.
+fn json_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if (c as u32) < 0x20 || c == '\u{7f}' => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
