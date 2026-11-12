@@ -64,7 +64,7 @@ impl View {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct OrbitCamera {
     pub target: Vec3,
     /// Radians around +y.

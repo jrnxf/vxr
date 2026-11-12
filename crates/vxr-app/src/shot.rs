@@ -306,6 +306,7 @@ fn run_steps(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     check(s.ed.ui.cmdk.is_none(), "Escape closes it".into())?;
 
     help(dir, &load)?;
+    tour(dir)?;
     palette(&mut s, dir)?;
     brushes(dir)?;
     brush_size(dir)?;
@@ -604,6 +605,15 @@ fn phone(dir: &Path, load: &dyn Fn() -> Result<(Scene, String), String>) -> Resu
             )
         };
         fits(&s, "plain")?;
+        let chip = s.ed.ui.hits.get("gestures").copied();
+        let over: Vec<_> = ["dock", "dock-brushes", "dock-more", "nav", "render"]
+            .iter()
+            .filter(|n| s.ed.ui.hits.get(**n).zip(chip).is_some_and(|(r, c)| r.intersects(c)))
+            .collect();
+        check(
+            chip.is_some() && over.is_empty(),
+            format!("{tag}: the gesture chip stands clear of the dock, camera bar and render corner ({over:?})"),
+        )?;
         s.save_png(&dir.join(format!("app-3x-phone-{tag}.png")))?;
 
         // The assistant open: the dock stays reachable, so the colour button still opens the
@@ -938,6 +948,10 @@ impl Platform for Fake {
         self.calls.push(format!("theme {id}"));
         Ok(())
     }
+    fn persist_tour_seen(&mut self) -> Result<(), String> {
+        self.calls.push("toured".into());
+        Ok(())
+    }
     fn challenge(&mut self) -> Option<String> {
         self.calls.push("challenge".into());
         Some("test".into())
@@ -1010,7 +1024,9 @@ fn host_actions() -> Result<(), String> {
     check(
         p.calls.last().is_some_and(|c| c == "theme nord"),
         format!("a picked theme is kept by id ({:?})", p.calls.last()),
-    )
+    )?;
+    run_action(&mut s.ed, &mut p, Action::TourSeen);
+    check(p.calls.last().is_some_and(|c| c == "toured"), format!("the tour's seen flag is kept ({:?})", p.calls.last()))
 }
 
 /// New scene (Cmd-N, Cmd-K, the top bar's New): with nothing unsaved it starts a blank scene
@@ -2486,6 +2502,26 @@ fn project(ed: &Editor, p: [f32; 3]) -> [f32; 2] {
     let (w, h) = (ed.width as f32, ed.height as f32);
     let c = ed.cam.view_proj(w / h) * glam::Vec4::new(p[0], p[1], p[2], 1.0);
     [(c.x / c.w + 1.0) * 0.5 * w, (1.0 - c.y / c.w) * 0.5 * h]
+}
+
+/// Whether the scene's voxels stand on screen under the top bar and clear of the tour card and
+/// the panels around it (the dock, gesture hints, scene tree, render corner and camera bar),
+/// and their screen box in pixels.
+fn scene_clear_of_tour(ed: &Editor) -> (bool, [f32; 4]) {
+    let b @ [x0, y0, x1, y1] = ed.scene_on_screen();
+    let p = ed.ppp;
+    let scene = egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y1)) / p;
+    let panels = ["tour", "dock", "dock-brushes", "dock-more", "gestures", "stats", "hint", "tree", "render", "nav"];
+    let clear = !panels.iter().filter_map(|n| ed.ui.hits.get(*n)).any(|r| r.intersects(scene));
+    (clear && x0 >= 0.0 && y0 >= 60.0 * p && x1 <= ed.width as f32 && y1 <= ed.height as f32, b)
+}
+
+/// Whether the scene's voxels stand in the middle of the view, as `frame_scene` leaves them.
+fn scene_framed(ed: &Editor) -> (bool, [f32; 2]) {
+    let [x0, y0, x1, y1] = ed.scene_on_screen();
+    let (w, h) = (ed.width as f32, ed.height as f32);
+    let c = [(x0 + x1) / 2.0, (y0 + y1) / 2.0];
+    ((c[0] - w / 2.0).abs() < w * 0.05 && (c[1] - h / 2.0).abs() < h * 0.05, c)
 }
 
 /// Selection and transform on an empty scene with two blocks, so every count is exact: S,
@@ -6037,6 +6073,11 @@ fn frame_times(scene: &Path) -> Result<(), String> {
     let help_idle = run(&mut s, false, false, false);
     s.ed.ui.close_help();
     let closed = run(&mut s, false, true, false);
+    // The tour's card, its demo playing, compares with nothing open.
+    s.ed.ui.start_tour();
+    let tour = run(&mut s, false, true, false);
+    let tour_idle = run(&mut s, false, false, false);
+    s.ed.ui.end_tour(false);
     let on = run(&mut s, true, true, false);
     let idle = run(&mut s, true, false, false);
     let orbit = run(&mut s, true, true, true);
@@ -6062,7 +6103,8 @@ fn frame_times(scene: &Path) -> Result<(), String> {
     println!(
         "info frame time with Help, island at 3024x1964 (median, CPU + GPU, no render corner): \
          {off:.2} ms before opening it while editing, {off_idle:.2} ms idle, {help:.2} ms open while editing, \
-         {help_idle:.2} ms open and idle, {closed:.2} ms closed again while editing"
+         {help_idle:.2} ms open and idle, {closed:.2} ms closed again while editing; the tour's card \
+         {tour:.2} ms while editing, {tour_idle:.2} ms idle"
     );
     check(
         current >= 1.0,
@@ -6336,8 +6378,14 @@ fn help(dir: &Path, load: &dyn Fn() -> Result<(Scene, String), String>) -> Resul
         let shown = s.ed.ui.help.shown.len();
         let whole = s.ed.ui.hits.keys().filter(|n| n.starts_with("help-try-")).count();
         check(
-            s.ed.ui.help.open && off.is_empty() && whole >= 1 && shown >= whole,
-            format!("{tag}: Help fits the screen ({w}x{h} points, off: {off:?}) with {whole} whole tile(s) of {shown}"),
+            s.ed.ui.help.open
+                && off.is_empty()
+                && whole >= 1
+                && shown >= whole
+                && s.ed.ui.hits.contains_key("help-tour"),
+            format!(
+                "{tag}: Help fits the screen with its tour row ({w}x{h} points, off: {off:?}) and {whole} whole tile(s) of {shown}"
+            ),
         )?;
         let (dock, panel) = (s.ed.ui.hits.get("dock").copied(), s.ed.ui.hits["help-panel"]);
         check(
@@ -6356,6 +6404,383 @@ fn help(dir: &Path, load: &dyn Fn() -> Result<(Scene, String), String>) -> Resul
             format!("{tag}: the {first} tile's Try closes Help"),
         )?;
     }
+    Ok(())
+}
+
+/// The first-run tour: the host starts it once, its card at the right plays each step's demo
+/// and waits for the real action through the pointer path, then moves on (by itself or with
+/// Next). Skip and finish keep the seen flag; Cmd-K and Help's top row replay it. Touch and
+/// phones get their own words and a card that stays clear of the dock and camera bar.
+fn tour(dir: &Path) -> Result<(), String> {
+    use vxr_app::demo::DEMOS;
+    use vxr_app::theme::ThemeChoice;
+    use vxr_app::ui::{STEPS, TOUR_W, TourStep};
+    let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    let none = egui::Modifiers::NONE;
+    // A block of 4 x 2 x 3 to draw on and move, in an otherwise empty scene.
+    let block = |s: &mut Shot| {
+        let cells: Vec<_> =
+            (50..54).flat_map(|x| (0..2).flat_map(move |y| (60..63).map(move |z| ([x, y, z], 12u8)))).collect();
+        s.ed.scene.edit(cells);
+        s.ed.frame_scene();
+    };
+    let at = |s: &Shot| s.ed.ui.tour.current();
+    let seen_actions = |s: &Shot| s.host.iter().filter(|a| **a == Action::TourSeen).count();
+    let mut s = Shot::new(Scene::new(NEW_SIZE), "Untitled", 2.0)?;
+    block(&mut s);
+    s.frames(3);
+    check(at(&s).is_none() && !s.ed.ui.hits.contains_key("tour"), "the tour waits for the host to start it".into())?;
+    s.ed.ui.projects_open = true;
+    vxr_app::host::first_tour(&mut s.ed);
+    check(at(&s).is_none(), "a launch that shows the projects list leaves the tour out".into())?;
+    s.ed.ui.projects_open = false;
+    s.ed.ui.tool = Tool::Erase;
+    s.ed.ui.shape = Shape::Face;
+    vxr_app::host::first_tour(&mut s.ed);
+    s.frames(6);
+
+    // Step 1, Add: the card at the top right of the view, the Add tool ringed, its demo playing.
+    let screen_w = s.ed.width as f32 / s.ed.ppp;
+    let card = s.ed.ui.hits.get("tour").copied().ok_or("no tour card")?;
+    let add = DEMOS.iter().position(|d| d.id == "add");
+    check(
+        at(&s) == Some(TourStep::Add)
+            && s.ed.ui.tool == Tool::Add
+            && s.ed.ui.shape == Shape::Voxel
+            && (card.width() - TOUR_W).abs() < 0.5
+            && (card.right() - (screen_w - 12.0)).abs() < 0.5
+            && (card.top() - 60.0).abs() < 0.5,
+        format!("a first start opens the tour on Add with the one-voxel brush, the card at the top right ({card:?})"),
+    )?;
+    let (marched, _) = s.ed.tour_stats();
+    check(
+        s.ed.ui.tour.shown == add
+            && s.ed.ui.tour.tile.texture.is_some()
+            && s.ed.ui.hits.contains_key("tour-demo")
+            && marched <= 1
+            && s.ed.help_stats().0 == 0,
+        format!("the card plays the add demo alone ({:?}, {marched} marched)", s.ed.ui.tour.shown),
+    )?;
+    let nav = s.ed.ui.hits.get("nav").copied();
+    let clear =
+        ["nav", "render", "stats", "hint"].iter().filter_map(|n| s.ed.ui.hits.get(*n)).all(|r| !r.intersects(card));
+    check(
+        s.ed.ui.hits.contains_key("tool-add")
+            && s.ed.ui.hits.contains_key("tour-skip")
+            && !s.ed.ui.hits.contains_key("tour-next")
+            && !s.ed.ui.tour.done
+            && clear,
+        format!("Add is ringed, Skip shows and Next waits for the action, clear of the camera bar ({nav:?})"),
+    )?;
+    let (clear, b) = scene_clear_of_tour(&s.ed);
+    check(
+        clear && b[2] <= card.left() * s.ed.ppp,
+        format!("the scene stands left of the card, clear of it ({b:?} px, card {card:?} pt)"),
+    )?;
+    // The assistant docks: it shifts the view in the frame the room narrows, and the scene is
+    // framed in the new room all the same; closed again, in the wide room.
+    s.ui_click("ai-toggle")?;
+    s.frames(3);
+    let (clear, b) = scene_clear_of_tour(&s.ed);
+    let dock = s.ed.ui.hits.get("assistant").copied();
+    let scene = egui::Rect::from_min_max(egui::pos2(b[0], b[1]), egui::pos2(b[2], b[3])) / s.ed.ppp;
+    check(
+        s.ed.ui.ai_open && s.ed.ui.hits.contains_key("tour") && clear && dock.is_some_and(|d| !d.intersects(scene)),
+        format!("with the assistant docked the scene stands clear of the card and the assistant ({b:?} px)"),
+    )?;
+    s.ui_click("ai-toggle")?;
+    s.frames(3);
+    let (clear, b) = scene_clear_of_tour(&s.ed);
+    check(!s.ed.ui.ai_open && clear, format!("closed again, the scene stands clear of the card ({b:?} px)"))?;
+    s.frames(30);
+    s.save_png(&dir.join("app-2x-tour.png"))?;
+    let v = s.voxels();
+    let top = s.top_face_pixel(project(&s.ed, [51.5, 1.99, 61.5]))?;
+    s.stroke(top, &[[20.0, 0.0]]);
+    s.frames(2);
+    check(
+        s.voxels() > v && s.ed.ui.tour.done && s.ed.ui.hits.contains_key("tour-next") && at(&s) == Some(TourStep::Add),
+        format!("drawing with Add does the step: Done and Next show ({v} -> {} voxels)", s.voxels()),
+    )?;
+    s.save_png(&dir.join("app-2x-tour-done.png"))?;
+    s.frames(80);
+    check(at(&s) == Some(TourStep::Look) && !s.ed.ui.tour.done, "a moment later the tour moves on to Look".into())?;
+
+    // Step 2, Look: a right-drag orbits and does it; Next moves on at once.
+    let orbit = DEMOS.iter().position(|d| d.id == "orbit");
+    s.frames(2);
+    check(s.ed.ui.tour.shown == orbit, format!("Look plays the orbit demo ({:?})", s.ed.ui.tour.shown))?;
+    let mid = [s.ed.width as f32 / 2.0, s.ed.height as f32 / 2.0];
+    let yaw = s.ed.cam.yaw;
+    s.ed.pointer_moved(Some(mid));
+    s.ed.button(Button::Right, true, false);
+    s.ed.pointer_moved(Some([mid[0] + 40.0, mid[1]]));
+    s.ed.button(Button::Right, false, false);
+    s.frames(2);
+    check(s.ed.cam.yaw != yaw && s.ed.ui.tour.done, "a right-drag orbits and does Look".into())?;
+    s.ui_click("tour-next")?;
+    check(at(&s) == Some(TourStep::Box), "Next moves on to Box at once".into())?;
+
+    // Step 3, Box: B, a drag for the base, up for the height, a click to place it.
+    s.frames(2);
+    check(s.ed.ui.hits.contains_key("brush-box"), "Box rings the box brush".into())?;
+    s.frames_with(2, vec![key(egui::Key::B, none)]);
+    let base = project(&s.ed, [44.5, 0.0, 70.5]);
+    s.stroke(base, &[[40.0, 10.0], [80.0, 20.0]]);
+    check(s.ed.lifting() && !s.ed.ui.tour.done, "the base alone is not the box yet".into())?;
+    let up = [base[0] + 80.0, base[1] - 100.0];
+    s.ed.pointer_moved(Some(up));
+    s.stroke(up, &[]);
+    s.frames(2);
+    check(!s.ed.lifting() && s.ed.ui.tour.done, "placing the lifted box does Box".into())?;
+    s.frames(80);
+    check(at(&s) == Some(TourStep::Move), "then the tour moves on to Move".into())?;
+
+    // Step 4, Move: S, a box select around the block, a drag by one of its voxels.
+    s.frames(2);
+    check(s.ed.ui.hits.contains_key("select"), "Move rings Select".into())?;
+    s.frames_with(2, vec![key(egui::Key::S, none)]);
+    let corners = [
+        project(&s.ed, [49.0, 2.5, 59.0]),
+        project(&s.ed, [55.0, 2.5, 59.0]),
+        project(&s.ed, [49.0, -0.5, 64.0]),
+        project(&s.ed, [55.0, -0.5, 64.0]),
+    ];
+    let x0 = corners.iter().map(|c| c[0]).fold(f32::MAX, f32::min);
+    let x1 = corners.iter().map(|c| c[0]).fold(f32::MIN, f32::max);
+    let y0 = corners.iter().map(|c| c[1]).fold(f32::MAX, f32::min);
+    let y1 = corners.iter().map(|c| c[1]).fold(f32::MIN, f32::max);
+    s.stroke([x0, y0], &[[(x1 - x0) / 2.0, (y1 - y0) / 2.0], [x1 - x0, y1 - y0]]);
+    check(s.ed.scene.selected_count() > 0 && !s.ed.ui.tour.done, "a box select alone is not the move".into())?;
+    let a_top = project(&s.ed, [51.5, 1.99, 61.5]);
+    s.stroke(a_top, &[]);
+    check(!s.ed.ui.tour.done, "a click on the selection that does not move it is not the move".into())?;
+    s.ed.pointer_moved(Some(a_top));
+    s.ed.button(Button::Left, true, false);
+    // The orbit in Look turned the view, so drag across the screen rather than to a cell.
+    s.ed.pointer_moved(Some([a_top[0] + 40.0, a_top[1]]));
+    s.ed.pointer_moved(Some([a_top[0] + 80.0, a_top[1]]));
+    s.ed.button(Button::Left, false, false);
+    s.frames(2);
+    check(s.ed.ui.tour.done, "dragging the selection does Move".into())?;
+    s.frames(80);
+
+    // Step 5, Help: the Help button ringed, Open Help and Done, no demo; opening Help ends it.
+    check(
+        at(&s) == Some(TourStep::Help)
+            && s.ed.ui.tour.shown.is_none()
+            && s.ed.ui.hits.contains_key("tour-help")
+            && s.ed.ui.hits.contains_key("tour-skip")
+            && !s.ed.ui.hits.contains_key("tour-demo")
+            && s.ed.ui.tour.step == Some(STEPS.len() - 1),
+        "the last step points at Help, with Open Help and Done and no demo".into(),
+    )?;
+    s.save_png(&dir.join("app-2x-tour-help.png"))?;
+    s.ui_click("tour-help")?;
+    check(
+        s.ed.ui.help.open
+            && at(&s).is_none()
+            && s.ed.ui.tour.seen
+            && s.ed.ui.tour.ended == Some("finished")
+            && seen_actions(&s) == 1
+            && !s.ed.ui.hits.contains_key("tour"),
+        format!("Open Help finishes the tour and keeps the seen flag ({:?})", s.ed.ui.tour.ended),
+    )?;
+
+    // Help's top row replays it, and says it was done.
+    let row = s.ed.ui.hits.get("help-tour").copied().ok_or("no tour row in Help")?;
+    let search = s.ed.ui.hits.get("help-search").copied().ok_or("no search field")?;
+    check(row.bottom() < search.top(), format!("Help's tour row sits above its search ({row:?}, {search:?})"))?;
+    s.frames(30);
+    s.save_png(&dir.join("app-2x-help-tour-row.png"))?;
+    s.ui_click("help-tour")?;
+    s.frames(2);
+    check(
+        !s.ed.ui.help.open && at(&s) == Some(TourStep::Add) && s.ed.ui.tour.ended.is_none(),
+        "Help's Take the tour row closes Help and starts the tour again".into(),
+    )?;
+    // Help open over the tour hides the card; closed again, the step is back.
+    s.frames_with(2, vec![key(egui::Key::F1, none)]);
+    check(
+        s.ed.ui.help.open && at(&s) == Some(TourStep::Add) && !s.ed.ui.hits.contains_key("tour"),
+        "Help opened before the last step hides the card and keeps the step".into(),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::F1, none)]);
+    check(s.ed.ui.hits.contains_key("tour"), "Help closed again shows the card".into())?;
+    s.ui_click("tour-skip")?;
+    check(
+        at(&s).is_none() && s.ed.ui.tour.ended == Some("skipped") && seen_actions(&s) == 2,
+        "Skip ends the tour and keeps the seen flag".into(),
+    )?;
+    s.frames(3);
+    let (marched, _) = s.ed.tour_stats();
+    check(!s.ed.ui.hits.contains_key("tour") && marched == 0, "closed, the tour draws and marches nothing".into())?;
+    let (framed, c) = scene_framed(&s.ed);
+    check(framed, format!("the card gone, the scene is framed in the whole view again ({c:?})"))?;
+    vxr_app::host::first_tour(&mut s.ed);
+    check(at(&s).is_none(), "once seen, a start leaves the tour out".into())?;
+
+    // Cmd-K replays it, and in the world it edits a model.
+    s.frames_with(2, vec![key(egui::Key::Tab, none)]);
+    let world = s.ed.ui.world;
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("take the tour".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, none)]);
+    s.frames(2);
+    check(
+        at(&s) == Some(TourStep::Add) && s.ed.ui.cmdk.is_none() && (!world || !s.ed.ui.world),
+        format!("Cmd-K Take the tour starts it again, editing a model (world was {world})"),
+    )?;
+    s.ed.ui.theme = ThemeChoice::Paper;
+    s.frames(30);
+    s.save_png(&dir.join("app-2x-tour-paper.png"))?;
+
+    // Touch and phones: tap and finger words, a card clear of the dock and camera bar.
+    for (points, tag, theme) in [
+        ((1180, 820), "touch", ThemeChoice::Neutral),
+        ((820, 1180), "touch-tall", ThemeChoice::Paper),
+        ((390, 844), "phone", ThemeChoice::Paper),
+        ((844, 390), "phone-land", ThemeChoice::Neutral),
+    ] {
+        let ppp = if tag.starts_with("touch") { 2.0 } else { 3.0 };
+        let mut s = Shot::sized(Scene::new(NEW_SIZE), "Untitled", ppp, points)?;
+        block(&mut s);
+        s.ed.ui.theme = theme;
+        s.ed.set_touch(true);
+        s.frames(3);
+        vxr_app::host::first_tour(&mut s.ed);
+        s.frames(30);
+        let (w, h) = (s.ed.width as f32 / s.ed.ppp, s.ed.height as f32 / s.ed.ppp);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h)).expand(0.5);
+        let card = s.ed.ui.hits.get("tour").copied().ok_or(format!("{tag}: no tour card"))?;
+        let over: Vec<_> = ["dock", "dock-brushes", "dock-more", "nav", "render", "gestures", "tree"]
+            .iter()
+            .filter(|n| s.ed.ui.hits.get(**n).is_some_and(|r| r.intersects(card)))
+            .collect();
+        let off: Vec<_> =
+            s.ed.ui
+                .hits
+                .iter()
+                .filter(|(n, r)| n.starts_with("tour") && !screen.contains_rect(**r))
+                .map(|(n, _)| n)
+                .collect();
+        check(
+            off.is_empty()
+                && over.is_empty()
+                && s.ed.ui.hits.contains_key("tool-add")
+                && (!tag.starts_with("touch") || (card.left() - 12.0).abs() < 0.5 && (card.top() - 60.0).abs() < 0.5),
+            format!("{tag}: the card fits the screen ({card:?}, off {off:?}) clear of {over:?}"),
+        )?;
+        let demo = s.ed.ui.hits.contains_key("tour-demo");
+        check(
+            demo == (tag != "phone-land") && (!demo || s.ed.ui.tour.tile.texture.is_some()),
+            format!("{tag}: the card plays its demo where the screen has room for it ({demo})"),
+        )?;
+        // The card stands over part of the view: the scene stands in the room it leaves.
+        let (clear, b) = scene_clear_of_tour(&s.ed);
+        check(clear, format!("{tag}: the scene stands clear of the card and panels ({b:?} px, card {card:?} pt)"))?;
+        if tag == "touch" {
+            // The room changes while the card shows (in the browser the render corner comes a
+            // few frames after it): the scene is framed in the new room, unless the user moved
+            // the camera since.
+            let framed = s.ed.cam;
+            s.ed.ui.show_render = false;
+            s.frames(3);
+            let grown = s.ed.cam != framed;
+            s.ed.ui.show_render = true;
+            s.frames(3);
+            let (clear, b) = scene_clear_of_tour(&s.ed);
+            check(
+                grown && clear,
+                format!("{tag}: the room changed, the scene is framed in the new room ({grown}, {b:?} px)"),
+            )?;
+            let framed = s.ed.cam;
+            // The user orbits, and a frame later the room changes.
+            s.ed.cam.yaw += 0.3;
+            let moved = s.ed.cam;
+            s.frames(1);
+            s.ed.ui.show_render = false;
+            s.frames(3);
+            check(s.ed.cam == moved, format!("{tag}: after the user moves the camera, a new room keeps it"))?;
+            s.ed.ui.show_render = true;
+            s.ed.cam = framed;
+            s.frames(3);
+        }
+        s.save_png(&dir.join(format!("app-tour-{tag}.png")))?;
+        // A tap does Add, as a click does.
+        let v = s.voxels();
+        let p = s.top_face_pixel(project(&s.ed, [51.5, 1.99, 61.5]))?;
+        s.stroke(p, &[]);
+        s.frames(2);
+        check(s.voxels() > v && s.ed.ui.tour.done, format!("{tag}: a tap does Add"))?;
+        let phone = tag.starts_with("phone");
+        check(
+            !phone || !["nav", "render", "gestures"].iter().any(|n| s.ed.ui.hits.contains_key(*n)),
+            format!("{tag}: on a phone the card takes the room of the camera bar, render corner and hints"),
+        )?;
+        if phone {
+            // A flyout that opens by itself waits under the card; one the user opens takes its room.
+            s.frames(80);
+            s.ed.ui.tool = Tool::Select;
+            s.frames(2);
+            check(
+                s.ed.ui.hits.contains_key("tour") && !s.ed.ui.hits.contains_key("selection"),
+                format!("{tag}: the selection flyout waits under the card"),
+            )?;
+            s.ui_click("dock-color")?;
+            s.frames(2);
+            let palette = s.ed.ui.hits.get("palette").copied();
+            check(
+                s.ed.ui.palette_open && !s.ed.ui.hits.contains_key("tour") && palette.is_some(),
+                format!("{tag}: the palette opened takes the card's room ({palette:?})"),
+            )?;
+            s.ui_click("dock-color")?;
+            s.frames(2);
+            check(
+                !s.ed.ui.palette_open && s.ed.ui.hits.contains_key("tour") && at(&s) == Some(TourStep::Look),
+                format!("{tag}: the palette closed, the card is back on its step ({:?})", at(&s)),
+            )?;
+            s.ed.ui.tool = Tool::Add;
+        }
+        s.ui_click("tour-skip")?;
+        s.frames(2);
+        check(
+            s.ed.ui.tour.seen
+                && at(&s).is_none()
+                && s.ed.ui.hits.contains_key("nav")
+                && s.ed.ui.hits.contains_key("gestures"),
+            format!("{tag}: Skip ends it, and the camera bar and hints come back"),
+        )?;
+        let (framed, c) = scene_framed(&s.ed);
+        check(framed, format!("{tag}: the card gone, the scene is framed in the whole view again ({c:?})"))?;
+    }
+
+    // A world at launch: the tour edits a model, and on a tablet its card stands right of the
+    // scene tree.
+    let world = vxr_vox::fixtures::all()
+        .into_iter()
+        .find(|f| f.name == "22-world")
+        .ok_or("no 22-world fixture")?
+        .builder
+        .build()
+        .write();
+    let mut s = Shot::sized(Scene::from_vox(&world)?, "22-world.vox", 2.0, (1180, 820))?;
+    s.ed.set_touch(true);
+    let was = s.ed.scene.at();
+    vxr_app::host::first_tour(&mut s.ed);
+    s.frames(30);
+    let tree = s.ed.ui.hits.get("tree").copied().ok_or("no scene tree")?;
+    let card = s.ed.ui.hits.get("tour").copied().ok_or("no tour card")?;
+    check(
+        was == vxr_core::history::At::World
+            && at(&s) == Some(TourStep::Add)
+            && s.ed.scene.at() != vxr_core::history::At::World
+            && !card.intersects(tree)
+            && (card.left() - tree.right() - 8.0).abs() < 0.5
+            && (card.width() - TOUR_W).abs() < 0.5,
+        format!("a world at launch: the tour edits a model, its card right of the tree ({card:?}, tree {tree:?})"),
+    )?;
+    s.save_png(&dir.join("app-tour-touch-tree.png"))?;
     Ok(())
 }
 

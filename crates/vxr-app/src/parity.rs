@@ -87,7 +87,8 @@ fn tool(a: &Action) -> Option<&'static str> {
         | Action::DownloadVox
         | Action::ExportLibrary
         | Action::DeleteAccount
-        | Action::Theme => None,
+        | Action::Theme
+        | Action::TourSeen => None,
     }
 }
 

@@ -4,7 +4,9 @@
 # stand-in model provider), run check.js in the page (every tool, camera, undo/redo, Cmd-K,
 # the assistant, Open, Save, resize, the projects list and drafts), check the landing page and
 # the boot skeleton (check-landing.js: first visit with progress and an early click, /about, the
-# returning-visit skip, ?open= ?project= ?embed), check that a draft and a
+# returning-visit skip, ?open= ?project= ?embed, which also leave the first-run tour out), check
+# the first-run tour (check-tour.js: each step done for real, the replays, Skip and the seen
+# flag, the touch card and words), check that a draft and a
 # key remembered in the browser come back in a new page (check-restore.js for the draft), check that a tablet-sized touch screen starts in the touch layout, pair the
 # page with a real `vxr bridge` (a debug build, which takes pages from 127.0.0.1, on a free port
 # VXR_CHECK_BRIDGE_PORT or a picked one, not the fixed 41723 another bridge may hold) and edit it from a real `vxr mcp --live` driven by a scripted MCP client
@@ -88,6 +90,34 @@ done
 axi open "$url" >/dev/null
 axi eval "async () => { for (let i = 0; i < 300 && !window.vxr; i++) await new Promise(r => setTimeout(r, 50)); return 'ready' }" >/dev/null
 forget
+# The first-run tour (check-tour.js): from a cleared seen flag, each step done for real, the
+# replays and Skip, a new page without it, then the touch layout's card and words. It ends with
+# the flag kept, so the pages after it start without the tour.
+tour() { axi eval --full "async () => ($(cat "$here/check-tour.js"))('$1')" | unwrap; }
+axi eval "() => { try { localStorage.removeItem('vxr-toured') } catch {} return 'ok' }" >/dev/null
+axi open "$url" >/dev/null
+tour_results="$(tour first)"
+axi screenshot "$shots/web-tour-neutral.png" >/dev/null
+echo "wrote $shots/web-tour-neutral.png"
+axi eval "async () => { window.vxr.set_theme('paper'); await new Promise(r => setTimeout(r, 300)); return 'ok' }" >/dev/null
+axi screenshot "$shots/web-tour-paper.png" >/dev/null
+echo "wrote $shots/web-tour-paper.png"
+axi eval "() => { window.vxr.set_theme('neutral'); return 'ok' }" >/dev/null
+tour_results+=$'\n'"$(tour steps)"
+tour_results+=$'\n'"$(tour replay)"
+# The steps edited the island: no draft to offer, which would leave the tour out by itself.
+forget
+axi open "$url" >/dev/null
+tour_results+=$'\n'"$(tour again)"
+forget
+axi eval "() => { try { localStorage.removeItem('vxr-toured') } catch {} return 'ok' }" >/dev/null
+axi emulate --viewport "1180x820x2,mobile,touch" >/dev/null
+axi open "$url" >/dev/null
+tour_results+=$'\n'"$(tour touch)"
+axi screenshot "$shots/web-tour-touch.png" >/dev/null
+echo "wrote $shots/web-tour-touch.png"
+tour_results+=$'\n'"$(tour skip)"
+forget
 for scale in 1 2; do
   axi emulate --viewport "1280x800x$scale" >/dev/null
   axi open "$url" >/dev/null
@@ -146,6 +176,7 @@ for _ in $(seq 600); do
 done
 [ -n "$results" ] || results="FAIL check.js did not finish in 10 minutes"
 results+="$touch_results"
+results+=$'\n'"$tour_results"
 results+=$'\n'"$land_results"
 axi screenshot "$shots/web-1x-checked.png" >/dev/null
 

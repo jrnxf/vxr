@@ -81,6 +81,17 @@ fn load_theme() -> ThemeChoice {
         .unwrap_or_default()
 }
 
+/// The tour's seen flag: a `toured` file beside `theme`.
+fn load_toured() -> bool {
+    config_dir().is_some_and(|d| d.join("toured").exists())
+}
+
+fn save_toured() -> Result<(), String> {
+    let dir = config_dir().ok_or("no config folder")?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("toured"), "1\n").map_err(|e| e.to_string())
+}
+
 fn save_theme(id: &str) -> Result<(), String> {
     let dir = config_dir().ok_or("no config folder")?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -219,6 +230,10 @@ impl Platform for Desktop {
         save_theme(id)
     }
 
+    fn persist_tour_seen(&mut self) -> Result<(), String> {
+        save_toured()
+    }
+
     fn named(&mut self, name: &str) {
         self.window.set_title(&format!("{name} - vxr"));
     }
@@ -274,13 +289,17 @@ impl App {
         )?;
         let editor = &mut host.editor;
         editor.ui.theme = load_theme();
+        editor.ui.tour.seen = load_toured();
         if let Some(dir) = config_dir() {
             editor.projects = Projects::load(Box::new(Folder::new(dir.join("projects"))));
         }
         editor.path = self.path.take();
         match &editor.path {
             Some(p) => _ = editor.projects.opened(&name, Some(p), None, modified(p), false, 0),
-            None => vxr_app::host::launch(editor),
+            None => {
+                vxr_app::host::launch(editor);
+                vxr_app::host::first_tour(editor);
+            }
         }
         // The account: signed in with the session kept in the keychain, if any. Who is signed
         // in, and the library, come with the first answer.

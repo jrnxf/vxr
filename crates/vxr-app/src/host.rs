@@ -108,6 +108,11 @@ pub trait Platform {
     /// Keep the picked theme (by its id) for the next start.
     fn persist_theme(&mut self, id: &str) -> Result<(), String>;
 
+    /// Keep the tour's seen flag (it was skipped or finished), so the next start leaves it out.
+    fn persist_tour_seen(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+
     /// The bot check's answer that asking for a sign-in email needs (the page's Turnstile
     /// token): at once, or None when the page answers later through [`challenged`].
     fn challenge(&mut self) -> Option<String> {
@@ -151,6 +156,12 @@ pub fn run_action(ed: &mut Editor, p: &mut dyn Platform, action: Action) {
         Action::Theme => {
             if let Err(e) = p.persist_theme(ed.ui.theme.id()) {
                 toast(ed, format!("Could not keep the theme: {e}"));
+            }
+        }
+        Action::TourSeen => {
+            // Only the next start misses it: no need to say so.
+            if let Err(e) = p.persist_tour_seen() {
+                eprintln!("vxr: could not keep the tour as seen: {e}");
             }
         }
         Action::Open => {
@@ -602,6 +613,14 @@ pub fn launch(ed: &mut Editor) {
         ed.projects.offer = Some(offer);
     } else if !ed.projects.list().is_empty() {
         ed.ui.projects_open = true;
+    }
+}
+
+/// After [`launch`], on a start with no file, link or embed: the first-run tour, unless it was
+/// seen or the launch showed a draft to restore or the projects list (a returning user).
+pub fn first_tour(ed: &mut Editor) {
+    if ed.projects.offer.is_none() && !ed.ui.projects_open {
+        ed.ui.first_tour();
     }
 }
 

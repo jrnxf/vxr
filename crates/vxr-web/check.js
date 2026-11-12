@@ -83,6 +83,7 @@ async () => {
   await frames(10);
   let s0 = st();
   step('starts with the island', s0.voxels > 100000 && s0.name === 'island.vox', JSON.stringify(s0));
+  step('a browser that saw the tour starts without it', s0.tour.step === null && s0.tour.seen && !s0.tour.card, JSON.stringify(s0.tour));
   const original = bytes();
   const file = new Uint8Array(await (await fetch('scene.vox')).arrayBuffer());
   step('saving the opened island unedited gives back its bytes', same(original, file), `${original.length} vs ${file.length}`);

@@ -432,6 +432,8 @@ function wire() {
 // What the editor asks of the page (the Browser platform in crates/vxr-web/src/web.rs): its
 // file picker, downloads and the kept theme. The editor decides what to write and says so.
 const THEME_KEY = 'vxr-theme';
+// The first-run tour was skipped or finished: it shows once.
+const TOURED_KEY = 'vxr-toured';
 function download(bytes, name, type) {
   const url = URL.createObjectURL(new Blob([bytes], { type }));
   const a = Object.assign(document.createElement('a'), { href: url, download: name });
@@ -461,6 +463,9 @@ async function libraryFetch(id, method, path, flat, body) {
 window.vxrHost = {
   pickOpen,
   download,
+  keepToured() {
+    try { localStorage.setItem(TOURED_KEY, '1'); } catch {}
+  },
   keepTheme(id) {
     try { localStorage.setItem(THEME_KEY, id); } catch {}
   },
@@ -641,6 +646,19 @@ function tick(now) {
   requestAnimationFrame(tick);
 }
 
+// Run `f` once the editor is in front: now, or when the landing page leaves (it sets
+// html[data-landing] to off as it opens the editor).
+function whenEntered(f) {
+  const root = document.documentElement;
+  if (root.dataset.landing !== 'on') return f();
+  const seen = new MutationObserver(() => {
+    if (root.dataset.landing === 'on') return;
+    seen.disconnect();
+    f();
+  });
+  seen.observe(root, { attributes: true, attributeFilter: ['data-landing'] });
+}
+
 async function main() {
   if (!navigator.gpu || !(await navigator.gpu.requestAdapter().catch(() => null))) {
     show('This browser has no WebGPU.', 'vxr needs WebGPU: try a recent Chrome, Edge or Safari on a desktop, or download the desktop app when it ships.');
@@ -676,6 +694,12 @@ async function main() {
   for (const [key, bytes] of await window.vxrProjects.preload().catch(warn('read the projects list')) ?? []) app.preload(key, bytes);
   await readHolds();
   app.launch();
+  // The first-run tour, once, and never for a link to a scene or project or an embed. It starts
+  // when the editor is in front: at once, or when the landing page opens it.
+  let toured = false;
+  try { toured = localStorage.getItem(TOURED_KEY) === '1'; } catch {}
+  app.set_tour_seen(toured);
+  if (document.documentElement.dataset.deep !== 'on') whenEntered(() => app.first_tour());
   app.check_account();
   // Edits not yet in a draft are written as the page goes or hides; leaving with unsaved
   // edits asks first (the draft stays either way, as after a crash).
