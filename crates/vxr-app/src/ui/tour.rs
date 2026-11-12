@@ -177,19 +177,43 @@ impl Hybrid {
         self.actions.push(Action::TourSeen);
     }
 
-    /// On a phone the tour card this frame drew covers the middle of the view: the larger room
-    /// it leaves the scene in the screen `full`, above it or (held sideways) at its left, above
-    /// the dock.
-    pub fn tour_room(&self, full: Rect) -> Option<Rect> {
-        let card = self.hits.get("tour").filter(|_| self.phone)?;
-        let dock = ["dock", "dock-brushes", "dock-more"]
+    /// The tour card this frame drew stands over part of the view, where the scene is: the
+    /// largest room it leaves the scene in the view `free` (the screen left of a docked
+    /// assistant), under the top bar, above the dock, the gesture hints, the stats and the hint
+    /// bar and clear of the rail,
+    /// the scene tree, the render corner and the camera bar. That is right of the card on a
+    /// tablet held sideways, under it on a tablet held upright, left of it on a desktop or a
+    /// phone held sideways, and above it on a phone.
+    pub fn tour_room(&self, free: Rect) -> Option<Rect> {
+        const GAP: f32 = 8.0;
+        let card = self.hits.get("tour")?;
+        let bottom = ["dock", "dock-brushes", "dock-more", "gestures", "stats", "hint"]
             .iter()
             .filter_map(|n| self.hits.get(*n))
-            .fold(full.bottom(), |t, r| t.min(r.top()));
-        let above = Rect::from_min_max(pos2(full.left(), TOP), pos2(full.right(), card.top() - 8.0));
-        let left = Rect::from_min_max(pos2(full.left(), TOP), pos2(card.left() - 8.0, dock - 8.0));
-        let area = |r: Rect| r.width().max(0.0) * r.height().max(0.0);
-        let room = if area(above) >= area(left) { above } else { left };
+            .fold(free.bottom(), |t, r| t.min(r.top()));
+        let left = if self.touch { free.left() } else { free.left() + 12.0 + self.rail_w };
+        let view = Rect::from_min_max(pos2(left + GAP, TOP), pos2(free.right() - GAP, bottom - GAP));
+        let area = |r: &Rect| r.width().max(0.0) * r.height().max(0.0);
+        let largest = |rooms: [Rect; 4]| rooms.into_iter().max_by(|a, b| area(a).total_cmp(&area(b)));
+        let (l, r, t, b) = (view.left(), view.right(), view.top(), view.bottom());
+        let mut room = largest([
+            Rect::from_min_max(pos2(l, t), pos2(r, card.top() - GAP)),
+            Rect::from_min_max(pos2(l, card.bottom() + GAP), pos2(r, b)),
+            Rect::from_min_max(pos2(l, t), pos2(card.left() - GAP, b)),
+            Rect::from_min_max(pos2(card.right() + GAP, t), pos2(r, b)),
+        ])?;
+        // A panel standing in the room cuts it on the side that keeps the most of it.
+        for o in [self.hits.get("tree").copied(), self.render_dock, self.nav_rect].into_iter().flatten() {
+            if room.intersects(o) {
+                let (l, r, t, b) = (room.left(), room.right(), room.top(), room.bottom());
+                room = largest([
+                    Rect::from_min_max(pos2(l, t), pos2(r, o.top() - GAP)),
+                    Rect::from_min_max(pos2(l, o.bottom() + GAP), pos2(r, b)),
+                    Rect::from_min_max(pos2(l, t), pos2(o.left() - GAP, b)),
+                    Rect::from_min_max(pos2(o.right() + GAP, t), pos2(r, b)),
+                ])?;
+            }
+        }
         (room.width() >= 40.0 && room.height() >= 40.0).then_some(room)
     }
 

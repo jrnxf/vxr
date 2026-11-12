@@ -1117,6 +1117,13 @@ impl App {
             .unwrap_or_default()
     }
 
+    /// The screen box of the scene's voxels as `[left, top, right, bottom]` in CSS pixels, as
+    /// `hit_rect`. For the browser check.
+    pub fn scene_rect(&self) -> Vec<f32> {
+        let e = &self.host.editor;
+        e.scene_on_screen().iter().map(|v| v / e.native_ppp).collect()
+    }
+
     /// A key the page read back from the browser's encrypted store (`vxrKeys.load`) at start:
     /// `kind` is "anthropic", "openai" or "compatible".
     pub fn restore_key(&mut self, kind: &str, key: &str) {

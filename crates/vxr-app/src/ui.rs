@@ -2511,8 +2511,9 @@ impl Hybrid {
     }
 
     // The touch gestures on a scrim chip over the view (they stay on, so they must read over
-    // any model): bottom left beside the dock, or centred over it when the screen is too
-    // narrow. Under every panel, and never takes a finger.
+    // any model): bottom left beside the dock, bottom right beside it when the dock stands at
+    // the left (a phone held sideways), or centred over it when the screen is too narrow.
+    // Under every panel, and never takes a finger.
     fn gesture_hints(&mut self, ctx: &Context, screen: Rect) {
         // The assistant's sheet, or Help's on a phone, covers the view the chip hints at.
         // The tour's card on a phone covers it too, and teaches the same gestures.
@@ -2544,6 +2545,15 @@ impl Hybrid {
         let size = g.size() + 2.0 * pad;
         let at = if screen.left() + 12.0 + size.x + 8.0 <= dock.left() {
             pos2(screen.left() + 12.0, screen.bottom() - 12.0 - size.y)
+        } else if self.dock_area.right() + 8.0 + size.x + 12.0 <= screen.right()
+            && ![self.nav_rect, self.render_dock].into_iter().flatten().any(|r| {
+                r.expand(8.0).intersects(Rect::from_min_size(
+                    pos2(screen.right() - 12.0 - size.x, screen.bottom() - 12.0 - size.y),
+                    size,
+                ))
+            })
+        {
+            pos2(screen.right() - 12.0 - size.x, screen.bottom() - 12.0 - size.y)
         } else {
             pos2(screen.center().x - size.x / 2.0, self.dock_top - 8.0 - size.y)
         };
@@ -5617,7 +5627,16 @@ impl Hybrid {
             let size = vec2(4.0 + pw + 4.0, len + 32.0 + 2.0);
             let below = self.render_dock.map_or(TOP, |r| r.bottom() + 8.0);
             let right = screen.right() - 12.0 - size.x;
-            let under = Rect::from_min_size(pos2(right, (screen.center().y - size.y / 2.0).max(below)), size);
+            // Centred in the view above the dock when the dock runs along the bottom (a phone
+            // held upright), so it stays clear of the gesture chip over the dock.
+            let d = self.dock_area;
+            let bottom = if self.phone && d.left() < screen.center().x && screen.center().x < d.right() {
+                d.top()
+            } else {
+                screen.bottom()
+            };
+            let mid = (screen.top() + bottom) / 2.0;
+            let under = Rect::from_min_size(pos2(right, (mid - size.y / 2.0).max(below)), size);
             if self.phone {
                 // On a phone: under the corner, else beside it, else at the top; where the dock
                 // or the screen's edge leaves no room the bar stays away.

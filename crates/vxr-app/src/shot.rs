@@ -605,6 +605,15 @@ fn phone(dir: &Path, load: &dyn Fn() -> Result<(Scene, String), String>) -> Resu
             )
         };
         fits(&s, "plain")?;
+        let chip = s.ed.ui.hits.get("gestures").copied();
+        let over: Vec<_> = ["dock", "dock-brushes", "dock-more", "nav", "render"]
+            .iter()
+            .filter(|n| s.ed.ui.hits.get(**n).zip(chip).is_some_and(|(r, c)| r.intersects(c)))
+            .collect();
+        check(
+            chip.is_some() && over.is_empty(),
+            format!("{tag}: the gesture chip stands clear of the dock, camera bar and render corner ({over:?})"),
+        )?;
         s.save_png(&dir.join(format!("app-3x-phone-{tag}.png")))?;
 
         // The assistant open: the dock stays reachable, so the colour button still opens the
@@ -2495,16 +2504,24 @@ fn project(ed: &Editor, p: [f32; 3]) -> [f32; 2] {
     [(c.x / c.w + 1.0) * 0.5 * w, (1.0 - c.y / c.w) * 0.5 * h]
 }
 
-/// The screen box, in pixels, of the scene's voxels.
-fn scene_on_screen(ed: &Editor) -> [f32; 4] {
-    let (lo, hi) = ed.scene.map.occupied_bounds().unwrap_or(([0; 3], [1; 3]));
-    let mut b = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
-    for i in 0..8 {
-        let pick = |a: usize, bit: usize| if i & bit == 0 { lo[a] } else { hi[a] } as f32;
-        let [x, y] = project(ed, [pick(0, 1), pick(1, 2), pick(2, 4)]);
-        b = [b[0].min(x), b[1].min(y), b[2].max(x), b[3].max(y)];
-    }
-    b
+/// Whether the scene's voxels stand on screen under the top bar and clear of the tour card and
+/// the panels around it (the dock, gesture hints, scene tree, render corner and camera bar),
+/// and their screen box in pixels.
+fn scene_clear_of_tour(ed: &Editor) -> (bool, [f32; 4]) {
+    let b @ [x0, y0, x1, y1] = ed.scene_on_screen();
+    let p = ed.ppp;
+    let scene = egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y1)) / p;
+    let panels = ["tour", "dock", "dock-brushes", "dock-more", "gestures", "stats", "hint", "tree", "render", "nav"];
+    let clear = !panels.iter().filter_map(|n| ed.ui.hits.get(*n)).any(|r| r.intersects(scene));
+    (clear && x0 >= 0.0 && y0 >= 60.0 * p && x1 <= ed.width as f32 && y1 <= ed.height as f32, b)
+}
+
+/// Whether the scene's voxels stand in the middle of the view, as `frame_scene` leaves them.
+fn scene_framed(ed: &Editor) -> (bool, [f32; 2]) {
+    let [x0, y0, x1, y1] = ed.scene_on_screen();
+    let (w, h) = (ed.width as f32, ed.height as f32);
+    let c = [(x0 + x1) / 2.0, (y0 + y1) / 2.0];
+    ((c[0] - w / 2.0).abs() < w * 0.05 && (c[1] - h / 2.0).abs() < h * 0.05, c)
 }
 
 /// Selection and transform on an empty scene with two blocks, so every count is exact: S,
@@ -6455,6 +6472,26 @@ fn tour(dir: &Path) -> Result<(), String> {
             && clear,
         format!("Add is ringed, Skip shows and Next waits for the action, clear of the camera bar ({nav:?})"),
     )?;
+    let (clear, b) = scene_clear_of_tour(&s.ed);
+    check(
+        clear && b[2] <= card.left() * s.ed.ppp,
+        format!("the scene stands left of the card, clear of it ({b:?} px, card {card:?} pt)"),
+    )?;
+    // The assistant docks: it shifts the view in the frame the room narrows, and the scene is
+    // framed in the new room all the same; closed again, in the wide room.
+    s.ui_click("ai-toggle")?;
+    s.frames(3);
+    let (clear, b) = scene_clear_of_tour(&s.ed);
+    let dock = s.ed.ui.hits.get("assistant").copied();
+    let scene = egui::Rect::from_min_max(egui::pos2(b[0], b[1]), egui::pos2(b[2], b[3])) / s.ed.ppp;
+    check(
+        s.ed.ui.ai_open && s.ed.ui.hits.contains_key("tour") && clear && dock.is_some_and(|d| !d.intersects(scene)),
+        format!("with the assistant docked the scene stands clear of the card and the assistant ({b:?} px)"),
+    )?;
+    s.ui_click("ai-toggle")?;
+    s.frames(3);
+    let (clear, b) = scene_clear_of_tour(&s.ed);
+    check(!s.ed.ui.ai_open && clear, format!("closed again, the scene stands clear of the card ({b:?} px)"))?;
     s.frames(30);
     s.save_png(&dir.join("app-2x-tour.png"))?;
     let v = s.voxels();
@@ -6578,6 +6615,8 @@ fn tour(dir: &Path) -> Result<(), String> {
     s.frames(3);
     let (marched, _) = s.ed.tour_stats();
     check(!s.ed.ui.hits.contains_key("tour") && marched == 0, "closed, the tour draws and marches nothing".into())?;
+    let (framed, c) = scene_framed(&s.ed);
+    check(framed, format!("the card gone, the scene is framed in the whole view again ({c:?})"))?;
     vxr_app::host::first_tour(&mut s.ed);
     check(at(&s).is_none(), "once seen, a start leaves the tour out".into())?;
 
@@ -6637,20 +6676,35 @@ fn tour(dir: &Path) -> Result<(), String> {
             demo == (tag != "phone-land") && (!demo || s.ed.ui.tour.tile.texture.is_some()),
             format!("{tag}: the card plays its demo where the screen has room for it ({demo})"),
         )?;
-        if tag.starts_with("phone") {
-            // The card covers the middle of a phone's view: the scene stands in the room it leaves.
-            let [x0, y0, x1, y1] = scene_on_screen(&s.ed);
-            let p = s.ed.ppp;
-            let fits = if tag == "phone-land" {
-                let dock = s.ed.ui.hits.get("dock").map_or(f32::MAX, |r| r.top());
-                x1 < card.left() * p && x0 >= 0.0 && y1 < dock * p
-            } else {
-                y1 < card.top() * p && y0 >= 60.0 * p
-            };
+        // The card stands over part of the view: the scene stands in the room it leaves.
+        let (clear, b) = scene_clear_of_tour(&s.ed);
+        check(clear, format!("{tag}: the scene stands clear of the card and panels ({b:?} px, card {card:?} pt)"))?;
+        if tag == "touch" {
+            // The room changes while the card shows (in the browser the render corner comes a
+            // few frames after it): the scene is framed in the new room, unless the user moved
+            // the camera since.
+            let framed = s.ed.cam;
+            s.ed.ui.show_render = false;
+            s.frames(3);
+            let grown = s.ed.cam != framed;
+            s.ed.ui.show_render = true;
+            s.frames(3);
+            let (clear, b) = scene_clear_of_tour(&s.ed);
             check(
-                fits,
-                format!("{tag}: the scene stands clear of the card ({:?} px, card {card:?} pt)", [x0, y0, x1, y1]),
+                grown && clear,
+                format!("{tag}: the room changed, the scene is framed in the new room ({grown}, {b:?} px)"),
             )?;
+            let framed = s.ed.cam;
+            // The user orbits, and a frame later the room changes.
+            s.ed.cam.yaw += 0.3;
+            let moved = s.ed.cam;
+            s.frames(1);
+            s.ed.ui.show_render = false;
+            s.frames(3);
+            check(s.ed.cam == moved, format!("{tag}: after the user moves the camera, a new room keeps it"))?;
+            s.ed.ui.show_render = true;
+            s.ed.cam = framed;
+            s.frames(3);
         }
         s.save_png(&dir.join(format!("app-tour-{tag}.png")))?;
         // A tap does Add, as a click does.
@@ -6697,15 +6751,8 @@ fn tour(dir: &Path) -> Result<(), String> {
                 && s.ed.ui.hits.contains_key("gestures"),
             format!("{tag}: Skip ends it, and the camera bar and hints come back"),
         )?;
-        if phone {
-            let [x0, y0, x1, y1] = scene_on_screen(&s.ed);
-            let (w, h) = (s.ed.width as f32, s.ed.height as f32);
-            let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
-            check(
-                (cx - w / 2.0).abs() < w * 0.05 && (cy - h / 2.0).abs() < h * 0.05,
-                format!("{tag}: the card gone, the scene is framed in the whole view again ({cx}, {cy})"),
-            )?;
-        }
+        let (framed, c) = scene_framed(&s.ed);
+        check(framed, format!("{tag}: the card gone, the scene is framed in the whole view again ({c:?})"))?;
     }
 
     // A world at launch: the tour edits a model, and on a tablet its card stands right of the

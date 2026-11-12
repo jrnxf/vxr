@@ -209,8 +209,9 @@ pub struct Editor {
     /// new step or the tour's end rewinds it).
     tour_tiles: Option<crate::demo::Tiles>,
     tour_was: Option<usize>,
-    /// On a phone the tour card showed last frame, with the scene framed in the room it leaves.
-    tour_framed: bool,
+    /// While the tour card shows: the room it leaves (points) and the camera last frame, and
+    /// whether the user has moved the camera since the scene was framed in that room.
+    tour_framed: Option<(egui::Rect, OrbitCamera, bool)>,
 }
 
 /// Whether a review has nothing in it: no step and no change.
@@ -341,7 +342,7 @@ impl Editor {
             help_was_open: false,
             tour_tiles: None,
             tour_was: None,
-            tour_framed: false,
+            tour_framed: None,
         };
         e.shape = (e.scene.reshapes(), e.scene.origin);
         e.mark_saved();
@@ -775,6 +776,23 @@ impl Editor {
     pub fn scene_in_view(&self) -> (f32, f32) {
         let (lo, hi) = self.scene_box();
         self.box_in_view(lo, hi)
+    }
+
+    /// The screen box of the scene's voxels (or an empty scene's floor) in pixels, as
+    /// `[left, top, right, bottom]`. Meant for a camera outside the box (a corner behind the
+    /// camera has no place on screen).
+    pub fn scene_on_screen(&self) -> [f32; 4] {
+        let (lo, hi) = self.scene_box();
+        let (w, h) = (self.width as f32, self.height as f32);
+        let vp = self.cam.view_proj(w / h);
+        let mut b = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+        for i in 0..8 {
+            let pick = |a: usize, bit: usize| if i & bit == 0 { lo[a] } else { hi[a] };
+            let c = vp * Vec3::new(pick(0, 1), pick(1, 2), pick(2, 4)).extend(1.0);
+            let (x, y) = ((c.x / c.w + 1.0) * 0.5 * w, (1.0 - c.y / c.w) * 0.5 * h);
+            b = [b[0].min(x), b[1].min(y), b[2].max(x), b[3].max(y)];
+        }
+        b
     }
 
     /// How much of the box `lo`..`hi` the view shows, as `scene_in_view`.
@@ -1961,36 +1979,51 @@ impl Editor {
         };
     }
 
-    /// On a phone the tour card covers the middle of the view, where the scene is: while it
-    /// shows, the scene is framed in the larger room the card leaves (above it, or at its left
-    /// on a phone held sideways), and framed in the whole view again when it goes.
+    /// The tour card stands over part of the view, where the scene is: while it shows, the
+    /// scene is framed in the largest room the card leaves (`Hybrid::tour_room`), and framed in
+    /// the whole view again when it goes. The room can change while the card shows (the render
+    /// corner and the camera bar come a few frames after it in the browser, a new step's card
+    /// is taller, the window turns, the assistant docks): the scene is framed in the new room
+    /// then, unless the user has moved the camera since. A camera change in a frame where the
+    /// room stays is the user's; one in the frame the room changes is the app's (the assistant
+    /// docking shifts the view, a resize keeps the scene in it).
     fn tour_room(&mut self) {
         let (w, h) = (self.width as f32, self.height as f32);
-        let room = self.ui.tour_room(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h) / self.ppp));
-        if room.is_some() == self.tour_framed {
-            return;
-        }
-        self.tour_framed = room.is_some();
-        let Some(r) = room else {
-            self.frame_scene();
-            return;
+        let free = egui::vec2(self.free_width(), h) / self.ppp;
+        let room = self.ui.tour_room(egui::Rect::from_min_size(egui::Pos2::ZERO, free));
+        let room = match (room, self.tour_framed) {
+            (None, None) => return,
+            // The card shows but leaves too little room: the scene stays where it is.
+            (None, Some(_)) if self.ui.hits.contains_key("tour") => return,
+            (None, Some(_)) => {
+                self.tour_framed = None;
+                self.frame_scene();
+                return;
+            }
+            (Some(r), Some((was, cam, moved))) => {
+                let same = (r.min - was.min).length() + (r.max - was.max).length() < 1.0;
+                let moved = moved || (same && cam != self.cam);
+                if same || moved {
+                    self.tour_framed = Some((r, self.cam, moved));
+                    return;
+                }
+                r
+            }
+            (Some(r), None) => r,
         };
-        let r = r * self.ppp;
+        let r = room * self.ppp;
         let (lo, hi) = self.scene_box();
         self.cam.target = (lo + hi) * 0.5;
         self.cam.fit(lo, hi, w / h, 0.9);
-        // Then zoom out until the scene's width and height each fit 90% of the room.
+        // Then zoom out until the scene's width and height each fit 90% of the room (the
+        // target is in the middle of the view, so each half of the box is measured from it).
         for _ in 0..4 {
-            let vp = self.cam.view_proj(w / h);
-            let (mut x, mut y) = (0f32, 0f32);
-            for i in 0..8 {
-                let pick = |a: usize, bit: usize| if i & bit == 0 { lo[a] } else { hi[a] };
-                let p = vp.project_point3(Vec3::new(pick(0, 1), pick(1, 2), pick(2, 4)));
-                (x, y) = (x.max(p.x.abs()), y.max(p.y.abs()));
-            }
-            self.cam.distance *= (x / (0.9 * r.width() / w)).max(y / (0.9 * r.height() / h));
+            let [x0, y0, x1, y1] = self.scene_on_screen();
+            let (x, y) = ((x0 - w / 2.0).abs().max(x1 - w / 2.0), (y0 - h / 2.0).abs().max(y1 - h / 2.0));
+            self.cam.distance *= (x / (0.45 * r.width())).max(y / (0.45 * r.height()));
         }
         self.cam.pan(r.center().x - w / 2.0, r.center().y - h / 2.0, h);
+        self.tour_framed = Some((room, self.cam, false));
     }
 
     /// The tour card's demo: how many images the last frame marched, and the loops the shown

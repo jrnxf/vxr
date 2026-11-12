@@ -2,12 +2,14 @@
 // one stage per call so the check can screenshot and reload between them):
 //   async (stage) => lines of "ok <step>" or "FAIL <step>: <why>".
 // The page is dist/ at 1280x800 with the tour's seen flag cleared before `first`:
-//   first   the tour starts on Add, its card at the top right, its demo playing
+//   first   the tour starts on Add, its card at the top right, its demo playing, the scene left of it
 //   steps   each step's real action does it: add, orbit, box, move, then Open Help finishes
-//   replay  Cmd-K and Help's tour row replay it, F1 hides and keeps it, Skip ends it
+//   replay  Cmd-K and Help's tour row replay it, F1 hides and keeps it, Skip ends it and the
+//           scene is framed in the whole view again
 //   again   a new page leaves the tour out once it was seen
-//   touch   a touch screen (1180x820) gets the card at the top left and the touch words
-//   skip    Skip on the touch screen keeps the seen flag again
+//   touch   a touch screen (1180x820) gets the card at the top left, the touch words and the
+//           scene framed clear of the card and the panels
+//   skip    Skip on the touch screen keeps the seen flag again and frames the scene in the whole view
 async (stage) => {
   const out = [];
   const step = (name, pass, why = '') => out.push(pass ? `ok tour ${name}` : `FAIL tour ${name}: ${why}`);
@@ -21,6 +23,22 @@ async (stage) => {
   const until = async (f, ms = 5000) => { for (let t = 0; t < ms && !f(); t += 50) await sleep(50); return !!f(); };
   const kept = () => { try { return localStorage.getItem('vxr-toured'); } catch { return 'blocked'; } };
   const rect = (n) => window.vxr.hit_rect(n);
+  // The scene's voxels on screen, in CSS pixels: clear of the card and the panels while the
+  // card shows, under the top bar and on screen; in the middle of the view once it goes.
+  const scene = () => window.vxr.scene_rect();
+  const meets = (a, b) => a.length === 4 && b.length === 4 && a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3];
+  const sceneClear = () => {
+    const s = scene();
+    const top = 60 * st().ppp / devicePixelRatio;
+    const hit = ['tour', 'dock', 'dock-brushes', 'dock-more', 'gestures', 'stats', 'hint', 'tree', 'render', 'nav'].filter((n) => meets(s, rect(n)));
+    const on = s[0] >= 0 && s[1] >= top && s[2] <= innerWidth && s[3] <= innerHeight;
+    return [hit.length === 0 && on, JSON.stringify({ scene: s, hit })];
+  };
+  const sceneFramed = () => {
+    const s = scene();
+    const c = [(s[0] + s[2]) / 2, (s[1] + s[3]) / 2];
+    return [Math.abs(c[0] - innerWidth / 2) < innerWidth * 0.05 && Math.abs(c[1] - innerHeight / 2) < innerHeight * 0.05, JSON.stringify(c)];
+  };
   let buttons = 0;
   const bit = { 0: 1, 1: 4, 2: 2 };
   const ptr = (type, x, y, button = 0, kind = 'mouse') => {
@@ -49,8 +67,8 @@ async (stage) => {
     c.dispatchEvent(new KeyboardEvent('keyup', o));
     await frames();
   };
-  // The island's middle at 1280x800, as in check.js.
-  const [mx, my] = [640, 430];
+  // The island's middle: the tour frames it left of the card, so it is read from the page.
+  const middle = () => { const s = scene(); return [(s[0] + s[2]) / 2, (s[1] + s[3]) / 2]; };
   // A step's action shows Done, and a moment later the next step.
   const doneThen = async (n, what) => {
     step(`${what} does the step`, tour().done, JSON.stringify(tour()));
@@ -67,8 +85,11 @@ async (stage) => {
     step('the card plays the add demo', t.card && t.demo === 'add' && t.image && t.marched <= 1 && rect('tour-demo').length === 4, JSON.stringify(t));
     step('it says what to do with the mouse', /^Click the scene/.test(t.body), t.body);
     step('Add is ringed, Skip shows and Next waits for the action', rect('tool-add').length === 4 && rect('tour-skip').length === 4 && rect('tour-next').length === 0);
+    const [ok, why] = sceneClear();
+    step('the scene stands left of the card, clear of it', ok && scene()[2] <= card[0], why);
     await sleep(500);
   } else if (stage === 'steps') {
+    const [mx, my] = middle();
     // 1, Add: a click on the island.
     const v = st().voxels;
     await click(mx, my);
@@ -121,6 +142,7 @@ async (stage) => {
     step('Skip ends the tour', tour().step === null && tour().ended === 'skipped' && tour().seen && kept() === '1', JSON.stringify(tour()));
     await frames(3);
     step('closed, the tour draws and marches nothing', !tour().card && tour().marched === 0 && rect('tour').length === 0, JSON.stringify(tour()));
+    step('the card gone, the scene is framed in the whole view again', ...sceneFramed());
     await key('k', { metaKey: true });
     for (const ch of 'take the tour') await key(ch);
     await key('Enter');
@@ -142,10 +164,12 @@ async (stage) => {
     step('it says what to do with taps', /^Tap the scene/.test(t.body) && !/click|right-drag/i.test(t.body), t.body);
     const clear = ['dock', 'render', 'nav'].filter((n) => { const r = rect(n).map((v) => v / z); return r.length === 4 && r[0] < card[2] && card[0] < r[2] && r[1] < card[3] && card[1] < r[3]; });
     step('the card is clear of the dock, the render corner and the camera bar', clear.length === 0, JSON.stringify(clear));
+    step('on a tablet the scene stands clear of the card and the panels', ...sceneClear());
   } else if (stage === 'skip') {
     const [x, y] = window.vxr.hit('tour-skip');
     ptr('pointerdown', x, y, 0, 'touch'); await frames(1); ptr('pointerup', x, y, 0, 'touch'); await frames(4);
     step('a tap on Skip ends it and keeps the flag', tour().step === null && tour().ended === 'skipped' && kept() === '1', JSON.stringify([tour(), kept()]));
+    step('the card gone, the tablet frames the scene in the whole view again', ...sceneFramed());
   }
   return out.join('\n');
 }
