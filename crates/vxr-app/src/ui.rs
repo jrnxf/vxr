@@ -20,10 +20,12 @@ mod account;
 mod activity;
 mod agents;
 mod assistant;
+mod help;
 pub use account::{SignIn, Step, Sync, WRONG_CODE};
 pub use activity::{Item, LIST_ROWS, Live};
 pub use agents::{AgentsView, EditRow, FILES_SETUP, PAIR, START};
 pub use assistant::{AiAction, AskBar, ChatView, PANEL_W};
+pub use help::{HELP_W, Help, MIN_VIEW, TileView};
 
 pub(crate) const R: u8 = 12;
 /// The top of the panels under the top bar's two 40 px islands.
@@ -223,6 +225,8 @@ mod icon {
     pub const CLOUD: char = '\u{e088}';
     pub const CLOUD_CHECK: char = '\u{e66e}';
     pub const REFRESH_CW: char = '\u{e145}';
+    pub const CIRCLE_HELP: char = '\u{e082}';
+    pub const KEYBOARD: char = '\u{e284}';
 }
 
 pub use vxr_core::select::{Region, Transform};
@@ -686,7 +690,9 @@ pub struct Hybrid {
     /// (set by the editor).
     pub camera_hints: bool,
     /// A Cmd-K camera gesture was chosen: toast how the camera moves.
-    camera_tip: bool,
+    pub(crate) camera_tip: bool,
+    /// Help: its panel of demo tiles and their search.
+    pub help: Help,
     /// The file menu under the scene name (New, Open, Save, Export) is open.
     pub file_menu: bool,
     /// The picked theme (System follows the system's light or dark setting), and the Theme
@@ -744,6 +750,9 @@ pub struct Hybrid {
     phone: bool,
     /// A phone held upright (narrower than `NARROW_W`): the assistant is a sheet above the dock.
     narrow: bool,
+    /// Too little room for the assistant and Help side by side (a phone held upright, or a
+    /// narrow window): one closes the other.
+    crowded: bool,
     /// A phone held sideways: the dock stands at the left and flyouts open to its right.
     short: bool,
     /// Top of the mirror button in the rail, where the axis flyout lines up.
@@ -996,6 +1005,7 @@ const COMMANDS: &[Command] = &[
     Command { label: "Assistant panel", keys: &["⌘", "J"], run: |h| h.toggle_ai() },
     Command { label: "Assistant keys and model", keys: &[], run: |h| h.open_ai_setup(None) },
     Command { label: "Terminal agents (MCP)…", keys: &[], run: |h| h.open_agents() },
+    Command { label: "Help", keys: &["F1"], run: |h| h.open_help() },
     Command { label: "Theme: System", keys: &[], run: |h| h.set_theme(ThemeChoice::System) },
     Command { label: "Theme: Neutral", keys: &[], run: |h| h.set_theme(ThemeChoice::Neutral) },
     Command { label: "Theme: Paper", keys: &[], run: |h| h.set_theme(ThemeChoice::Paper) },
@@ -1042,6 +1052,7 @@ impl Hybrid {
             view_panel: false,
             camera_hints: false,
             camera_tip: false,
+            help: Help::default(),
             file_menu: false,
             theme: ThemeChoice::default(),
             theme_menu: false,
@@ -1071,6 +1082,7 @@ impl Hybrid {
             dock_area: Rect::NOTHING,
             phone: false,
             narrow: false,
+            crowded: false,
             short: false,
             axes_y: 0.0,
             voxel_y: 0.0,
@@ -1374,6 +1386,10 @@ impl Hybrid {
         {
             return;
         }
+        if self.help.open {
+            self.close_help();
+            return;
+        }
         if self.size_shown() && std::mem::take(&mut self.size_panel) {
             return;
         }
@@ -1439,6 +1455,7 @@ impl Hybrid {
         self.phone = self.touch && screen.width().min(screen.height()) < PHONE_MIN;
         self.narrow = self.phone && screen.width() < NARROW_W;
         self.short = self.phone && !self.narrow;
+        self.crowded = self.narrow || screen.width() < PANEL_W + HELP_W + 16.0 + MIN_VIEW;
         // A change under review needs its card: the panel opens on the chat (where it sits in the
         // thread) when one appears, and stays open until it is applied or discarded. On a phone
         // held upright it is a sheet over the scene, which the user may close to look: the
@@ -1451,12 +1468,20 @@ impl Hybrid {
             self.ai_open = true;
         }
         self.review_seen = reviewing;
+        // Held upright on a phone Help and the assistant are both sheets, and a narrow window
+        // has no room for both: whatever opened the assistant (a review, Cmd-K, the ask bar)
+        // closes Help, as opening Help closes it.
+        if self.crowded && self.ai_open && self.help.open {
+            self.close_help();
+        }
         self.top_bar(ctx, screen);
         // The docked assistant takes the right edge; the panels anchored there move left of it.
         // Held upright on a phone it is a sheet above the dock instead.
         self.assistant_panel(ctx, screen);
         let full = screen;
-        let screen = Rect::from_min_max(screen.min, pos2(screen.right() - self.ai_width(), screen.bottom()));
+        let beside_ai = Rect::from_min_max(screen.min, pos2(screen.right() - self.ai_width(), screen.bottom()));
+        // Help docks left of the assistant; the panels anchored at the right move left of both.
+        let screen = Rect::from_min_max(screen.min, pos2(screen.right() - self.dock_width(), screen.bottom()));
         if self.touch {
             self.dock(ctx, screen);
         } else {
@@ -1491,6 +1516,7 @@ impl Hybrid {
         self.marquee(ctx);
         self.fitted(ctx, |s| s.palette_panel(ctx, screen));
         self.fitted(ctx, |s| s.color_editor(ctx, screen));
+        self.help_panel(ctx, full, beside_ai);
         // The cards of the assistant panel draw over it: the change under review in its thread,
         // and the Agents tab.
         self.agents_tab(ctx);
@@ -1593,8 +1619,16 @@ impl Hybrid {
                 }
                 return;
             }
+            // Help closes on Escape from its search field too, after the prompts that take every key (egui drops the field's focus first).
+            if self.help.open && self.help.focused && i.consume_key(Modifiers::NONE, Key::Escape) {
+                self.close_help();
+                return;
+            }
             if i.consume_key(Modifiers::COMMAND, Key::J) {
                 self.toggle_ai();
+            }
+            if i.consume_key(Modifiers::NONE, Key::F1) {
+                self.toggle_help();
             }
             if i.consume_key(Modifiers::COMMAND, Key::K) {
                 self.cmdk = if self.cmdk.is_some() { None } else { Some(String::new()) };
@@ -1741,8 +1775,19 @@ impl Hybrid {
     }
 
     /// The bars that lay themselves out to the phone's width; every other panel fits the region.
-    const OWN_LAYOUT: [&str; 10] =
-        ["top", "top-right", "dock", "dock-brushes", "dock-more", "assistant", "review", "nav", "toast", "stats"];
+    const OWN_LAYOUT: [&str; 11] = [
+        "top",
+        "top-right",
+        "dock",
+        "dock-brushes",
+        "dock-more",
+        "assistant",
+        "review",
+        "nav",
+        "toast",
+        "stats",
+        "help",
+    ];
 
     /// On a phone (the region is set), scale the panel `id` down about its corner until it fits
     /// the region, and move it inside. The bars that lay themselves out keep their place.
@@ -1977,9 +2022,10 @@ impl Hybrid {
         // The account control, at the far right after a divider, where there is sign-in.
         let cw = self.account_chip_width(ctx);
         let aw = if self.account.is_some() { cw + 14.0 } else { 0.0 };
-        let rw = 4.0 + 36.0 + 4.0 + 36.0 + 4.0 + 36.0 + 4.0 + ew + aw;
+        let rw = 4.0 + 36.0 + 4.0 + 36.0 + 4.0 + 36.0 + 4.0 + 36.0 + 4.0 + ew + aw;
         let right = Rect::from_min_size(pos2(screen.right() - 12.0 - rw, 12.0), vec2(rw, 40.0));
         let mut theme_tip = None;
+        let mut help_tip = None;
         Self::panel(ctx, "top-right", right, Order::Middle, |ui, rect| {
             let cy = rect.center().y;
             let edge = rect.right() - ew - aw;
@@ -2034,9 +2080,23 @@ impl Hybrid {
             if r.clicked() {
                 self.theme_menu = !self.theme_menu;
             }
+            // Help (F1), left of the theme.
+            let mut hx = tx - 36.0 - 4.0 - 36.0;
+            let r = tbtn_on(ui, &mut hx, cy, Some(icon::CIRCLE_HELP), "", "help", true, self.help.open);
+            self.hits.insert("help".into(), r.rect);
+            if r.hovered() && !self.help.open {
+                help_tip = Some(r.rect);
+            }
+            if r.clicked() {
+                self.toggle_help();
+            }
         });
+        let below = |at: Rect| Some((Rect::from_min_max(pos2(-1e6, -1e6), pos2(1e6, at.top())), true));
         if let Some(at) = theme_tip {
-            tooltip(ctx, at, "Theme", &[], Some((Rect::from_min_max(pos2(-1e6, -1e6), pos2(1e6, at.top())), true)));
+            tooltip(ctx, at, "Theme", &[], below(at));
+        }
+        if let Some(at) = help_tip {
+            tooltip(ctx, at, "Help", &["F1"], below(at));
         }
     }
 
@@ -2301,7 +2361,7 @@ impl Hybrid {
     /// The room a phone's panels fit in: above the dock, or beside it when the phone is held
     /// sideways and the dock leaves no height.
     fn panel_region(&self, full: Rect) -> Rect {
-        let view = Rect::from_min_max(full.min, pos2(full.right() - self.ai_width(), full.bottom()));
+        let view = Rect::from_min_max(full.min, pos2(full.right() - self.dock_width(), full.bottom()));
         let rows = self.dock_rows(view);
         if self.short {
             let right = rows.iter().map(|r| r.right()).fold(f32::MIN, f32::max);
@@ -2433,8 +2493,8 @@ impl Hybrid {
     // any model): bottom left beside the dock, or centred over it when the screen is too
     // narrow. Under every panel, and never takes a finger.
     fn gesture_hints(&mut self, ctx: &Context, screen: Rect) {
-        // The assistant's sheet covers the view the chip hints at.
-        if self.sheet() {
+        // The assistant's sheet, or Help's on a phone, covers the view the chip hints at.
+        if self.sheet() || (self.phone && self.help.open) {
             return;
         }
         let mut job = LayoutJob::default();

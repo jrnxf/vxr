@@ -642,6 +642,57 @@ async () => {
   await key('Escape');
   await key('v');
 
+  // Help: the top bar button, F1 and Cmd-K Help open it, its tiles play their demos, search
+  // filters them, Try closes it and picks the tool, and closed it marches nothing.
+  {
+    const h = () => st().help;
+    step('Help starts closed, with a top bar button left of the theme button', !h().open && at('help') && window.vxr.hit_rect('help')[2] < window.vxr.hit_rect('theme')[0], JSON.stringify(h()));
+    await clickAt('help');
+    await frames(6);
+    let s = h();
+    step('the Help button opens Help with its tiles, each with an image', s.open && s.demos >= 10 && s.shown.length >= 4 && s.shown.every((t) => t.image) && ['add', 'orbit', 'box', 'select'].every((id) => at(`help-try-${id}`)), JSON.stringify(s));
+    const [pl, pt, pr] = window.vxr.hit_rect('help-panel');
+    step('Help is 384 points wide at the right, under the top bar', Math.abs(pr - pl - 384) < 1 && pr <= 1280 - 7 && pt > window.vxr.hit_rect('help')[3], JSON.stringify(window.vxr.hit_rect('help-panel')));
+    let marched = 0;
+    for (let i = 0; i < 600 && !h().shown.every((t) => t.loops >= 1); i++) { await frames(2); marched += h().marched; }
+    s = h();
+    step('every shown tile plays to its end and starts again', s.shown.every((t) => t.loops >= 1) && marched > 0, JSON.stringify(s));
+    const before = JSON.stringify([st().tool, st().shape]);
+    await clickAt('help-search');
+    for (const ch of 'box') await key(ch);
+    s = h();
+    step('search filters the tiles, and typing in it picks no tool', s.query === 'box' && s.shown.length >= 1 && s.shown.length < 4 && s.shown.some((t) => t.id === 'box') && JSON.stringify([st().tool, st().shape]) === before, JSON.stringify([s, st().tool, st().shape]));
+    await key('Escape');
+    step('Escape in the search field closes Help', !h().open);
+    const voxels = st().voxels;
+    await key('F1');
+    step('F1 opens Help again, keeping the search', h().open && h().query === 'box', JSON.stringify(h()));
+    await clickAt('help-search');
+    await key('a', cmd);
+    await key('Backspace');
+    await frames(3);
+    step('clearing the search shows every tile again, and edits no voxels', h().query === '' && h().shown.length >= 4 && st().voxels === voxels, JSON.stringify([h(), st().voxels, voxels]));
+    await clickAt('help-try-box');
+    s = st();
+    step("Box's Try closes Help and picks Add with the box brush", !s.help.open && s.tool === 'Add' && s.shape === 'Box' && s.help.tried === 'box', JSON.stringify([s.help, s.tool, s.shape]));
+    await key('F1');
+    step('F1 toggles Help', h().open);
+    await key('F1');
+    step('F1 closes Help again', !h().open);
+    await key('k', cmd);
+    for (const ch of 'help') await key(ch);
+    await key('Enter');
+    step('Cmd-K Help opens Help', h().open && !st().cmdk);
+    await clickAt('help-shortcuts');
+    step("Help's Keyboard shortcuts row opens the command list", st().cmdk && h().open);
+    await key('Escape');
+    await clickAt('help-close');
+    await frames(3);
+    s = h();
+    step('its close button closes it, and closed it marches nothing', !s.open && s.marched === 0 && s.shown.length === 0, JSON.stringify(s));
+    await key('v');
+  }
+
   // Palette editing, clicking the drawn UI where the editor says each part is.
   const col = (slot) => Array.from(window.vxr.color(slot));
   let used = 1;

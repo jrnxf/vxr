@@ -291,6 +291,49 @@ impl Renderer {
         }
     }
 
+    /// Another renderer of `width` x `height` with this one's pipelines, so it costs no shader
+    /// build: its own camera, selection, ghost and targets, with no G-buffer. For small views
+    /// drawn beside the main one, such as Help's demo tiles; its `color` texture is what they show.
+    /// This renderer must have no G-buffer either, since the march pipeline is shared.
+    pub fn sibling(&self, device: &wgpu::Device, width: u32, height: u32) -> Self {
+        assert!(!self.gbuffer, "a sibling shares the march pipeline, so it needs a renderer without a G-buffer");
+        let (width, height) = (width.max(1), height.max(1));
+        let cam = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("camera"),
+            size: std::mem::size_of::<CameraUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let (sel, ghost) = (mask_buffer(device, 16), mask_buffer(device, 16));
+        let sel_group = mask_group(device, &self.sel_layout, &sel, &ghost);
+        let t = Targets::new(device, &self.out_layout, &self.blit_layout, &self.sampler, &cam, width, height, false);
+        Self {
+            width,
+            height,
+            gbuffer: false,
+            cam,
+            out_layout: self.out_layout.clone(),
+            out_group: t.out_group,
+            color: t.color,
+            depth: t.depth,
+            info: t.info,
+            tiles: t.tiles,
+            march: self.march.clone(),
+            blit: self.blit.clone(),
+            blit_layout: self.blit_layout.clone(),
+            blit_group: t.blit_group,
+            sampler: self.sampler.clone(),
+            sel,
+            sel_layout: self.sel_layout.clone(),
+            sel_group,
+            sel_words: 0,
+            ghost,
+            ghost_words: 0,
+            guides: Guides::default(),
+            colors: self.colors,
+        }
+    }
+
     /// Highlight the selection: one bit per voxel in the map's mask layout (16 words per
     /// brick slot), as `vxr_core::Scene::selection_mask` builds it. Empty clears it.
     pub fn set_selection(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, words: &[u32]) {

@@ -269,6 +269,10 @@ impl Hybrid {
         } else {
             self.ai_open = true;
         }
+        // On a phone held upright, or a narrow window, the assistant and Help take turns.
+        if self.ai_open && self.crowded {
+            self.close_help();
+        }
     }
 
     /// Cmd-K "Ask AI": the prompt bar, starting from `text`.
