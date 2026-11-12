@@ -2495,6 +2495,18 @@ fn project(ed: &Editor, p: [f32; 3]) -> [f32; 2] {
     [(c.x / c.w + 1.0) * 0.5 * w, (1.0 - c.y / c.w) * 0.5 * h]
 }
 
+/// The screen box, in pixels, of the scene's voxels.
+fn scene_on_screen(ed: &Editor) -> [f32; 4] {
+    let (lo, hi) = ed.scene.map.occupied_bounds().unwrap_or(([0; 3], [1; 3]));
+    let mut b = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+    for i in 0..8 {
+        let pick = |a: usize, bit: usize| if i & bit == 0 { lo[a] } else { hi[a] } as f32;
+        let [x, y] = project(ed, [pick(0, 1), pick(1, 2), pick(2, 4)]);
+        b = [b[0].min(x), b[1].min(y), b[2].max(x), b[3].max(y)];
+    }
+    b
+}
+
 /// Selection and transform on an empty scene with two blocks, so every count is exact: S,
 /// colour click with Shift and Alt, Escape, box select, a live move drag, the flyout's
 /// rotate, flip and loop, copy and paste at the pointer, fill, delete, Cmd-A, arrows, cut,
@@ -6625,6 +6637,21 @@ fn tour(dir: &Path) -> Result<(), String> {
             demo == (tag != "phone-land") && (!demo || s.ed.ui.tour.tile.texture.is_some()),
             format!("{tag}: the card plays its demo where the screen has room for it ({demo})"),
         )?;
+        if tag.starts_with("phone") {
+            // The card covers the middle of a phone's view: the scene stands in the room it leaves.
+            let [x0, y0, x1, y1] = scene_on_screen(&s.ed);
+            let p = s.ed.ppp;
+            let fits = if tag == "phone-land" {
+                let dock = s.ed.ui.hits.get("dock").map_or(f32::MAX, |r| r.top());
+                x1 < card.left() * p && x0 >= 0.0 && y1 < dock * p
+            } else {
+                y1 < card.top() * p && y0 >= 60.0 * p
+            };
+            check(
+                fits,
+                format!("{tag}: the scene stands clear of the card ({:?} px, card {card:?} pt)", [x0, y0, x1, y1]),
+            )?;
+        }
         s.save_png(&dir.join(format!("app-tour-{tag}.png")))?;
         // A tap does Add, as a click does.
         let v = s.voxels();
@@ -6670,6 +6697,15 @@ fn tour(dir: &Path) -> Result<(), String> {
                 && s.ed.ui.hits.contains_key("gestures"),
             format!("{tag}: Skip ends it, and the camera bar and hints come back"),
         )?;
+        if phone {
+            let [x0, y0, x1, y1] = scene_on_screen(&s.ed);
+            let (w, h) = (s.ed.width as f32, s.ed.height as f32);
+            let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+            check(
+                (cx - w / 2.0).abs() < w * 0.05 && (cy - h / 2.0).abs() < h * 0.05,
+                format!("{tag}: the card gone, the scene is framed in the whole view again ({cx}, {cy})"),
+            )?;
+        }
     }
 
     // A world at launch: the tour edits a model, and on a tablet its card stands right of the

@@ -209,6 +209,8 @@ pub struct Editor {
     /// new step or the tour's end rewinds it).
     tour_tiles: Option<crate::demo::Tiles>,
     tour_was: Option<usize>,
+    /// On a phone the tour card showed last frame, with the scene framed in the room it leaves.
+    tour_framed: bool,
 }
 
 /// Whether a review has nothing in it: no step and no change.
@@ -339,6 +341,7 @@ impl Editor {
             help_was_open: false,
             tour_tiles: None,
             tour_was: None,
+            tour_framed: false,
         };
         e.shape = (e.scene.reshapes(), e.scene.origin);
         e.mark_saved();
@@ -1870,6 +1873,7 @@ impl Editor {
             let d = self.arrow_offset(key);
             self.selection_action(Action::Transform(Transform::Move(d)));
         }
+        self.tour_room();
         self.preview.lighting = self.ui.render.lighting(self.cam.distance);
         self.preview.max_spp = self.ui.render.samples();
         // The theme's own colours for the view: its background, guides and selection.
@@ -1955,6 +1959,38 @@ impl Editor {
             down: p.down,
             key: p.key(self.ui.touch),
         };
+    }
+
+    /// On a phone the tour card covers the middle of the view, where the scene is: while it
+    /// shows, the scene is framed in the larger room the card leaves (above it, or at its left
+    /// on a phone held sideways), and framed in the whole view again when it goes.
+    fn tour_room(&mut self) {
+        let (w, h) = (self.width as f32, self.height as f32);
+        let room = self.ui.tour_room(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h) / self.ppp));
+        if room.is_some() == self.tour_framed {
+            return;
+        }
+        self.tour_framed = room.is_some();
+        let Some(r) = room else {
+            self.frame_scene();
+            return;
+        };
+        let r = r * self.ppp;
+        let (lo, hi) = self.scene_box();
+        self.cam.target = (lo + hi) * 0.5;
+        self.cam.fit(lo, hi, w / h, 0.9);
+        // Then zoom out until the scene's width and height each fit 90% of the room.
+        for _ in 0..4 {
+            let vp = self.cam.view_proj(w / h);
+            let (mut x, mut y) = (0f32, 0f32);
+            for i in 0..8 {
+                let pick = |a: usize, bit: usize| if i & bit == 0 { lo[a] } else { hi[a] };
+                let p = vp.project_point3(Vec3::new(pick(0, 1), pick(1, 2), pick(2, 4)));
+                (x, y) = (x.max(p.x.abs()), y.max(p.y.abs()));
+            }
+            self.cam.distance *= (x / (0.9 * r.width() / w)).max(y / (0.9 * r.height() / h));
+        }
+        self.cam.pan(r.center().x - w / 2.0, r.center().y - h / 2.0, h);
     }
 
     /// The tour card's demo: how many images the last frame marched, and the loops the shown

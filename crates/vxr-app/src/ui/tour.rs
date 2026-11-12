@@ -177,6 +177,22 @@ impl Hybrid {
         self.actions.push(Action::TourSeen);
     }
 
+    /// On a phone the tour card this frame drew covers the middle of the view: the larger room
+    /// it leaves the scene in the screen `full`, above it or (held sideways) at its left, above
+    /// the dock.
+    pub fn tour_room(&self, full: Rect) -> Option<Rect> {
+        let card = self.hits.get("tour").filter(|_| self.phone)?;
+        let dock = ["dock", "dock-brushes", "dock-more"]
+            .iter()
+            .filter_map(|n| self.hits.get(*n))
+            .fold(full.bottom(), |t, r| t.min(r.top()));
+        let above = Rect::from_min_max(pos2(full.left(), TOP), pos2(full.right(), card.top() - 8.0));
+        let left = Rect::from_min_max(pos2(full.left(), TOP), pos2(card.left() - 8.0, dock - 8.0));
+        let area = |r: Rect| r.width().max(0.0) * r.height().max(0.0);
+        let room = if area(above) >= area(left) { above } else { left };
+        (room.width() >= 40.0 && room.height() >= 40.0).then_some(room)
+    }
+
     /// The user did `step`'s action: the step is done if it is the one on screen.
     pub fn tour_did(&mut self, step: TourStep) {
         if self.tour.current() == Some(step) {
