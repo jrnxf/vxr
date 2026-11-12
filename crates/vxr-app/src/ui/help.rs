@@ -18,8 +18,12 @@ const GAP: f32 = 10.0;
 const IMAGE_ASPECT: f32 = 1.75;
 /// Under the image: the name and Try, then the keys.
 const TILE_FOOT: f32 = 10.0 + 22.0 + 3.0 + 15.0 + 10.0;
-/// The header (title and close) and the search field.
-const HEAD: f32 = 46.0 + 34.0 + 12.0;
+/// The header (title and close), the tour's row and the search field.
+const HEAD: f32 = 46.0 + TOUR_ROW + 10.0 + 34.0 + 12.0;
+/// The "Take the tour" row.
+const TOUR_ROW: f32 = 44.0;
+/// The "Tour" button of a short panel, beside the search field.
+const TOUR_PILL: f32 = 76.0;
 /// A panel shorter than this (a phone held sideways) drops the title and puts the keyboard
 /// shortcuts row after the tiles, so a whole tile shows.
 const SHORT: f32 = 420.0;
@@ -30,7 +34,7 @@ const MIN_TILE_W: f32 = 160.0;
 /// The keyboard shortcuts row at the bottom.
 const FOOT: f32 = 48.0;
 /// How often the tiles move while Help is open.
-const TILE_FRAME: std::time::Duration = std::time::Duration::from_millis(33);
+pub(super) const TILE_FRAME: std::time::Duration = std::time::Duration::from_millis(33);
 
 /// Help as the UI shows it. The editor fills `tiles` and plays the demos in `shown`.
 #[derive(Default)]
@@ -82,6 +86,8 @@ impl Hybrid {
         if self.crowded {
             self.ai_open = false;
         }
+        // The tour's last step points here: opening Help finishes it.
+        self.tour_help_opened();
     }
 
     pub fn close_help(&mut self) {
@@ -161,7 +167,8 @@ impl Hybrid {
         let mut query = std::mem::take(&mut self.help.query);
         let to_top = std::mem::take(&mut self.help.to_top);
         let tiles = self.help.tiles.clone();
-        let (mut close, mut tried, mut commands, mut focused_now) = (false, None, false, false);
+        let (mut close, mut tried, mut commands, mut focused_now, mut tour) = (false, None, false, false, false);
+        let seen = self.tour.seen;
         let mut hits: Vec<(String, Rect)> = Vec::new();
         let mut shown = Vec::new();
         let order = if self.phone { Order::Foreground } else { Order::Middle };
@@ -188,11 +195,25 @@ impl Hybrid {
                 if xr.hovered() { th().text } else { th().muted },
             );
             close |= xr.clicked();
-            // The search field.
+            // The tour's row, then the search field.
             let field = if short {
-                Rect::from_min_max(pos2(rect.left() + PAD, rect.top() + 12.0), pos2(x.left() - 8.0, rect.top() + 46.0))
+                // A short panel has the tour as a button between the search field and close.
+                let pill = Rect::from_min_max(
+                    pos2(x.left() - 8.0 - TOUR_PILL, rect.top() + 12.0),
+                    pos2(x.left() - 8.0, rect.top() + 46.0),
+                );
+                tour |= tour_pill(ui, pill, &mut hits);
+                Rect::from_min_max(
+                    pos2(rect.left() + PAD, rect.top() + 12.0),
+                    pos2(pill.left() - 8.0, rect.top() + 46.0),
+                )
             } else {
-                Rect::from_min_size(pos2(rect.left() + PAD, rect.top() + 46.0), vec2(rect.width() - 2.0 * PAD, 34.0))
+                let row = Rect::from_min_size(
+                    pos2(rect.left() + PAD, rect.top() + 46.0),
+                    vec2(rect.width() - 2.0 * PAD, TOUR_ROW),
+                );
+                tour |= tour_row(ui, row, seen, &mut hits);
+                Rect::from_min_size(pos2(rect.left() + PAD, row.bottom() + 10.0), vec2(rect.width() - 2.0 * PAD, 34.0))
             };
             let focused = ui.memory(|m| m.has_focus(Id::unique("help-search")));
             p.rect(
@@ -303,6 +324,8 @@ impl Hybrid {
         }
         if let Some(i) = tried {
             self.try_demo(&DEMOS[i]);
+        } else if tour {
+            self.start_tour();
         } else if close {
             self.close_help();
         }
@@ -326,6 +349,59 @@ fn shortcuts_row(ui: &mut Ui, row: Rect, hits: &mut Vec<(String, Rect)>) -> bool
     rr.clicked()
 }
 
+/// Help's top row: "Take the tour", which replays it, with "Done" once it was seen. Returns
+/// whether it was clicked.
+fn tour_row(ui: &mut Ui, row: Rect, seen: bool, hits: &mut Vec<(String, Rect)>) -> bool {
+    let p = ui.painter().clone();
+    let resp = ui.interact(row, Id::unique("help-tour"), Sense::click());
+    if p.clip_rect().contains_rect(row) {
+        hits.push(("help-tour".into(), row));
+    }
+    p.rect(
+        row,
+        CornerRadius::same(8),
+        if resp.hovered() { th().hover } else { th().tint(5) },
+        Stroke::new(1.0, th().line),
+        StrokeKind::Inside,
+    );
+    let cy = row.center().y;
+    p.text(pos2(row.left() + 20.0, cy), Align2::CENTER_CENTER, icon::PLAY, icon_font(15.0), th().text);
+    let x = row.left() + 38.0;
+    p.text(pos2(x, cy - 8.0), Align2::LEFT_CENTER, "Take the tour", sans_medium(13.0), th().text);
+    p.text(
+        pos2(x, cy + 9.0),
+        Align2::LEFT_CENTER,
+        format!("{} steps, about a minute", super::tour::STEPS.len()),
+        sans(11.5),
+        th().muted,
+    );
+    if seen {
+        let g = p.layout_no_wrap("Done".into(), sans(11.5), th().muted);
+        let gx = row.right() - 12.0 - g.size().x;
+        p.galley(pos2(gx, cy - g.size().y / 2.0), g, th().muted);
+        p.text(pos2(gx - 10.0, cy), Align2::CENTER_CENTER, icon::CHECK, icon_font(13.0), th().muted);
+    }
+    resp.clicked()
+}
+
+/// The "Tour" button of a short panel. Returns whether it was clicked.
+fn tour_pill(ui: &mut Ui, pill: Rect, hits: &mut Vec<(String, Rect)>) -> bool {
+    let p = ui.painter().clone();
+    let resp = ui.interact(pill, Id::unique("help-tour"), Sense::click());
+    hits.push(("help-tour".into(), pill));
+    p.rect(
+        pill,
+        CornerRadius::same(8),
+        if resp.hovered() { th().hover } else { th().tint(5) },
+        Stroke::new(1.0, th().line),
+        StrokeKind::Inside,
+    );
+    let cy = pill.center().y;
+    p.text(pos2(pill.left() + 18.0, cy), Align2::CENTER_CENTER, icon::PLAY, icon_font(13.0), th().text);
+    p.text(pos2(pill.left() + 31.0, cy), Align2::LEFT_CENTER, "Tour", sans_medium(13.0), th().text);
+    resp.clicked()
+}
+
 /// One demo tile: its image with the pointer and keys over it, its name, Try and keys.
 /// Returns true when Try was clicked.
 fn draw_tile(
@@ -340,32 +416,11 @@ fn draw_tile(
     let p = ui.painter().clone();
     p.rect(card, CornerRadius::same(10), th().tint(5), Stroke::new(1.0, th().line), StrokeKind::Inside);
     let image = Rect::from_min_size(card.min + vec2(1.0, 1.0), vec2(card.width() - 2.0, image_h - 1.0));
-    let corners = CornerRadius { nw: 9, ne: 9, sw: 0, se: 0 };
-    match tile.texture {
-        Some(t) => {
-            let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
-            p.add(egui::epaint::RectShape::filled(image, corners, Color32::WHITE).with_texture(t, uv));
-        }
-        None => {
-            p.rect_filled(image, corners, th().tint(9));
-        }
-    }
+    draw_image(ui, image, CornerRadius { nw: 9, ne: 9, sw: 0, se: 0 }, tile, touch);
     p.line_segment(
         [pos2(card.left() + 1.0, image.bottom() + 0.5), pos2(card.right() - 1.0, image.bottom() + 0.5)],
         Stroke::new(1.0, th().line),
     );
-    let clip = p.clip_rect().intersect(image);
-    let over = p.with_clip_rect(clip);
-    if let Some([u, v]) = tile.pointer {
-        let at = pos2(image.left() + u * image.width(), image.top() + v * image.height());
-        draw_pointer(&over, at, tile.down, touch);
-    }
-    if let Some(k) = tile.key {
-        let g = over.layout_no_wrap(k.into(), sans_medium(11.0), Color32::WHITE);
-        let chip = Rect::from_min_size(image.min + vec2(6.0, 6.0), g.size() + vec2(10.0, 6.0));
-        over.rect_filled(chip, CornerRadius::same(5), Color32::from_black_alpha(150));
-        over.galley(chip.min + vec2(5.0, 3.0), g, Color32::WHITE);
-    }
     // The name and Try, then the keys.
     let ny = image.bottom() + 10.0 + 11.0;
     let tr = Rect::from_min_size(pos2(card.right() - 10.0 - 44.0, ny - 11.0), vec2(44.0, 22.0));
@@ -404,6 +459,32 @@ fn draw_tile(
     let g = p.layout_job(job);
     p.galley(pos2(card.left() + 10.0, ky - g.size().y / 2.0), g, th().muted);
     resp.clicked()
+}
+
+/// A demo's image with its pointer and keys over it: a Help tile's or the tour card's.
+pub(super) fn draw_image(ui: &Ui, image: Rect, corners: CornerRadius, tile: &TileView, touch: bool) {
+    let p = ui.painter();
+    match tile.texture {
+        Some(t) => {
+            let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+            p.add(egui::epaint::RectShape::filled(image, corners, Color32::WHITE).with_texture(t, uv));
+        }
+        None => {
+            p.rect_filled(image, corners, th().tint(9));
+        }
+    }
+    let clip = p.clip_rect().intersect(image);
+    let over = p.with_clip_rect(clip);
+    if let Some([u, v]) = tile.pointer {
+        let at = pos2(image.left() + u * image.width(), image.top() + v * image.height());
+        draw_pointer(&over, at, tile.down, touch);
+    }
+    if let Some(k) = tile.key {
+        let g = over.layout_no_wrap(k.into(), sans_medium(11.0), Color32::WHITE);
+        let chip = Rect::from_min_size(image.min + vec2(6.0, 6.0), g.size() + vec2(10.0, 6.0));
+        over.rect_filled(chip, CornerRadius::same(5), Color32::from_black_alpha(150));
+        over.galley(chip.min + vec2(5.0, 3.0), g, Color32::WHITE);
+    }
 }
 
 /// The demo's pointer: an arrow, with a ring while a button is held (R for the right button,

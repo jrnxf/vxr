@@ -29,6 +29,8 @@ extern "C" {
     fn page_download(bytes: &[u8], name: &str, mime: &str);
     #[wasm_bindgen(js_namespace = vxrHost, js_name = keepTheme)]
     fn page_keep_theme(id: &str);
+    #[wasm_bindgen(js_namespace = vxrHost, js_name = keepToured)]
+    fn page_keep_toured();
     #[wasm_bindgen(js_namespace = vxrHost, js_name = hasHandles)]
     fn page_has_handles() -> bool;
     #[wasm_bindgen(js_namespace = vxrHost, js_name = saveVox)]
@@ -178,6 +180,11 @@ impl Platform for Browser {
         Ok(())
     }
 
+    fn persist_tour_seen(&mut self) -> Result<(), String> {
+        page_keep_toured();
+        Ok(())
+    }
+
     fn challenge(&mut self) -> Option<String> {
         page_challenge();
         None
@@ -317,6 +324,19 @@ impl App {
     pub fn set_theme(&mut self, id: &str) -> bool {
         self.woken = true;
         ThemeChoice::from_id(id).map(|c| self.host.editor.ui.theme = c).is_some()
+    }
+
+    /// The tour's seen flag, as the page kept it, before [`App::first_tour`].
+    pub fn set_tour_seen(&mut self, seen: bool) {
+        self.host.editor.ui.tour.seen = seen;
+    }
+
+    /// After [`App::launch`], on a visit that is no link to a scene or project and no embed:
+    /// the first-run tour, unless it was seen or the launch showed the projects list or a
+    /// draft to restore.
+    pub fn first_tour(&mut self) {
+        self.woken = true;
+        vxr_app::host::first_tour(&mut self.host.editor);
     }
 
     /// The window lost focus: release held keys so nothing sticks.
@@ -825,7 +845,7 @@ impl App {
         let e = &self.host.editor;
         let (c, h) = (&e.cam, e.scene.history());
         format!(
-            r#"{{"voxels":{},"tool":"{:?}","shape":"{:?}","mirror":{},"mirrorAxes":[{},{},{}],"lock":{},"brushSize":{},"sizePanel":{},"lifting":{},"span":{},"selected":{},"region":"{:?}","hasClip":{},"bounds":[{},{},{}],"boundsPanel":{},"slot":{},"colorEdit":{},"slotOp":"{:?}","undo":{},"redo":{},"cmdk":{},"name":{:?},"size":[{},{}],"ppp":{},"cam":[{},{},{},{},{},{}],"ortho":{},"inView":[{},{}],"cameraHints":{},"view":{},"viewPanel":{},"fileMenu":{},"confirmNew":{},"theme":"{}","themeMenu":{},"touch":{},"paletteOpen":{},"themeShown":{:?},"guides":[{},{},{}],"mode":"{}","objects":{},"models":{},"picked":{},"tree":[{}],"treeOn":{},"renaming":{},"layers":[{}],"layerOn":{},"render":{{"shown":{},"spp":{},"rows":{},"current":{},"restarts":{},"timestamps":{},"panel":{},"full":{},"size":[{},{}],"maxSpp":{},"exposure":{},"gamma":{},"vignette":{},"aperture":{},"sky":{},"physicalSky":{},"export":{}}},"review":{},"undoLabel":{},"asks":{:?},"unsaved":{},"projectsMenu":{},"projects":[{}],"current":{},"restore":{},"confirmClose":{},"storage":[{},{}],"account":{},"signIn":{{"shown":{},"error":{},"checking":{},"challenge":{}}},"toast":{},"agents":{{"panel":{},"available":{},"web":{},"allowed":{},"review":{},"connecting":{},"error":{},"fail":{},"code":{:?},"clients":[{}],"edits":[{}],"chip":{:?},"live":[{}],"calls":[{}]}},"help":{}}}"#,
+            r#"{{"voxels":{},"tool":"{:?}","shape":"{:?}","mirror":{},"mirrorAxes":[{},{},{}],"lock":{},"brushSize":{},"sizePanel":{},"lifting":{},"span":{},"selected":{},"region":"{:?}","hasClip":{},"bounds":[{},{},{}],"boundsPanel":{},"slot":{},"colorEdit":{},"slotOp":"{:?}","undo":{},"redo":{},"cmdk":{},"name":{:?},"size":[{},{}],"ppp":{},"cam":[{},{},{},{},{},{}],"ortho":{},"inView":[{},{}],"cameraHints":{},"view":{},"viewPanel":{},"fileMenu":{},"confirmNew":{},"theme":"{}","themeMenu":{},"touch":{},"paletteOpen":{},"themeShown":{:?},"guides":[{},{},{}],"mode":"{}","objects":{},"models":{},"picked":{},"tree":[{}],"treeOn":{},"renaming":{},"layers":[{}],"layerOn":{},"render":{{"shown":{},"spp":{},"rows":{},"current":{},"restarts":{},"timestamps":{},"panel":{},"full":{},"size":[{},{}],"maxSpp":{},"exposure":{},"gamma":{},"vignette":{},"aperture":{},"sky":{},"physicalSky":{},"export":{}}},"review":{},"undoLabel":{},"asks":{:?},"unsaved":{},"projectsMenu":{},"projects":[{}],"current":{},"restore":{},"confirmClose":{},"storage":[{},{}],"account":{},"signIn":{{"shown":{},"error":{},"checking":{},"challenge":{}}},"toast":{},"agents":{{"panel":{},"available":{},"web":{},"allowed":{},"review":{},"connecting":{},"error":{},"fail":{},"code":{:?},"clients":[{}],"edits":[{}],"chip":{:?},"live":[{}],"calls":[{}]}},"help":{},"tour":{}}}"#,
             e.scene.map.voxels,
             e.ui.tool,
             e.ui.shape,
@@ -1033,6 +1053,7 @@ impl App {
                 .collect::<Vec<_>>()
                 .join(","),
             help_state(e),
+            tour_state(e),
         )
     }
 
@@ -1187,6 +1208,27 @@ fn help_state(e: &vxr_app::editor::Editor) -> String {
         json_str(&h.query),
         DEMOS.len(),
         h.tried.map_or("null".into(), |t| format!("{t:?}")),
+    )
+}
+
+/// The tour's state as JSON, for `state()`: the step (1 to 5, or null) and its id, whether its
+/// action was done, the seen flag, how the last run ended, whether the card shows, and its
+/// demo's image, loops and images marched last frame.
+fn tour_state(e: &vxr_app::editor::Editor) -> String {
+    let t = &e.ui.tour;
+    let (marched, loops) = e.tour_stats();
+    let step = t.current();
+    format!(
+        r#"{{"step":{},"id":{},"done":{},"seen":{},"ended":{},"card":{},"demo":{},"image":{},"body":{},"loops":{loops},"marched":{marched}}}"#,
+        t.step.map_or("null".into(), |i| (i + 1).to_string()),
+        step.map_or("null".into(), |s| format!("{:?}", s.id())),
+        t.done,
+        t.seen,
+        t.ended.map_or("null".into(), |s| format!("{s:?}")),
+        e.ui.hits.contains_key("tour"),
+        t.shown.map_or("null".into(), |i| format!("{:?}", vxr_app::demo::DEMOS[i].id)),
+        t.shown.is_some() && t.tile.texture.is_some(),
+        step.map_or("null".into(), |s| json_str(&s.body(e.ui.touch).replace('*', ""))),
     )
 }
 

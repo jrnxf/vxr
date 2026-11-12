@@ -11,4 +11,6 @@
   const deep = q.has('open') || q.has('project') || q.has('embed') || window.top !== window.self;
   const about = location.pathname.replace(/\/$/, '') === '/about';
   root.dataset.landing = about || (!seen && !deep) ? 'on' : 'off';
+  // The first-run tour also leaves out links and embeds (www/app.js).
+  root.dataset.deep = deep ? 'on' : 'off';
 })();

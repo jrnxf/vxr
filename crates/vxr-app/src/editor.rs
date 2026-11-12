@@ -20,7 +20,7 @@ use crate::review::{Answer, Review, Script};
 use crate::touch::Touches;
 use crate::ui::{
     AccountRow, Action, AiAction, ChatView, EditRow, FontBytes, Hybrid, LayerRow, Named, ProjectRow, RestoreAsk, Stats,
-    Sync, TreeRow, group_thousands,
+    Sync, TourStep, TreeRow, group_thousands,
 };
 
 /// Input quiet for this long raises the preview's budget (spikes/preview/RESULTS.md).
@@ -205,6 +205,10 @@ pub struct Editor {
     /// closed. And whether Help was open last frame (closing it rewinds every demo).
     help_tiles: Option<crate::demo::Tiles>,
     help_was_open: bool,
+    /// The tour card's demo, at the card's image size, and the step it showed last frame (a
+    /// new step or the tour's end rewinds it).
+    tour_tiles: Option<crate::demo::Tiles>,
+    tour_was: Option<usize>,
 }
 
 /// Whether a review has nothing in it: no step and no change.
@@ -333,6 +337,8 @@ impl Editor {
             quit: false,
             help_tiles: None,
             help_was_open: false,
+            tour_tiles: None,
+            tour_was: None,
         };
         e.shape = (e.scene.reshapes(), e.scene.origin);
         e.mark_saved();
@@ -665,13 +671,18 @@ impl Editor {
                     self.pointer_moved(None);
                 }
             }
-            G::Orbit(d) => self.cam.orbit(d[0], d[1]),
+            G::Orbit(d) => {
+                self.cam.orbit(d[0], d[1]);
+                self.ui.tour_did(TourStep::Look);
+            }
             G::Pan(d) => {
                 let from = self.cam;
                 self.cam.pan(d[0], d[1], self.height as f32);
                 self.bound_camera(&from);
+                self.ui.tour_did(TourStep::Look);
             }
             G::Pinch { scale, at } => {
+                self.ui.tour_did(TourStep::Look);
                 let (o, d) = self.ray(at);
                 let hit = self.scene.map.raycast(o, d, 1e5).map(|h| Vec3::from(o) + Vec3::from(d) * h.t);
                 self.zoom(scale.max(0.01).ln() / -0.88f32.ln(), hit);
@@ -836,6 +847,9 @@ impl Editor {
         };
         if let (Some(drag), Some(last)) = (self.cam_drag, last) {
             let (dx, dy) = (p[0] - last[0], p[1] - last[1]);
+            if dx != 0.0 || dy != 0.0 {
+                self.ui.tour_did(TourStep::Look);
+            }
             match drag {
                 CamDrag::Orbit => self.cam.orbit(dx, dy),
                 CamDrag::Pan => {
@@ -893,10 +907,14 @@ impl Editor {
                         self.gesture = Some(g);
                     } else {
                         g.release(&mut self.scene);
+                        self.tour_drew();
                     }
                 }
                 if let Some(g) = self.moving.take() {
                     let still = g.offset == [0; 3];
+                    if !still {
+                        self.ui.tour_did(TourStep::Move);
+                    }
                     g.release(&mut self.scene);
                     if let (true, Some((at, t)), Some(p)) = (still, self.move_press.take(), self.pointer)
                         && (p[0] - at[0]).abs() < CLICK_PX
@@ -970,7 +988,15 @@ impl Editor {
                 self.ui.toast(&self.ctx, format!("Picked #{:02X}{:02X}{:02X}", c[0], c[1], c[2]));
             }
             Press::Drag(g) => self.gesture = Some(g),
-            Press::Done(_) | Press::Nothing => {}
+            Press::Done(_) => self.tour_drew(),
+            Press::Nothing => {}
+        }
+    }
+
+    /// A stroke or shape was drawn: with Add, the tour's first step is done.
+    fn tour_drew(&mut self) {
+        if self.ui.tool == Tool::Add {
+            self.ui.tour_did(TourStep::Add);
         }
     }
 
@@ -983,6 +1009,10 @@ impl Editor {
     pub fn place_box(&mut self) {
         if let Some(g) = self.gesture.take_if(|g| g.lifting) {
             g.release(&mut self.scene);
+            if self.ui.tool == Tool::Add {
+                self.ui.tour_did(TourStep::Box);
+            }
+            self.tour_drew();
         }
     }
 
@@ -1272,6 +1302,7 @@ impl Editor {
     /// Wheel zoom toward the point under the pointer, in notches (positive zooms in).
     pub fn scroll(&mut self, notches: f32) {
         self.last_input = now_ms();
+        self.ui.tour_did(TourStep::Look);
         let hit = self.pointer.and_then(|p| {
             let (o, d) = self.ray(p);
             self.scene.map.raycast(o, d, 1e5).map(|h| Vec3::from(o) + Vec3::from(d) * h.t)
@@ -1700,6 +1731,7 @@ impl Editor {
             })
             .collect();
         self.help_frame();
+        self.tour_frame();
         let stats = self.stats();
         let mut actions = Vec::new();
         let ui = &mut self.ui;
@@ -1880,6 +1912,57 @@ impl Editor {
         }
         tiles.advance(&self.ui.help.shown, self.frame_at.0);
         self.ui.help.tiles = Self::tile_views(tiles, self.ui.touch);
+    }
+
+    /// The tour card's demo: move it on to this frame's time and give the card its image and
+    /// pointer. A new step plays its own demo from the start, in the frame its card first
+    /// shows; the tour's end frees the images; nothing runs while no demo shows.
+    fn tour_frame(&mut self) {
+        let step = self.ui.tour.current();
+        let demo = step.and_then(TourStep::demo);
+        if self.ui.tour.step != self.tour_was {
+            self.tour_was = self.ui.tour.step;
+            if step.is_none() {
+                if let Some(mut t) = self.tour_tiles.take() {
+                    t.free(&mut self.egui);
+                }
+            } else if let (Some(t), Some(i)) = (self.tour_tiles.as_mut(), demo) {
+                t.players[i].rewind();
+            }
+        }
+        if let Some(t) = self.tour_tiles.as_mut() {
+            t.marched = 0;
+        }
+        // The card showed last frame: it shows this step's demo now (the step may be new).
+        let Some(i) = demo.filter(|_| self.ui.tour.shown.is_some()) else {
+            self.ui.tour.tile = crate::ui::TileView::default();
+            return;
+        };
+        let px = self.ui.tour.image * self.ppp;
+        let size = (px.x.round() as u32, px.y.round() as u32);
+        if size.0 < 8 || size.1 < 8 {
+            return;
+        }
+        let tiles = self.tour_tiles.get_or_insert_with(|| crate::demo::Tiles::new(size));
+        if tiles.size != size {
+            tiles.resize(size);
+        }
+        tiles.advance(&[i], self.frame_at.0);
+        let p = &tiles.players[i];
+        self.ui.tour.tile = crate::ui::TileView {
+            texture: tiles.texture(i),
+            pointer: p.pointer(),
+            down: p.down,
+            key: p.key(self.ui.touch),
+        };
+    }
+
+    /// The tour card's demo: how many images the last frame marched, and the loops the shown
+    /// demo played.
+    pub fn tour_stats(&self) -> (usize, u64) {
+        let t = self.tour_tiles.as_ref();
+        let loops = self.ui.tour.shown.and_then(|i| t.map(|t| t.players[i].loops)).unwrap_or(0);
+        (t.map_or(0, |t| t.marched), loops)
     }
 
     /// What each tile shows now, for the UI.
@@ -2574,6 +2657,9 @@ impl Editor {
         // Help's tiles that show and changed, before the egui pass draws them.
         if let Some(t) = self.help_tiles.as_mut().filter(|_| self.ui.help.open) {
             t.encode(&self.gpu, &self.layout, &self.renderer, &mut self.egui, &mut enc, &self.ui.help.shown, ppp);
+        }
+        if let (Some(t), Some(i)) = (self.tour_tiles.as_mut(), self.ui.tour.shown) {
+            t.encode(&self.gpu, &self.layout, &self.renderer, &mut self.egui, &mut enc, &[i], ppp);
         }
         if let Some(r) = corner {
             let px = [r.left() * ppp, r.top() * ppp, r.width() * ppp, r.height() * ppp];

@@ -4,9 +4,10 @@
 // The page is dist/ at 1280x800; the stages follow the visits of one fresh browser profile:
 //   first    a first visit while the wasm is held back: the landing, with progress on its button
 //   early    clicked before the editor is ready: "Opening", then the editor goes in on its own
-//   ready    /about with the editor ready: the landing again, and Open the editor with no wait
+//   ready    /about with the editor ready: the landing again, the tour waiting behind it, and
+//            Open the editor with no wait, which starts the tour
 //   again    a returning visit: no landing, the boot skeleton in the editor's places
-//   deep     ?open= ?project= ?embed skip the landing for a browser that never saw it
+//   deep     ?open= ?project= ?embed skip the landing and the tour for a browser that never saw them
 async (stage) => {
   const out = [];
   const step = (name, pass, why = '') => out.push(pass ? `ok ${name}` : `FAIL ${name}: ${why}`);
@@ -18,6 +19,7 @@ async (stage) => {
   const flag = () => { try { return localStorage.getItem('vxr-visited'); } catch { return 'blocked'; } };
   const entered = () => 'entered' in root.dataset;
   const text = (el) => el.textContent.replace(/\s+/g, ' ').trim();
+  const tour = () => JSON.parse(window.vxr.state()).tour;
 
   if (stage === 'first') {
     step('a first visit starts on the landing page', root.dataset.landing === 'on' && shown($('landing')), root.dataset.landing);
@@ -46,6 +48,7 @@ async (stage) => {
     step('/about shows the landing again', root.dataset.landing === 'on' && shown($('landing')) && location.pathname === '/about', location.pathname + ' ' + root.dataset.landing);
     step('the button is full and says Ready once the editor is', await until(() => $('land-open').classList.contains('ready')) && $('land-load').textContent === 'Ready', $('land-load').textContent);
     step('the loaded button has no spinner showing', !$('land-open').classList.contains('opening'));
+    step('the first-run tour waits behind the landing', tour().step === null && !tour().card, JSON.stringify(tour()));
   } else if (stage === 'ready-click') {
     $('land-open').click();
     step('the island grows into the editor', await until(() => shown($('hero')) && $('hero').getAnimations().length > 0, 2000), 'no animation');
@@ -53,6 +56,7 @@ async (stage) => {
     step('the editor opens when the picture has grown', await until(entered, 5000) && !shown($('landing')) && !$('c').inert);
     step('the address goes back to /', location.pathname === '/', location.pathname);
     step('the picture is gone', $('hero').hidden);
+    step('the editor opened, the first-run tour starts', await until(() => tour().step === 1 && tour().card, 2000), JSON.stringify(tour()));
   } else if (stage === 'again') {
     for (let i = 0; i < 300 && !window.vxr; i++) await sleep(50);
     step('a returning visit skips the landing', root.dataset.landing === 'off' && !shown($('landing')), root.dataset.landing);
@@ -80,6 +84,9 @@ async (stage) => {
     for (let i = 0; i < 300 && !window.vxr; i++) await sleep(50);
     const how = location.search;
     step(`${how} goes straight to the editor`, root.dataset.landing === 'off' && !shown($('landing')) && !!window.vxr, root.dataset.landing);
+    await sleep(300);
+    const t = tour();
+    step(`${how} leaves the first-run tour out`, t.step === null && !t.card, JSON.stringify(t));
   }
   return out.join('\n');
 }

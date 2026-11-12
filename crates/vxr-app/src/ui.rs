@@ -21,11 +21,13 @@ mod activity;
 mod agents;
 mod assistant;
 mod help;
+mod tour;
 pub use account::{SignIn, Step, Sync, WRONG_CODE};
 pub use activity::{Item, LIST_ROWS, Live};
 pub use agents::{AgentsView, EditRow, FILES_SETUP, PAIR, START};
 pub use assistant::{AiAction, AskBar, ChatView, PANEL_W};
 pub use help::{HELP_W, Help, MIN_VIEW, TileView};
+pub use tour::{STEPS, TOUR_W, Tour, TourStep};
 
 pub(crate) const R: u8 = 12;
 /// The top of the panels under the top bar's two 40 px islands.
@@ -227,6 +229,7 @@ mod icon {
     pub const REFRESH_CW: char = '\u{e145}';
     pub const CIRCLE_HELP: char = '\u{e082}';
     pub const KEYBOARD: char = '\u{e284}';
+    pub const PLAY: char = '\u{e13c}';
 }
 
 pub use vxr_core::select::{Region, Transform};
@@ -364,6 +367,8 @@ pub enum Action {
     UndoAgentEdit(usize),
     /// The theme was picked (for the host to keep: `Hybrid::theme`).
     Theme,
+    /// The tour was skipped or finished: the host keeps the seen flag, so it shows once.
+    TourSeen,
     /// Open the projects list's row (for the host): its file, or a never-saved scene's draft.
     OpenProject(usize),
     /// The restore prompt's Restore: load the scene's draft (for the host).
@@ -693,6 +698,8 @@ pub struct Hybrid {
     pub(crate) camera_tip: bool,
     /// Help: its panel of demo tiles and their search.
     pub help: Help,
+    /// The first-run tour: its step, and whether it was seen.
+    pub tour: Tour,
     /// The file menu under the scene name (New, Open, Save, Export) is open.
     pub file_menu: bool,
     /// The picked theme (System follows the system's light or dark setting), and the Theme
@@ -1006,6 +1013,7 @@ const COMMANDS: &[Command] = &[
     Command { label: "Assistant keys and model", keys: &[], run: |h| h.open_ai_setup(None) },
     Command { label: "Terminal agents (MCP)…", keys: &[], run: |h| h.open_agents() },
     Command { label: "Help", keys: &["F1"], run: |h| h.open_help() },
+    Command { label: "Take the tour", keys: &[], run: |h| h.start_tour() },
     Command { label: "Theme: System", keys: &[], run: |h| h.set_theme(ThemeChoice::System) },
     Command { label: "Theme: Neutral", keys: &[], run: |h| h.set_theme(ThemeChoice::Neutral) },
     Command { label: "Theme: Paper", keys: &[], run: |h| h.set_theme(ThemeChoice::Paper) },
@@ -1053,6 +1061,7 @@ impl Hybrid {
             camera_hints: false,
             camera_tip: false,
             help: Help::default(),
+            tour: Tour::default(),
             file_menu: false,
             theme: ThemeChoice::default(),
             theme_menu: false,
@@ -1236,7 +1245,7 @@ impl Hybrid {
             && matches!(self.tool, Tool::Add | Tool::Erase | Tool::Paint)
             && !self.world
             && self.selected == 0
-            && (self.size_panel || self.size > 1)
+            && (self.size_panel || (self.size > 1 && !self.tour_sheet()))
     }
 
     pub fn center_brush(&mut self) {
@@ -1495,7 +1504,7 @@ impl Hybrid {
         if self.phone {
             // Under the flyouts, which open over the camera bar and the render corner.
             self.render_corner(ctx, screen, stats);
-            if sheet {
+            if sheet || self.tour_sheet() {
                 self.nav_rect = None;
             } else {
                 self.nav_bar(ctx, screen);
@@ -1533,6 +1542,8 @@ impl Hybrid {
         if !self.phone {
             self.nav_bar(ctx, screen);
         }
+        // After the render corner and camera bar, which it stands clear of.
+        self.tour_card(ctx, full, screen);
         if !sheet {
             self.fitted(ctx, |s| s.view_panel(ctx, screen));
         }
@@ -2211,6 +2222,8 @@ impl Hybrid {
                 let r = tool_button(ui, pos2(x, y), ic, k, tool == t);
                 if t == Tool::Select {
                     self.hits.insert("select".into(), r.rect);
+                } else if t == Tool::Add {
+                    self.hits.insert("tool-add".into(), r.rect);
                 }
                 if r.clicked() {
                     self.tool = t;
@@ -2232,6 +2245,8 @@ impl Hybrid {
                 if s == Shape::Voxel {
                     self.voxel_y = y;
                     self.hits.insert("voxel".into(), r.rect);
+                } else if s == Shape::Box {
+                    self.hits.insert("brush-box".into(), r.rect);
                 }
                 if r.clicked() {
                     if s == Shape::Voxel {
@@ -2356,6 +2371,12 @@ impl Hybrid {
     /// The assistant is a sheet above the dock: a phone held upright, with the panel open.
     fn sheet(&self) -> bool {
         self.narrow && self.ai_open
+    }
+
+    /// The tour's card on a phone: like a sheet, it takes the room of the camera bar, the render
+    /// corner and the gesture hints.
+    fn tour_sheet(&self) -> bool {
+        self.phone && self.tour.step.is_some() && !self.help.open && !self.sheet() && !self.tour_yields()
     }
 
     /// The room a phone's panels fit in: above the dock, or beside it when the phone is held
@@ -2494,7 +2515,8 @@ impl Hybrid {
     // narrow. Under every panel, and never takes a finger.
     fn gesture_hints(&mut self, ctx: &Context, screen: Rect) {
         // The assistant's sheet, or Help's on a phone, covers the view the chip hints at.
-        if self.sheet() || (self.phone && self.help.open) {
+        // The tour's card on a phone covers it too, and teaches the same gestures.
+        if self.sheet() || (self.phone && self.help.open) || self.tour_sheet() {
             return;
         }
         let mut job = LayoutJob::default();
@@ -2560,6 +2582,7 @@ impl Hybrid {
             pos2(if self.touch { 12.0 } else { 12.0 + self.rail_w + 8.0 }, TOP),
             vec2(TREE_W, 36.0 + rows as f32 * row_h + layers_h + 6.0),
         );
+        self.hits.insert("tree".into(), rect);
         let objects = self.tree.iter().filter(|r| !r.group).count();
         let (on, scroll, layer_on) = (self.tree_on, self.tree_scroll, self.layer_on);
         let mut renaming = self.renaming.take();
@@ -3085,7 +3108,8 @@ impl Hybrid {
     // The axis flyout beside the rail's mirror and lock buttons, shown while either is on:
     // MIRROR X Y Z (any of them) and LOCK X Y Z (one of them).
     fn axes(&mut self, ctx: &Context) {
-        if !self.mirror && self.lock.is_none() {
+        // On a phone the flyout waits under the tour's card.
+        if (!self.mirror && self.lock.is_none()) || self.tour_sheet() {
             return;
         }
         let rect = self.axes_rect(ctx);
@@ -3178,8 +3202,9 @@ impl Hybrid {
     }
 
     /// Whether the selection flyout shows: with the select tool or a selection, in a model.
+    /// On a phone it waits under the tour's card.
     fn selection_shown(&self) -> bool {
-        !self.world && (self.tool == Tool::Select || self.selected > 0)
+        !self.world && (self.tool == Tool::Select || self.selected > 0) && !self.tour_sheet()
     }
 
     /// Choose what a select click takes, and switch to the select tool.
@@ -5114,6 +5139,10 @@ impl Hybrid {
         let corner = Rect::from_min_size(pos2(screen.right() - 12.0 - size.x, top), size);
         // A phone held sideways with the assistant open has no room for it beside the dock.
         if self.phone && !full && corner.intersects(self.dock_area.expand(8.0)) {
+            return;
+        }
+        // A phone's tour card takes the room it had.
+        if self.tour_sheet() && !full {
             return;
         }
         let rect = if full { screen } else { corner };
