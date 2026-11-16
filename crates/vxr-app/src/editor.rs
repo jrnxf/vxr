@@ -2817,6 +2817,33 @@ impl Editor {
         self.ui.toast(&self.ctx, msg);
     }
 
+    /// Put the image file `name` (a PNG the user picked for Import image) into the model as
+    /// voxels one cell thick, upright on the ground in front of the model, colours matched
+    /// to the palette, as one undo step, and say what happened. A file that does not import changes
+    /// nothing.
+    pub fn import_image(&mut self, name: &str, bytes: &[u8]) {
+        let done = vxr_core::image::decode(bytes).and_then(|img| {
+            self.gesture = None;
+            let done = self.scene.import_image(&img, None)?;
+            Ok((img.width, img.height, done))
+        });
+        let (w, h, done) = match done {
+            Ok(done) => done,
+            // The reason says what an image to import must be; it stays long enough to read.
+            Err(e) => return self.ui.alert(&self.ctx, format!("Could not import {name}: {e}")),
+        };
+        let plural = |n: usize| if n == 1 { "" } else { "s" };
+        let grew = if done.grew { ", and the model grew to hold it" } else { "" };
+        let msg = format!(
+            "Imported {name} ({w}×{h}) as {} voxel{} in {} color{}{grew}",
+            done.voxels,
+            plural(done.voxels),
+            done.slots,
+            plural(done.slots)
+        );
+        self.ui.toast(&self.ctx, msg);
+    }
+
     /// The file name for a palette export: the scene's name with `-palette` and `ext`.
     pub fn palette_name(&self, ext: &str) -> String {
         format!("{}-palette.{ext}", self.export_stem())

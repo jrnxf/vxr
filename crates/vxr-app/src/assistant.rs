@@ -998,6 +998,7 @@ mod tests {
                 "palette_adjust",
                 "palette_sort",
                 "palette_import",
+                "image_import",
                 "material_set",
                 "make_object",
                 "rename",

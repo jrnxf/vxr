@@ -97,6 +97,7 @@ fn tool_schemas() {
             "palette_adjust",
             "palette_sort",
             "palette_import",
+            "image_import",
             "material_set",
             "make_object",
             "move_object",
@@ -1333,6 +1334,7 @@ fn scoped_calls() -> Vec<(&'static str, Value)> {
         ("resize", json!({"size": [40, 40, 40]})),
         ("crop", json!({})),
         ("palette_swap", json!({"a": 1, "b": 2})),
+        ("image_import", json!({"png": "iVBORw0KGgo="})),
         ("make_object", json!({"from_slot": 10})),
         ("move_object", json!({"node": 1, "offset": [1, 0, 0]})),
         ("transform_object", json!({"node": 1, "kind": "rotate", "axis": "y"})),
@@ -1731,6 +1733,64 @@ fn palette_adjust_shifts_slots_or_the_selection_s_slots() {
 /// The colour and material every voxel of the file shows, by world cell.
 fn look(s: &Scene) -> Vec<([i32; 3], [u8; 4], vxr_core::material::Material)> {
     s.world_voxels(false).into_iter().map(|(p, v)| (p, s.palette[v as usize], s.materials[v as usize])).collect()
+}
+
+/// Standard base64 with padding, as an agent sends a file.
+fn base64(bytes: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for c in bytes.chunks(3) {
+        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        for i in 0..4 {
+            out.push(if i <= c.len() { A[(n >> (18 - 6 * i) & 63) as usize] as char } else { '=' });
+        }
+    }
+    out
+}
+
+#[test]
+fn image_import_puts_the_same_voxels_as_import_image() {
+    // A 40 x 3 picture (wider than the 32 bounds) with the slab's brown, the column's red, an
+    // off-palette blue and a transparent gap, every length of base64 tail among the sizes.
+    let px: Vec<u8> = (0..120)
+        .flat_map(|i| match i % 4 {
+            0 => [140, 85, 40, 255],
+            1 => [215, 35, 35, 255],
+            2 => [20, 20, 240, 255],
+            _ => [0, 0, 0, 0],
+        })
+        .collect();
+    for (w, h, at) in [(40, 3, None), (5, 2, Some([3, 6, -2])), (1, 1, Some([0, 0, 0]))] {
+        let png = vxr_core::files::png(w, h, &px[..(w * h * 4) as usize]).unwrap();
+        let img = vxr_core::image::decode(&png).unwrap();
+        let mut want = small();
+        want.import_image(&img, at).unwrap();
+        let mut s = small();
+        let (cells, bounds) = (voxels(&s), s.bounds());
+        let mut o = Session::new(&s, None);
+        let t = call(&mut o, &mut s, "image_import", json!({"png": base64(&png), "at": at}));
+        assert_eq!((voxels(&s), s.bounds()), (voxels(&want), want.bounds()), "{w}x{h} {at:?}: {t}");
+        o.discard(&mut s);
+        assert_eq!((voxels(&s), s.bounds()), (cells, bounds), "{w}x{h}");
+    }
+    let mut s = small();
+    let mut o = Session::new(&s, None);
+    let png = vxr_core::files::png(40, 3, &px).unwrap();
+    let t = call(&mut o, &mut s, "image_import", json!({"png": base64(&png)}));
+    assert!(t.starts_with("imported a 40x3 image at [-20, 0, 4] (its bottom-left pixel; it spans x -20 to 19, y 0 to 2): 90 cells changed in 3 slots; bounds x -20..19, y 0..31, z -16..15; "), "{t}");
+    let mut c = |p| get(&mut o, &mut s, p);
+    // Bottom row, left to right: brown is slot 10, red 20, the blue its nearest slot, a gap.
+    assert_eq!([c([-20, 0, 4]), c([-19, 0, 4]), c([-17, 0, 4])], [10, 20, 0]);
+    for (args, why) in [
+        (json!({"png": "iVBO%"}), "png: it is not base64 (A-Z, a-z, 0-9, + and /, with = padding)"),
+        (json!({"png": base64(b"GIF89a")}), "png: it is not a PNG image"),
+        (
+            json!({"png": base64(&vxr_core::files::png(2, 1, &[9, 9, 9, 0, 9, 9, 9, 0]).unwrap())}),
+            "every pixel of the image is transparent",
+        ),
+    ] {
+        assert_eq!(err(&mut o, &mut s, "image_import", args), (ErrorKind::Invalid, why.to_string()));
+    }
 }
 
 #[test]

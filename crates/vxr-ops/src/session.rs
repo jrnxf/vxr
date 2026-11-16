@@ -963,6 +963,35 @@ impl Session {
                     if n > 8 { ", …" } else { "" }
                 ))
             }
+            Op::ImageImport(a) => {
+                if scene.at() == At::World {
+                    return Err(invalid(WORLD));
+                }
+                let bytes = base64(&a.png)
+                    .ok_or_else(|| invalid("png: it is not base64 (A-Z, a-z, 0-9, + and /, with = padding)"))?;
+                let img = vxr_core::image::decode(&bytes).map_err(|e| invalid(format!("png: {e}")))?;
+                let p = scene.place_image(&img, a.at).map_err(invalid)?;
+                let b = scene.bounds();
+                if (p.lo, p.size) != (b.lo, b.size) {
+                    self.rebound(scene, p.lo, p.size)?;
+                }
+                let st = self.stage(scene, p.cells, false)?;
+                Ok(format!(
+                    "imported a {}x{} image at {:?} (its bottom-left pixel; it spans x {} to {}, y {} to {}): {} cells changed in {} slot{}; bounds {}; {}",
+                    img.width,
+                    img.height,
+                    p.at,
+                    p.at[0],
+                    p.at[0] + img.width as i32 - 1,
+                    p.at[1],
+                    p.at[1] + img.height as i32 - 1,
+                    st.changed,
+                    p.slots,
+                    if p.slots == 1 { "" } else { "s" },
+                    self.bounds_text(scene),
+                    self.staged_text(scene)
+                ))
+            }
             Op::PaletteSort(a) => {
                 let mut slots: Vec<u8> = if a.slots.is_empty() {
                     (1..=255).collect()
@@ -2454,4 +2483,29 @@ pub(crate) fn span(lo: Cell, hi: Cell) -> i64 {
 
 pub(crate) fn inside(p: Cell, lo: Cell, hi: Cell) -> bool {
     (0..3).all(|k| p[k] >= lo[k] && p[k] <= hi[k])
+}
+
+/// Standard base64 (with or without `=` padding; spaces and line breaks skipped), or None
+/// when another character is in it.
+fn base64(text: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(text.len() / 4 * 3);
+    let (mut acc, mut bits) = (0u32, 0);
+    for c in text.bytes().filter(|c| !c.is_ascii_whitespace()) {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' => break,
+            _ => return None,
+        };
+        acc = acc << 6 | v as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
 }

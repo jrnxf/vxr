@@ -179,6 +179,7 @@ fn parse_png(bytes: &[u8]) -> Result<Vec<[u8; 4]>, String> {
         let at = |i: usize| u32::from_be_bytes([size[i], size[i + 1], size[i + 2], size[i + 3]]);
         fits(at(0), at(4))?;
     }
+    crate::image::check_chunks(bytes)?;
     let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     decoder.set_transformations(png::Transformations::normalize_to_color8());
     decoder.set_limits(png::Limits { bytes: IMPORT_MAX_BYTES });

@@ -184,6 +184,7 @@ mod icon {
     pub const COPY: char = '\u{e09e}';
     pub const APERTURE: char = '\u{e040}';
     pub const IMAGE_DOWN: char = '\u{e53c}';
+    pub const IMAGE_UP: char = '\u{e5cb}';
     pub const SUN: char = '\u{e178}';
     pub const SUNSET: char = '\u{e17a}';
     pub const SLASH: char = '\u{e51d}';
@@ -270,6 +271,9 @@ pub enum Action {
     /// Ask for a palette file (a PNG or text) and give its colours to slots 1 up (the host
     /// picks the file).
     ImportPalette,
+    /// Ask for a PNG image and put it into the model as voxels one cell thick (the host
+    /// picks the file).
+    ImportImage,
     /// Flip "Only the selection" for the OBJ, slices and sprite exports, and say so.
     ExportSelection,
     /// Flip the region option (erase and paint stay inside the selection), and say so.
@@ -1138,6 +1142,7 @@ const COMMANDS: &[Command] = &[
     Command { label: "Export palette as PNG", keys: &[], run: |h| h.actions.push(Action::ExportPalette(false)) },
     Command { label: "Export palette as text", keys: &[], run: |h| h.actions.push(Action::ExportPalette(true)) },
     Command { label: "Import palette…", keys: &[], run: |h| h.actions.push(Action::ImportPalette) },
+    Command { label: "Import image…", keys: &[], run: |h| h.actions.push(Action::ImportImage) },
     Command { label: "Ask AI…", keys: &["Tab"], run: |h| h.open_ask_bar("") },
     Command { label: "Organize into objects (AI)", keys: &[], run: |h| h.organize() },
     Command { label: "Assistant panel", keys: &["⌘", "J"], run: |h| h.toggle_ai() },
@@ -3131,6 +3136,7 @@ impl Hybrid {
             Entry::Sep,
             Entry::Head("IMPORT"),
             Entry::Row("import-palette", icon::PALETTE, "Palette…", ".png .hex .gpl"),
+            Entry::Row("import-image", icon::IMAGE_UP, "Image as voxels…", ".png"),
         ];
         let height = |e: &Entry| match e {
             Entry::Head(_) => 26.0,
@@ -3245,6 +3251,7 @@ impl Hybrid {
             Some("export-palette-png") => self.actions.push(Action::ExportPalette(false)),
             Some("export-palette-hex") => self.actions.push(Action::ExportPalette(true)),
             Some("import-palette") => self.actions.push(Action::ImportPalette),
+            Some("import-image") => self.actions.push(Action::ImportImage),
             _ => {}
         }
         if flip {

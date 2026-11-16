@@ -485,9 +485,19 @@ paletteInput.addEventListener('change', async () => {
   if (f) app.import_palette(new Uint8Array(await f.slice(0, (1 << 20) + 1).arrayBuffer()), f.name);
 });
 
+// Import image: a PNG to turn into voxels. The editor refuses one over 1024 pixels on a side
+// from its header, before any pixel is decoded.
+const imageInput = Object.assign(document.createElement('input'), { type: 'file', accept: '.png,image/png' });
+imageInput.addEventListener('change', async () => {
+  const f = imageInput.files[0];
+  imageInput.value = '';
+  if (f) app.import_image(new Uint8Array(await f.arrayBuffer()), f.name);
+});
+
 window.vxrHost = {
   pickOpen,
   pickPalette: () => paletteInput.click(),
+  pickImage: () => imageInput.click(),
   download,
   fetchEmbed,
   keepToured() {

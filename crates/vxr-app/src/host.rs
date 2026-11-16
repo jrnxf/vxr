@@ -131,6 +131,12 @@ pub trait Platform {
         Err("there is no file picker here".into())
     }
 
+    /// Ask for a PNG image to import as voxels: its name and bytes. A browser answers later,
+    /// as [`Platform::pick_palette`] does, and the page hands the file to [`Editor::import_image`].
+    fn pick_image(&mut self) -> Result<Option<(String, Vec<u8>)>, String> {
+        Err("there is no file picker here".into())
+    }
+
     /// Write the scene's `.vox` bytes as a copy named `name` (a download in the browser, a save
     /// dialog on the desktop); returns the name it was given.
     fn export_vox(&mut self, _name: &str, _bytes: &[u8]) -> Result<Option<String>, String> {
@@ -361,6 +367,11 @@ pub fn run_action(ed: &mut Editor, p: &mut dyn Platform, action: Action) {
             Ok(Some((name, bytes))) => ed.import_palette(&name, &bytes),
             Ok(None) => {}
             Err(e) => toast(ed, format!("Could not import a palette: {e}. Try Import palette again")),
+        },
+        Action::ImportImage => match p.pick_image() {
+            Ok(Some((name, bytes))) => ed.import_image(&name, &bytes),
+            Ok(None) => {}
+            Err(e) => toast(ed, format!("Could not import an image: {e}. Try Import image again")),
         },
         Action::ExportPalette(text) => {
             let written = if text {

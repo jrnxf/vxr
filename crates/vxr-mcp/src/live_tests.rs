@@ -760,14 +760,25 @@ fn the_housekeeping_select_and_palette_tools_change_the_window_and_undo_gives_th
     );
     assert_eq!(w.scene.history().position(), position + 4);
     assert_eq!((w.scene.palette[1], w.scene.palette[2]), ([0x10, 0x20, 0x30, 255], [0x40, 0x50, 0x60, 255]));
+    // A PNG of a red pixel and a clear one, above the model: the bounds grow and the voxel
+    // lands in one undo step in the window.
+    let voxels = w.scene.map.voxels;
+    let t = call(
+        &mut w,
+        &mut a,
+        "image_import",
+        json!({"png": "iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAAD0lEQVR4nGP4z8AARAwMAAz8Af9c/RSVAAAAAElFTkSuQmCC", "at": [0, 40, 0]}),
+    );
+    assert!(t.starts_with("imported a 2x1 image at [0, 40, 0] (its bottom-left pixel; it spans x 0 to 1, y 40 to 40): 1 cells changed in 1 slot; "), "{t}");
+    assert_eq!((w.scene.history().position(), w.scene.map.voxels), (position + 5, voxels + 1));
     call(&mut w, &mut a, "show_world", json!({}));
-    // Fourteen edits applied, one undo step each (the delete was undone): undone, the save is
+    // Fifteen edits applied, one undo step each (the delete was undone): undone, the save is
     // the file's bytes.
     let mut steps = 0;
     while w.scene.undo() {
         steps += 1;
     }
-    assert_eq!(steps, 14);
+    assert_eq!(steps, 15);
     assert_eq!(w.scene.to_vox().unwrap(), bytes);
 }
 

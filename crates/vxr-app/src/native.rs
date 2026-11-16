@@ -169,6 +169,15 @@ impl Platform for Desktop {
         Ok(Some((file_name(&path), bytes)))
     }
 
+    fn pick_image(&mut self) -> Result<Option<(String, Vec<u8>)>, String> {
+        let Some(path) = rfd::FileDialog::new().add_filter("PNG image", &["png"]).pick_file() else {
+            return Ok(None);
+        };
+        // The decoder refuses an image over its size from the header, before any pixel.
+        let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", file_name(&path)))?;
+        Ok(Some((file_name(&path), bytes)))
+    }
+
     fn open_project(&mut self, project: &Project) -> Result<Option<Opened>, String> {
         read(project.path.as_deref().ok_or("it has no file")?).map(Some)
     }

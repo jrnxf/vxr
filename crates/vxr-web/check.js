@@ -1238,6 +1238,52 @@ async () => {
         }
         HTMLInputElement.prototype.click = inputClick;
       }
+      // Import image: the row opens a picker for PNGs, a small sign drawn on a canvas becomes
+      // voxels with a toast, a file that is not a PNG is refused, Cmd-K asks too, undo takes it back.
+      {
+        let picker = null;
+        const inputClick = HTMLInputElement.prototype.click;
+        HTMLInputElement.prototype.click = function () { if (this.type === 'file') picker = this; else inputClick.call(this); };
+        const hand = async (name, body) => {
+          const dt = new DataTransfer();
+          dt.items.add(new File([body], name));
+          picker.files = dt.files;
+          picker.dispatchEvent(new Event('change'));
+          await new Promise((r) => setTimeout(r, 50));
+          await frames(3);
+        };
+        const voxelsWas = st().voxels;
+        await click(...hit('scene-select'));
+        await frames(14);
+        await click(...hit('import-image'));
+        await frames();
+        step('its Image as voxels… row opens a file picker for PNG images',
+          !!picker && picker.accept === '.png,image/png' && !st().fileMenu, `${picker && picker.accept}`);
+        if (picker) {
+          await hand('photo.jpg', 'not a picture');
+          step('a file that is not a PNG is refused and changes nothing',
+            st().voxels === voxelsWas && (st().toast || '').startsWith('Could not import photo.jpg: it is not a PNG image'), `${st().voxels} ${st().toast}`);
+          const sign = document.createElement('canvas');
+          sign.width = 6; sign.height = 4;
+          const g = sign.getContext('2d');
+          g.fillStyle = '#c03020';
+          g.fillRect(0, 0, 6, 4);
+          g.clearRect(2, 1, 2, 2);
+          picker = null;
+          await key('k', cmd);
+          for (const ch of 'import image') await key(ch);
+          await key('Enter');
+          await frames();
+          const asked = !!picker;
+          if (picker) await hand('sign.png', await new Promise((r) => sign.toBlob(r, 'image/png')));
+          step('Cmd-K Import image… asks too, and a 6×4 sign with a 2×2 hole becomes 20 voxels in one color',
+            asked && st().voxels === voxelsWas + 20 && (st().toast || '').startsWith('Imported sign.png (6×4) as 20 voxels in 1 color'), `${asked} ${st().voxels - voxelsWas} ${st().toast}`);
+          await key('z', cmd);
+          await frames();
+          step('undo takes the image back', st().voxels === voxelsWas, `${st().voxels}`);
+        }
+        HTMLInputElement.prototype.click = inputClick;
+      }
       // Only the selection: with one colour selected and the switch on, the slices and the
       // OBJ hold those voxels alone, under names of their own; switched off, the whole scene.
       const toolWas = st().tool;

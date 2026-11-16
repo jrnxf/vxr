@@ -27,6 +27,8 @@ extern "C" {
     fn page_pick_open();
     #[wasm_bindgen(js_namespace = vxrHost, js_name = pickPalette)]
     fn page_pick_palette();
+    #[wasm_bindgen(js_namespace = vxrHost, js_name = pickImage)]
+    fn page_pick_image();
     #[wasm_bindgen(js_namespace = vxrHost, js_name = download)]
     fn page_download(bytes: &[u8], name: &str, mime: &str);
     #[wasm_bindgen(js_namespace = vxrHost, js_name = keepTheme)]
@@ -195,6 +197,11 @@ impl Platform for Browser {
 
     fn pick_palette(&mut self) -> Result<Option<(String, Vec<u8>)>, String> {
         page_pick_palette();
+        Ok(None)
+    }
+
+    fn pick_image(&mut self) -> Result<Option<(String, Vec<u8>)>, String> {
+        page_pick_image();
         Ok(None)
     }
 
@@ -746,6 +753,12 @@ impl App {
     pub fn import_palette(&mut self, bytes: &[u8], name: &str) {
         self.woken = true;
         self.host.editor.import_palette(name, bytes);
+    }
+
+    /// The PNG the user picked for Import image.
+    pub fn import_image(&mut self, bytes: &[u8], name: &str) {
+        self.woken = true;
+        self.host.editor.import_image(name, bytes);
     }
 
     /// The page could not open project `name`'s file: `why`.

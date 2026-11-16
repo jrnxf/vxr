@@ -664,6 +664,16 @@ pub struct PaletteImport {
     pub text: String,
 }
 
+/// Import a PNG image as voxels, as Import image… does: one cell thick, upright in the x-y plane as the front view shows the picture, each pixel one voxel in the palette slot nearest its colour (set the colours with palette_set or palette_import first for an exact match). Pixels under half opaque stay empty. The bounds grow to hold it. At most 1024 pixels on a side, and the changed-cell limit counts every pixel.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ImageImport {
+    /// The PNG file as standard base64.
+    pub png: String,
+    /// The cell of the image's bottom-left pixel. Without it the image stands on the ground, centred across the bounds on x, one cell in front of the frontmost voxel (halfway back in an empty model).
+    pub at: Option<Cell>,
+}
+
 /// What palette_sort orders the colours by.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
@@ -812,6 +822,7 @@ ops! {
     "palette_adjust" => PaletteAdjust(PaletteAdjust),
     "palette_sort" => PaletteSort(PaletteSort),
     "palette_import" => PaletteImport(PaletteImport),
+    "image_import" => ImageImport(ImageImport),
     "material_set" => MaterialSet(MaterialSet),
     "make_object" => MakeObject(MakeObject),
     "move_object" => MoveObject(MoveObject),
@@ -875,7 +886,7 @@ impl Op {
             | "set_layer" | "delete_object" | "new_layer" | "hide_layer" => Scope::World,
             "place" | "erase" | "box" | "line" | "sphere" | "circle" | "face" | "fill" | "paint" | "select"
             | "transform" | "copy" | "cut" | "paste" | "stamp" | "delete" | "hollow" | "fill_inside" | "resize"
-            | "crop" | "palette_swap" | "make_object" => Scope::Model,
+            | "crop" | "palette_swap" | "make_object" | "image_import" => Scope::Model,
             _ => Scope::Any,
         }
     }

@@ -34,6 +34,8 @@ fn tool(a: &Action) -> Option<&'static str> {
         Action::SortPalette(_) => Some("palette_sort"),
         // The tool takes the file's text; the UI's file picker reads PNG too.
         Action::ImportPalette => Some("palette_import"),
+        // The tool takes the PNG as base64; the UI's file picker reads the file.
+        Action::ImportImage => Some("image_import"),
         // In world mode rotate and flip turn the picked object: `transform_object`.
         Action::Transform(_) => Some("transform"),
         Action::SelectAll | Action::InvertSelection | Action::SelectColor | Action::Deselect => Some("select"),
@@ -136,6 +138,7 @@ fn with_tools() -> Vec<Action> {
         Action::SortPalette(vxr_core::palette::SortKey::Hue),
         Action::ExportPalette(false),
         Action::ImportPalette,
+        Action::ImportImage,
         Action::Transform(Transform::Rotate(0)),
         Action::SelectAll,
         Action::InvertSelection,

@@ -911,6 +911,8 @@ struct Fake {
     embed: Option<(String, Vec<vxr_app::files::File>)>,
     /// The palette file the next Import palette picks; None is a cancelled dialog.
     palette: Option<(String, Vec<u8>)>,
+    /// The image the next Import image picks; None is a cancelled dialog.
+    image: Option<(String, Vec<u8>)>,
 }
 
 impl Platform for Fake {
@@ -956,6 +958,10 @@ impl Platform for Fake {
     fn pick_palette(&mut self) -> Result<Option<(String, Vec<u8>)>, String> {
         self.calls.push("pick_palette".into());
         Ok(self.palette.take())
+    }
+    fn pick_image(&mut self) -> Result<Option<(String, Vec<u8>)>, String> {
+        self.calls.push("pick_image".into());
+        Ok(self.image.take())
     }
     fn save_text(&mut self, name: &str, text: &str) -> Result<Option<String>, String> {
         self.calls.push(format!("save_text {name}"));
@@ -5512,6 +5518,78 @@ fn export(s: &mut Shot, dir: &Path) -> Result<(), String> {
         if s.ed.scene.palette != palette || s.ed.scene.history().position() != position {
             return Err("the palette imports did not undo".into());
         }
+
+        // Import image: a cancelled dialog and a file that is not a PNG change nothing; a
+        // 24 x 16 sign in two island colours with a clear 4 x 4 window stands in front of the
+        // model as 368 voxels in one undo step, every pixel in its exact slot.
+        let (voxels, bounds) = (s.voxels(), s.ed.scene.bounds());
+        let mut used = std::collections::BTreeSet::new();
+        s.ed.scene.for_each_voxel(|_, v| {
+            used.insert(v);
+        });
+        let mut used = used.into_iter().map(|v| palette[v as usize]);
+        let (a, b) = (used.next().unwrap_or([255; 4]), used.next().unwrap_or([0, 0, 0, 255]));
+        let px: Vec<u8> = (0..24 * 16)
+            .flat_map(|i| {
+                let (x, y) = (i % 24, i / 24);
+                match (x, y) {
+                    (10..=13, 6..=9) => [0, 0, 0, 0],
+                    (0 | 23, _) | (_, 0 | 15) => a,
+                    _ => b,
+                }
+            })
+            .collect();
+        run_action(&mut s.ed, &mut p, Action::ImportImage);
+        s.frames(2);
+        let cancelled = s.voxels() == voxels && s.ed.scene.history().position() == position;
+        p.image = Some(("photo.jpg".into(), b"\xff\xd8\xff\xe0 a JPEG".to_vec()));
+        run_action(&mut s.ed, &mut p, Action::ImportImage);
+        s.frames(2);
+        let refused = s.ed.ui.toast_text() == Some("Could not import photo.jpg: it is not a PNG image")
+            && s.voxels() == voxels
+            && s.ed.scene.history().position() == position;
+        p.image = Some(("sign.png".into(), vxr_core::files::png(24, 16, &px)?));
+        run_action(&mut s.ed, &mut p, Action::ImportImage);
+        s.frames(4);
+        let toast = s.ed.ui.toast_text().unwrap_or_default().to_string();
+        let first = |c: [u8; 4]| (1..256).find(|&i| palette[i] == c).unwrap_or(0) as u8;
+        let mut placed = 0;
+        let mut z = None;
+        s.ed.scene.for_each_voxel(|p, _| z = z.max(Some(p[2])));
+        let front = z.unwrap_or(0);
+        for i in 0..24 * 16 {
+            let (x, y) = (i % 24, i / 24);
+            let want = match px[i as usize * 4 + 3] {
+                0 => 0,
+                _ => first([px[i as usize * 4], px[i as usize * 4 + 1], px[i as usize * 4 + 2], 255]),
+            };
+            let cx = (bounds.size[0] as i32 - 24).div_euclid(2) + x;
+            let at =
+                s.ed.scene.to_map([bounds.lo[0] + cx, bounds.floor + 15 - y, s.ed.scene.to_world([0, 0, front])[2]]);
+            placed += (s.ed.scene.map.get(at[0], at[1], at[2]) == want) as usize;
+        }
+        let one_step = s.ed.scene.history().position() != position;
+        s.save_png(&dir.join("app-2x-image-imported.png"))?;
+        s.ed.undo();
+        let undone =
+            s.voxels() == voxels && s.ed.scene.bounds() == bounds && s.ed.scene.history().position() == position;
+        check(
+            cancelled && refused,
+            "Import image changes nothing when the dialog is cancelled, and a file that is not a PNG is refused \
+             with why"
+                .into(),
+        )?;
+        check(
+            toast.starts_with("Imported sign.png (24×16) as 368 voxels in 2 colors")
+                && placed == 384
+                && one_step
+                && undone
+                && p.calls.iter().filter(|c| *c == "pick_image").count() == 3,
+            format!(
+                "a 24×16 PNG stands in front of the model with {placed} of 384 pixels in their exact slot or \
+                 clear, as one undo step that undo takes back with the bounds ({toast})"
+            ),
+        )?;
     }
     s.host.clear();
     s.open_file_row("import-palette")?;
@@ -5523,6 +5601,17 @@ fn export(s: &mut Shot, dir: &Path) -> Result<(), String> {
     check(
         row && s.host == [Action::ImportPalette],
         "the file menu's Import Palette… row and Cmd-K Import palette… ask the host for a palette file".into(),
+    )?;
+    s.host.clear();
+    s.open_file_row("import-image")?;
+    let row = s.host == [Action::ImportImage] && !s.ed.ui.file_menu;
+    s.host.clear();
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("import image".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    check(
+        row && s.host == [Action::ImportImage],
+        "the file menu's Import Image as voxels… row and Cmd-K Import image… ask the host for a PNG".into(),
     )?;
     // Only the selection is a switch: its row flips it and keeps the menu open.
     s.host.clear();

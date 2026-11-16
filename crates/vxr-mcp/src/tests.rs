@@ -687,6 +687,10 @@ fn the_ui_s_other_actions_have_tools() {
     );
     c.ok("edit_object", json!({"node": 1}));
     c.ok("resize", json!({"size": [8, 3, 8]}));
+    // A PNG of a red pixel and a clear one: one voxel, then undone.
+    let t = c.ok("image_import", json!({"png": "iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAAD0lEQVR4nGP4z8AARAwMAAz8Af9c/RSVAAAAAElFTkSuQmCC", "at": [0, 2, 0]}));
+    assert!(t.starts_with("imported a 2x1 image at [0, 2, 0] (its bottom-left pixel; it spans x 0 to 1, y 2 to 2): 1 cells changed in 1 slot; "), "{t}");
+    c.ok("undo", json!({}));
     let t = c.ok("face", json!({"cell": [0, 0, 0], "slot": 9}));
     assert!(t.starts_with("64 cells changed"), "the slab's top: {t}");
     let t = c.ok("select", json!({"volume": [0, 1, 0]}));
