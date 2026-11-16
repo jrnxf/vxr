@@ -2,6 +2,7 @@
 //!
 //! - [`brickmap`]: the sparse brick map (8^3 bricks with occupancy masks), edits,
 //!   dirty tracking for partial GPU uploads, and a CPU ray cast for picking.
+//! - [`bricks`]: the brick scene file the embed loads, a brick map and its colours.
 //! - [`export`]: OBJ export, greedy quads textured by a 256x1 palette image, and PNG slices.
 //! - [`files`]: those exports as files (OBJ with `.mtl` and texture, the slices PNG), a
 //!   stored zip of several, and the `.vox` save (checked to read back, written atomically).
@@ -17,6 +18,7 @@
 //!   and center brushes, mirror on three axes and axis lock), as presses, drags and releases.
 
 pub mod brickmap;
+pub mod bricks;
 pub mod export;
 pub mod files;
 pub mod history;

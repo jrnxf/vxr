@@ -234,6 +234,49 @@ impl BrickMap {
         true
     }
 
+    /// Fill the empty brick at grid cell `cell` whole, on a map that is not tracking changes:
+    /// `mask` says which of its voxels are occupied and `slots` holds their palette slots in
+    /// mask bit order (as many as the mask has bits, none zero). False, with the map
+    /// unchanged, when the cell is not an empty one of the grid, the mask is empty, a slot is
+    /// zero or a voxel falls outside the size.
+    pub(crate) fn fill_brick(&mut self, cell: usize, mask: &[u32; MASK_WORDS], slots: &[u8]) -> bool {
+        debug_assert!(!self.track, "fill_brick records no dirty state");
+        let n = mask.iter().map(|w| w.count_ones() as usize).sum::<usize>();
+        if self.grid.get(cell) != Some(&EMPTY) || n == 0 || n != slots.len() || slots.contains(&0) {
+            return false;
+        }
+        // The coordinates of this brick that lie inside the size, per axis, one bit each.
+        let c = cell as u32;
+        let brick = [c % self.dims[0], c / self.dims[0] % self.dims[1], c / (self.dims[0] * self.dims[1])];
+        let inside: [u32; 3] = std::array::from_fn(|a| (1u32 << (self.size[a] - brick[a] * B).min(B)) - 1);
+        let b = self.alloc_brick();
+        let pal = &mut self.pal[b as usize * BRICK_VOXELS..(b as usize + 1) * BRICK_VOXELS];
+        let mut k = 0;
+        for (w, &bits) in mask.iter().enumerate() {
+            let mut bits = bits;
+            while bits != 0 {
+                let li = w as u32 * 32 + bits.trailing_zeros();
+                bits &= bits - 1;
+                let p = [li & 7, (li >> 3) & 7, li >> 6];
+                if (0..3).any(|a| inside[a] >> p[a] & 1 == 0) {
+                    pal.fill(0);
+                    self.free.push(b);
+                    return false;
+                }
+                pal[li as usize] = slots[k];
+                k += 1;
+            }
+        }
+        self.grid[cell] = b;
+        self.masks[b as usize * MASK_WORDS..(b as usize + 1) * MASK_WORDS].copy_from_slice(mask);
+        for &slot in slots {
+            self.counts[slot as usize] += 1;
+        }
+        self.voxels += n as u64;
+        self.fills += n as u64;
+        true
+    }
+
     /// Hand the dirty lists to the uploader and reset them.
     pub fn take_dirty(&mut self) -> (Vec<u32>, Vec<u32>) {
         for &b in &self.dirty_bricks {

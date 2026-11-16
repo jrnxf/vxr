@@ -19,6 +19,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "bricks_decode"
+path = "fuzz_targets/bricks_decode.rs"
+test = false
+doc = false
+bench = false
+
 # Keep the fuzz crate out of the repo workspace.
 [workspace]
 members = ["."]
