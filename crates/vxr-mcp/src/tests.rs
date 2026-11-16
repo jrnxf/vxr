@@ -757,11 +757,12 @@ fn export_writes_the_obj_and_the_slices_under_the_root() {
     c.ok("export", json!({"kind": "slices", "path": "s.png"}));
     assert!(d.0.join("s.png").is_file());
     for (args, says) in [
-        (json!({"kind": "render"}), "vxr mcp --live"),
+        (json!({"kind": "render"}), "kind render is the path-traced picture"),
+        (json!({"kind": "embed"}), "kind embed is the folder for a web page"),
         (json!({"kind": "obj", "path": "../x.obj"}), "without .."),
         (json!({"kind": "obj", "path": "x.vox"}), "not a .obj file"),
         (json!({"kind": "slices", "path": "x.obj"}), "not a .png file"),
-        (json!({"kind": "gltf"}), "obj, slices or render"),
+        (json!({"kind": "gltf"}), "obj, slices, render or embed"),
     ] {
         let e = c.err("export", args.clone());
         assert!(e.contains(says), "{args}: {e}");

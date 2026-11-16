@@ -396,9 +396,14 @@ impl Page {
     /// and the answer naming them.
     fn deliver(&mut self, ed: &mut Editor, client: &str, what: &str) -> Result<String, String> {
         let files = std::mem::take(&mut ed.agent_files);
-        let file = match files.as_slice() {
-            [one] => one.clone(),
-            _ => (format!("{}-obj.zip", ed.export_stem()), zip(&files)),
+        let file = match (ed.agent_folder.take(), files.as_slice()) {
+            // An embed: its folder inside one zip, as the Embed command downloads it.
+            (Some(folder), _) => {
+                let inside: Vec<_> = files.iter().map(|(f, bytes)| (format!("{folder}/{f}"), bytes.clone())).collect();
+                (format!("{folder}.zip"), zip(&inside))
+            }
+            (None, [one]) => one.clone(),
+            (None, _) => (format!("{}-obj.zip", ed.export_stem()), zip(&files)),
         };
         let ctx = ed.ctx.clone();
         ed.ui.toast(&ctx, format!("{client} exported {}", file.0));

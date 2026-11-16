@@ -29,6 +29,8 @@ const MAX_PATH: usize = 200;
 const NO_SCENE: &str = "no scene open: call open or new_scene first";
 const NO_RENDER: &str = "kind render is the path-traced picture, made on the GPU by the vxr window, which files mode does not use: ask the user to open the file in vxr and connect vxr mcp --live, or call look for a quick picture";
 
+const NO_EMBED: &str = "kind embed is the folder for a web page, whose poster is path-traced on the GPU by the vxr window, which files mode does not use: ask the user to open the file in vxr and connect vxr mcp --live, or to choose Embed in vxr's Export menu";
+
 /// Tools that only read the scene.
 pub const READ_ONLY: [&str; 8] =
     ["list_files", "scene_summary", "get_voxels", "slice", "find_parts", "look", "review_status", "connect"];
@@ -62,7 +64,7 @@ fn own_tools() -> Vec<(&'static str, String, Value)> {
         edit_object_tool(),
         show_world_tool(),
         export_tool(
-            "Export the open scene (the model being edited, or every shown object of a world) as files under the root, as the Export menu does. kind obj writes <name>.obj with its <name>.mtl and 256x1 palette texture <name>.png; kind slices writes every layer of the model's bounds side by side, the bottom on the left, as one PNG. path is where (relative to the root, ending in .obj for obj and .png for slices), by default beside the scene: <scene>.obj or <scene>-slices.png; an earlier file there is replaced. kind render, the path-traced picture, is made on the GPU by the vxr window: open the file in vxr and use vxr mcp --live for it, or look for a quick picture.",
+            "Export the open scene (the model being edited, or every shown object of a world) as files under the root, as the Export menu does. kind obj writes <name>.obj with its <name>.mtl and 256x1 palette texture <name>.png; kind slices writes every layer of the model's bounds side by side, the bottom on the left, as one PNG. path is where (relative to the root, ending in .obj for obj and .png for slices), by default beside the scene: <scene>.obj or <scene>-slices.png; an earlier file there is replaced. kind render, the path-traced picture, and kind embed, the folder for a web page with its path-traced poster, are made on the GPU by the vxr window: open the file in vxr and use vxr mcp --live for them, or look for a quick picture.",
             Some(json!({"type": "string", "description": "where to write, relative to the root folder, without .."})),
         ),
         (
@@ -99,7 +101,7 @@ pub(crate) fn show_world_tool() -> (&'static str, String, Value) {
 /// `export`, in files mode (with `path`) and live mode.
 pub(crate) fn export_tool(description: &str, path: Option<Value>) -> (&'static str, String, Value) {
     let mut props = json!({
-        "kind": {"type": "string", "enum": ["obj", "slices", "render"], "description": "obj: OBJ with .mtl and palette texture; slices: every layer as one PNG; render: the path-traced PNG"},
+        "kind": {"type": "string", "enum": ["obj", "slices", "render", "embed"], "description": "obj: OBJ with .mtl and palette texture; slices: every layer as one PNG; render: the path-traced PNG; embed: a folder for a web page, with the <voxel-scene> viewer, the scene, a path-traced poster and an index.html showing the tag"},
     });
     if let Some(p) = path {
         props["path"] = p;
@@ -448,14 +450,15 @@ impl Files {
 
     /// `export`: the OBJ files or the PNG slices of the open scene, written under the root.
     fn export(&mut self, args: &Value) -> R {
-        let kind = args.get("kind").and_then(Value::as_str).ok_or("kind: obj, slices or render")?;
+        let kind = args.get("kind").and_then(Value::as_str).ok_or("kind: obj, slices, render or embed")?;
         let o = self.open.as_ref().ok_or(NO_SCENE)?;
         let stem = o.rel.strip_suffix(".vox").or_else(|| o.rel.strip_suffix(".VOX")).unwrap_or(&o.rel).to_string();
         let (ext, default) = match kind {
             "obj" => ("obj", format!("{stem}.obj")),
             "slices" => ("png", format!("{stem}-slices.png")),
             "render" => return Err(NO_RENDER.into()),
-            other => return Err(format!("kind {}: obj, slices or render", clean(other.as_bytes()))),
+            "embed" => return Err(NO_EMBED.into()),
+            other => return Err(format!("kind {}: obj, slices, render or embed", clean(other.as_bytes()))),
         };
         let rel = args.get("path").and_then(Value::as_str).map(str::to_string).unwrap_or(default);
         let path = self.resolve_as(&rel, ext)?;

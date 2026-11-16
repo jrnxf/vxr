@@ -199,6 +199,16 @@ impl Live {
     fn deliver(&self, ed: &mut Editor, client: &str, what: &str) -> Result<String, String> {
         let files = std::mem::take(&mut ed.agent_files);
         std::fs::create_dir_all(&self.downloads).map_err(|e| format!("could not write into Downloads: {e}"))?;
+        let ctx = ed.ctx.clone();
+        // An embed is one new folder, never over one there ("x-embed-1").
+        if let Some(folder) = ed.agent_folder.take() {
+            let folder = crate::embed::write_folder(&self.downloads, &folder, &files)
+                .map_err(|e| format!("could not write the embed into Downloads: {e}"))?;
+            let dir = self.downloads.join(&folder);
+            let written: Vec<String> = files.iter().map(|f| dir.join(&f.0).to_string_lossy().into_owned()).collect();
+            ed.ui.toast(&ctx, format!("{client} exported the folder {folder} into Downloads"));
+            return Ok(json!({"exported": written, "what": what, "note": "written as one folder into the user's Downloads folder"}).to_string());
+        }
         let (mut written, mut names) = (Vec::new(), Vec::new());
         let files = unused_names(&self.downloads, files, &ed.scene)?;
         for (name, bytes) in &files {
@@ -207,7 +217,6 @@ impl Live {
             written.push(path.to_string_lossy().into_owned());
             names.push(name.clone());
         }
-        let ctx = ed.ctx.clone();
         ed.ui.toast(&ctx, format!("{client} exported {} into Downloads", names.join(", ")));
         Ok(json!({"exported": written, "what": what, "note": "written into the user's Downloads folder"}).to_string())
     }

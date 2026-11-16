@@ -49,7 +49,11 @@ impl Shot {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
-        let ed = Editor::new(gpu, scene, name, FORMAT, (w, h), ppp, crate::native::fonts())?;
+        let mut ed = Editor::new(gpu, scene, name, FORMAT, (w, h), ppp, crate::native::fonts())?;
+        // Stand-ins named as the viewer's files: the real ones are checked in a browser.
+        ed.embed_viewer = Some(Box::new(|| {
+            Ok(Some(vxr_app::files::EMBED_VIEWER.iter().map(|n| (n.to_string(), n.as_bytes().to_vec())).collect()))
+        }));
         Ok(Self { ed, target, time: 0.0, host: Vec::new(), system: None, copied: None })
     }
 
@@ -898,8 +902,6 @@ struct Fake {
     disk: Option<vxr_app::projects::Memory>,
     /// The session token kept, as the desktop keeps it in the keychain.
     session: Option<String>,
-    /// This build has no embed viewer.
-    no_viewer: bool,
     /// The last embed folder written: its name and files.
     embed: Option<(String, Vec<vxr_app::files::File>)>,
 }
@@ -978,13 +980,6 @@ impl Platform for Fake {
         self.zip = bytes.to_vec();
         Ok(Some(name.into()))
     }
-    fn embed_viewer(&mut self) -> Result<Option<Vec<vxr_app::files::File>>, String> {
-        if self.no_viewer {
-            return Err("this build has no embed viewer".into());
-        }
-        // Stand-ins named as the viewer's files: the real ones are checked in a browser.
-        Ok(Some(vxr_app::files::EMBED_VIEWER.iter().map(|n| (n.to_string(), n.as_bytes().to_vec())).collect()))
-    }
     fn save_embed(&mut self, name: &str, files: &[vxr_app::files::File]) -> Result<Option<String>, String> {
         self.calls.push(format!("save_embed {name}"));
         if self.cancel {
@@ -1026,13 +1021,15 @@ fn embed_export(dir: &Path) -> Result<(), String> {
         "Cmd-K Embed does the same".into(),
     )?;
 
-    let mut p = Fake { no_viewer: true, ..Default::default() };
+    let mut p = Fake::default();
+    let viewer = s.ed.embed_viewer.replace(Box::new(|| Err("this build has no embed viewer".into())));
     run_action(&mut s.ed, &mut p, Action::Embed);
     s.frames(2);
     check(
         s.ed.export.is_none() && s.ed.ui.toast_text() == Some("Could not embed: this build has no embed viewer"),
         format!("a build without the viewer traces nothing and says so ({:?})", s.ed.ui.toast_text()),
     )?;
+    s.ed.embed_viewer = viewer;
 
     let mut p = Fake::default();
     s.host.clear();
@@ -7826,6 +7823,64 @@ fn agents_look_render(
         format!("a render export answers once traced, its PNG in Downloads ({size:?}): {t}"),
     )?;
     check(s.ed.exported.is_none(), "the agent's render asks the user nothing".into())?;
+
+    // The embed folder, as the Embed command makes it, but into Downloads and with the tag
+    // in the answer instead of on the user's clipboard.
+    let viewer = s.ed.embed_viewer.replace(Box::new(|| Err("this build has no embed viewer".into())));
+    let (t, e) = s.agent_call(live, claude, "export", json!({"kind": "embed"}));
+    check(
+        e && t.contains("could not embed: this build has no embed viewer") && s.ed.export.is_none(),
+        format!("without the viewer an agent's embed traces nothing and says why: {t}"),
+    )?;
+    s.ed.embed_viewer = viewer;
+    s.copied = None;
+    s.host.clear();
+    let before = names(downloads);
+    let (t, e) = s.agent_call(live, claude, "export", json!({"kind": "embed"}));
+    let folder = downloads.join("house-embed");
+    let scene = std::fs::read(folder.join("house.vxrb")).unwrap_or_default();
+    let shown = vxr_core::bricks::open(&scene).map(|(map, _)| map.voxels).unwrap_or(0);
+    let poster = png::Decoder::new(std::io::Cursor::new(std::fs::read(folder.join("house.png")).unwrap_or_default()))
+        .read_info()
+        .map(|r| (r.info().width, r.info().height))
+        .unwrap_or((0, 0));
+    let path = |f: &str| folder.join(f).to_string_lossy().into_owned();
+    let answer: Value = serde_json::from_str(&t).unwrap_or_default();
+    let listed: Vec<&str> = answer["exported"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    check(
+        !e && names(&folder)
+            == ["house.png", "house.vxrb", "index.html", "voxel-scene.js", "vxr_embed.js", "vxr_embed_bg.wasm"]
+            && listed
+                == ["index.html", "house.vxrb", "house.png", "voxel-scene.js", "vxr_embed.js", "vxr_embed_bg.wasm"]
+                    .map(path)
+            && shown == s.voxels()
+            && poster == vxr_app::files::EMBED_POSTER
+            && answer["what"].as_str().is_some_and(|w| w.contains(&vxr_app::files::embed_snippet("house.vox"))),
+        format!(
+            "an embed export answers once its poster is traced: the folder house-embed in Downloads with the \
+             scene ({shown} voxels), a {poster:?} poster and the viewer, and the tag in the answer: {t}"
+        ),
+    )?;
+    let loose: Vec<String> = names(downloads).into_iter().filter(|n| !before.contains(n)).collect();
+    check(
+        loose == ["house-embed"]
+            && s.copied.is_none()
+            && s.ed.embedded.is_none()
+            && !s.host.contains(&Action::Embedded)
+            && s.ed.ui.toast_text() == Some("Claude Code exported the folder house-embed into Downloads"),
+        format!(
+            "it adds only that folder, leaves the clipboard alone and asks the user nothing ({loose:?}, {:?})",
+            s.ed.ui.toast_text()
+        ),
+    )?;
+    let first = std::fs::read(folder.join("index.html")).unwrap_or_default();
+    let (t, e) = s.agent_call(live, claude, "export", json!({"kind": "embed"}));
+    check(
+        !e && downloads.join("house-embed-1/house.vxrb").is_file()
+            && t.contains("house-embed-1")
+            && std::fs::read(folder.join("index.html")).is_ok_and(|b| b == first),
+        format!("again it makes house-embed-1 and replaces nothing: {t}"),
+    )?;
     check(s.ed.scene.history().position() == position, "exports are no undo step".into())?;
     s.ed.ui.render = vxr_app::render::RenderSettings::default();
     Ok(())

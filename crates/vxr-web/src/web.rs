@@ -76,6 +76,25 @@ thread_local! {
     static VIEWER: RefCell<Viewer> = const { RefCell::new(Viewer::Unasked) };
 }
 
+/// The viewer's files for the editor (`Editor::embed_viewer`): fetched on the first ask,
+/// None until they land ([`App::embed_fetched`]).
+fn embed_viewer() -> Result<Option<Vec<File>>, String> {
+    VIEWER.with_borrow_mut(|v| match v {
+        Viewer::Unasked => {
+            *v = Viewer::Fetching;
+            page_fetch_embed();
+            Ok(None)
+        }
+        Viewer::Fetching => Ok(None),
+        Viewer::Here(files) => Ok(Some(files.clone())),
+        // Said once; the next Embed fetches again.
+        Viewer::Failed(_) => {
+            let Viewer::Failed(why) = std::mem::take(v) else { unreachable!() };
+            Err(format!("the viewer did not download ({why}). Check the connection and choose Embed again"))
+        }
+    })
+}
+
 /// What a browser does for [`run_action`]: Open is the page's file picker, which calls
 /// [`App::open`] or [`App::open_file`] when the user has chosen. Save writes through a handle
 /// to the file where the browser has File System Access (Chrome, Edge), finishing in
@@ -202,23 +221,6 @@ impl Platform for Browser {
         Ok(())
     }
 
-    fn embed_viewer(&mut self) -> Result<Option<Vec<File>>, String> {
-        VIEWER.with_borrow_mut(|v| match v {
-            Viewer::Unasked => {
-                *v = Viewer::Fetching;
-                page_fetch_embed();
-                Ok(None)
-            }
-            Viewer::Fetching => Ok(None),
-            Viewer::Here(files) => Ok(Some(files.clone())),
-            // Said once; the next Embed fetches again.
-            Viewer::Failed(_) => {
-                let Viewer::Failed(why) = std::mem::take(v) else { unreachable!() };
-                Err(format!("the viewer did not download ({why}). Check the connection and choose Embed again"))
-            }
-        })
-    }
-
     fn save_embed(&mut self, name: &str, files: &[File]) -> Result<Option<String>, String> {
         // Inside a folder, so unpacking the zip gives the folder a desktop Embed writes.
         let inside: Vec<File> = files.iter().map(|(f, bytes)| (format!("{name}/{f}"), bytes.clone())).collect();
@@ -316,6 +318,7 @@ pub async fn start(
     let mut host = Host::new(gpu, surface, (width, height), wgpu::PresentMode::Fifo, scene, &name, ppp, fonts)?;
     let editor = &mut host.editor;
     editor.wall_clock = || js_sys::Date::now() / 1000.0;
+    editor.embed_viewer = Some(Box::new(embed_viewer));
     // The assistant calls its provider straight from this page, with keys in this tab.
     let keys = Rc::new(RefCell::new(KeyStore::default()));
     editor.assistant = Assistant::new(Box::new(Fetch), Box::new(WebKeys(keys.clone())), true);

@@ -17,7 +17,7 @@ fn tool(a: &Action) -> Option<&'static str> {
         Action::Save => Some("save"),
         Action::Undo => Some("undo"),
         Action::Redo => Some("redo"),
-        Action::ExportObj | Action::ExportSlices | Action::ExportPng => Some("export"),
+        Action::ExportObj | Action::ExportSlices | Action::ExportPng | Action::Embed => Some("export"),
         Action::Recolor { .. } => Some("palette_set"),
         Action::SetMaterial { .. } => Some("material_set"),
         Action::SwapColors(..) => Some("palette_swap"),
@@ -50,7 +50,6 @@ fn tool(a: &Action) -> Option<&'static str> {
         | Action::Zoom(_)
         | Action::Snap(_)
         | Action::Ortho(_)
-        | Action::Embed
         // Closes the colour edit that `Recolor` and `SetMaterial` opened: tools are one step.
         | Action::CommitColor
         | Action::CancelExport

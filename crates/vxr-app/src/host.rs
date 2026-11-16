@@ -134,14 +134,6 @@ pub trait Platform {
         Err("there is no download here".into())
     }
 
-    /// The embed viewer's files, named as [`crate::files::EMBED_VIEWER`], which an embed
-    /// folder carries: at once, or None while they are on their way (a browser fetches them
-    /// from the site; the page then runs [`Action::Embedded`] again). An error says why
-    /// this build or page has none.
-    fn embed_viewer(&mut self) -> Result<Option<Vec<File>>, String> {
-        Err("there is no embed viewer here".into())
-    }
-
     /// Write an embed's files as a folder named `name` where the user picks (one zip named
     /// `name` in the browser); returns the name it was given, or None when the user cancelled.
     fn save_embed(&mut self, _name: &str, _files: &[File]) -> Result<Option<String>, String> {
@@ -283,7 +275,7 @@ pub fn run_action(ed: &mut Editor, p: &mut dyn Platform, action: Action) {
         Action::Embed => {
             // Asked before the picture is traced: a build without the viewer says so at
             // once, and a browser starts fetching it now.
-            match p.embed_viewer() {
+            match ed.viewer() {
                 Ok(_) => {
                     let _ = ed.start_embed();
                 }
@@ -292,7 +284,7 @@ pub fn run_action(ed: &mut Editor, p: &mut dyn Platform, action: Action) {
         }
         Action::Embedded => {
             let Some(poster) = ed.embedded.take() else { return };
-            let viewer = match p.embed_viewer() {
+            let viewer = match ed.viewer() {
                 Ok(Some(viewer)) => viewer,
                 Ok(None) => {
                     // Still on their way: the page asks again when they land.

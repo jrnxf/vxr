@@ -86,6 +86,9 @@ enum CamDrag {
     Pan,
 }
 
+/// Where a host finds the embed viewer's files (see [`Editor::viewer`]).
+pub type ViewerSource = Box<dyn FnMut() -> Result<Option<Vec<crate::files::File>>, String>>;
+
 pub struct Editor {
     pub gpu: Gpu,
     pub scene: Scene,
@@ -171,6 +174,14 @@ pub struct Editor {
     agent_render: Option<u64>,
     /// How that export ended, once it did.
     agent_rendered: Option<Result<String, String>>,
+    /// The traced poster of an agent's embed (`export` with kind embed), until the viewer's
+    /// files are here and the folder is made ([`Editor::take_agent_render`]).
+    agent_poster: Option<Vec<u8>>,
+    /// The folder [`Editor::agent_files`] go into as one (an agent's embed) instead of as
+    /// loose files.
+    pub agent_folder: Option<String>,
+    /// Where the embed viewer's files come from, set by the host ([`Editor::viewer`]).
+    pub embed_viewer: Option<ViewerSource>,
     /// Export sizes this GPU can render.
     export_fits: [bool; 4],
     /// The scene's map replacements and origin the GPU map was built at (see `Scene::reshapes`).
@@ -326,6 +337,9 @@ impl Editor {
             agent_files: Vec::new(),
             agent_render: None,
             agent_rendered: None,
+            agent_poster: None,
+            agent_folder: None,
+            embed_viewer: None,
             export_fits: [false; 4],
             shape: (0, [0; 3]),
             last_object: None,
@@ -378,6 +392,7 @@ impl Editor {
         self.preview.restart();
         self.export = None;
         self.embedded = None;
+        self.agent_poster = None;
         self.shape = (scene.reshapes(), scene.origin);
         self.scene = scene;
         self.last_object = None;
@@ -2255,6 +2270,7 @@ impl Editor {
             return Err("a change waits for the user's review in vxr: export once they apply or discard it".into());
         }
         self.agent_files.clear();
+        self.agent_folder = None;
         match args.get("kind").and_then(serde_json::Value::as_str) {
             Some("obj") => {
                 let (files, quads) = crate::files::obj_files(&self.scene, &self.export_stem())?;
@@ -2275,8 +2291,46 @@ impl Editor {
                 self.agent_rendered = None;
                 Ok("rendering".into())
             }
-            _ => Err("kind: obj, slices or render".into()),
+            Some("embed") => {
+                if self.export.is_some() {
+                    return Err("a render is already running in vxr: call again once it is done".into());
+                }
+                // Asked before the poster is traced: a build without the viewer says so at
+                // once, and a browser starts fetching it now.
+                self.viewer().map_err(|e| format!("could not embed: {e}"))?;
+                self.start_embed_poster().map_err(|e| format!("could not embed: {e}"))?;
+                self.agent_render = Some(conn);
+                self.agent_rendered = None;
+                Ok("rendering".into())
+            }
+            _ => Err("kind: obj, slices, render or embed".into()),
         }
+    }
+
+    /// The embed viewer's files, named as [`crate::files::EMBED_VIEWER`], which an embed
+    /// folder carries: at once, or None while they are on their way (a browser fetches them
+    /// from the site the first time). An error says why this build or page has none.
+    pub fn viewer(&mut self) -> Result<Option<Vec<crate::files::File>>, String> {
+        match &mut self.embed_viewer {
+            Some(source) => source(),
+            None => Err("there is no embed viewer here".into()),
+        }
+    }
+
+    /// An agent's embed folder into [`Editor::agent_files`], and what it is.
+    fn agent_embed(&mut self, poster: Vec<u8>, viewer: Vec<crate::files::File>) -> Result<String, String> {
+        let name = self.ui.scene_name.clone();
+        self.agent_files = crate::files::embed_files(&self.scene, &name, poster, viewer)
+            .map_err(|e| format!("could not embed: {e}"))?;
+        self.agent_folder = Some(format!("{}-embed", crate::files::embed_stem(&name)));
+        let (w, h) = crate::files::EMBED_POSTER;
+        Ok(format!(
+            "an embed folder: its index.html, served over HTTP, shows the scene live. A page shows it with \
+             the folder's other files beside it and this tag:\n{}\nThe poster is {w} x {h} pixels, path-traced \
+             at {} samples per pixel",
+            crate::files::embed_snippet(&name),
+            self.ui.render.samples()
+        ))
     }
 
     /// Whether `conn`'s answer waits for its render export to end.
@@ -2288,6 +2342,17 @@ impl Editor {
     /// PNG is then in [`Editor::agent_files`].
     pub fn take_agent_render(&mut self) -> Option<Result<String, String>> {
         self.agent_render?;
+        if let Some(poster) = self.agent_poster.take() {
+            match self.viewer() {
+                Ok(Some(viewer)) => self.agent_rendered = Some(self.agent_embed(poster, viewer)),
+                // Still on their way: the answer waits for them.
+                Ok(None) => {
+                    self.agent_poster = Some(poster);
+                    return None;
+                }
+                Err(e) => self.agent_rendered = Some(Err(format!("could not embed: {e}"))),
+            }
+        }
         let r = self.agent_rendered.take().or_else(|| {
             self.export.is_none().then(|| {
                 Err("the render export was cancelled in vxr (the user cancelled it or the scene changed)".to_string())
@@ -2302,6 +2367,8 @@ impl Editor {
         if self.agent_render.take().is_some() {
             self.export = None;
             self.agent_rendered = None;
+            self.agent_poster = None;
+            self.agent_folder = None;
             self.agent_files.clear();
         }
     }
@@ -2557,6 +2624,24 @@ impl Editor {
     /// light and samples, so the live scene takes over from the picture in place. The host
     /// gets [`Action::Embedded`] when it is traced.
     pub fn start_embed(&mut self) -> Result<(), String> {
+        match self.start_embed_poster() {
+            Ok(()) => {
+                let spp = self.ui.render.samples();
+                self.ui.toast(
+                    &self.ctx,
+                    format!("Rendering the embed's picture at {spp} spp. The tag is on the clipboard."),
+                );
+                Ok(())
+            }
+            Err(e) => {
+                self.ui.toast(&self.ctx, format!("Could not embed: {e}"));
+                Err(format!("could not embed: {e}"))
+            }
+        }
+    }
+
+    /// Start tracing the poster of an embed (see [`Editor::start_embed`]), with no toast.
+    fn start_embed_poster(&mut self) -> Result<(), String> {
         let r = (|| {
             if self.export.is_some() {
                 return Err("a render is running: wait for it or cancel it in the Render panel".to_string());
@@ -2584,22 +2669,9 @@ impl Editor {
             x.embed = true;
             Ok(x)
         })();
-        match r {
-            Ok(x) => {
-                self.export = Some(x);
-                self.embedded = None;
-                let spp = self.ui.render.samples();
-                self.ui.toast(
-                    &self.ctx,
-                    format!("Rendering the embed's picture at {spp} spp. The tag is on the clipboard."),
-                );
-                Ok(())
-            }
-            Err(e) => {
-                self.ui.toast(&self.ctx, format!("Could not embed: {e}"));
-                Err(format!("could not embed: {e}"))
-            }
-        }
+        self.export = Some(r?);
+        self.embedded = None;
+        Ok(())
     }
 
     /// Start a PNG export of the corner's view with the Render panel's settings.
@@ -2834,7 +2906,14 @@ impl Editor {
         }
         let embed = self.export.as_ref().is_some_and(|x| x.embed);
         let done = self.export.as_mut().and_then(|x| x.after_submit(&self.gpu).map(|r| (r, x.size())));
+        // The export is an agent's, whose answer waits for it.
+        let agent = self.agent_render.is_some() && self.agent_rendered.is_none();
         match done {
+            Some((Ok(png), _)) if embed && agent => {
+                self.export = None;
+                self.agent_poster = Some(png);
+                None
+            }
             Some((Ok(png), _)) if embed => {
                 self.export = None;
                 self.embedded = Some(png);
@@ -2842,10 +2921,13 @@ impl Editor {
             }
             Some((Err(e), _)) if embed => {
                 self.export = None;
+                if agent {
+                    self.agent_rendered = Some(Err(format!("could not embed: {e}")));
+                }
                 self.ui.toast(&self.ctx, format!("Could not embed: {e}"));
                 None
             }
-            Some((Ok(png), (w, h))) if self.agent_render.is_some() && self.agent_rendered.is_none() => {
+            Some((Ok(png), (w, h))) if agent => {
                 self.export = None;
                 self.agent_files = vec![(self.export_name(), png)];
                 self.agent_rendered =
@@ -2859,7 +2941,7 @@ impl Editor {
             }
             Some((Err(e), _)) => {
                 self.export = None;
-                if self.agent_render.is_some() && self.agent_rendered.is_none() {
+                if agent {
                     self.agent_rendered = Some(Err(format!("could not export: {e}")));
                 }
                 self.ui.toast(&self.ctx, format!("Could not export: {e}"));
