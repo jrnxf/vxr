@@ -724,6 +724,34 @@ impl Session {
                 let into = if parent == 0 { "the top of the world".to_string() } else { format!("group {parent}") };
                 Ok(format!("ungrouped {what}: nodes {kids:?} moved up into {into}; {t}"))
             }
+            Op::Reorder(a) => {
+                let what = self.node(scene, a.node)?;
+                let w = scene.world().expect("a world");
+                let parents = w.tree.parents();
+                let parent = a.parent.unwrap_or_else(|| parents[a.node].expect("a node in the tree has a parent"));
+                if parent != 0 {
+                    let p = self.node(scene, parent)?;
+                    if w.model_of(parent).is_some() {
+                        return Err(invalid(format!("parent {parent}: {p} is not a group")));
+                    }
+                    if std::iter::successors(Some(parent), |&k| parents[k]).any(|k| k == a.node) {
+                        return Err(invalid(format!("parent {parent}: {what} cannot go into itself")));
+                    }
+                }
+                let into = if parent == 0 { "the top of the world".to_string() } else { format!("group {parent}") };
+                if let Some(b) = a.before {
+                    self.node(scene, b)?;
+                    if b == a.node || parents[b] != Some(parent) {
+                        return Err(invalid(format!("before {b}: give another node of {into}")));
+                    }
+                }
+                let (moved, t) = self.world_edit(scene, |w| w.place(a.node, parent, a.before))?;
+                if !moved {
+                    return Ok(format!("{what} is already there in {into}: nothing changed"));
+                }
+                let order = scene.world().expect("a world").tree.children(parent).to_vec();
+                Ok(format!("moved {what} into {into}, which now holds nodes {order:?} in this order; {t}"))
+            }
             Op::Hide(a) => {
                 let what = self.node(scene, a.node)?;
                 let t = self.world_edit(scene, |w| w.set_hidden(a.node, a.hidden))?.1;
@@ -2269,6 +2297,8 @@ fn world_args(op: &mut Op) -> (Vec<&mut usize>, Option<&mut i32>) {
         Op::Duplicate(a) => (vec![&mut a.node], None),
         Op::Group(a) => (a.nodes.iter_mut().collect(), None),
         Op::Ungroup(a) => (vec![&mut a.node], None),
+        // Parent 0 is the root, which no step makes: it is found as it is.
+        Op::Reorder(a) => (std::iter::once(&mut a.node).chain(&mut a.parent).chain(&mut a.before).collect(), None),
         Op::Hide(a) => (vec![&mut a.node], None),
         Op::SetLayer(a) => (vec![&mut a.node], a.layer.as_mut()),
         Op::DeleteObject(a) => (vec![&mut a.node], None),
@@ -2340,20 +2370,45 @@ fn nodes_text(n: usize) -> String {
 }
 
 /// How many nodes under the root of `new` differ from `old`: added or taken out of the tree,
-/// moved to another parent, or with another name, flag, layer, transform or model. A
-/// group whose children change does not count; the children do.
+/// moved to another parent or to another place among the children it stays with, or with
+/// another name, flag, layer, transform or model. A group whose children change does not
+/// count; the children do.
 fn changed_nodes(old: &Tree, new: &Tree) -> usize {
     fn at<'a>(t: &'a Tree, p: &[Option<usize>], i: usize) -> Option<(&'a TreeNode, usize)> {
         Some((t.nodes.get(i)?, p.get(i).copied().flatten()?))
     }
     let (po, pn) = (old.parents(), new.parents());
-    (1..old.nodes.len().max(new.nodes.len()))
-        .filter(|&i| match (at(old, &po, i), at(new, &pn, i)) {
-            (None, None) => false,
-            (Some((a, pa)), Some((b, pb))) => pa != pb || !same_node(a, b),
-            _ => true,
-        })
-        .count()
+    let n = old.nodes.len().max(new.nodes.len());
+    let changed = |i: usize| match (at(old, &po, i), at(new, &pn, i)) {
+        (None, None) => false,
+        (Some((a, pa)), Some((b, pb))) => pa != pb || !same_node(a, b),
+        _ => true,
+    };
+    // The fewest children that moved within a group both trees have: those outside the
+    // longest run of children that kept their order.
+    let reordered = |g: usize| {
+        let reached = |p: &[Option<usize>], i: usize| i == 0 || p.get(i).copied().flatten().is_some();
+        if !reached(&po, g) || !reached(&pn, g) {
+            return 0;
+        }
+        let (Some(TreeNode { kind: NodeKind::Group(a), .. }), Some(TreeNode { kind: NodeKind::Group(b), .. })) =
+            (old.nodes.get(g), new.nodes.get(g))
+        else {
+            return 0;
+        };
+        let place: HashMap<usize, usize> = a.iter().enumerate().map(|(k, &c)| (c, k)).collect();
+        let stayed: Vec<usize> = b.iter().filter(|&&c| !changed(c)).filter_map(|c| place.get(c).copied()).collect();
+        let mut run: Vec<usize> = Vec::new();
+        for &k in &stayed {
+            match run.binary_search(&k) {
+                Ok(_) => {}
+                Err(at) if at == run.len() => run.push(k),
+                Err(at) => run[at] = k,
+            }
+        }
+        stayed.len() - run.len()
+    };
+    (1..n).filter(|&i| changed(i)).count() + (0..n).map(reordered).sum::<usize>()
 }
 
 /// Whether two nodes are the same but for the children a group holds.

@@ -356,6 +356,17 @@ pub enum Action {
     ToggleHidden,
     /// Put the picked object or group into a new group of its own (Cmd-G).
     Group,
+    /// A scene tree row was dragged to another place: under group `parent` (0 is the top),
+    /// in front of its child `before` or at the end.
+    PlaceNode {
+        node: usize,
+        parent: usize,
+        before: Option<usize>,
+    },
+    /// Move the picked object or group one place up or down among its group (Cmd-K).
+    ShiftNode {
+        down: bool,
+    },
     /// Put the picked object or group on this layer (a layer row click in world mode).
     SetLayer(i32),
     /// Hide or show a layer (its row's eye).
@@ -593,6 +604,44 @@ pub struct TreeRow {
     /// Neither it nor a group above it is hidden or on a hidden layer.
     pub shown: bool,
     pub layer: i32,
+}
+
+/// Where a dragged scene tree row lands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TreeDrop {
+    /// The group it goes under (node 0 is the top) and the child it goes in front of (None:
+    /// the end).
+    pub parent: usize,
+    pub before: Option<usize>,
+    /// What shows it: a line in the gap above row `.0` at depth `.1`, or (None) the group
+    /// row the pointer is on.
+    line: Option<(usize, usize)>,
+    row: usize,
+}
+
+/// Where the row of `node` lands when it is dropped with the pointer on row `over`, `frac`
+/// of the way down it (0 to 1) and `depth` indents in from the left. The middle half of a
+/// group row puts it in that group, at the end. Anywhere else it goes in the gap above or
+/// below the row; where a gap is the end of one or more groups, the pointer's depth says
+/// which of them it stays in. None for a place in the node itself or under it.
+pub fn tree_drop(rows: &[TreeRow], node: usize, over: usize, frac: f32, depth: usize) -> Option<TreeDrop> {
+    let from = rows.iter().position(|r| r.node == node)?;
+    let end = rows[from + 1..].iter().position(|r| r.depth <= rows[from].depth).map_or(rows.len(), |k| from + 1 + k);
+    let on = rows.get(over)?;
+    let (parent, before, line) = if on.group && (0.25..0.75).contains(&frac) {
+        (Some(over), None, None)
+    } else {
+        let gap = if frac < 0.5 { over } else { over + 1 };
+        let lo = rows.get(gap).map_or(0, |r| r.depth);
+        let hi = if gap == 0 { 0 } else { rows[gap - 1].depth + rows[gap - 1].group as usize };
+        let d = depth.clamp(lo, hi);
+        let parent = if d == 0 { None } else { rows[..gap].iter().rposition(|r| r.depth == d - 1) };
+        (parent, rows.get(gap).filter(|r| r.depth == d).map(|r| r.node), Some((gap, d)))
+    };
+    if parent.is_some_and(|p| (from..end).contains(&p)) {
+        return None;
+    }
+    Some(TreeDrop { parent: parent.map_or(0, |p| rows[p].node), before, line, row: over })
 }
 
 /// One row of the scene tree's LAYERS list, in world mode (set by the editor).
@@ -845,6 +894,8 @@ pub struct Hybrid {
     pub layer_on: Option<i32>,
     /// The first tree row shown, when there are more than fit.
     tree_scroll: usize,
+    /// The node whose tree row is being dragged to another place, and where it would land.
+    tree_drag: Option<(usize, Option<TreeDrop>)>,
     /// The node or layer being renamed and its field's text, and whether the field still
     /// needs focus.
     renaming: Option<(Named, String)>,
@@ -1010,6 +1061,8 @@ const COMMANDS: &[Command] = &[
     Command { label: "Rename object", keys: &[], run: |h| h.start_rename(h.picked_node) },
     Command { label: "Group object", keys: &["⌘", "G"], run: |h| h.actions.push(Action::Group) },
     Command { label: "Ungroup", keys: &["⌘", "⇧", "G"], run: |h| h.actions.push(Action::Ungroup) },
+    Command { label: "Move up in scene tree", keys: &[], run: |h| h.actions.push(Action::ShiftNode { down: false }) },
+    Command { label: "Move down in scene tree", keys: &[], run: |h| h.actions.push(Action::ShiftNode { down: true }) },
     Command { label: "New layer", keys: &[], run: |h| h.actions.push(Action::AddLayer) },
     Command { label: "Hide or show layer", keys: &[], run: |h| h.actions.push(Action::ToggleLayer) },
     Command { label: "Rename layer", keys: &[], run: |h| h.start_layer_rename(h.layer_on) },
@@ -1190,6 +1243,7 @@ impl Hybrid {
             tree_on: None,
             picked_node: None,
             tree_scroll: 0,
+            tree_drag: None,
             layers: Vec::new(),
             layer_on: None,
             renaming: None,
@@ -1717,6 +1771,11 @@ impl Hybrid {
             // (cancel) is handled here, ahead of the keys Escape would otherwise reach.
             if self.renaming.is_some() && i.consume_key(Modifiers::NONE, Key::Escape) {
                 self.renaming = None;
+                return;
+            }
+            // Escape drops a tree row being dragged where it came from.
+            if self.tree_drag.is_some() && i.consume_key(Modifiers::NONE, Key::Escape) {
+                self.tree_drag = None;
                 return;
             }
             // The same for the review card's ask field: Escape leaves the field, it does not
@@ -2727,8 +2786,12 @@ impl Hybrid {
     // The scene tree (Diorama's .tree, kept for Hybrid): beside the rail once a second object
     // exists. A row per object and group in tree order, indented under its groups, with the
     // model's size and an eye. A click picks the object in world mode or edits its model;
-    // in world mode the eye hides and shows, and a double-click renames.
+    // in world mode the eye hides and shows, a double-click renames, and a drag moves the
+    // row to another place in the tree (a line shows the gap, a group row lights).
     fn tree_panel(&mut self, ctx: &Context) {
+        if self.tree.is_empty() || !self.world {
+            self.tree_drag = None;
+        }
         if self.tree.is_empty() {
             self.renaming = None;
             return;
@@ -2748,6 +2811,7 @@ impl Hybrid {
         let objects = self.tree.iter().filter(|r| !r.group).count();
         let (on, scroll, layer_on) = (self.tree_on, self.tree_scroll, self.layer_on);
         let mut renaming = self.renaming.take();
+        let mut drag = self.tree_drag.take();
         let mut focus = std::mem::take(&mut self.rename_focus);
         let mut run = Vec::new();
         let mut hits = Vec::new();
@@ -2779,8 +2843,13 @@ impl Hybrid {
                 let r =
                     Rect::from_min_size(pos2(body.left(), body.top() + k as f32 * row_h), vec2(body.width(), row_h));
                 let id = format!("tree-{}", row.node);
-                let resp = ui.interact(r, Id::unique(&id), Sense::click());
+                let sense = if world { Sense::click_and_drag() } else { Sense::click() };
+                let resp = ui.interact(r, Id::unique(&id), sense);
                 hits.push((id, r));
+                if resp.drag_started() && renaming.is_none() {
+                    drag = Some((row.node, None));
+                }
+                let dragged = drag.is_some_and(|(n, _)| n == row.node);
                 let eye = Rect::from_center_size(pos2(r.right() - 15.0, r.center().y), vec2(22.0, 22.0));
                 let eye_resp = world.then(|| ui.interact(eye, Id::unique(("tree-eye", row.node)), Sense::click()));
                 if world {
@@ -2791,7 +2860,7 @@ impl Hybrid {
                 let p = ui.painter();
                 if is_on {
                     p.rect_filled(r, CornerRadius::same(7), th().accent_bg);
-                } else if hover {
+                } else if hover || dragged {
                     p.rect_filled(r, CornerRadius::same(7), th().hover);
                 }
                 let color = match (is_on, row.shown) {
@@ -2836,6 +2905,48 @@ impl Hybrid {
                     start_rename = Some(named);
                 } else if resp.clicked() {
                     run.push(Action::PickNode(row.node));
+                }
+            }
+            // A row being dragged: where it would land shows as a line in the gap, or as a
+            // ring on the group row it goes into; the release puts it there.
+            if let Some((node, at)) = &mut drag {
+                let (pos, down, released) =
+                    ui.input(|i| (i.pointer.interact_pos(), i.pointer.any_down(), i.pointer.any_released()));
+                if let Some(p) = pos.filter(|_| down || released) {
+                    *at = body.expand2(vec2(0.0, row_h / 2.0)).contains(p).then_some(()).and_then(|()| {
+                        let y = ((p.y - body.top()) / row_h).clamp(0.0, rows as f32 - 0.001);
+                        let depth = ((p.x - body.left() - 8.0) / 14.0).floor().max(0.0) as usize;
+                        tree_drop(&self.tree, *node, scroll + y as usize, y.fract(), depth)
+                    });
+                }
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                let row_y = |k: usize| body.top() + (k as f32 - scroll as f32) * row_h;
+                match *at {
+                    Some(TreeDrop { line: Some((gap, d)), .. }) => {
+                        let (x, y) = (body.left() + 8.0 + d as f32 * 14.0, row_y(gap));
+                        let stroke = Stroke::new(2.0, th().accent);
+                        ui.painter().circle_stroke(pos2(x + 3.0, y), 3.0, stroke);
+                        ui.painter().hline(x + 6.0..=body.right() - 8.0, y, stroke);
+                        let mark = Rect::from_min_max(pos2(x, y - 3.0), pos2(body.right() - 8.0, y + 3.0));
+                        hits.push(("tree-drop".to_string(), mark));
+                    }
+                    Some(TreeDrop { line: None, row, .. }) => {
+                        let r = Rect::from_min_size(pos2(body.left(), row_y(row)), vec2(body.width(), row_h));
+                        ui.painter().rect_stroke(
+                            r.shrink(1.0),
+                            CornerRadius::same(7),
+                            Stroke::new(2.0, th().accent),
+                            StrokeKind::Inside,
+                        );
+                        hits.push(("tree-drop".to_string(), r));
+                    }
+                    None => {}
+                }
+                if released && let Some(to) = *at {
+                    run.push(Action::PlaceNode { node: *node, parent: to.parent, before: to.before });
+                }
+                if released || !down {
+                    drag = None;
                 }
             }
             if !world {
@@ -2913,6 +3024,7 @@ impl Hybrid {
             self.tree_scroll = self.tree_scroll.saturating_add_signed(steps).min(self.tree.len() - rows);
         }
         self.renaming = renaming;
+        self.tree_drag = drag;
         self.rename_focus = focus;
         self.renamed = renamed.or(self.renamed.take());
         self.hits.extend(hits);
@@ -6887,6 +6999,63 @@ mod tests {
         assert_eq!(super::group_thousands(145064), "145,064");
         assert_eq!(super::group_thousands(999), "999");
         assert_eq!(super::group_thousands(1_000_000), "1,000,000");
+    }
+
+    /// Where a dragged tree row lands, for a tree of
+    /// a, G { b, H { c } }, d, E {} (nodes 10 to 16 in that order).
+    #[test]
+    fn a_dragged_tree_row_lands_in_the_gap_or_the_group_under_the_pointer() {
+        let rows: Vec<super::TreeRow> =
+            [(0, false), (0, true), (1, false), (1, true), (2, false), (0, false), (0, true)]
+                .into_iter()
+                .enumerate()
+                .map(|(k, (depth, group))| super::TreeRow {
+                    node: 10 + k,
+                    depth,
+                    name: String::new(),
+                    group,
+                    linked: 1,
+                    size: [1; 3],
+                    hidden: false,
+                    shown: true,
+                    layer: 0,
+                })
+                .collect();
+        let (a, g, b, h, d, e) = (10, 11, 12, 13, 15, 16);
+        // (the node dragged, the row under the pointer, how far down it, the pointer's indent)
+        // lands under (parent, in front of).
+        let table = [
+            ((d, 0, 0.1, 5), Some((0, Some(a)))),
+            ((b, 0, 0.6, 3), Some((0, Some(g)))),
+            ((a, 1, 0.5, 0), Some((g, None))),
+            ((d, 1, 0.1, 0), Some((0, Some(g)))),
+            // Under a group row with children is its first place.
+            ((a, 1, 0.9, 0), Some((g, Some(b)))),
+            // The gap after c ends H and G: the indent says which it stays in.
+            ((a, 4, 0.9, 5), Some((h, None))),
+            ((a, 4, 0.9, 1), Some((g, None))),
+            ((a, 4, 0.9, 0), Some((0, Some(d)))),
+            ((a, 5, 0.2, 2), Some((h, None))),
+            // An empty group takes a row in its middle and just under it; further left is after it.
+            ((a, 6, 0.5, 0), Some((e, None))),
+            ((a, 6, 0.9, 9), Some((e, None))),
+            ((a, 6, 0.9, 0), Some((0, None))),
+            // Never into itself or under itself.
+            ((g, 1, 0.5, 0), None),
+            ((g, 2, 0.1, 1), None),
+            ((g, 3, 0.5, 2), None),
+            ((g, 4, 0.9, 2), None),
+            ((g, 4, 0.9, 1), None),
+            ((g, 4, 0.9, 0), Some((0, Some(d)))),
+            ((h, 4, 0.9, 1), Some((g, None))),
+            // No such row, no such node.
+            ((a, 7, 0.5, 0), None),
+            ((99, 0, 0.5, 0), None),
+        ];
+        for ((node, over, frac, depth), want) in table {
+            let got = super::tree_drop(&rows, node, over, frac, depth).map(|t| (t.parent, t.before));
+            assert_eq!(got, want, "node {node} over row {over} at {frac}, indent {depth}");
+        }
     }
 
     #[test]

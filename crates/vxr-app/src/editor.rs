@@ -1939,6 +1939,8 @@ impl Editor {
                 Action::ToggleWorld => self.toggle_world(),
                 Action::PickNode(i) => self.pick_node(i),
                 Action::SetHidden(i, hidden) => self.set_hidden(i, hidden),
+                Action::PlaceNode { node, parent, before } => self.place_node(node, parent, before),
+                Action::ShiftNode { down } => self.shift_node(down),
                 Action::ToggleHidden => match (self.scene.picked(), self.scene.world()) {
                     (Some(i), Some(w)) => self.set_hidden(i, !w.tree.nodes[i].hidden),
                     _ => self.ui.toast(&self.ctx, "Pick an object in the world to hide it"),
@@ -2649,6 +2651,46 @@ impl Editor {
             format!("Hid {name}")
         } else {
             format!("Showing {name}")
+        };
+        self.ui.toast(&self.ctx, msg);
+    }
+
+    /// Move tree node `i` under group `parent` (0 is the top) in front of its child `before`,
+    /// or to the end: the drop of a dragged tree row, one undo step, in world mode. It stays
+    /// where it is in the world and stays picked.
+    pub fn place_node(&mut self, i: usize, parent: usize, before: Option<usize>) {
+        let Some(w) = self.scene.world().filter(|w| w.in_tree(i)) else { return };
+        let (name, old) = (node_name(w, i), w.tree.parents()[i]);
+        match self.scene.edit_world(|w| w.place(i, parent, before)) {
+            Ok(true) => {
+                self.scene.pick(Some(i));
+                let msg = match parent {
+                    _ if old == Some(parent) => format!("Moved {name} in the tree"),
+                    0 => format!("Moved {name} out of its group"),
+                    _ => format!("Moved {name} into {}", node_name(self.scene.world().unwrap(), parent)),
+                };
+                self.ui.toast(&self.ctx, msg);
+            }
+            Ok(false) => {}
+            Err(_) => self.ui.toast(&self.ctx, "Tab to the world to move objects in the tree"),
+        }
+    }
+
+    /// Move the picked object or group one place up or down among its group, as one undo
+    /// step, in world mode.
+    pub fn shift_node(&mut self, down: bool) {
+        let msg = match (self.scene.at(), self.scene.picked()) {
+            (At::World, Some(i)) => {
+                let name = node_name(self.scene.world().unwrap(), i);
+                match (self.scene.edit_world(|w| w.shift(i, down)), down) {
+                    (Ok(true), false) => format!("Moved {name} up"),
+                    (Ok(true), true) => format!("Moved {name} down"),
+                    (_, false) => format!("{name} is already first in its group"),
+                    (_, true) => format!("{name} is already last in its group"),
+                }
+            }
+            (At::World, None) => "Click an object to pick it first".to_string(),
+            _ => "Tab to the world to move objects in the tree".to_string(),
         };
         self.ui.toast(&self.ctx, msg);
     }

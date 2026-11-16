@@ -883,11 +883,162 @@ fn any_turn() -> impl proptest::strategy::Strategy<Value = [[i32; 3]; 3]> {
     (0u8..128).prop_filter_map("not a rotation byte", vxr_vox::scene::rotation_from_byte)
 }
 
+type ByName = BTreeMap<String, Vec<([i32; 3], u8)>>;
+
+/// Every object's voxels in the world by the object's name, and the names in tree order
+/// with their depth: what moving nodes about in the tree must keep and must change.
+fn named(w: &World) -> (ByName, Vec<String>) {
+    let name = |i: usize| String::from_utf8_lossy(w.tree.nodes[i].name.as_deref().unwrap_or(b"root")).into_owned();
+    let mut voxels = BTreeMap::new();
+    for i in w.objects() {
+        let v: &mut Vec<_> = voxels.entry(name(i)).or_default();
+        w.for_each_object_voxel(i, |p, c| v.push((p, c)));
+    }
+    let parents = w.tree.parents();
+    let rows = w.tree.order().into_iter().map(|i| format!("{}<{}", name(i), parents[i].map(name).unwrap_or_default()));
+    (voxels, rows.collect())
+}
+
+#[test]
+fn a_node_steps_up_and_down_among_its_group_and_stops_at_the_ends() {
+    let mut b = Builder::new(200);
+    let m = b.model([1, 1, 1], vec![[0, 0, 0, 1]]);
+    for (k, n) in ["a", "b", "c"].into_iter().enumerate() {
+        b.root.push(SceneNode::shape(m, None, [k as i32 * 2, 0, 0]).named(n));
+    }
+    let (_, mut w) = open(&b.build().write());
+    let [a, b, c] = ["a", "b", "c"].map(|n| find(&w, n));
+    let kids = |w: &World| w.tree.children(0).to_vec();
+    assert!(!w.shift(a, false), "the first stays first");
+    assert!(!w.shift(c, true), "the last stays last");
+    assert!(!w.shift(0, true), "the root has no place to change");
+    assert_eq!(kids(&w), [a, b, c]);
+    assert!(w.shift(a, true));
+    assert_eq!(kids(&w), [b, a, c]);
+    assert!(w.shift(a, true));
+    assert_eq!(kids(&w), [b, c, a]);
+    assert!(w.shift(c, false));
+    assert_eq!(kids(&w), [c, b, a]);
+    assert!(w.shift(a, false), "up is one place, not to the start");
+    assert_eq!(kids(&w), [c, a, b]);
+}
+
+#[test]
+fn a_move_in_the_tree_is_one_undo_step_and_follows_the_group_it_lands_in() {
+    let bytes = fixture("22-world");
+    let mut s = vxr_core::Scene::from_vox(&bytes).unwrap();
+    let w = s.world().unwrap();
+    let (trees, slab) = (find(w, "trees"), find(w, "slab"));
+    let all = s.world_voxels(false);
+    let steps = s.history().position();
+    // Into a moved, hidden group: the slab stays where it was and hides with the group.
+    s.edit_world(|w| w.move_by(trees, [4, 1, -2])).unwrap();
+    let moved = s.world_voxels(false);
+    s.edit_world(|w| w.set_hidden(trees, true)).unwrap();
+    let first = s.world().unwrap().tree.children(trees)[0];
+    assert_eq!(s.edit_world(|w| w.place(slab, trees, Some(first))), Ok(true));
+    let w = s.world().unwrap();
+    assert_eq!(w.tree.children(trees)[0], slab);
+    assert!(!w.shown(slab), "it hides with the group it is in now");
+    assert_eq!(s.world_voxels(false), moved, "nothing moved in the world");
+    // A place it already has is no step.
+    let at = s.history().position();
+    assert_eq!(s.edit_world(|w| w.place(slab, trees, Some(first))), Ok(false));
+    assert_eq!(s.history().position(), at);
+    // Saved and reopened it is still there; one undo takes it out again.
+    let again = vxr_core::Scene::from_vox(&s.to_vox().unwrap()).unwrap();
+    let back = again.world().unwrap();
+    assert_eq!(back.tree.children(find(back, "trees"))[0], find(back, "slab"));
+    assert_eq!(again.world_voxels(false), moved);
+    assert!(s.undo());
+    assert!(!s.world().unwrap().tree.children(trees).contains(&slab));
+    while s.undo() {}
+    assert_eq!(s.history().position(), steps);
+    assert_eq!(s.world_voxels(false), all);
+    assert!(s.to_vox().unwrap() == bytes);
+}
+
 proptest::proptest! {
     #![proptest_config(proptest::prelude::ProptestConfig {
         cases: std::env::var("PROPTEST_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(256),
         ..proptest::prelude::ProptestConfig::default()
     })]
+
+    /// Move any node of a world of turned, nested groups to any place in its tree, many
+    /// times: a move into itself, under itself or to where it already is changes nothing;
+    /// any other puts it exactly there, takes it out of where it was, and leaves every
+    /// object's voxels on the same world cells. The file keeps the order (saved and
+    /// reopened: same tree, same voxels per object), and MagicaVoxel's composition of the
+    /// file agrees with the world where the objects overlap, in files before and from
+    /// version 200 (which differ in whether the earlier or the later object shows).
+    #[test]
+    fn nodes_move_about_the_tree_in_place_and_the_file_keeps_the_order(
+        version in proptest::sample::select(vec![150, 200]),
+        turns in proptest::collection::vec(any_turn(), 6),
+        at in proptest::collection::vec(proptest::array::uniform3(-3i32..=3), 6),
+        steps in proptest::collection::vec((0usize..6, 0usize..3, 0usize..5), 1..8),
+    ) {
+        // Small boxes close together, each of its own colour, so they overlap.
+        let mut b = Builder::new(version);
+        let models: Vec<usize> = (0..3u8)
+            .map(|m| {
+                let s = [2 + m as i32, 3, 2];
+                let n = s[0] * s[1] * s[2];
+                b.model(s, (0..n).map(|i| [(i % s[0]) as u8, (i / s[0] % 3) as u8, (i / (s[0] * 3)) as u8, 1 + m * 40 + i as u8]).collect())
+            })
+            .collect();
+        b.root.push(SceneNode::shape(models[0], Some(turns[0]), at[0]).named("a"));
+        b.root.push(
+            SceneNode::group(
+                Some(turns[1]),
+                at[1],
+                vec![
+                    SceneNode::shape(models[1], Some(turns[2]), at[2]).named("b"),
+                    SceneNode::group(Some(turns[3]), at[3], vec![SceneNode::shape(models[2], Some(turns[4]), at[4]).named("c")])
+                        .named("inner"),
+                ],
+            )
+            .named("outer"),
+        );
+        b.root.push(SceneNode::shape(models[0], Some(turns[5]), at[5]).named("d"));
+        let (mut doc, mut w) = open(&b.build().write());
+        let nodes = ["a", "b", "c", "d", "outer", "inner"].map(|n| find(&w, n));
+        let groups = [0, nodes[4], nodes[5]];
+        let voxels = named(&w).0;
+
+        for &(node, group, slot) in &steps {
+            let (i, p) = (nodes[node], groups[group]);
+            let kids = w.tree.children(p).to_vec();
+            let before = kids.get(slot).copied();
+            let parents = w.tree.parents();
+            let under = std::iter::successors(Some(p), |&k| parents[k]).any(|k| k == i);
+            let mut want: Vec<usize> = kids.iter().copied().filter(|&k| k != i).collect();
+            want.insert(before.and_then(|b| want.iter().position(|&k| k == b)).unwrap_or(want.len()), i);
+            let moves = !under && before != Some(i) && want != kids;
+            let (old, tree) = (parents[i].unwrap(), w.tree.clone());
+            proptest::prop_assert_eq!(w.place(i, p, before), moves, "node {} into {} before {:?}", node, group, before);
+            if moves {
+                proptest::prop_assert_eq!(w.tree.children(p), &want[..]);
+                if old != p {
+                    proptest::prop_assert!(!w.tree.children(old).contains(&i));
+                }
+                proptest::prop_assert_eq!(w.tree.order().len(), tree.order().len(), "every node is still reached once");
+            } else {
+                proptest::prop_assert_eq!(&w.tree, &tree);
+            }
+            proptest::prop_assert_eq!(&named(&w).0, &voxels, "node {} into {} before {:?}", node, group, before);
+        }
+        proptest::prop_assert!(!w.place(0, 0, None), "the root stays");
+        proptest::prop_assert!(!w.place(nodes[0], nodes[1], None), "an object holds nothing");
+        proptest::prop_assert!(!w.place(nodes[0], 0, Some(w.tree.nodes.len())), "no such node to go in front of");
+
+        proptest::prop_assert_eq!(w.save_into(&mut doc).unwrap(), WorldSave::Kept);
+        let (doc2, back) = open(&doc.write());
+        proptest::prop_assert_eq!(named(&back), named(&w));
+        let flat: BTreeMap<[i32; 3], u8> =
+            doc2.scene().unwrap().world_voxels(Rule::Compose).into_iter().map(|(p, c)| (vox_to_world(p), c)).collect();
+        proptest::prop_assert_eq!(w.world_voxels(false), flat);
+    }
 
     /// Rotate and flip any object or group of a world whose objects and group are already
     /// turned and mirrored every way a file can say: each voxel under the node goes where

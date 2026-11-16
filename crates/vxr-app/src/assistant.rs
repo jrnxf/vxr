@@ -1024,6 +1024,7 @@ mod tests {
                 "duplicate",
                 "group",
                 "ungroup",
+                "reorder",
                 "hide",
                 "set_layer",
                 "delete_object",

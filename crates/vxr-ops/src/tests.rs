@@ -104,6 +104,7 @@ fn tool_schemas() {
             "duplicate",
             "group",
             "ungroup",
+            "reorder",
             "hide",
             "set_layer",
             "delete_object",
@@ -1338,6 +1339,7 @@ fn scoped_calls() -> Vec<(&'static str, Value)> {
         ("duplicate", json!({"node": 1})),
         ("group", json!({"nodes": [1]})),
         ("ungroup", json!({"node": 2})),
+        ("reorder", json!({"node": 1})),
         ("hide", json!({"node": 1})),
         ("set_layer", json!({"node": 1, "layer": 0})),
         ("delete_object", json!({"node": 1})),
@@ -1422,6 +1424,57 @@ fn transform_object_turns_a_node_as_the_core_does_and_the_file_keeps_it() {
     assert_eq!(s.world_voxels(false), before, "both turns are one change, one undo");
 }
 
+/// `reorder` puts a node where a drag of its row puts it (`World::place`): the same tree,
+/// the same file, with every voxel where it was, and it follows nodes earlier steps made.
+#[test]
+fn reorder_moves_a_node_in_the_tree_as_the_row_drag_does() {
+    let bytes = world_file();
+    let mut s = Scene::from_vox(&bytes).unwrap();
+    let mut ui = Scene::from_vox(&bytes).unwrap();
+    let all = s.world_voxels(false);
+    let mut o = Session::new(&s, Some(&bytes));
+    let kids = |s: &Scene, g: usize| s.world().unwrap().tree.children(g).to_vec();
+    assert_eq!((kids(&s, 0), kids(&s, 2), kids(&s, 5)), (vec![1, 2, 7, 8], vec![3, 4, 5], vec![6]));
+
+    // Within its group, to the end and in front of a sibling.
+    assert_eq!(
+        call(&mut o, &mut s, "reorder", json!({"node": 1})),
+        "moved object 1 into the top of the world, which now holds nodes [2, 7, 8, 1] in this order; 1 node changed in the world, no voxel of any model; staged so far: 1 node in the world"
+    );
+    let t = call(&mut o, &mut s, "reorder", json!({"node": 4, "before": 3}));
+    assert!(t.starts_with("moved object 4 into group 2, which now holds nodes [4, 3, 5] in this order; "), "{t}");
+    // Into another group (a turned and moved one keeps the node where it shows), and out.
+    let t = call(&mut o, &mut s, "reorder", json!({"node": 1, "parent": 5, "before": 6}));
+    assert!(t.starts_with("moved object 1 into group 5, which now holds nodes [1, 6] in this order; "), "{t}");
+    let t = call(&mut o, &mut s, "reorder", json!({"node": 5, "parent": 0, "before": 2}));
+    assert!(
+        t.starts_with("moved group 5 (2 objects) into the top of the world, which now holds nodes [5, 2, 7, 8] in"),
+        "{t}"
+    );
+    assert_eq!(
+        call(&mut o, &mut s, "reorder", json!({"node": 5, "before": 2})),
+        "group 5 (2 objects) is already there in the top of the world: nothing changed"
+    );
+    assert_eq!(s.world_voxels(false), all, "no voxel moved");
+    for (i, p, b) in [(1, 0, None), (4, 2, Some(3)), (1, 5, Some(6)), (5, 0, Some(2))] {
+        assert_eq!(ui.edit_world(|w| w.place(i, p, b)), Ok(true));
+    }
+    assert_eq!(s.world().unwrap().tree, ui.world().unwrap().tree);
+    assert!(s.to_vox().unwrap() == ui.to_vox().unwrap());
+
+    // A copy made by an earlier step is followed when that step's numbers change.
+    assert!(call(&mut o, &mut s, "duplicate", json!({"node": 7})).starts_with("copied object 7 as object 9"));
+    assert!(call(&mut o, &mut s, "duplicate", json!({"node": 3})).starts_with("copied object 3 as object 10"));
+    let t = call(&mut o, &mut s, "reorder", json!({"node": 10, "parent": 5}));
+    assert!(t.starts_with("moved object 10 into group 5, which now holds nodes [1, 6, 10] in this order"), "{t}");
+    let step = o.steps().len() - 3;
+    assert!(o.set_dropped(&mut s, step, true), "without the copy of 7, the copy of 3 is node 9");
+    assert_eq!((kids(&s, 5), kids(&s, 2)), (vec![1, 6, 9], vec![4, 3]));
+    assert!(o.set_dropped(&mut s, step, false));
+    assert_eq!((kids(&s, 5), kids(&s, 2)), (vec![1, 6, 10], vec![4, 3]));
+    assert_eq!(s.world().unwrap().objects().len(), 6 + 2, "the two copies, nothing else");
+}
+
 #[test]
 fn world_tools_refuse_cleanly() {
     let bytes = world_file();
@@ -1435,7 +1488,21 @@ fn world_tools_refuse_cleanly() {
         ("ungroup", json!({"node": 1}), "node 1: object 1 is not a group"),
         ("group", json!({"nodes": []}), "nodes: give the objects or groups to group"),
         ("group", json!({"nodes": [1, 3]}), "the nodes do not share a parent"),
+        ("reorder", json!({"node": 0, "before": 1}), "node 0 is the root"),
+        ("reorder", json!({"node": 1, "parent": 3}), "parent 3: object 3 is not a group"),
+        ("reorder", json!({"node": 1, "parent": 99}), "node 99: not an object or group of this world"),
+        ("reorder", json!({"node": 2, "parent": 5}), "parent 5: group 2 (3 objects) cannot go into itself"),
+        ("reorder", json!({"node": 2, "parent": 2}), "parent 2: group 2 (3 objects) cannot go into itself"),
+        ("reorder", json!({"node": 1, "before": 3}), "before 3: give another node of the top of the world"),
+        ("reorder", json!({"node": 3, "before": 3}), "before 3: give another node of group 2"),
+        ("reorder", json!({"node": 1, "parent": 2, "before": 6}), "before 6: give another node of group 2"),
         ("set_layer", json!({"node": 1}), "give layer"),
+    ] {
+        let (k, m) = err(&mut o, &mut s, tool, args);
+        assert!(k == ErrorKind::Invalid && m.contains(says), "{tool}: {m}");
+    }
+    o.begin_turn();
+    for (tool, args, says) in [
         ("set_layer", json!({"node": 1, "layer": 1, "new_layer": "x"}), "not both"),
         ("set_layer", json!({"node": 1, "layer": 42}), "layer 42: no such layer; the layers are [0, 1, 2]"),
         ("set_layer", json!({"node": 1, "new_layer": "  "}), "new_layer: a name of 1 to 64 characters"),

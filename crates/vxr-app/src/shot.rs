@@ -3993,6 +3993,110 @@ fn groups(s: &mut Shot, bytes: &[u8], dir: &Path) -> Result<(), String> {
     s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
     s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
 
+    // A drag of a tree row moves it in the tree: onto the middle of a group row it goes into
+    // the group (the row shows a ring), on the top edge of a row it goes in front of it (a
+    // line shows the gap). The objects stay where they show.
+    s.frames(120);
+    let kids = |s: &Shot, g: usize| s.ed.scene.world().unwrap().tree.children(g).to_vec();
+    // The id of the last undo step: it changes with every step made.
+    let step = |s: &Shot| s.ed.scene.history().position();
+    let (top, in_trees, start) = (kids(s, 0), kids(s, trees), step(s));
+    let row = |s: &Shot, i: usize| s.ed.ui.hits.get(&format!("tree-{i}")).copied().ok_or("a tree row is not on screen");
+    let button = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    // Press on a row and move the pointer to `to`, without the release.
+    let carry = |s: &mut Shot, from: egui::Pos2, to: egui::Pos2| {
+        s.frames_with(1, vec![egui::Event::PointerMoved(from)]);
+        s.frames_with(1, vec![button(from, true)]);
+        for k in 1..=6 {
+            s.frames_with(1, vec![egui::Event::PointerMoved(from + (to - from) * k as f32 / 6.0)]);
+        }
+    };
+    let (from, over) = (row(s, slab)?.center(), row(s, trees)?);
+    let to = over.center();
+    carry(s, from, to);
+    let ring = s.ed.ui.hits.get("tree-drop").copied();
+    s.save_png(&dir.join("app-tree-drag-into.png"))?;
+    s.frames_with(3, vec![button(to, false)]);
+    let slab_row = s.ed.ui.tree.iter().find(|r| r.node == slab).cloned();
+    check(
+        ring == Some(over)
+            && kids(s, trees) == [in_trees.clone(), vec![slab]].concat()
+            && !kids(s, 0).contains(&slab)
+            && slab_row.is_some_and(|r| r.depth == 1)
+            && s.ed.scene.picked() == Some(slab)
+            && s.ed.scene.world_voxels(false) == world
+            && step(s) != start
+            && !s.ed.ui.hits.contains_key("tree-drop"),
+        format!(
+            "a tree row dragged onto a group row goes into the group, in place, as one undo step (trees holds {:?})",
+            kids(s, trees)
+        ),
+    )?;
+    s.save_png(&dir.join("app-tree-dragged.png"))?;
+    s.frames(120);
+    let (from, over) = (row(s, slab)?.center(), row(s, trees)?);
+    let to = egui::pos2(over.left() + 30.0, over.top() + 3.0);
+    carry(s, from, to);
+    let line = s.ed.ui.hits.get("tree-drop").copied();
+    s.save_png(&dir.join("app-tree-drag-line.png"))?;
+    s.frames_with(3, vec![button(to, false)]);
+    let back = step(s);
+    check(
+        line.is_some_and(|l| (l.center().y - over.top()).abs() < 0.5 && l.height() < 8.0)
+            && kids(s, 0) == top
+            && kids(s, trees) == in_trees
+            && s.ed.scene.world_voxels(false) == world,
+        format!(
+            "dragged to the top edge of the group's row it goes back in front of it (the top holds {:?})",
+            kids(s, 0)
+        ),
+    )?;
+    // Escape during a drag leaves the row where it was; so does a drop on the row itself.
+    s.frames(120);
+    let (from, to) = (row(s, slab)?.center(), row(s, trees)?.center());
+    carry(s, from, to);
+    s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+    let dropped = !s.ed.ui.hits.contains_key("tree-drop");
+    s.frames_with(3, vec![button(to, false)]);
+    carry(s, from, from + egui::vec2(20.0, 4.0));
+    s.frames_with(3, vec![button(from + egui::vec2(20.0, 4.0), false)]);
+    check(
+        dropped && kids(s, 0) == top && kids(s, trees) == in_trees && step(s) == back,
+        "Escape during a row drag, and a drop on the row itself, move nothing".into(),
+    )?;
+    // Cmd-K moves the picked row one place down and up among its group.
+    let run = |s: &mut Shot, text: &str| {
+        s.frames_with(2, vec![key(egui::Key::K, cmd)]);
+        s.frames_with(1, vec![egui::Event::Text(text.into())]);
+        s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    };
+    s.frames(30);
+    s.ui_click(&format!("tree-{slab}"))?;
+    run(s, "move down in scene");
+    let (down, went) = (kids(s, 0), step(s));
+    run(s, "move up in scene");
+    let (up, came) = (kids(s, 0), step(s));
+    run(s, "move up in scene");
+    check(
+        top[..2] == [slab, trees]
+            && down[..2] == [trees, slab]
+            && up == top
+            && kids(s, 0) == top
+            && went != back
+            && came != went
+            && step(s) == came
+            && s.ed.scene.picked() == Some(slab),
+        format!("Cmd-K 'Move down in scene tree' and 'Move up in scene tree' step the picked row ({down:?})"),
+    )?;
+    for _ in 0..4 {
+        s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
+    }
+
     // Tab with a group picked edits the group's first object.
     s.frames(30);
     s.ui_click(&format!("tree-{trees}"))?;

@@ -609,6 +609,10 @@ fn the_world_tools_change_the_window_and_undo_gives_the_file_back() {
     assert!(t.starts_with("rotated object 3 90 degrees about X, now from "), "{t}");
     let after = w.scene.world_voxels(true);
     assert!(after.len() == before.len() && after != before);
+    // A move in the tree puts the gem in front of the slab's group, in the window's world.
+    let t = call(&mut w, &mut a, "reorder", json!({"node": 7, "before": 15}));
+    assert!(t.starts_with("moved object 7 into the top of the world, which now holds nodes [7, 15, 2, "), "{t}");
+    assert_eq!(w.scene.world().unwrap().tree.children(0)[..2], [7, 15]);
     // A move that does nothing says so and makes no step.
     let t = call(&mut w, &mut a, "move_object", json!({"node": 3, "offset": [0, 0, 0]}));
     assert!(t.ends_with("; warning: nothing changed"), "{t}");
@@ -617,9 +621,9 @@ fn the_world_tools_change_the_window_and_undo_gives_the_file_back() {
     let (t, e) = edit(&host, &mut w, &mut a, "hide", json!({"node": 3}));
     assert!(e && t.contains("show_world"), "{t}");
     call(&mut w, &mut a, "show_world", json!({}));
-    // Eight edits, eight undo steps: undone, the save is the file's bytes.
-    assert_eq!(w.scene.history().position(), 8);
-    for _ in 0..8 {
+    // Nine edits, nine undo steps: undone, the save is the file's bytes.
+    assert_eq!(w.scene.history().position(), 9);
+    for _ in 0..9 {
         assert!(w.scene.undo());
     }
     assert!(!w.scene.undo());

@@ -583,6 +583,65 @@ impl World {
         true
     }
 
+    /// Move node `i` (and what it holds) to another place in the tree: under group `parent`,
+    /// in front of its child `before`, or at the end with None. It keeps where it is in the
+    /// world (its own transform takes up the difference between the two groups'); whether
+    /// it shows follows the group it lands in. The order matters where objects overlap
+    /// (see [`World::version`]) and is the order the file lists them in. False, with nothing
+    /// changed, for the root, a `parent` that is not a group of the tree or is `i` or under
+    /// it, a `before` that is `i` or not a child of `parent`, and when `i` is already there.
+    pub fn place(&mut self, i: usize, parent: usize, before: Option<usize>) -> bool {
+        let parents = self.tree.parents();
+        let Some(old) = parents.get(i).copied().flatten() else { return false };
+        let reached = parent == 0 || parents.get(parent).copied().flatten().is_some();
+        if !reached || !matches!(self.tree.nodes.get(parent).map(|n| &n.kind), Some(Kind::Group(_))) {
+            return false;
+        }
+        let mut up = Some(parent);
+        while let Some(p) = up {
+            if p == i {
+                return false;
+            }
+            up = parents[p];
+        }
+        if before.is_some_and(|b| b == i || parents.get(b).copied().flatten() != Some(parent)) {
+            return false;
+        }
+        let mut kids: Vec<usize> = self.tree.children(parent).iter().copied().filter(|&k| k != i).collect();
+        let at = before.and_then(|b| kids.iter().position(|&k| k == b)).unwrap_or(kids.len());
+        kids.insert(at, i);
+        if kids == self.tree.children(parent) {
+            return false;
+        }
+        if parent != old {
+            let (from, to) = (self.transform_in(&parents, old), self.transform_in(&parents, parent));
+            let back = transpose(&to.r);
+            let inverse = Affine { r: back, t: mat_vec(&back, to.t).map(|v| -v) };
+            let node = &mut self.tree.nodes[i];
+            node.local = inverse.then(&from).then(&node.local);
+            if let Kind::Group(k) = &mut self.tree.nodes[old].kind {
+                k.retain(|&k| k != i);
+            }
+        }
+        self.tree.nodes[parent].kind = Kind::Group(kids);
+        true
+    }
+
+    /// Move node `i` one place up (toward the start) or down among the children of its
+    /// group, as [`World::place`]. False at the end of the list and for the root.
+    pub fn shift(&mut self, i: usize, down: bool) -> bool {
+        let Some(p) = self.tree.parents().get(i).copied().flatten() else { return false };
+        let kids = self.tree.children(p);
+        let Some(at) = kids.iter().position(|&k| k == i) else { return false };
+        let before = match (down, at) {
+            (false, 0) => return false,
+            (false, _) => Some(kids[at - 1]),
+            (true, _) if at + 1 >= kids.len() => return false,
+            (true, _) => kids.get(at + 2).copied(),
+        };
+        self.place(i, p, before)
+    }
+
     pub fn set_name(&mut self, i: usize, name: Option<&str>) {
         self.tree.nodes[i].name = name.map(|n| n.as_bytes().to_vec());
     }

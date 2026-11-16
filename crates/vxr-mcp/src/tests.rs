@@ -393,6 +393,24 @@ fn a_save_keeps_every_chunk_the_edit_did_not_touch() {
     };
     assert_eq!((tall(&flat), tall(&turned)), (1, 8));
     c.ok("undo", json!({}));
+    // A move in the tree is saved as the file's order of objects (the slab goes last, with
+    // every voxel where it was) and undo takes it back.
+    let last = |bytes: &[u8]| {
+        let s = vxr_core::Scene::from_vox(bytes).unwrap();
+        let w = s.world().unwrap();
+        let end = *w.tree.children(0).last().unwrap();
+        w.tree.nodes[end].name.clone().map(|n| String::from_utf8_lossy(&n).into_owned())
+    };
+    assert_ne!(last(&original).as_deref(), Some("slab"));
+    assert!(
+        c.ok("reorder", json!({"node": node}))
+            .starts_with(&format!("moved object {node} into the top of the world, which now holds nodes ["))
+    );
+    c.ok("save", json!({}));
+    let saved = std::fs::read(dir.0.join("world.vox")).unwrap();
+    assert_eq!(last(&saved).as_deref(), Some("slab"));
+    assert_eq!(vxr_core::Scene::from_vox(&saved).unwrap().world_voxels(false), flat);
+    c.ok("undo", json!({}));
     c.ok("edit_object", json!({"node": node}));
 
     // Unedited, a save is the file's own bytes.

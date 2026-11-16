@@ -1871,6 +1871,25 @@ async () => {
     await key('Enter');
     step("Cmd-K 'Ungroup' takes it out again", st().tree.length === 8 && st().picked === 'slab', JSON.stringify(st()));
     for (let i = 0; i < 2; i++) await key('z', cmd);
+    // A drag of a tree row moves it in the tree (onto a group row: into the group), and
+    // Cmd-K steps the picked row down among its group, one undo step each.
+    const treeOrder = () => st().tree.map((r) => `${r.name}:${r.depth}`).join(',');
+    const treeOrder0 = treeOrder();
+    await pause();
+    const rowFrom = window.vxr.hit(`tree-${slab}`);
+    const rowTo = window.vxr.hit(`tree-${trees}`);
+    await drag(rowFrom[0], rowFrom[1], rowTo[0], rowTo[1]);
+    s = st();
+    step('a tree row dragged onto a group row goes into the group, in place', treeOrder() === 'trees:0,tree a:1,tree b:1,grove:1,tree c:2,slab:1,gem:0,lost gem:0' && s.picked === 'slab' && s.objects === 6 && !same(bytes(), worldFile) && window.vxr.hit('tree-drop').length === 0, treeOrder());
+    await key('z', cmd);
+    step('the row drag is one undo step', treeOrder() === treeOrder0 && same(bytes(), worldFile), treeOrder());
+    await pause();
+    await chip(`tree-${slab}`);
+    await key('k', cmd);
+    for (const ch of 'move down in scene') await key(ch);
+    await key('Enter');
+    step("Cmd-K 'Move down in scene tree' steps the picked row", treeOrder() === 'trees:0,tree a:1,tree b:1,grove:1,tree c:2,slab:0,gem:0,lost gem:0' && st().picked === 'slab', treeOrder());
+    await key('z', cmd);
     step('every group edit undone gives back the file', same(bytes(), worldFile), JSON.stringify(st()));
 
     // Layers: the LAYERS list, a layer's eye, a layer row click moving the picked object onto

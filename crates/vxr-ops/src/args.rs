@@ -513,6 +513,15 @@ pub struct Ungroup {
     pub node: usize,
 }
 
+/// Move an object or group of the world to another place in the scene tree, as a drag of its row does: into group parent (0 is the top of the world; default the group it is in), in front of its child before (default the end). It stays where it is in the world, and shows or hides with the group it lands in. Where objects overlap, the order in the tree decides which shows.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Reorder {
+    pub node: usize,
+    pub parent: Option<usize>,
+    pub before: Option<usize>,
+}
+
 /// Hide an object or group of the world, or show it again with hidden false, as its eye in the scene tree does. A hidden object stays in the file.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -810,6 +819,7 @@ ops! {
     "duplicate" => Duplicate(Duplicate),
     "group" => Group(Group),
     "ungroup" => Ungroup(Ungroup),
+    "reorder" => Reorder(Reorder),
     "hide" => Hide(Hide),
     "set_layer" => SetLayer(SetLayer),
     "delete_object" => DeleteObject(DeleteObject),
@@ -861,8 +871,8 @@ impl Op {
     /// model too, for the objects make_object stages.
     pub fn scope(name: &str) -> Scope {
         match name {
-            "move_object" | "transform_object" | "duplicate" | "group" | "ungroup" | "hide" | "set_layer"
-            | "delete_object" | "new_layer" | "hide_layer" => Scope::World,
+            "move_object" | "transform_object" | "duplicate" | "group" | "ungroup" | "reorder" | "hide"
+            | "set_layer" | "delete_object" | "new_layer" | "hide_layer" => Scope::World,
             "place" | "erase" | "box" | "line" | "sphere" | "circle" | "face" | "fill" | "paint" | "select"
             | "transform" | "copy" | "cut" | "paste" | "stamp" | "delete" | "hollow" | "fill_inside" | "resize"
             | "crop" | "palette_swap" | "make_object" => Scope::Model,
