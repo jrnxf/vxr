@@ -656,6 +656,11 @@ fn the_ui_s_other_actions_have_tools() {
     assert!(e.contains("selection works on one model"), "{e}");
     let t = c.ok("palette_adjust", json!({"slots": [201, 202], "hue": 120, "value": -50}));
     assert!(t.starts_with("shifted 2 slots ("), "{t}");
+    let t = c.ok("palette_sort", json!({"by": "value", "slots": [202, 201]}));
+    assert_eq!(
+        t,
+        "sorted 2 slots by value: 2 slots moved and 0 voxels follow their colours, so the scene looks the same; now slot 201 #330033, slot 202 #4d0033"
+    );
     c.ok("edit_object", json!({"node": 1}));
     c.ok("resize", json!({"size": [8, 3, 8]}));
     let t = c.ok("face", json!({"cell": [0, 0, 0], "slot": 9}));
@@ -677,12 +682,12 @@ fn the_ui_s_other_actions_have_tools() {
     let w = summary(&mut d)["world"].clone();
     assert_eq!(w["nodes"].as_array().unwrap().len(), 7, "the gem is gone: {w}");
     assert!(w["layers"].as_array().unwrap().iter().any(|l| l["id"] == 0 && l["hidden"] == true), "{w}");
-    // Eleven edits, eleven undo steps, and the selections none.
+    // Twelve edits, twelve undo steps, and the selections none.
     let mut steps = 0;
     while !c.tool("undo", json!({})).1 {
         steps += 1;
     }
-    assert_eq!(steps, 11);
+    assert_eq!(steps, 12);
     c.ok("save", json!({"path": "undone.vox"}));
     assert_eq!(std::fs::read(dir.0.join("undone.vox")).unwrap(), bytes);
 }
@@ -775,6 +780,17 @@ fn export_writes_the_obj_and_the_slices_under_the_root() {
     assert_eq!(t["exported"], json!(["art/rock-sprite.png"]));
     assert_eq!(t["what"], "the isometric sprite, 12 x 11 pixels on a transparent background");
     assert_eq!(&std::fs::read(d.0.join("art/rock-sprite.png")).unwrap()[1..4], b"PNG");
+    // The palette, as an image and as text beside it: slot 2 is the second line.
+    c.ok("palette_set", json!({"slot": 2, "hex": "#0a141e"}));
+    let t: Value = serde_json::from_str(&c.ok("export", json!({"kind": "palette"}))).unwrap();
+    assert_eq!(t["exported"], json!(["art/rock-palette.png", "art/rock-palette.hex"]));
+    assert_eq!(t["what"], "the palette: a 256 x 1 PNG (pixel x is slot x + 1) and 255 rrggbb lines, slot 1 first");
+    assert_eq!(&std::fs::read(d.0.join("art/rock-palette.png")).unwrap()[1..4], b"PNG");
+    let text = std::fs::read_to_string(d.0.join("art/rock-palette.hex")).unwrap();
+    assert_eq!((text.lines().count(), text.lines().nth(1)), (255, Some("0a141e")));
+    let t: Value = serde_json::from_str(&c.ok("export", json!({"kind": "palette", "path": "out/pal.png"}))).unwrap();
+    assert_eq!(t["exported"], json!(["out/pal.png", "out/pal.hex"]));
+    assert_eq!(std::fs::read_to_string(d.0.join("out/pal.hex")).unwrap(), text);
     let t: Value = serde_json::from_str(&c.ok("export", json!({"kind": "obj", "path": "out/big.obj"}))).unwrap();
     assert_eq!(t["exported"][0], "out/big.obj");
     assert!(std::fs::read_to_string(d.0.join("out/big.obj")).unwrap().contains("mtllib big.mtl"));
@@ -813,7 +829,7 @@ fn export_writes_the_obj_and_the_slices_under_the_root() {
         (json!({"kind": "obj", "path": "../x.obj"}), "without .."),
         (json!({"kind": "obj", "path": "x.vox"}), "not a .obj file"),
         (json!({"kind": "slices", "path": "x.obj"}), "not a .png file"),
-        (json!({"kind": "gltf"}), "obj, slices, sprite, render, turntable or embed"),
+        (json!({"kind": "gltf"}), "obj, slices, sprite, palette, render, turntable or embed"),
     ] {
         let e = c.err("export", args.clone());
         assert!(e.contains(says), "{args}: {e}");

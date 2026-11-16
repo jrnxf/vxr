@@ -333,6 +333,24 @@ pub fn apng(frames: &[Vec<u8>], num: u16, den: u16) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+/// The palette as a 256 x 1 PNG ([`crate::palette::strip`]): the image MagicaVoxel and
+/// most voxel tools load as a palette, and the texture of the OBJ export.
+pub fn palette_png(scene: &Scene) -> Result<Vec<u8>, String> {
+    png(TEXTURE_W, 1, &crate::palette::strip(&scene.palette))
+}
+
+/// The palette export an agent asks for: `<stem>.png` ([`palette_png`]) and `<stem>.hex`
+/// ([`crate::palette::hex`]).
+pub fn palette_files(scene: &Scene, stem: &str) -> Result<Vec<File>, String> {
+    Ok(vec![
+        (format!("{stem}.png"), palette_png(scene)?),
+        (format!("{stem}.hex"), crate::palette::hex(&scene.palette).into_bytes()),
+    ])
+}
+
+/// What [`palette_files`] made, for the agent.
+pub const PALETTE_WHAT: &str = "the palette: a 256 x 1 PNG (pixel x is slot x + 1) and 255 rrggbb lines, slot 1 first";
+
 /// RGBA8 rows as a PNG file.
 pub fn png(w: u32, h: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();

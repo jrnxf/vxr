@@ -17,15 +17,21 @@ fn tool(a: &Action) -> Option<&'static str> {
         Action::Save => Some("save"),
         Action::Undo => Some("undo"),
         Action::Redo => Some("redo"),
-        Action::ExportObj | Action::ExportSlices | Action::ExportSprite | Action::ExportSelection | Action::ExportPng | Action::ExportTurntable | Action::Embed => {
-            Some("export")
-        }
+        Action::ExportObj
+        | Action::ExportSlices
+        | Action::ExportSprite
+        | Action::ExportPalette(_)
+        | Action::ExportSelection
+        | Action::ExportPng
+        | Action::ExportTurntable
+        | Action::Embed => Some("export"),
         Action::Recolor { .. } => Some("palette_set"),
         Action::SetMaterial { .. } => Some("material_set"),
         Action::SwapColors(..) => Some("palette_swap"),
         Action::CopyColor { .. } => Some("palette_copy"),
         // The palette's selection is `slots`, or `selection: true` for the used colours.
         Action::ShiftColors(_) | Action::SelectUsedColors => Some("palette_adjust"),
+        Action::SortPalette(_) => Some("palette_sort"),
         // In world mode rotate and flip turn the picked object: `transform_object`.
         Action::Transform(_) => Some("transform"),
         Action::SelectAll | Action::InvertSelection | Action::SelectColor | Action::Deselect => Some("select"),
@@ -124,6 +130,8 @@ fn with_tools() -> Vec<Action> {
         Action::CopyColor { from: 1, to: 2 },
         Action::ShiftColors(vxr_core::palette::Shift::default()),
         Action::SelectUsedColors,
+        Action::SortPalette(vxr_core::palette::SortKey::Hue),
+        Action::ExportPalette(false),
         Action::Transform(Transform::Rotate(0)),
         Action::SelectAll,
         Action::InvertSelection,

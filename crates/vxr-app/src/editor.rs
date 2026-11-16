@@ -6,6 +6,7 @@ use glam::Vec3;
 use vxr_core::Scene;
 use vxr_core::history::At;
 use vxr_core::material::Material;
+use vxr_core::palette::SortKey;
 use vxr_core::scene::SplitError;
 use vxr_core::select::{Mode, MoveDrag, Transform};
 use vxr_core::tools::{Brush, Gesture, Press, Shape, Target, Tool, plane_cell};
@@ -1877,6 +1878,25 @@ impl Editor {
                     self.ui.select_colors(slots);
                     self.ui.toast(&self.ctx, msg);
                 }
+                Action::SortPalette(key) => {
+                    self.gesture = None;
+                    let chosen = self.ui.colors.clone();
+                    let slots: Vec<u8> = if chosen.is_empty() { (1..=255).collect() } else { chosen };
+                    let (table, _) = self.scene.sort_colors(&slots, key);
+                    let moved = (1..=255u8).filter(|&s| table[s as usize] != s).count();
+                    // The current colour stays the current colour, in its new slot.
+                    self.ui.slot = table[self.ui.slot as usize];
+                    let by = if key == SortKey::Value { "brightness" } else { key.name() };
+                    let what = match self.ui.colors.len() {
+                        0 => "the palette".to_string(),
+                        n => format!("the {n} selected colors"),
+                    };
+                    let msg = match moved {
+                        0 => format!("Already in order by {by}: {what}"),
+                        _ => format!("Sorted {what} by {by} ({moved} slots moved)"),
+                    };
+                    self.ui.toast(&self.ctx, msg);
+                }
                 Action::CommitColor => {
                     self.scene.commit();
                 }
@@ -2364,6 +2384,11 @@ impl Editor {
                 self.agent_files = vec![(format!("{stem}-sprite.png"), png)];
                 Ok(format!("{part}the isometric sprite, {w} x {h} pixels on a transparent background"))
             }
+            Some("palette") => {
+                let stem = format!("{}-palette", self.export_stem());
+                self.agent_files = crate::files::palette_files(&self.scene, &stem)?;
+                Ok(crate::files::PALETTE_WHAT.into())
+            }
             Some("render") => {
                 if self.export.is_some() {
                     return Err("a render export is already running in vxr: call again once it is done".into());
@@ -2394,7 +2419,7 @@ impl Editor {
                 self.agent_rendered = None;
                 Ok("rendering".into())
             }
-            _ => Err("kind: obj, slices, sprite, render, turntable or embed".into()),
+            _ => Err("kind: obj, slices, sprite, palette, render, turntable or embed".into()),
         }
     }
 
@@ -2727,6 +2752,11 @@ impl Editor {
     /// The file name for the isometric sprite export: the scene's name with `-sprite.png`.
     pub fn sprite_name(&self) -> String {
         format!("{}-sprite.png", self.part_stem(self.exports_selection().is_some()))
+    }
+
+    /// The file name for a palette export: the scene's name with `-palette` and `ext`.
+    pub fn palette_name(&self, ext: &str) -> String {
+        format!("{}-palette.{ext}", self.export_stem())
     }
 
     /// The file name for a render export: the scene's name with `-render.png`.

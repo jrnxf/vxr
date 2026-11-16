@@ -94,6 +94,7 @@ fn tool_schemas() {
             "palette_swap",
             "palette_copy",
             "palette_adjust",
+            "palette_sort",
             "material_set",
             "make_object",
             "move_object",
@@ -1655,6 +1656,56 @@ fn palette_adjust_shifts_slots_or_the_selection_s_slots() {
     // Discarded, the palette is the file's again.
     o.discard(&mut s);
     assert_eq!(s.palette, before);
+}
+
+/// The colour and material every voxel of the file shows, by world cell.
+fn look(s: &Scene) -> Vec<([i32; 3], [u8; 4], vxr_core::material::Material)> {
+    s.world_voxels(false).into_iter().map(|(p, v)| (p, s.palette[v as usize], s.materials[v as usize])).collect()
+}
+
+#[test]
+fn palette_sort_orders_slots_and_every_voxel_follows() {
+    let mut s = small();
+    let (before, cells, palette) = (look(&s), voxels(&s), s.palette);
+    let mut o = Session::new(&s, None);
+    // Red (hue 0) goes before the brown (hue 27): the two slots trade places.
+    let t = call(&mut o, &mut s, "palette_sort", json!({"by": "hue", "slots": [20, 10]}));
+    assert_eq!(
+        t,
+        "sorted 2 slots by hue: 2 slots moved and 19 voxels follow their colours, so the scene looks the same; now slot 10 #d72323, slot 20 #8c5528"
+    );
+    assert_eq!(look(&s), before);
+    assert_eq!((get(&mut o, &mut s, [1, 2, 1]), get(&mut o, &mut s, [0, 0, 0])), (10, 20));
+    let t = call(&mut o, &mut s, "palette_sort", json!({"by": "hue", "slots": [10, 20]}));
+    assert_eq!(t, "2 slots already in order by hue: nothing changed");
+    assert!(err(&mut o, &mut s, "palette_sort", json!({"by": "hue", "slots": [0, 4]})).1.contains("slot 0"));
+    assert!(o.call(&mut s, "palette_sort", json!({"by": "name"})).is_err());
+    o.discard(&mut s);
+    assert_eq!((s.palette, voxels(&s)), (palette, cells));
+
+    // The voxels a staged new object waits to take follow their colours too.
+    let bytes = desk_file();
+    let mut s = Scene::from_vox(&bytes).unwrap();
+    let before = look(&s);
+    let mut o = Session::new(&s, Some(&bytes));
+    call(&mut o, &mut s, "make_object", json!({"from_slot": 4, "name": "book"}));
+    let t = call(&mut o, &mut s, "palette_sort", json!({"by": "value"}));
+    assert!(t.starts_with("sorted the palette by value: ") && t.contains(" and 296 voxels follow"), "{t}");
+    o.apply(&mut s).unwrap();
+    assert_eq!(s.world().unwrap().objects().len(), 2);
+    assert_eq!(look(&s), before);
+
+    // In a world every object's model follows, the linked copies once, and undo gives the file back.
+    let bytes = world_file();
+    let mut s = Scene::from_vox(&bytes).unwrap();
+    let before = look(&s);
+    let mut o = Session::new(&s, Some(&bytes));
+    let t = call(&mut o, &mut s, "palette_sort", json!({"by": "saturation"}));
+    // The grey slab's slot stays first; the trees' one model (13 voxels) and the gems' (1) follow.
+    assert!(t.contains(" and 14 voxels follow"), "{t}");
+    assert_eq!(look(&s), before);
+    assert_ne!(s.palette, Scene::from_vox(&bytes).unwrap().palette);
+    apply_and_undo(o, &mut s, &bytes);
 }
 
 #[test]

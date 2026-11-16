@@ -623,6 +623,28 @@ pub struct PaletteAdjust {
     pub value: f32,
 }
 
+/// Sort palette slots by hue, saturation or value, as Sort palette does: the colours and materials of the slots trade places and every voxel of the file follows its colour, so the scene looks the same and only the palette order changes, in one undo step. Leave slots out for the whole palette, or give the slots to sort among themselves (a ramp, the used colours).
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PaletteSort {
+    pub by: SortBy,
+    /// The slots to sort among themselves, 1 to 255. Leave out for every slot.
+    #[serde(default)]
+    pub slots: Vec<u8>,
+}
+
+/// What palette_sort orders the colours by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum SortBy {
+    /// Greys first, dark to light, then the colours around the wheel from red.
+    Hue,
+    /// From grey to vivid.
+    Saturation,
+    /// From dark to light.
+    Value,
+}
+
 /// Where look looks from.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
@@ -756,6 +778,7 @@ ops! {
     "palette_swap" => PaletteSwap(PaletteSwap),
     "palette_copy" => PaletteCopy(PaletteCopy),
     "palette_adjust" => PaletteAdjust(PaletteAdjust),
+    "palette_sort" => PaletteSort(PaletteSort),
     "material_set" => MaterialSet(MaterialSet),
     "make_object" => MakeObject(MakeObject),
     "move_object" => MoveObject(MoveObject),

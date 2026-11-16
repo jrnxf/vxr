@@ -199,6 +199,15 @@ impl Platform for Desktop {
         Ok(Some(file_name(&path)))
     }
 
+    fn save_text(&mut self, name: &str, text: &str) -> Result<Option<String>, String> {
+        let ext = name.rsplit('.').next().unwrap_or("txt");
+        let Some(path) = rfd::FileDialog::new().add_filter("Text", &[ext]).set_file_name(name).save_file() else {
+            return Ok(None);
+        };
+        std::fs::write(&path, text).map_err(|e| e.to_string())?;
+        Ok(Some(file_name(&path)))
+    }
+
     fn save_zip(&mut self, name: &str, bytes: &[u8]) -> Result<Option<String>, String> {
         let Some(path) = rfd::FileDialog::new().add_filter("Zip", &["zip"]).set_file_name(name).save_file() else {
             return Ok(None);

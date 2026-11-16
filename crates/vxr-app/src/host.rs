@@ -30,7 +30,7 @@ use vxr_render::Gpu;
 
 use crate::Editor;
 use crate::editor::Button;
-use crate::files::{File, obj_files, slices_png, sprite_png, vox_bytes};
+use crate::files::{File, obj_files, palette_png, slices_png, sprite_png, vox_bytes};
 use crate::projects::{Project, Read, THUMB, content_hash};
 use crate::sync::{Auth, Event, Reply};
 use crate::ui::{Action, FontBytes};
@@ -96,6 +96,9 @@ pub trait Platform {
 
     /// Write one PNG, suggesting `name`; returns the name it was given.
     fn save_png(&mut self, name: &str, bytes: &[u8]) -> Result<Option<String>, String>;
+
+    /// Write one text file, suggesting `name`; returns the name it was given.
+    fn save_text(&mut self, name: &str, text: &str) -> Result<Option<String>, String>;
 
     /// Write several files built from a name stem (suggesting `stem`): `make` builds them
     /// for the stem the user ended up choosing. Returns the main file's name.
@@ -346,6 +349,19 @@ pub fn run_action(ed: &mut Editor, p: &mut dyn Platform, action: Action) {
                 Ok((Some(name), [w, h])) => toast(ed, format!("{} {name} ({part}{w}×{h}, transparent)", p.verb())),
                 Ok((None, _)) => {}
                 Err(e) => toast(ed, format!("Could not export: {e}")),
+            }
+        }
+        Action::ExportPalette(text) => {
+            let written = if text {
+                p.save_text(&ed.palette_name("hex"), &vxr_core::palette::hex(&ed.scene.palette))
+            } else {
+                palette_png(&ed.scene).and_then(|png| p.save_png(&ed.palette_name("png"), &png))
+            };
+            match written {
+                Ok(Some(name)) if text => toast(ed, format!("{} {name} (255 colors, one per line)", p.verb())),
+                Ok(Some(name)) => toast(ed, format!("{} {name} (256×1, slot 1 first)", p.verb())),
+                Ok(None) => {}
+                Err(e) => toast(ed, format!("Could not export the palette: {e}. Try the export again")),
             }
         }
         Action::Turned => {

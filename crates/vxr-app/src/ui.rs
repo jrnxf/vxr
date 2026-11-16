@@ -15,7 +15,7 @@ use vxr_core::material::{Kind, Material};
 use crate::color::{Hsv, hex, parse_hex};
 use crate::render::{EXPORT_SIZES, RenderSettings, SPP_CHOICES, TURNTABLE_FRAMES};
 use crate::theme::{self, Theme, ThemeChoice, th};
-use vxr_core::palette::Shift;
+use vxr_core::palette::{Shift, SortKey};
 
 mod account;
 mod activity;
@@ -264,6 +264,8 @@ pub enum Action {
     ExportSlices,
     /// Export the isometric sprite: one PNG of pixel art on a transparent background.
     ExportSprite,
+    /// Export the palette as a 256 x 1 PNG (false) or as `.hex` text (true).
+    ExportPalette(bool),
     /// Flip "Only the selection" for the OBJ, slices and sprite exports, and say so.
     ExportSelection,
     /// Flip the region option (erase and paint stay inside the selection), and say so.
@@ -322,6 +324,9 @@ pub enum Action {
     /// Select, in the palette, the slots the selected voxels use (the whole model's while
     /// nothing is selected).
     SelectUsedColors,
+    /// Sort the palette's selected slots, or every slot while none is selected, by this:
+    /// the voxels follow their colours, so only the palette order changes.
+    SortPalette(SortKey),
     /// Keep only the voxels seen from outside the selection, or the whole model.
     Hollow,
     /// Fill the space the selection, or the whole model, encloses with the current colour.
@@ -1045,6 +1050,17 @@ const COMMANDS: &[Command] = &[
     Command { label: "Replace color with…", keys: &[], run: |h| h.arm_slot_op(SlotOp::Replace) },
     Command { label: "Remove color", keys: &[], run: |h| h.actions.push(Action::RemoveColor(h.slot)) },
     Command { label: "Select used colors", keys: &[], run: |h| h.actions.push(Action::SelectUsedColors) },
+    Command { label: "Sort palette by hue", keys: &[], run: |h| h.actions.push(Action::SortPalette(SortKey::Hue)) },
+    Command {
+        label: "Sort palette by saturation",
+        keys: &[],
+        run: |h| h.actions.push(Action::SortPalette(SortKey::Saturation)),
+    },
+    Command {
+        label: "Sort palette by brightness",
+        keys: &[],
+        run: |h| h.actions.push(Action::SortPalette(SortKey::Value)),
+    },
     Command {
         label: "Toggle render preview",
         keys: &[],
@@ -1061,6 +1077,8 @@ const COMMANDS: &[Command] = &[
     Command { label: "Export PNG slices", keys: &[], run: |h| h.actions.push(Action::ExportSlices) },
     Command { label: "Export isometric sprite", keys: &[], run: |h| h.actions.push(Action::ExportSprite) },
     Command { label: "Export only the selection", keys: &[], run: |h| h.actions.push(Action::ExportSelection) },
+    Command { label: "Export palette as PNG", keys: &[], run: |h| h.actions.push(Action::ExportPalette(false)) },
+    Command { label: "Export palette as text", keys: &[], run: |h| h.actions.push(Action::ExportPalette(true)) },
     Command { label: "Ask AI…", keys: &["Tab"], run: |h| h.open_ask_bar("") },
     Command { label: "Organize into objects (AI)", keys: &[], run: |h| h.organize() },
     Command { label: "Assistant panel", keys: &["⌘", "J"], run: |h| h.toggle_ai() },
@@ -2975,6 +2993,9 @@ impl Hybrid {
             Entry::Row("export-slices", icon::LAYERS, "PNG slices", ".png"),
             Entry::Row("export-sprite", icon::AXIS_3D, "Isometric sprite", "pixel art .png"),
             Entry::Check("export-selection", "Only the selection", self.export_selection, self.selection_hint()),
+            Entry::Sep,
+            Entry::Row("export-palette-png", icon::PALETTE, "Palette image", "256×1 .png"),
+            Entry::Row("export-palette-hex", icon::PALETTE, "Palette colors", ".hex"),
         ];
         let height = |e: &Entry| match e {
             Entry::Head(_) => 26.0,
@@ -3086,6 +3107,8 @@ impl Hybrid {
             Some("export-slices") => self.actions.push(Action::ExportSlices),
             Some("export-sprite") => self.actions.push(Action::ExportSprite),
             Some("export-embed") => self.actions.push(Action::Embed),
+            Some("export-palette-png") => self.actions.push(Action::ExportPalette(false)),
+            Some("export-palette-hex") => self.actions.push(Action::ExportPalette(true)),
             _ => {}
         }
         if flip {

@@ -201,6 +201,11 @@ impl Platform for Browser {
         Ok(Some(name.into()))
     }
 
+    fn save_text(&mut self, name: &str, text: &str) -> Result<Option<String>, String> {
+        page_download(text.as_bytes(), name, "text/plain");
+        Ok(Some(name.into()))
+    }
+
     fn save_all(
         &mut self,
         stem: &str,

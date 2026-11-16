@@ -97,6 +97,11 @@ impl WorldStroke {
     }
 }
 
+/// Whether `table` gives another slot to any voxel counted in `counts`.
+fn moves(table: &[u8; 256], counts: &[u32; 256]) -> bool {
+    (1..256).any(|s| table[s] != s as u8 && counts[s] > 0)
+}
+
 /// Why Selection to new object cannot run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SplitError {
@@ -771,6 +776,63 @@ impl Scene {
         self.commit()
     }
 
+    /// Move every voxel of slot `s` to slot `table[s]` inside the open edit (opening one if
+    /// needed): in the map and in every other model of the file, so no object changes its
+    /// look when slots trade colours ([`Scene::move_slots`]). `table` is a permutation of
+    /// the slots that keeps slot 0. Returns how many voxels took another slot (a model
+    /// shared by linked copies counts once).
+    pub fn remap_slots(&mut self, table: &[u8; 256]) -> usize {
+        let mut n = 0;
+        if self.at != At::World && moves(table, &self.map.counts) {
+            let mut cells = Vec::new();
+            self.map.for_each(|p, v| {
+                if table[v as usize] != v {
+                    cells.push((p, table[v as usize]));
+                }
+            });
+            n = cells.len();
+            for (p, v) in cells {
+                self.put(p, v);
+            }
+        }
+        n + self.remap_models(table)
+    }
+
+    /// [`Scene::remap_slots`] for the models the map does not hold: every model of the file
+    /// but the one being edited, or all of them while the world shows (shown again after).
+    pub fn remap_models(&mut self, table: &[u8; 256]) -> usize {
+        let Some(w) = self.world.as_mut() else { return 0 };
+        let current = match self.at {
+            At::Object(i) => w.model_of(i),
+            _ => None,
+        };
+        let mut n = 0;
+        for m in 0..w.models.len() {
+            if Some(m) == current || !moves(table, &w.models[m].counts) {
+                continue;
+            }
+            let s = self.world_stroke.get_or_insert_with(|| WorldStroke::of(w, self.at));
+            if s.replaced.iter().all(|r| r.0 != m) {
+                s.replaced.push((m, w.models[m].clone()));
+            }
+            let mut cells = Vec::new();
+            w.models[m].for_each(|p, v| {
+                if table[v as usize] != v {
+                    cells.push((p, table[v as usize]));
+                }
+            });
+            n += cells.len();
+            for (p, v) in cells {
+                w.models[m].set(p[0], p[1], p[2], v);
+            }
+        }
+        if n > 0 && self.at == At::World {
+            // It fitted before, and no voxel moved, so it fits again.
+            let _ = self.load(At::World);
+        }
+        n
+    }
+
     pub fn undo(&mut self) -> bool {
         self.commit();
         let Some(mut step) = self.history.undo().cloned() else { return false };
@@ -862,6 +924,12 @@ impl Scene {
             self.source = Some(m.source.clone());
         }
         let Some(w) = &mut self.world else { return };
+        // Models changed in place that the map does not hold (a palette sort's) leave the
+        // map as it is: its selection and ground stay.
+        let current = match self.at {
+            At::Object(i) if w.in_tree(i) => w.model_of(i),
+            _ => None,
+        };
         if revert {
             w.tree = c.old.clone();
             w.models.truncate(c.models);
@@ -873,6 +941,7 @@ impl Scene {
             w.models[*m] = if revert { before } else { after }.clone();
         }
         let at = c.at[!revert as usize];
+        let elsewhere = at != At::World && c.replaced.iter().all(|r| Some(r.0) != current);
         if revert && let Some(m) = &c.made {
             // Back to a new scene without a world: its one object's model is the map again.
             let (mut map, lo) = w.object_map(w.objects()[0]).expect("the made world has one object");
@@ -880,7 +949,7 @@ impl Scene {
             (self.map, self.origin, self.pivot, self.floor) = (map, lo, m.pivot, m.floor);
             (self.world, self.source, self.at, self.picked) = (None, None, At::Map, None);
             self.reshapes += 1;
-        } else if !(c.added.is_empty() && c.replaced.is_empty() && c.at[0] == c.at[1] && at == self.at)
+        } else if !(c.added.is_empty() && (c.replaced.is_empty() || elsewhere) && c.at[0] == c.at[1] && at == self.at)
             || at == At::World
         {
             // It fitted when it was made, so it fits again.

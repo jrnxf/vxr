@@ -19,7 +19,7 @@ use std::collections::{HashMap, HashSet};
 use serde_json::Value;
 use vxr_core::history::At;
 use vxr_core::material::{Kind, Material};
-use vxr_core::palette::{Shift, slots_of};
+use vxr_core::palette::{Shift, SortKey, slots_of, sort_table};
 use vxr_core::scene::MAX_EXTENT;
 use vxr_core::select::{Clip, bounds};
 use vxr_core::tools::{MAX_RADIUS, ball_cells, box_cells, line_cells, line_steps};
@@ -886,6 +886,55 @@ impl Session {
                     if slots.len() == 1 { "" } else { "s" },
                     if slots.len() == 1 { "it" } else { "them" },
                     lines.join("; ")
+                ))
+            }
+            Op::PaletteSort(a) => {
+                let mut slots: Vec<u8> = if a.slots.is_empty() {
+                    (1..=255).collect()
+                } else {
+                    a.slots.iter().map(|&s| slot(s)).collect::<Result<_, _>>()?
+                };
+                slots.sort_unstable();
+                slots.dedup();
+                let key = match a.by {
+                    SortBy::Hue => SortKey::Hue,
+                    SortBy::Saturation => SortKey::Saturation,
+                    SortBy::Value => SortKey::Value,
+                };
+                let table = sort_table(&scene.palette, &slots, key);
+                let moved = (1..=255u8).filter(|&s| table[s as usize] != s).count();
+                let what =
+                    if a.slots.is_empty() { "the palette".to_string() } else { format!("{} slots", slots.len()) };
+                if moved == 0 {
+                    return Ok(format!("{what} already in order by {}: nothing changed", key.name()));
+                }
+                // The model being edited goes through the change's own cells; the file's other
+                // models, and the voxels a new object waits to take, follow beside it.
+                let mut voxels = 0;
+                if scene.at() != At::World {
+                    let cells = self.voxels_of(scene, |v| table[v as usize] != v);
+                    voxels = cells.len();
+                    let remap = cells.into_iter().map(|(w, v)| (w, table[v as usize])).collect();
+                    self.stage(scene, remap, true)?;
+                }
+                self.open(scene);
+                for (k, p) in self.pending.iter_mut().enumerate() {
+                    if let Pending::Object { voxels: taken, .. } = p {
+                        for v in taken.iter_mut().filter(|v| table[v.1 as usize] != v.1) {
+                            voxels += (self.moved.get(&v.0) == Some(&k)) as usize;
+                            v.1 = table[v.1 as usize];
+                        }
+                    }
+                }
+                scene.move_slots(&table);
+                voxels += scene.remap_models(&table);
+                let first: Vec<String> =
+                    slots.iter().take(8).map(|&s| format!("slot {s} {}", hex(scene.palette[s as usize]))).collect();
+                Ok(format!(
+                    "sorted {what} by {}: {moved} slots moved and {voxels} voxels follow their colours, so the scene looks the same; now {}{}",
+                    key.name(),
+                    first.join(", "),
+                    if slots.len() > 8 { ", ..." } else { "" }
                 ))
             }
             Op::Undo(_) => {

@@ -164,10 +164,7 @@ pub fn obj(voxels: &BTreeMap<[i32; 3], u8>, palette: &[[u8; 4]; 256], name: &str
 
     let mtl =
         format!("# vxr OBJ export\nnewmtl palette\nKa 0 0 0\nKd 1 1 1\nKs 0 0 0\nd 1\nillum 1\nmap_Kd {name}.png\n");
-    let mut texture = Vec::with_capacity(TEXTURE_W as usize * 4);
-    for t in 0..TEXTURE_W as usize {
-        texture.extend_from_slice(&palette[(t + 1) % 256]);
-    }
+    let texture = crate::palette::strip(palette);
     Obj { obj, mtl, texture, quads: quads.len(), vertices: vertex.len() }
 }
 

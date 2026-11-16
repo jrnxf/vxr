@@ -900,6 +900,8 @@ struct Fake {
     obj: Vec<String>,
     /// The last PNG handed over.
     png: Vec<u8>,
+    /// The last text file handed over.
+    text: String,
     /// The desktop's files, as the projects store sees them: each save changes its file there.
     disk: Option<vxr_app::projects::Memory>,
     /// The session token kept, as the desktop keeps it in the keychain.
@@ -946,6 +948,11 @@ impl Platform for Fake {
     fn save_png(&mut self, name: &str, bytes: &[u8]) -> Result<Option<String>, String> {
         self.calls.push(format!("save_png {name} {}", bytes.starts_with(b"\x89PNG")));
         self.png = bytes.to_vec();
+        Ok((!self.cancel).then(|| name.to_string()))
+    }
+    fn save_text(&mut self, name: &str, text: &str) -> Result<Option<String>, String> {
+        self.calls.push(format!("save_text {name}"));
+        self.text = text.to_string();
         Ok((!self.cancel).then(|| name.to_string()))
     }
     fn save_all(
@@ -3308,6 +3315,40 @@ fn world(dir: &Path) -> Result<(), String> {
             && s.ed.ui.toast_text() == Some("Click an object to pick it first"),
         format!("with no object picked, 'rotate y' turns nothing and says to pick one ({:?})", s.ed.ui.toast_text()),
     )?;
+    // Sort palette in the world: every object's model follows its colours, so each voxel
+    // shows what it showed and the view is the same picture, pixel for pixel.
+    {
+        // The render corner off (it keeps sampling), and past the 1.8 s a toast shows.
+        let corner = std::mem::replace(&mut s.ed.ui.show_render, false);
+        let view_px = |s: &mut Shot| {
+            s.frames(120);
+            pollster::block_on(read_texture(&s.ed.gpu.device, &s.ed.gpu.queue, &s.ed.renderer.color))
+        };
+        let look = |s: &Shot| -> Vec<([i32; 3], [u8; 4])> {
+            s.ed.scene.world_voxels(false).into_iter().map(|(p, v)| (p, s.ed.scene.palette[v as usize])).collect()
+        };
+        let (was, seen) = (s.ed.scene.palette, look(&s));
+        run(&mut s, "sort palette by hue");
+        let sorted = s.ed.scene.palette != was && look(&s) == seen;
+        let toast = s.ed.ui.toast_text().map(str::to_string);
+        // Both pictures are taken after the command palette closed, with nothing under the pointer lit.
+        let px = view_px(&mut s);
+        s.frames_with(2, vec![key(egui::Key::Z, egui::Modifiers::COMMAND)]);
+        let undone = s.ed.scene.palette == was && look(&s) == seen;
+        let differ =
+            px.as_chunks::<4>().0.iter().zip(view_px(&mut s).as_chunks::<4>().0).filter(|(p, q)| p != q).count();
+        check(
+            sorted
+                && undone
+                && differ == 0
+                && toast.as_deref().is_some_and(|t| t.starts_with("Sorted the palette by hue (")),
+            format!(
+                "in the world, Cmd-K Sort palette by hue reorders the palette and every object looks the same: \
+                 {differ} view pixels differ between the sorted palette and its undo ({toast:?})"
+            ),
+        )?;
+        s.ed.ui.show_render = corner;
+    }
     s.stroke(p, &[]);
     s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
     s.frames_with(1, vec![egui::Event::Text("duplicate object".into())]);
@@ -5172,6 +5213,64 @@ fn export(s: &mut Shot, dir: &Path) -> Result<(), String> {
     s.frames_with(1, vec![egui::Event::Text("export isometric sprite".into())]);
     s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
     check(s.host.contains(&Action::ExportSprite), "Cmd-K Export isometric sprite asks the host too".into())?;
+    // The palette, as an image and as text: the rows, Cmd-K, and what the host is handed.
+    s.host.clear();
+    s.open_file_row("export-palette-png")?;
+    let png_row = s.host.contains(&Action::ExportPalette(false)) && !s.ed.ui.file_menu;
+    s.open_file_row("export-palette-hex")?;
+    check(
+        png_row && s.host.contains(&Action::ExportPalette(true)) && !s.ed.ui.file_menu,
+        "its Palette image and Palette colors rows ask the host to export and close the menu".into(),
+    )?;
+    s.host.clear();
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("export palette as png".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("export palette as text".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    check(
+        s.host == [Action::ExportPalette(false), Action::ExportPalette(true)],
+        "Cmd-K Export palette as PNG and Export palette as text ask the host too".into(),
+    )?;
+    {
+        let stem = s.ed.export_stem();
+        let palette = s.ed.scene.palette;
+        let mut p = Fake { cancel: true, ..Default::default() };
+        run_action(&mut s.ed, &mut p, Action::ExportPalette(false));
+        s.frames(2);
+        let cancelled = s.ed.ui.toast_text() != Some(&format!("Saved {stem}-palette.png (256×1, slot 1 first)"));
+        p.cancel = false;
+        run_action(&mut s.ed, &mut p, Action::ExportPalette(false));
+        s.frames(2);
+        let png_toast = s.ed.ui.toast_text() == Some(&format!("Saved {stem}-palette.png (256×1, slot 1 first)"));
+        run_action(&mut s.ed, &mut p, Action::ExportPalette(true));
+        s.frames(2);
+        let hex_toast = s.ed.ui.toast_text() == Some(&format!("Saved {stem}-palette.hex (255 colors, one per line)"));
+        let mut r = png::Decoder::new(std::io::Cursor::new(&p.png)).read_info().map_err(|e| e.to_string())?;
+        let mut px = vec![0; r.output_buffer_size().unwrap_or(0)];
+        let info = r.next_frame(&mut px).map_err(|e| e.to_string())?;
+        let pixels = (1..=255usize).filter(|&i| px[(i - 1) * 4..i * 4] == palette[i]).count();
+        let lines = p
+            .text
+            .lines()
+            .zip(&palette[1..])
+            .filter(|(l, c)| **l == format!("{:02x}{:02x}{:02x}", c[0], c[1], c[2]))
+            .count();
+        check(
+            cancelled
+                && png_toast
+                && hex_toast
+                && (info.width, info.height, pixels) == (256, 1, 255)
+                && (p.text.lines().count(), lines) == (255, 255)
+                && p.calls[1..]
+                    == [format!("save_png {stem}-palette.png true"), format!("save_text {stem}-palette.hex")],
+            format!(
+                "the host writes {stem}-palette.png (256×1, {pixels} of 255 slots at their pixel) and \
+                 {stem}-palette.hex ({lines} of 255 slots on their line), and nothing when the dialog is cancelled"
+            ),
+        )?;
+    }
     // Only the selection is a switch: its row flips it and keeps the menu open.
     s.host.clear();
     s.open_file_row("export-selection")?;
@@ -7617,6 +7716,108 @@ fn palette(s: &mut Shot, dir: &Path) -> Result<(), String> {
     )?;
     s.save_png(&dir.join("color-group-all.png"))?;
     s.ui_click(&format!("sw{used}"))?;
+
+    // Sort palette: the slots trade colours and materials and the voxels follow, so the
+    // scene looks the same; the current colour stays current in its new slot.
+    {
+        use vxr_core::palette::{SortKey, sort_table};
+        let run = |s: &mut Shot, text: &str| {
+            let key =
+                |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+            s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+            s.frames_with(1, vec![egui::Event::Text(text.into())]);
+            s.frames_with(3, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+        };
+        // What every voxel shows, as one number that changes when any voxel's colour does.
+        let look = |s: &Shot| {
+            let mut sum = 0u64;
+            s.ed.scene.for_each_voxel(|p, v| {
+                let c = s.ed.scene.palette[v as usize];
+                let cell = (p[0] as u64) << 40 | (p[1] as u64) << 20 | p[2] as u64;
+                sum = sum.wrapping_add(cell.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ u32::from_le_bytes(c) as u64);
+            });
+            sum
+        };
+        // The editor has settled after Select used colors: a plain click ends that selection.
+        s.frames(2);
+        s.ui_click(&format!("sw{used}"))?;
+        let none_selected = s.ed.ui.colors.is_empty();
+        let all: Vec<u8> = (1..=255).collect();
+        let (before, seen, position) = (s.ed.scene.palette, look(s), s.ed.scene.history().position());
+        let table = sort_table(&before, &all, SortKey::Hue);
+        let moved = (1..=255u8).filter(|&i| table[i as usize] != i).count();
+        run(s, "sort palette by hue");
+        let now = s.ed.scene.palette;
+        check(
+            moved > 0
+                && none_selected
+                && (1..=255usize).all(|i| now[table[i] as usize] == before[i])
+                && sort_table(&now, &all, SortKey::Hue) == std::array::from_fn(|i| i as u8)
+                && look(s) == seen
+                && s.ed.scene.map.counts[table[used as usize] as usize] == counts[used as usize]
+                && s.ed.ui.slot == table[used as usize]
+                && s.ed.scene.history().position() != position
+                && s.ed.ui.toast_text() == Some(format!("Sorted the palette by hue ({moved} slots moved)").as_str()),
+            format!(
+                "Cmd-K Sort palette by hue puts every slot in hue order ({moved} moved): the voxels follow, \
+                 the scene looks the same and the current colour moves from slot {used} to {} (now slot {}, {:?})",
+                table[used as usize],
+                s.ed.ui.slot,
+                s.ed.ui.toast_text()
+            ),
+        )?;
+        let position = s.ed.scene.history().position();
+        s.save_png(&dir.join("palette-sorted.png"))?;
+        run(s, "sort palette by hue");
+        check(
+            s.ed.scene.history().position() == position
+                && s.ed.ui.toast_text() == Some("Already in order by hue: the palette"),
+            format!("sorting again changes nothing and says so ({:?})", s.ed.ui.toast_text()),
+        )?;
+        s.ed.undo();
+        s.ed.ui.slot = used;
+        s.frames(2);
+        check(
+            s.ed.scene.palette == before && s.ed.scene.map.counts == counts && look(s) == seen,
+            "one undo gives the palette's order back".into(),
+        )?;
+        // With slots selected in the palette, only those are sorted among themselves.
+        let at = s.at(&format!("sw{other}"))?;
+        s.ui_drag(at, at, egui::Modifiers::SHIFT);
+        let (lo, hi) = (used.min(other), used.max(other));
+        // The two are put out of order first, so that the sort has something to move.
+        if sort_table(&before, &[lo, hi], SortKey::Value)[lo as usize] == lo {
+            s.ed.scene.swap_colors(lo, hi);
+            s.frames(2);
+        }
+        let (mid, mid_counts, seen) = (s.ed.scene.palette, s.ed.scene.map.counts, look(s));
+        run(s, "sort palette by brightness");
+        let now = s.ed.scene.palette;
+        check(
+            s.ed.ui.colors.len() == 2
+                && s.ed.ui.colors.contains(&lo)
+                && s.ed.ui.colors.contains(&hi)
+                && (now[lo as usize], now[hi as usize]) == (mid[hi as usize], mid[lo as usize])
+                && (1..=255u8).all(|i| i == lo || i == hi || now[i as usize] == mid[i as usize])
+                && s.ed.scene.map.counts[lo as usize] == mid_counts[hi as usize]
+                && look(s) == seen
+                && s.ed.ui.toast_text() == Some("Sorted the 2 selected colors by brightness (2 slots moved)"),
+            format!(
+                "with slots {lo} and {hi} selected, Sort palette by brightness sorts only those two ({:?}, {:?})",
+                s.ed.ui.colors,
+                s.ed.ui.toast_text()
+            ),
+        )?;
+        s.ed.undo();
+        if s.ed.scene.palette != before {
+            s.ed.undo();
+        }
+        s.ui_click(&format!("sw{used}"))?;
+        check(
+            s.ed.scene.palette == before && s.ed.scene.map.counts == counts && s.ed.ui.colors.is_empty(),
+            "undo gives the two slots back".into(),
+        )?;
+    }
 
     // The palette shows the colours in use (and the current one); All shows every slot.
     s.ed.ui.slot = used;

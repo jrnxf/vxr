@@ -820,6 +820,23 @@ async () => {
     for (let i = 1; i < 256; i++) if (col(i)[4] > 0) inUse++;
     step('Cmd-K Select used colors selects every color in the model', all.length === inUse && inUse > 1 && st().toast === `Selected the ${inUse} colors in the model`, JSON.stringify([all, inUse, st().toast]));
     await clickAt(`sw${used}`);
+    // Sort palette: the slots trade colors, every color keeps its voxels, the current color stays current.
+    const pal = () => { const p = []; for (let i = 1; i < 256; i++) p.push(col(i).join()); return p; };
+    const [pal0, voxels0] = [pal(), st().voxels];
+    await key('k', cmd);
+    for (const ch of 'sort palette by hue') await key(ch);
+    await key('Enter');
+    await frames(2);
+    const pal1 = pal();
+    const movedSlots = pal1.filter((c, i) => c !== pal0[i]).length;
+    step('Cmd-K Sort palette by hue reorders the slots: every color keeps its voxels and the current color stays current',
+      movedSlots > 0 && pal1.slice().sort().join('|') === pal0.slice().sort().join('|') && st().voxels === voxels0
+        && col(st().slot).join() === c0.join() && /^Sorted the palette by hue \(\d+ slots moved\)$/.test(st().toast || ''),
+      JSON.stringify([movedSlots, st().slot, st().toast]));
+    await key('z', cmd);
+    await frames(2);
+    step('one undo gives the palette its order back', pal().join('|') === pal0.join('|'));
+    await clickAt(`sw${used}`);
   }
   step('the palette shows the colors in use, not an unused slot', !!at(`sw${used}`) && !at(`sw${free}`));
   await clickAt('palette-all');
@@ -1128,6 +1145,34 @@ async () => {
       await key('Enter');
       await frames();
       step('Cmd-K Export isometric sprite downloads it too', zipName === 'island-sprite.png', `${zipName}`);
+      // The palette, as a 256 by 1 image and as one rrggbb line per slot.
+      zipBlob = null; zipName = null;
+      await click(...hit('scene-select'));
+      await frames(14);
+      await click(...hit('export-palette-png'));
+      await frames();
+      const pp = zipBlob ? await slicePixels(zipBlob) : null;
+      step('its Palette image row downloads island-palette.png, 256 by 1',
+        zipName === 'island-palette.png' && !st().fileMenu && pp && pp.w === 256 && pp.h === 1 && /palette\.png \(256×1, slot 1 first\)$/.test(st().toast || ''),
+        `${zipName} ${pp && `${pp.w}x${pp.h}`} ${st().toast}`);
+      zipBlob = null; zipName = null;
+      await click(...hit('scene-select'));
+      await frames(14);
+      await click(...hit('export-palette-hex'));
+      await frames();
+      const hexLines = zipBlob ? (await zipBlob.text()).split('\n') : [];
+      const hexOf = (i) => Array.from(window.vxr.color(i)).slice(0, 3).map((v) => v.toString(16).padStart(2, '0')).join('');
+      let onLine = 0;
+      for (let i = 1; i < 256; i++) onLine += hexLines[i - 1] === hexOf(i);
+      step('its Palette colors row downloads island-palette.hex: 255 lines, every slot on its line',
+        zipName === 'island-palette.hex' && !st().fileMenu && hexLines.length === 256 && hexLines[255] === '' && onLine === 255,
+        `${zipName} ${hexLines.length} lines, ${onLine} right, ${st().toast}`);
+      zipName = null;
+      await key('k', cmd);
+      for (const ch of 'export palette as text') await key(ch);
+      await key('Enter');
+      await frames();
+      step('Cmd-K Export palette as text downloads it too', zipName === 'island-palette.hex', `${zipName}`);
       // Only the selection: with one colour selected and the switch on, the slices and the
       // OBJ hold those voxels alone, under names of their own; switched off, the whole scene.
       const toolWas = st().tool;
