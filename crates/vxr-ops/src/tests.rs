@@ -85,6 +85,7 @@ fn tool_schemas() {
             "copy",
             "cut",
             "paste",
+            "stamp",
             "delete",
             "hollow",
             "fill_inside",
@@ -1324,6 +1325,7 @@ fn scoped_calls() -> Vec<(&'static str, Value)> {
         ("copy", json!({})),
         ("cut", json!({})),
         ("paste", json!({"at": [0, 5, 0]})),
+        ("stamp", json!({"at": [[0, 5, 0]]})),
         ("delete", json!({})),
         ("hollow", json!({})),
         ("fill_inside", json!({"slot": 1})),
@@ -2469,4 +2471,83 @@ fn erase_by_slot_and_the_selection_limit_refuse_what_they_cannot_do() {
         );
     }
     assert_eq!(get(&mut o, &mut s, [0, 0, 0]), 10, "a refused call changes nothing");
+}
+
+#[test]
+fn stamp_sets_the_copy_down_as_the_pattern_brush_does() {
+    // Break caught: the agent's stamp and the pattern brush drifting apart (which way the
+    // copy grows, how it is centred, what erase and paint leave alone). Each row is a call
+    // and the same press with the brush: the tool grows from the cell toward `side`, the
+    // brush out of the pressed face for add and into it for erase and paint.
+    let rows = [
+        ("add", [6, 0, 6], "top", Tool::Add, [6, -1, 6], [0, 1, 0]),
+        ("add", [4, 2, 1], "right", Tool::Add, [3, 2, 1], [1, 0, 0]),
+        ("add", [1, 2, -1], "back", Tool::Add, [1, 2, 0], [0, 0, -1]),
+        ("erase", [1, 3, 1], "bottom", Tool::Erase, [1, 3, 1], [0, 1, 0]),
+        ("paint", [3, 0, 2], "left", Tool::Paint, [3, 0, 2], [1, 0, 0]),
+    ];
+    for (mode, at, side, tool, voxel, normal) in rows {
+        let mut s = opened();
+        let mut o = Session::new(&s, None);
+        // The column of three and the slab cell under it: an L-free 1 x 4 x 1 of two colours.
+        call(&mut o, &mut s, "select", json!({"from": [1, 0, 1], "to": [1, 3, 1]}));
+        assert_eq!(call(&mut o, &mut s, "copy", json!({})), "copied 4 voxels, a 1 x 4 x 1 box from [1, 0, 1]");
+        call(&mut o, &mut s, "select", json!({"none": true}));
+
+        let mut b = opened();
+        b.clipboard = o.clipboard().cloned();
+        let brush =
+            Brush { tool, shape: Shape::Pattern, mirror: [false; 3], lock: None, color: 7, size: 1, inside: false };
+        let t = Target { voxel: b.to_map(voxel), normal, value: 1, ground: false };
+        let Press::Drag(g) = b.press(brush, t) else { panic!("expected a drag") };
+        let changed = g.release(&mut b);
+        assert!(changed > 0, "{mode} {side}: the brush changed nothing");
+
+        let said = call(&mut o, &mut s, "stamp", json!({"at": [at], "side": side, "mode": mode}));
+        assert!(said.starts_with(&format!("stamped 1 times; {changed} cells changed")), "{mode} {side}: {said}");
+        o.apply(&mut s).unwrap();
+        assert_eq!(voxels(&s), voxels(&b), "{mode} {side}");
+    }
+}
+
+#[test]
+fn stamp_repeats_the_clipboard_in_one_step_and_says_what_it_needs() {
+    let mut s = opened();
+    let bytes = s.to_vox().unwrap();
+    let mut o = Session::new(&s, None);
+    assert_eq!(err(&mut o, &mut s, "stamp", json!({"at": [[5, 0, 5]]})).1, "the clipboard is empty: copy or cut first");
+    call(&mut o, &mut s, "select", json!({"from": [1, 0, 1], "to": [1, 3, 1]}));
+    call(&mut o, &mut s, "copy", json!({}));
+    assert_eq!(err(&mut o, &mut s, "stamp", json!({"at": []})).1, "at is empty: give the cells to stamp at");
+    assert_eq!(
+        err(&mut o, &mut s, "stamp", json!({"at": [[5, 0, 5]], "selection": true})).1,
+        "selection: true limits mode erase and paint; add is never limited"
+    );
+    // Three stamps, the last two overlapping one cell apart in height: the later one wins
+    // where they meet, as two brush presses in that order would leave it. The selection stays.
+    let r = call(&mut o, &mut s, "stamp", json!({"at": [[8, 0, 8], [10, 0, 10], [10, 1, 10]]}));
+    assert!(r.starts_with("stamped 3 times; 9 cells changed"), "{r}");
+    assert_eq!(o.selection().count(), 4);
+    let column = |o: &mut Session, s: &mut Scene, x: i32| {
+        o.begin_turn();
+        let cells: Vec<[i32; 3]> = (0..6).map(|y| [x, y, x]).collect();
+        let got = json(&call(o, s, "get_voxels", json!({"cells": cells})));
+        (0..6).map(|i| got["cells"][i][3].as_i64().unwrap()).collect::<Vec<_>>()
+    };
+    assert_eq!(column(&mut o, &mut s, 8), [10, 20, 20, 20, 0, 0]);
+    assert_eq!(column(&mut o, &mut s, 10), [10, 10, 20, 20, 20, 0]);
+    // At the edge the cells outside are skipped and counted.
+    let r = call(&mut o, &mut s, "stamp", json!({"at": [[15, 30, 15]]}));
+    assert!(r.starts_with("stamped 1 times; 2 cells changed") && r.contains("warning: 2 cells were outside"), "{r}");
+    // Erase limited to the selection: the stamp covers the column and the slab under it, and
+    // only the selected ones go. Here all four are selected; deselect the slab cell first.
+    call(&mut o, &mut s, "select", json!({"from": [1, 0, 1], "to": [1, 0, 1], "mode": "subtract"}));
+    let r = call(&mut o, &mut s, "stamp", json!({"at": [[1, 0, 1]], "mode": "erase", "selection": true}));
+    assert!(r.starts_with("stamped 1 times; 3 cells changed"), "{r}");
+    assert_eq!(column(&mut o, &mut s, 1), [10, 0, 0, 0, 0, 0]);
+    // More stamps than the limit allows are refused before any work.
+    let many: Vec<[i32; 3]> = (0..600_000).map(|i| [i % 16, 0, 0]).collect();
+    let (_, m) = err(&mut o, &mut s, "stamp", json!({"at": many}));
+    assert_eq!(m, "600000 stamps of 4 voxels are 2400000 cells; at most 2000000");
+    apply_and_undo(o, &mut s, &bytes);
 }

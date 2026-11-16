@@ -676,9 +676,14 @@ fn the_ui_s_other_actions_have_tools() {
     assert!(c.ok("select", json!({"invert": true})).starts_with("0 voxels selected"));
     let t = c.ok("circle", json!({"center": [0, 2, 0], "radius": 2, "slot": 9}));
     assert!(t.starts_with("21 cells changed"), "{t}");
+    // The pattern brush: two cells of the disc copied, then painted onto the slab twice.
+    c.ok("select", json!({"from": [0, 2, 0], "to": [1, 2, 0]}));
+    assert_eq!(c.ok("copy", json!({})), "copied 2 voxels, a 2 x 1 x 1 box from [0, 2, 0]");
+    let t = c.ok("stamp", json!({"at": [[2, 0, 2], [-2, 0, -2]], "mode": "paint"}));
+    assert!(t.starts_with("stamped 2 times; 4 cells changed"), "{t}");
     let t = c.ok("palette_swap", json!({"a": 9, "b": 200}));
     assert!(
-        t.starts_with("swapped slots 9 and 200: slot 9 is now #ffffff (0 voxels), slot 200 is now #fa8c1e (85 voxels)"),
+        t.starts_with("swapped slots 9 and 200: slot 9 is now #ffffff (0 voxels), slot 200 is now #fa8c1e (89 voxels)"),
         "{t}"
     );
     c.ok("show_world", json!({}));
@@ -688,12 +693,12 @@ fn the_ui_s_other_actions_have_tools() {
     let w = summary(&mut d)["world"].clone();
     assert_eq!(w["nodes"].as_array().unwrap().len(), 7, "the gem is gone: {w}");
     assert!(w["layers"].as_array().unwrap().iter().any(|l| l["id"] == 0 && l["hidden"] == true), "{w}");
-    // Thirteen edits, thirteen undo steps, and the selections none.
+    // Fourteen edits, fourteen undo steps, and the selections none.
     let mut steps = 0;
     while !c.tool("undo", json!({})).1 {
         steps += 1;
     }
-    assert_eq!(steps, 13);
+    assert_eq!(steps, 14);
     c.ok("save", json!({"path": "undone.vox"}));
     assert_eq!(std::fs::read(dir.0.join("undone.vox")).unwrap(), bytes);
 }

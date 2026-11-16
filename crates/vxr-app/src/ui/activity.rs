@@ -172,6 +172,7 @@ pub fn verb(c: &AgentCall, running: bool) -> String {
         "copy" => ("Copying", "Copied voxels".into()),
         "cut" => ("Cutting", "Cut voxels".into()),
         "paste" => ("Pasting", "Pasted voxels".into()),
+        "stamp" => ("Stamping a pattern", "Stamped a pattern".into()),
         "delete" => ("Deleting voxels", "Deleted voxels".into()),
         "transform" => ("Transforming", "Transformed voxels".into()),
         "resize" => ("Resizing", "Resized the bounds".into()),
@@ -220,7 +221,7 @@ pub fn tool_icon(tool: &str) -> char {
         "erase" | "delete" | "cut" | "delete_object" => icon::ERASER,
         "paint" | "palette_set" | "palette_swap" | "palette_copy" | "palette_adjust" | "palette_sort"
         | "palette_import" | "material_set" => icon::PAINTBRUSH,
-        "select" | "copy" | "paste" => icon::SELECT,
+        "select" | "copy" | "paste" | "stamp" => icon::SELECT,
         "undo" => icon::UNDO,
         "redo" => icon::REDO,
         "done" => icon::CIRCLE_CHECK,

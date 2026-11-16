@@ -540,6 +540,9 @@ fn the_edit_tools_change_the_window_and_undo_gives_the_file_back() {
     assert_eq!(call("copy", json!({})), "copied 3 voxels, a 1 x 3 x 1 box from [1, 1, 1]");
     let t = call("paste", json!({"at": [5, 0, 5]}));
     assert!(t.starts_with("pasted at [5, 0, 5] (low corner); 3 cells changed"), "{t}");
+    // The same clipboard as a pattern brush: two stamps in one call, one undo step.
+    let t = call("stamp", json!({"at": [[3, 1, -3], [-3, 1, 3]]}));
+    assert!(t.starts_with("stamped 2 times; 6 cells changed"), "{t}");
     // Taller bounds, then a post above the old top.
     let t = call("resize", json!({"size": [32, 40, 32]}));
     assert!(t.starts_with("bounds x -16..15, y 0..39, z -16..15 (32 x 40 x 32); 0 cells changed"), "{t}");
@@ -551,9 +554,9 @@ fn the_edit_tools_change_the_window_and_undo_gives_the_file_back() {
     assert!(t.ends_with("; warning: nothing changed"), "{t}");
     let t = call("crop", json!({}));
     assert!(t.starts_with("bounds x -5..5, y 0..35, z -5..5 (11 x 36 x 11); 0 cells changed"), "{t}");
-    // Seven edits, seven undo steps: undone, the save is the file's bytes.
-    assert_eq!(w.scene.history().position(), 7);
-    for _ in 0..7 {
+    // Eight edits, eight undo steps: undone, the save is the file's bytes.
+    assert_eq!(w.scene.history().position(), 8);
+    for _ in 0..8 {
         assert!(w.scene.undo());
     }
     assert!(!w.scene.undo());

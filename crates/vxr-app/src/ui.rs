@@ -165,6 +165,7 @@ mod icon {
     pub const PIPETTE: char = '\u{e13b}';
     pub const POINTER: char = '\u{e1c3}';
     pub const SQUARE_DASHED: char = '\u{e1cb}';
+    pub const STAMP: char = '\u{e3bb}';
     pub const LAYERS: char = '\u{e529}';
     pub const PLUS: char = '\u{e13d}';
     pub const MINUS: char = '\u{e11c}';
@@ -983,6 +984,7 @@ const COMMANDS: &[Command] = &[
     Command { label: "Line brush", keys: &["L"], run: |h| h.shape = Shape::Line },
     Command { label: "Center brush: circle", keys: &["C"], run: |h| h.shape = Shape::Circle },
     Command { label: "Center brush: sphere", keys: &["C", "C"], run: |h| h.shape = Shape::Sphere },
+    Command { label: "Pattern brush", keys: &["T"], run: |h| h.shape = Shape::Pattern },
     Command { label: "Mirror", keys: &["M"], run: |h| h.mirror = !h.mirror },
     Command { label: "Mirror X", keys: &[], run: |h| h.toggle_mirror_axis(0) },
     Command { label: "Mirror Y", keys: &[], run: |h| h.toggle_mirror_axis(1) },
@@ -1883,6 +1885,7 @@ impl Hybrid {
                 (Key::F, |h| h.shape = Shape::Face),
                 (Key::L, |h| h.shape = Shape::Line),
                 (Key::C, |h| h.center_brush()),
+                (Key::T, |h| h.shape = Shape::Pattern),
                 (Key::M, |h| h.mirror = !h.mirror),
                 (Key::K, |h| h.cycle_lock()),
                 (Key::R, |h| h.toggle_render_panel()),
@@ -2401,6 +2404,13 @@ impl Hybrid {
             if r.clicked() {
                 self.center_brush();
             }
+            y += TOOL_STEP;
+            // The pattern brush stamps the copied selection.
+            let r = tool_button(ui, pos2(x, y), icon::STAMP, "T", shape == Shape::Pattern);
+            self.hits.insert("pattern".into(), r.rect);
+            if r.clicked() {
+                self.shape = Shape::Pattern;
+            }
             let Pos2 { x, mut y } = start(2);
             if at[2].y > at[1].y {
                 rail_sep(ui, x, &mut y);
@@ -2487,9 +2497,9 @@ impl Hybrid {
         let step = DOCK_BTN + 2.0;
         let bar = |n: f32, seps: f32| 5.0 + n * step - 2.0 + seps * sep_w() + 5.0;
         let widths: &[f32] = if view.width() < bar(8.0, 2.0) + 24.0 {
-            &[bar(5.0, 0.0), bar(5.0, 0.0), bar(5.0, 2.0)]
+            &[bar(5.0, 0.0), bar(6.0, 0.0), bar(5.0, 2.0)]
         } else {
-            &[bar(8.0, 2.0), bar(7.0, 1.0)]
+            &[bar(8.0, 2.0), bar(8.0, 1.0)]
         };
         let mut top = view.bottom() - 12.0;
         widths
@@ -2627,6 +2637,12 @@ impl Hybrid {
         hits.push(("center", r.rect));
         if r.clicked() {
             self.center_brush();
+        }
+        *x += DOCK_BTN + 2.0;
+        let r = dock_button(ui, pos2(*x, y), icon::STAMP, "pattern", shape == Shape::Pattern, true);
+        hits.push(("pattern", r.rect));
+        if r.clicked() {
+            self.shape = Shape::Pattern;
         }
         *x += DOCK_BTN + 2.0;
     }
@@ -5902,6 +5918,12 @@ impl Hybrid {
             (Tool::Add, Shape::Sphere) => vec![("Drag", "grow a sphere from its center"), ("C", "circle")],
             (Tool::Erase, Shape::Sphere) => vec![("Drag", "carve a sphere"), ("C", "circle")],
             (Tool::Paint, Shape::Sphere) => vec![("Drag", "paint a sphere"), ("C", "circle")],
+            (_, Shape::Pattern) if !self.has_clip && t != Tool::Pick && t != Tool::Select => {
+                vec![("⌘C", "copy a selection to stamp")]
+            }
+            (Tool::Add, Shape::Pattern) => vec![("Click", "stamp the copy"), ("Drag", "move it, release to place")],
+            (Tool::Erase, Shape::Pattern) => vec![("Click", "carve the copy's shape"), ("Drag", "move it")],
+            (Tool::Paint, Shape::Pattern) => vec![("Click", "paint the copy's colors"), ("Drag", "move it")],
             (Tool::Pick, _) => vec![("Click", "take that color")],
             (Tool::Select, _) if self.selected > 0 => {
                 vec![("Drag", "box select"), ("Drag selection", "move it"), ("Arrows", "nudge"), ("⌫", "delete")]
@@ -6373,7 +6395,7 @@ fn rail_layout(max_h: f32) -> ([egui::Vec2; 3], egui::Vec2) {
     let (pad, sep, col) = (6.0, 9.0, TOOL + 6.0);
     let mut at = [egui::Vec2::ZERO; 3];
     let (mut x, mut y, mut h) = (pad, pad, 0.0_f32);
-    for (i, n) in [5.0, 5.0, 3.0].into_iter().enumerate() {
+    for (i, n) in [5.0, 6.0, 3.0].into_iter().enumerate() {
         let tall = n * TOOL_STEP - (TOOL_STEP - TOOL);
         if i > 0 && y + sep + tall + pad > max_h {
             (x, y) = (x + col, pad);
@@ -6937,6 +6959,7 @@ mod tests {
             "brush-face",
             "brush-line",
             "center",
+            "pattern",
             "mirror",
             "lock",
             "library",

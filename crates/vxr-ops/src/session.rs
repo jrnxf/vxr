@@ -22,7 +22,7 @@ use vxr_core::material::{Kind, Material};
 use vxr_core::palette::{Shift, SortKey, slots_of, sort_table};
 use vxr_core::scene::MAX_EXTENT;
 use vxr_core::select::{Clip, bounds};
-use vxr_core::tools::{MAX_RADIUS, ball_cells, box_cells, line_cells, line_steps};
+use vxr_core::tools::{MAX_RADIUS, ball_cells, box_cells, line_cells, line_steps, pattern_cells};
 use vxr_core::{Scene, World};
 use vxr_vox::chunk::{NOTE, Note};
 use vxr_vox::raw::RawFile;
@@ -589,6 +589,37 @@ impl Session {
                 let st = self.stage(scene, cells.collect(), false)?;
                 self.selection = st.made.iter().copied().collect();
                 Ok(format!("pasted at {corner:?} (low corner); {}", self.stage_text(scene, &st)))
+            }
+            Op::Stamp(a) => {
+                let Some(clip) = self.clip.clone() else {
+                    return Err(invalid("the clipboard is empty: copy or cut first"));
+                };
+                if a.at.is_empty() {
+                    return Err(invalid("at is empty: give the cells to stamp at"));
+                }
+                let total = (a.at.len() as i64).saturating_mul(clip.voxels.len() as i64);
+                if total > self.limits.box_cells {
+                    return Err(invalid(format!(
+                        "{} stamps of {} voxels are {total} cells; at most {}",
+                        a.at.len(),
+                        clip.voxels.len(),
+                        self.limits.box_cells
+                    )));
+                }
+                let grow = a.side.unwrap_or(Side::Top).normal();
+                // Staging keeps a cell's first slot: the last stamp goes first, so it wins.
+                let mut cells: Vec<(Cell, u8)> =
+                    a.at.iter().rev().flat_map(|&at| pattern_cells(&clip, at, grow)).collect();
+                if a.selection {
+                    let keep: HashSet<Cell> =
+                        self.inside(scene, cells.iter().map(|c| c.0).collect(), a.mode, true)?.into_iter().collect();
+                    cells.retain(|c| keep.contains(&c.0));
+                }
+                if a.mode == Mode::Erase {
+                    cells.iter_mut().for_each(|c| c.1 = 0);
+                }
+                let st = self.stage(scene, cells, a.mode == Mode::Paint)?;
+                Ok(format!("stamped {} times; {}", a.at.len(), self.stage_text(scene, &st)))
             }
             Op::Delete(_) => {
                 let st = self.delete(scene)?;

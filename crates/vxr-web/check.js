@@ -312,6 +312,22 @@ async () => {
   await key('v', cmd);
   step('Cmd-C, Cmd-V pastes a copy at the pointer, selected', st().hasClip && !same(bytes(), original) && st().selected > 0, JSON.stringify([st().hasClip, st().selected, st().voxels - s0.voxels]));
   await key('z', cmd);
+  // The pattern brush (T) stamps that copy: shown at the press, moved by the drag, one undo step.
+  await key('a');
+  await key('t');
+  const stampKept = st().selected;
+  ptr('pointermove', mx - 150, my + 60); await frames();
+  ptr('pointerdown', mx - 150, my + 60); await frames();
+  const stamped = st();
+  for (let i = 1; i <= 6; i++) { ptr('pointermove', mx - 150 + i * 6, my + 60); await frames(1); }
+  ptr('pointerup', mx - 114, my + 60); await frames();
+  s = st();
+  step('T pattern brush stamps the copy: live at the press, placed at the release', stamped.shape === 'Pattern' && stamped.span?.[0] === 'PATTERN' && stamped.voxels > s0.voxels && s.voxels > s0.voxels && s.span === null && s.selected === stampKept && window.vxr.hit('pattern').length === 2,
+    JSON.stringify([stamped.shape, stamped.span, s0.voxels, stamped.voxels, s.voxels, s.selected, stampKept]));
+  await key('z', cmd);
+  step('the stamp is one undo step', same(bytes(), original));
+  await key('v');
+  await key('s');
   await click(mx, my);
   const v0 = st().voxels;
   await key('Backspace');

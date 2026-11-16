@@ -449,7 +449,7 @@ impl Player {
                         self.gesture = Some(g);
                     }
                     Press::Picked(v) => self.color = v,
-                    Press::Done(_) | Press::Nothing => {}
+                    Press::Done(_) | Press::Nothing | Press::NoPattern => {}
                 }
             }
             Drag(_) | LiftTo(_) => {

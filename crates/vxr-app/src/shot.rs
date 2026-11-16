@@ -579,6 +579,7 @@ fn phone(dir: &Path, load: &dyn Fn() -> Result<(Scene, String), String>) -> Resu
         "brush-face",
         "brush-line",
         "center",
+        "pattern",
         "mirror",
         "lock",
         "library",
@@ -2882,6 +2883,67 @@ fn selection(dir: &Path) -> Result<(), String> {
     check(s.ed.scene.map.counts[5] == 24, "fill paints the selection with the current colour".into())?;
     s.frames_with(2, vec![key(egui::Key::Backspace, none)]);
     check(s.voxels() == v && count(&s) == 0, "Backspace deletes the selection".into())?;
+
+    // The pattern brush (T, the rail's stamp button, Cmd-K): the copy of block A as a stamp.
+    // A press on the ground shows it standing there, a drag moves it, the release leaves it
+    // (a drag is read on the middle of the pressed layer, half a cell above the ground)
+    // as one undo step; with erase, a press on its top takes exactly it away again.
+    s.frames_with(2, vec![key(egui::Key::A, none)]);
+    s.frames_with(2, vec![key(egui::Key::T, none)]);
+    let by_key = s.ed.ui.shape == Shape::Pattern;
+    s.ed.ui.shape = Shape::Voxel;
+    s.frames(2);
+    s.ui_click("pattern")?;
+    let by_rail = s.ed.ui.shape == Shape::Pattern;
+    s.ed.ui.shape = Shape::Voxel;
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("pattern brush".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, none)]);
+    check(
+        by_key && by_rail && (s.ed.ui.tool, s.ed.ui.shape) == (Tool::Add, Shape::Pattern),
+        format!("T, the rail's stamp button and Cmd-K Pattern brush choose the pattern brush ({by_key} {by_rail})"),
+    )?;
+    let get = |s: &Shot, p: [i32; 3]| s.ed.scene.map.get(p[0], p[1], p[2]);
+    let position = s.ed.scene.history().position();
+    s.ed.pointer_moved(Some(project(&s.ed, [59.5, 0.0, 61.5])));
+    s.ed.button(Button::Left, true, false);
+    let pressed = (s.ed.span(), s.voxels(), get(&s, [57, 1, 60]));
+    s.ed.pointer_moved(Some(project(&s.ed, [60.5, 0.5, 61.5])));
+    s.ed.pointer_moved(Some(project(&s.ed, [61.5, 0.5, 61.5])));
+    s.frames(2);
+    s.save_png(&dir.join("pattern-brush.png"))?;
+    let moved = (s.voxels(), get(&s, [57, 1, 60]), get(&s, [59, 1, 60]), get(&s, [62, 0, 62]));
+    s.ed.button(Button::Left, false, false);
+    let placed = s.ed.scene.history().position() != position && count(&s) == 0;
+    check(
+        pressed == (Some(("PATTERN", "4×2×3".into())), v + 24, 13) && moved == (v + 24, 0, 13, 12) && placed,
+        format!("pattern brush: a press shows the stamp {pressed:?}, a drag moves it {moved:?}, the release places it"),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::E, none)]);
+    s.stroke(project(&s.ed, [61.5, 1.99, 61.5]), &[]);
+    let carved = s.voxels();
+    s.ed.undo();
+    let back = s.voxels();
+    s.ed.undo();
+    check(
+        carved == v && back == v + 24 && s.voxels() == v,
+        format!("pattern brush with erase takes the stamp's shape away ({carved}); each is one undo step ({back})"),
+    )?;
+    // With nothing copied, a press changes nothing and says what the brush needs.
+    let clip = s.ed.scene.clipboard.take();
+    s.frames_with(2, vec![key(egui::Key::A, none)]);
+    s.stroke(project(&s.ed, [52.5, 0.0, 72.5]), &[]);
+    s.frames(2);
+    check(
+        s.voxels() == v
+            && s.ed.ui.toast_text() == Some("Copy a selection first: the pattern brush stamps it")
+            && s.ed.scene.history().position() == position,
+        format!("pattern brush with nothing copied changes nothing and says so ({:?})", s.ed.ui.toast_text()),
+    )?;
+    s.save_png(&dir.join("pattern-brush-empty.png"))?;
+    s.ed.scene.clipboard = clip;
+    s.tool(Tool::Select, Shape::Voxel);
+    s.frames(2);
 
     s.frames_with(2, vec![key(egui::Key::A, egui::Modifiers::COMMAND)]);
     let all = count(&s);

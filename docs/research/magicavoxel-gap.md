@@ -10,7 +10,7 @@ Status as of 2026-11-16 (Monday; Phase 3, after the web embed and the exports fo
 - **Priority**: P1 is needed before a MagicaVoxel user could switch, P2 is expected soon after, P3 is nice to have or out of scope for now.
 - **Why**: which reason people love MagicaVoxel it serves (see `docs/market-research.md`, "Why it is loved"): **minutes** (results in minutes), **sculpt** (the hand-sculpting feel), **palette** (palette-first work), **render** (a beautiful built-in renderer), **lossless** (lossless `.vox`). A dash means it serves none of them directly.
 - **Build order**: the numbers in brackets, such as [1], are the Part 3 order in which the done rows were built (1 lossless save, 2 palette editing, 3 preview, render and materials, 4 line and center brushes, 5 selection and transform, 6 model tools, 7 camera and view, 8 world editor, 9 export).
-- **Next, in order**: the pattern brush, scene tree multi-select and reorder, image import, click to focus, saved camera views. Sort palette, image import and saved views are P3 rows pulled forward because a switching user meets them early.
+- **Next, in order**: scene tree multi-select and reorder, image import, click to focus, saved camera views. Sort palette, image import and saved views are P3 rows pulled forward because a switching user meets them early.
 
 MagicaVoxel versions: 0.99.7.2 (July 2025) is the current build and is Windows-only. The Mac build stopped at 0.99.6.2 (September 2020) [S1]. A user switching from the Mac build expects the 0.99.6 set; a Windows user expects 0.99.7's palette groups, layer sorting and animation timeline.
 
@@ -35,7 +35,7 @@ Feature names below follow the update log [S1] unless another source is given.
 | Box brush (B) | Drag a rectangle, resizable with a gizmo, Enter commits [S1 0.99.5.1] | done (drag a rectangle, then the pointer sets its height until a click or Enter places it, Escape drops it; no gizmo) | P1 | minutes |
 | Line brush (L) | Line, square and circle in one geometry mode since 0.99.6.2 [S1 0.99.6.2] | done (L: drag a line on the drag plane, shown live) | P1 | sculpt |
 | Center brush (C) | Square or circle from a center point, even diameters [S1 0.97, 0.97.1] | done (C: circle on the drag plane from its center, C again for a sphere; no square or even diameters) | P1 | sculpt |
-| Pattern brush (P) | Stamp a pattern made from a selection, rotate and offset it [S1 0.98.1] | missing | P2 | minutes |
+| Pattern brush (P) | Stamp a pattern made from a selection, rotate and offset it [S1 0.98.1] | done (T: stamps the copied selection against the face under the pointer, shown at the press, moved by the drag, placed at the release; add, erase and paint; mirror and Brush inside only apply; the agent's `stamp`; no rotate or offset option: rotate the selection before copying it) | P2 | minutes |
 | Mirror X, Y, Z | Per-axis mirror on every brush [S1 0.97] | done (M toggles; X, Y, Z chips in the axis flyout; planes in `docs/decisions.md`) | P1 | sculpt |
 | Axis lock | Brush option "axis" [S1 0.97, 0.99.5.1] | done (K cycles X, Y, Z, off: drags stay on the plane across that axis) | P1 | sculpt |
 | Diagonal symmetry | Command `dia [axis]` [S1 0.98.1] | missing | P3 | - |
@@ -198,7 +198,7 @@ Design note: `.vox` animation is a list of `nSHP` models with `_f` frame indices
 
 1. Lossless save [1] was the one blocking gap for anyone with existing files. It is done: saving an opened MagicaVoxel scene keeps its materials, layers, cameras and names.
 2. The palette [2] and the renderer [3] were the two loved features vxr lacked most visibly. Palette editing is done (picker, live recolour, swap and copy, multi-select with group hue, saturation and value edits, sorting, and export as a PNG strip and as text); palette import remains. The live path-traced corner, the Render panel (sun, sky, exposure, depth of field, samples), PNG export and per-slot materials (diffuse, metal, plastic, glass, emissive, saved as MATL) are in; refraction (glass does not bend light), click to focus and the newer blend and cloud types remain.
-3. Brushes [4] and selection [5] are in (line, center circle and sphere, mirror on X, Y and Z, axis lock; box and colour select, move, copy, paste, delete, fill, rotate, flip and loop), which closes the sculpting gap apart from the pattern brush (region options and the one-step replace and remove colour are in).
+3. Brushes [4] and selection [5] are in (line, center circle and sphere, mirror on X, Y and Z, axis lock; box and colour select, move, copy, paste, delete, fill, rotate, flip and loop), which closes the sculpting gap (the pattern brush, region options and the one-step replace and remove colour are in).
 4. The world editor [8] is in for scenes with many objects (objects, groups, linked copies, layers, the scene tree, all saved losslessly). Objects and groups rotate and flip in 90 degree steps. Multi-select and reorder in the tree remain.
 5. Export [9] is in: OBJ, PNG slices, the isometric sprite, each also for the selection alone, the palette, the turntable and the web embed. Image and palette import remain.
 6. No row marked P1 is missing. One P1 row is partial: the platform row (a Linux download and a Windows build).

@@ -107,6 +107,17 @@ impl Clip {
             None => [self.from[0] + self.size[0], self.from[1], self.from[2]],
         }
     }
+
+    /// Where the pattern brush puts the low corner: the box starts in cell `at` and grows
+    /// along the unit vector `grow` (out of a face, or into it), centred on `at` across it.
+    /// Growing up, it is where Paste puts it ([`Clip::corner`]).
+    pub fn against(&self, at: [i32; 3], grow: [i32; 3]) -> [i32; 3] {
+        std::array::from_fn(|a| match grow[a] {
+            0 => at[a] - self.size[a] / 2,
+            g if g > 0 => at[a],
+            _ => at[a] - self.size[a] + 1,
+        })
+    }
 }
 
 impl Transform {

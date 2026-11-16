@@ -986,6 +986,7 @@ mod tests {
                 "copy",
                 "cut",
                 "paste",
+                "stamp",
                 "delete",
                 "hollow",
                 "fill_inside",

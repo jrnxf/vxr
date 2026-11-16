@@ -1039,6 +1039,7 @@ impl Editor {
             }
             Press::Drag(g) => self.gesture = Some(g),
             Press::Done(_) => self.tour_drew(),
+            Press::NoPattern => self.ui.toast(&self.ctx, "Copy a selection first: the pattern brush stamps it"),
             Press::Nothing => {}
         }
     }
@@ -1658,6 +1659,7 @@ impl Editor {
                 Shape::Box => Some(("BOX", format!("{}×{}×{}", d[0], d[1], d[2]))),
                 Shape::Line => Some(("LINE", format!("{}", d.into_iter().max().unwrap_or(1)))),
                 Shape::Circle | Shape::Sphere => Some(("RADIUS", format!("{}", g.radius()))),
+                Shape::Pattern => Some(("PATTERN", format!("{}×{}×{}", d[0], d[1], d[2]))),
                 Shape::Voxel | Shape::Face => None,
             }
         })

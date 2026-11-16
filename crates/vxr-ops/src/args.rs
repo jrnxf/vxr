@@ -362,6 +362,20 @@ pub struct Paste {
     pub at: Option<Cell>,
 }
 
+/// Stamp your clipboard (copy or cut first) as a pattern, once at each cell of at, in one step: the pattern brush. The clipboard's box starts in the cell and grows toward side (default top: it stands on the cell, as paste puts it), centred on the cell across that. Mode add puts its voxels, erase clears the cells where it has voxels, paint gives the voxels it covers its colours. Where stamps overlap the later one wins. Cells outside the editable bounds are skipped with a warning. The selection stays.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Stamp {
+    /// Cells [x, y, z], one stamp each.
+    pub at: Vec<Cell>,
+    pub side: Option<Side>,
+    #[serde(default)]
+    pub mode: Mode,
+    /// Change only voxels that are selected (select first); for mode erase and paint.
+    #[serde(default)]
+    pub selection: bool,
+}
+
 /// Erase the selected voxels; the selection empties.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -777,6 +791,7 @@ ops! {
     "copy" => Copy(CopySelection),
     "cut" => Cut(Cut),
     "paste" => Paste(Paste),
+    "stamp" => Stamp(Stamp),
     "delete" => Delete(Delete),
     "hollow" => Hollow(Hollow),
     "fill_inside" => FillInside(FillInside),
@@ -849,8 +864,8 @@ impl Op {
             "move_object" | "transform_object" | "duplicate" | "group" | "ungroup" | "hide" | "set_layer"
             | "delete_object" | "new_layer" | "hide_layer" => Scope::World,
             "place" | "erase" | "box" | "line" | "sphere" | "circle" | "face" | "fill" | "paint" | "select"
-            | "transform" | "copy" | "cut" | "paste" | "delete" | "hollow" | "fill_inside" | "resize" | "crop"
-            | "palette_swap" | "make_object" => Scope::Model,
+            | "transform" | "copy" | "cut" | "paste" | "stamp" | "delete" | "hollow" | "fill_inside" | "resize"
+            | "crop" | "palette_swap" | "make_object" => Scope::Model,
             _ => Scope::Any,
         }
     }
