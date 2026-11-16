@@ -26,6 +26,8 @@ fn tool(a: &Action) -> Option<&'static str> {
         Action::CopyColor { .. } => Some("palette_copy"),
         Action::Transform(_) => Some("transform"),
         Action::SelectAll | Action::InvertSelection | Action::SelectColor | Action::Deselect => Some("select"),
+        // `selection: true` on box, line, sphere, circle, face and erase.
+        Action::BrushInside => Some("box"),
         Action::DeleteSelection => Some("delete"),
         Action::FillSelection => Some("fill"),
         Action::Hollow => Some("hollow"),
@@ -118,6 +120,7 @@ fn with_tools() -> Vec<Action> {
         Action::SelectAll,
         Action::InvertSelection,
         Action::SelectColor,
+        Action::BrushInside,
         Action::Deselect,
         Action::DeleteSelection,
         Action::FillSelection,

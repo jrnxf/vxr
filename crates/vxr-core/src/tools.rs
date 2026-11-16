@@ -52,6 +52,10 @@ pub struct Brush {
     /// pressed face and as deep as it is wide, out of the face for add and into it for erase
     /// and paint.
     pub size: u8,
+    /// Erase and paint change only selected voxels while any are selected (MagicaVoxel's
+    /// region option, [`crate::select::inside`]). Add is never limited: a selection holds
+    /// only voxels, so there would be no cell left to add to.
+    pub inside: bool,
 }
 
 /// What a ray points at: a voxel face, or the ground plane under the model.
@@ -153,7 +157,9 @@ impl Scene {
         self.mirror(p, 0)
     }
 
-    /// Set a cell and its mirror images: up to eight cells with all three axes on.
+    /// Set a cell and its mirror images: up to eight cells with all three axes on. Erase and
+    /// paint change only cells that hold a voxel (a mirror image over empty space stays
+    /// empty) and, with [`Brush::inside`], only selected ones.
     fn put_brush(&mut self, brush: &Brush, p: [i32; 3], v: u8) {
         let mut cells = [p; 8];
         let mut n = 1;
@@ -165,10 +171,17 @@ impl Scene {
                 n *= 2;
             }
         }
+        let add = brush.tool == Tool::Add;
         for (i, &c) in cells[..n].iter().enumerate() {
-            if !cells[..i].contains(&c) {
-                self.put(c, v);
+            if cells[..i].contains(&c) {
+                continue;
             }
+            if !add
+                && (self.map.get(c[0], c[1], c[2]) == 0 || (brush.inside && !crate::select::inside(&self.selection, c)))
+            {
+                continue;
+            }
+            self.put(c, v);
         }
     }
 

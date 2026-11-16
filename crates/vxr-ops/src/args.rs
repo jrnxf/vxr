@@ -157,6 +157,9 @@ pub struct Erase {
     /// Several part ids or names.
     #[serde(default)]
     pub parts: Vec<String>,
+    /// Clear only those of them that are selected (select first).
+    #[serde(default)]
+    pub selection: bool,
 }
 
 /// Fill the box between two corner cells (both included). hollow keeps only its outer shell.
@@ -172,6 +175,9 @@ pub struct BoxShape {
     pub mode: Mode,
     #[serde(default)]
     pub hollow: bool,
+    /// Change only voxels that are selected (select first); for mode erase and paint.
+    #[serde(default)]
+    pub selection: bool,
     /// Name the voxels this makes as a part.
     pub name: Option<String>,
 }
@@ -187,6 +193,9 @@ pub struct Line {
     pub slot: Option<u8>,
     #[serde(default)]
     pub mode: Mode,
+    /// Change only voxels that are selected (select first); for mode erase and paint.
+    #[serde(default)]
+    pub selection: bool,
     /// Name the voxels this makes as a part.
     pub name: Option<String>,
 }
@@ -204,6 +213,9 @@ pub struct Sphere {
     #[serde(default)]
     pub mode: Mode,
     pub flat_axis: Option<Axis>,
+    /// Change only voxels that are selected (select first); for mode erase and paint.
+    #[serde(default)]
+    pub selection: bool,
     /// Name the voxels this makes as a part.
     pub name: Option<String>,
 }
@@ -221,6 +233,9 @@ pub struct Circle {
     #[serde(default)]
     pub mode: Mode,
     pub axis: Option<Axis>,
+    /// Change only voxels that are selected (select first); for mode erase and paint.
+    #[serde(default)]
+    pub selection: bool,
     /// Name the voxels this makes as a part.
     pub name: Option<String>,
 }
@@ -238,6 +253,9 @@ pub struct FaceShape {
     pub slot: Option<u8>,
     #[serde(default)]
     pub mode: Mode,
+    /// Change only voxels that are selected (select first); for mode erase and paint.
+    #[serde(default)]
+    pub selection: bool,
     /// Name the voxels this makes as a part.
     pub name: Option<String>,
 }

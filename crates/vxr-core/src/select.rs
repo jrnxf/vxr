@@ -30,6 +30,13 @@ pub enum Region {
     Volume,
 }
 
+/// The region option, for brushes and for the agent tools' `selection: true`: whether an
+/// erase or a paint limited to the selection may change cell `p`. With nothing selected
+/// there is no limit.
+pub fn inside(selection: &HashSet<[i32; 3]>, p: [i32; 3]) -> bool {
+    selection.is_empty() || selection.contains(&p)
+}
+
 /// Every cell connected to `p` through faces for which `filled` holds, `p` first; empty when
 /// `p` is not filled ([`Scene::volume`]).
 pub fn connected(filled: impl Fn([i32; 3]) -> bool, p: [i32; 3]) -> Vec<[i32; 3]> {

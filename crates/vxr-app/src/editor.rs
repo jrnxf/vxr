@@ -881,6 +881,7 @@ impl Editor {
             lock: self.ui.lock,
             color: self.ui.slot,
             size: self.ui.size,
+            inside: self.ui.inside,
         }
     }
 
@@ -1867,6 +1868,10 @@ impl Editor {
                 | Action::Duplicate { .. }
                 | Action::Group
                 | Action::Ungroup => self.selection_action(a),
+                Action::BrushInside => {
+                    let now = self.ui.toggle_inside();
+                    self.ui.toast(&self.ctx, now);
+                }
                 Action::ToggleWorld => self.toggle_world(),
                 Action::PickNode(i) => self.pick_node(i),
                 Action::SetHidden(i, hidden) => self.set_hidden(i, hidden),

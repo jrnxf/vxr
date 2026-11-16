@@ -344,6 +344,23 @@ async () => {
   await chip('click-color');
   await click(mx, my);
   step('a click selects the face, the volume (Cmd-K) or the colour, with no edit', face[0] === 'Face' && face[1] > 0 && face[1] <= byColor && volume[0] === 'Volume' && volume[1] >= face[1] && st().region === 'Color' && st().selected === byColor && same(bytes(), original), JSON.stringify([face, volume, st().selected, byColor]));
+  // The region option: with "Brush inside only" on, an erase click on a voxel outside the
+  // selection (the clicked colour, once the selection is inverted) changes nothing, and
+  // on a selected voxel it takes it.
+  const limited = await chip('brush-inside') && st().brushInside;
+  const limitToast = st().toast || '';
+  await key('I', { metaKey: true, shiftKey: true });
+  await key('e');
+  await click(mx, my);
+  const outside = same(bytes(), original);
+  await key('I', { metaKey: true, shiftKey: true });
+  const whole = st().voxels;
+  await click(mx, my);
+  const tookInside = whole - st().voxels;
+  await key('z', cmd);
+  await chip('brush-inside');
+  await key('s');
+  step('Brush inside only: erase leaves a voxel outside the selection and takes one inside it', limited && /^Erase and paint stay inside the selection \(/.test(limitToast) && outside && tookInside === 1 && !st().brushInside && same(bytes(), original) && st().selected === byColor, JSON.stringify([limited, limitToast, outside, tookInside, st().brushInside, st().selected, byColor]));
   await key('Escape');
   // Model tools on the whole island: hollow, fill inside, one undo step each.
   const solid = st().voxels;

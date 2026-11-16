@@ -265,6 +265,8 @@ pub enum Action {
     ExportSprite,
     /// Flip "Only the selection" for the OBJ, slices and sprite exports, and say so.
     ExportSelection,
+    /// Flip the region option (erase and paint stay inside the selection), and say so.
+    BrushInside,
     /// Show `rgba` in palette slot `slot` now, inside the open colour edit.
     Recolor {
         slot: u8,
@@ -590,7 +592,7 @@ pub enum Named {
 const TREE_W: f32 = 212.0;
 const TREE_ROWS: usize = 14;
 /// The selection flyout's height, in points.
-const SELECTION_H: f32 = 344.0;
+const SELECTION_H: f32 = 378.0;
 
 /// What the next swatch click does, armed from the colour editor or Cmd-K.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -661,6 +663,9 @@ pub struct Hybrid {
     pub lock: Option<usize>,
     /// The voxel brush's size, 1 to [`MAX_SIZE`] (- and = step it).
     pub size: u8,
+    /// The region option: while voxels are selected, erase and paint change only those
+    /// ([`vxr_core::tools::Brush::inside`]).
+    pub inside: bool,
     /// What a select click on a voxel takes: its colour, its face or its volume.
     pub region: Region,
     /// The size flyout beside the voxel brush button is open (V again, or a click on the
@@ -953,6 +958,7 @@ const COMMANDS: &[Command] = &[
     Command { label: "Lock axis Y", keys: &[], run: |h| h.toggle_lock(1) },
     Command { label: "Lock axis Z", keys: &[], run: |h| h.toggle_lock(2) },
     Command { label: "Cycle axis lock", keys: &["K"], run: |h| h.cycle_lock() },
+    Command { label: "Brush only inside the selection", keys: &[], run: |h| h.actions.push(Action::BrushInside) },
     Command { label: "World mode / edit model", keys: &["Tab"], run: |h| h.actions.push(Action::ToggleWorld) },
     Command {
         label: "Duplicate object",
@@ -1051,6 +1057,7 @@ impl Hybrid {
             mirror: false,
             mirror_on: [true, false, false],
             lock: None,
+            inside: false,
             size: 1,
             region: Region::Color,
             size_panel: false,
@@ -3284,6 +3291,16 @@ impl Hybrid {
         !self.world && (self.tool == Tool::Select || self.selected > 0) && !self.tour_sheet()
     }
 
+    /// Flip the region option. Returns what erase and paint reach now, to say it.
+    pub fn toggle_inside(&mut self) -> String {
+        self.inside = !self.inside;
+        match (self.inside, self.selected) {
+            (false, _) => "Erase and paint reach every voxel".to_string(),
+            (true, 0) => "Erase and paint will stay inside the selection, once voxels are selected".to_string(),
+            (true, _) => format!("Erase and paint stay inside the selection ({})", self.selection_hint()),
+        }
+    }
+
     /// Choose what a select click takes, and switch to the select tool.
     pub fn set_region(&mut self, region: Region) {
         self.region = region;
@@ -3302,6 +3319,7 @@ impl Hybrid {
         let rect = self.selection_rect(ctx);
         self.hits.insert("selection".into(), rect);
         let (selected, has_clip, can_split) = (self.selected, self.has_clip, self.can_split);
+        let inside = self.inside;
         let mut region = self.region;
         let bounds_open = self.bounds_panel.is_some();
         let mut toggle_bounds = false;
@@ -3426,8 +3444,30 @@ impl Hybrid {
                 p.rect_stroke(c, CornerRadius::same(7), Stroke::new(1.0, th().line), StrokeKind::Inside);
                 p.text(c.center(), Align2::CENTER_CENTER, "To new object", sans(11.0), th().faint);
             }
+            // The region option: erase and paint stay inside the selection. It shows on like
+            // Resize while the Bounds panel is open.
+            let c = Rect::from_min_size(pos2(rect.left() + 12.0, hy + 30.0 + 7.0 * 34.0 - 13.0), vec2(138.0, 26.0));
+            let resp = ui.interact(c, Id::unique("brush-inside"), Sense::click());
+            hits.push(("brush-inside".to_string(), c));
+            let p = ui.painter();
+            if inside {
+                p.rect_filled(c, CornerRadius::same(7), th().accent_tint);
+            }
+            let border = if inside {
+                th().ring
+            } else if resp.hovered() {
+                th().tint(64)
+            } else {
+                th().line2
+            };
+            p.rect_stroke(c, CornerRadius::same(7), Stroke::new(1.0, border), StrokeKind::Inside);
+            let color = if resp.hovered() || inside { th().text } else { th().muted };
+            p.text(c.center(), Align2::CENTER_CENTER, "Brush inside only", sans(11.0), color);
+            if resp.clicked() {
+                run.push(Action::BrushInside);
+            }
             // What a click on a voxel selects.
-            let row = Rect::from_min_size(pos2(rect.left() + 12.0, hy + 30.0 + 7.0 * 34.0 - 13.0), vec2(138.0, 26.0));
+            let row = Rect::from_min_size(pos2(rect.left() + 12.0, hy + 30.0 + 8.0 * 34.0 - 13.0), vec2(138.0, 26.0));
             let mut seg = Vec::new();
             let labels = ["Color", "Face", "Volume"].map(String::from);
             let names = ["click-color", "click-face", "click-volume"];
@@ -3437,7 +3477,7 @@ impl Hybrid {
                 region = regions[k];
             }
             hits.extend(seg.into_iter().map(|(n, r)| (n.to_string(), r)));
-            let cy = hy + 30.0 + 8.0 * 34.0 + 4.0;
+            let cy = hy + 30.0 + 9.0 * 34.0 + 4.0;
             ui.painter().line_segment(
                 [pos2(rect.left() + 10.0, cy - 20.5), pos2(rect.right() - 10.0, cy - 20.5)],
                 Stroke::new(1.0, th().line),

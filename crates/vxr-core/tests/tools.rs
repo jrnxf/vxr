@@ -1,10 +1,12 @@
 //! The editing tools: each brush on a small scene, mirror, and one undo step per gesture.
 
+use proptest::prelude::*;
 use vxr_core::Scene;
+use vxr_core::select::Mode;
 use vxr_core::tools::{Brush, Press, Shape, Target, Tool, plane_cell};
 
 fn brush(tool: Tool, shape: Shape) -> Brush {
-    Brush { tool, shape, mirror: [false; 3], lock: None, color: 7, size: 1 }
+    Brush { tool, shape, mirror: [false; 3], lock: None, color: 7, size: 1, inside: false }
 }
 
 /// A 4x1x4 slab of colour 3 at y = 0, with a 1x1 bump of colour 5 on top at (0, 1, 0).
@@ -395,4 +397,94 @@ fn a_stroke_or_line_dragged_far_off_the_map_changes_only_the_map_and_stays_fast(
     let far = run(stroke, [100_000, 0, 100_000]);
     assert_eq!(far, run(stroke, [40, 0, 40]), "past 40 no 16-cube reaches the map");
     assert!(far.len() > 32 * 16);
+}
+
+/// Catches: a mirrored paint coloured the mirror image of a voxel even where that cell was
+/// empty, so painting one side of a lopsided model grew voxels on the other.
+#[test]
+fn a_mirrored_paint_or_erase_never_fills_an_empty_mirror_cell() {
+    let mut s = slab();
+    // The slab spans x 0..4, so the mirror of x 0 across the pivot is outside it.
+    let image = s.mirror_x([0, 0, 2]);
+    assert_eq!(s.map.get(image[0], image[1], image[2]), 0);
+    let before = s.map.voxels;
+    let b = Brush { mirror: [true, false, false], ..brush(Tool::Paint, Shape::Voxel) };
+    assert_eq!(drag(&mut s, b, top([0, 0, 2], 3), &[]), 1);
+    assert_eq!((s.map.get(0, 0, 2), s.map.get(image[0], image[1], image[2])), (7, 0));
+    assert_eq!(s.map.voxels, before);
+}
+
+/// The face brush with the region option: erase takes only the selected part of the face,
+/// add still builds on the whole face, and the erased voxels leave the selection.
+#[test]
+fn the_face_brush_erases_only_selected_voxels_and_adds_everywhere() {
+    let mut s = slab();
+    s.select([[1, 0, 1], [2, 0, 1]], Mode::Replace);
+    let inside = |tool| Brush { inside: true, ..brush(tool, Shape::Face) };
+    let Press::Done(n) = s.press(inside(Tool::Add), top([3, 0, 3], 3)) else { panic!() };
+    assert_eq!(n, 15, "add covers the face's 15 open cells, selected or not");
+    assert!(s.undo());
+    let Press::Done(n) = s.press(inside(Tool::Erase), top([3, 0, 3], 3)) else { panic!() };
+    assert_eq!(n, 2);
+    assert_eq!((s.map.get(1, 0, 1), s.map.get(2, 0, 1), s.map.get(3, 0, 3)), (0, 0, 3));
+    assert_eq!(s.selected_count(), 0);
+    assert!(s.undo());
+    assert_eq!((s.map.voxels, s.selected_count()), (17, 2), "one undo step gives back voxels and selection");
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: std::env::var("PROPTEST_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(256),
+        ..ProptestConfig::default()
+    })]
+
+    /// The region option on any erase or paint drag (every shape, any mirror, any brush
+    /// size): each selected cell ends as the same drag without the option leaves it and
+    /// each other cell is untouched. With nothing selected, and for add, the option
+    /// changes nothing.
+    #[test]
+    fn a_limited_brush_changes_selected_cells_as_the_free_brush_does_and_no_others(
+        // Cells on both sides of the mirror planes and a brick edge (8); the flag is "selected".
+        model in prop::collection::btree_map((4i32..12, 4i32..12, 4i32..12), (1u8..=6, any::<bool>()), 1..160),
+        none_selected in prop::bool::weighted(0.15),
+        tool in prop::sample::select(vec![Tool::Erase, Tool::Paint, Tool::Add]),
+        shape in prop::sample::select(vec![Shape::Voxel, Shape::Box, Shape::Line, Shape::Circle, Shape::Sphere]),
+        mirror in any::<[bool; 3]>(),
+        size in 1u8..=3,
+        from in (4i32..12, 4i32..12, 4i32..12),
+        moves in prop::collection::vec((2i32..14, 2i32..14, 2i32..14), 0..4),
+    ) {
+        let run = |inside: bool| {
+            let mut s = Scene::new([16, 16, 16]);
+            // Every axis mirrors q to 15 - q.
+            (s.origin, s.pivot) = ([0; 3], [16; 3]);
+            s.edit(model.iter().map(|(&(x, y, z), &(v, _))| ([x, y, z], v)));
+            if !none_selected {
+                s.select(model.iter().filter(|c| c.1.1).map(|(&(x, y, z), _)| [x, y, z]), Mode::Replace);
+            }
+            let selected: Vec<[i32; 3]> = s.selection().collect();
+            let before = cells(&s);
+            let b = Brush { mirror, size, inside, ..brush(tool, shape) };
+            let from = [from.0, from.1, from.2];
+            let t = Target { voxel: from, normal: [0, 1, 0], value: s.map.get(from[0], from[1], from[2]), ground: false };
+            let moves: Vec<[i32; 3]> = moves.iter().map(|&(x, y, z)| [x, y, z]).collect();
+            drag(&mut s, b, t, &moves);
+            let after = (0..16).flat_map(|x| (0..16).flat_map(move |y| (0..16).map(move |z| [x, y, z])));
+            let after: Vec<u8> = after.map(|p| s.map.get(p[0], p[1], p[2])).collect();
+            (selected, before, after, s)
+        };
+        let (_, _, free, _) = run(false);
+        let (selected, before, limited, mut s) = run(true);
+        let all = (0..16).flat_map(|x| (0..16).flat_map(move |y| (0..16).map(move |z| [x, y, z])));
+        for (k, p) in all.enumerate() {
+            let was = before.iter().find(|c| c.0 == p).map_or(0, |c| c.1);
+            let want = if tool == Tool::Add || selected.is_empty() || selected.contains(&p) { free[k] } else { was };
+            prop_assert_eq!(limited[k], want, "cell {:?}", p);
+        }
+        // The limited drag is still one undo step.
+        if cells(&s) != before {
+            prop_assert!(s.undo());
+        }
+        prop_assert_eq!(cells(&s), before);
+    }
 }

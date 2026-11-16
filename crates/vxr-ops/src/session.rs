@@ -481,6 +481,7 @@ impl Session {
                         a.cells
                     }
                 };
+                let cells = self.inside(scene, cells, Mode::Erase, a.selection)?;
                 self.edit(scene, cells, Mode::Erase, 0, None)
             }
             Op::Box(a) => {
@@ -491,6 +492,7 @@ impl Session {
                     return Err(invalid(format!("the box spans {volume} cells; at most {}", self.limits.box_cells)));
                 }
                 let cells: Vec<Cell> = box_cells(lo, hi, a.hollow).collect();
+                let cells = self.inside(scene, cells, a.mode, a.selection)?;
                 self.edit(scene, cells, a.mode, slot, a.name.as_deref())
             }
             Op::Line(a) => {
@@ -499,16 +501,19 @@ impl Session {
                     return Err(invalid(format!("the line is over {MAX_LINE} cells")));
                 }
                 let cells: Vec<Cell> = line_cells(a.from, a.to).collect();
+                let cells = self.inside(scene, cells, a.mode, a.selection)?;
                 self.edit(scene, cells, a.mode, slot, a.name.as_deref())
             }
             Op::Sphere(a) => {
                 let slot = shape_slot(a.mode, a.slot)?;
                 let cells = round(a.center, a.radius, a.flat_axis)?;
+                let cells = self.inside(scene, cells, a.mode, a.selection)?;
                 self.edit(scene, cells, a.mode, slot, a.name.as_deref())
             }
             Op::Circle(a) => {
                 let slot = shape_slot(a.mode, a.slot)?;
                 let cells = round(a.center, a.radius, Some(a.axis.unwrap_or(Axis::Y)))?;
+                let cells = self.inside(scene, cells, a.mode, a.selection)?;
                 self.edit(scene, cells, a.mode, slot, a.name.as_deref())
             }
             Op::Face(a) => {
@@ -518,7 +523,8 @@ impl Session {
                 let face = self.face(scene, a.cell, side)?;
                 // Add builds on the open side; erase and paint work on the face's own voxels.
                 let d = if a.mode == Mode::Add { n } else { [0; 3] };
-                let cells = face.into_iter().map(|p| add(scene.to_world(p), d)).collect();
+                let cells: Vec<Cell> = face.into_iter().map(|p| add(scene.to_world(p), d)).collect();
+                let cells = self.inside(scene, cells, a.mode, a.selection)?;
                 self.edit(scene, cells, a.mode, slot, a.name.as_deref())
             }
             Op::Fill(a) => {
@@ -1109,6 +1115,22 @@ impl Session {
             self.selection.iter().filter(|&&p| self.get(scene, p) != 0).map(|&p| scene.to_world(p)).collect();
         out.sort_unstable();
         out
+    }
+
+    /// The region option (`selection: true` on a shape or on erase): the cells of `cells` an
+    /// erase or a paint limited to the selection may change, by the rule the brushes use
+    /// ([`vxr_core::select::inside`]). Without `only`, every cell.
+    fn inside(&self, scene: &Scene, cells: Vec<Cell>, mode: Mode, only: bool) -> Result<Vec<Cell>, Error> {
+        if !only {
+            return Ok(cells);
+        }
+        if mode == Mode::Add {
+            return Err(invalid("selection: true limits mode erase and paint; add is never limited"));
+        }
+        if self.selected(scene).is_empty() {
+            return Err(invalid("nothing is selected: call select first"));
+        }
+        Ok(cells.into_iter().filter(|&q| vxr_core::select::inside(&self.selection, scene.to_map(q))).collect())
     }
 
     fn list_limit(&self, n: usize) -> Result<(), Error> {

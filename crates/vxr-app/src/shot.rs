@@ -2930,6 +2930,67 @@ fn selection(dir: &Path) -> Result<(), String> {
     )?;
     s.ui_click("deselect")?;
 
+    // The region option: with block B selected and "Brush inside only" on, erase and paint
+    // change B's voxels and leave block A alone, add still builds anywhere, and with the
+    // option off (Cmd-K) or nothing selected the brushes reach every voxel again.
+    s.stroke(b_top, &[]);
+    let had = (count(&s), s.voxels());
+    s.ui_click("brush-inside")?;
+    let said = s.ed.ui.toast_text().unwrap_or_default().to_string();
+    s.save_png(&dir.join("selection-brush-inside.png"))?;
+    s.tool(Tool::Erase, Shape::Voxel);
+    s.stroke(a_top, &[]);
+    let outside = s.voxels();
+    s.stroke(b_top, &[]);
+    let inside = (count(&s), s.voxels());
+    s.tool(Tool::Paint, Shape::Voxel);
+    s.stroke(a_top, &[]);
+    let painted = s.ed.scene.map.get(51, 1, 61);
+    s.tool(Tool::Add, Shape::Voxel);
+    s.stroke(a_top, &[]);
+    let added = s.voxels();
+    check(
+        had == (8, 32)
+            && s.ed.ui.inside
+            && said == "Erase and paint stay inside the selection (8 voxels)"
+            && outside == 32
+            && inside == (7, 31)
+            && painted == 12
+            && added == 32,
+        format!(
+            "Brush inside only ({said:?}): erase outside the selection changes nothing ({outside}), inside it takes a voxel {inside:?}, paint outside keeps slot {painted}, add still builds ({added})"
+        ),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("brush only inside".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, none)]);
+    let said = s.ed.ui.toast_text().unwrap_or_default().to_string();
+    s.tool(Tool::Erase, Shape::Voxel);
+    s.stroke(a_top, &[]);
+    let off = (s.ed.ui.inside, s.voxels());
+    s.ui_click("brush-inside")?;
+    s.ui_click("deselect")?;
+    s.stroke(a_top, &[]);
+    let none_selected = (s.ed.ui.inside, s.voxels());
+    check(
+        said == "Erase and paint reach every voxel" && off == (false, 31) && none_selected == (true, 30),
+        format!(
+            "Cmd-K turns it off ({said:?}) and erase reaches block A {off:?}; on again with nothing selected it reaches every voxel {none_selected:?}"
+        ),
+    )?;
+    // Back to the scene and the tool the next steps start from.
+    s.tool(Tool::Select, Shape::Voxel);
+    s.frames(2);
+    s.ui_click("brush-inside")?;
+    for _ in 0..4 {
+        s.frames_with(2, vec![key(egui::Key::Z, egui::Modifiers::COMMAND)]);
+    }
+    s.frames_with(2, vec![key(egui::Key::Escape, none)]);
+    check(
+        !s.ed.ui.inside && s.voxels() == 32 && count(&s) == 0 && s.ed.scene.to_vox()? == saved,
+        format!("four undos give back the 32 voxels ({}), nothing selected ({})", s.voxels(), count(&s)),
+    )?;
+
     s.stroke(a_top, &[]);
     let before = bounds(&s);
     s.frames_with(2, vec![key(egui::Key::ArrowRight, none)]);

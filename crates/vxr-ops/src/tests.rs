@@ -790,10 +790,11 @@ fn far_corners_are_refused() {
     let (_, m) = err(&mut o, &mut s, "get_voxels", json!({"cells": [[0, i32::MIN, 0]]}));
     assert!(m.contains("out of range"), "{m}");
     // The limits hold for any corners, given straight to run.
-    let shape = BoxShape { from: lo, to: hi, slot: Some(1), mode: Mode::Add, hollow: false, name: None };
+    let shape =
+        BoxShape { from: lo, to: hi, slot: Some(1), mode: Mode::Add, hollow: false, selection: false, name: None };
     let m = o.run(&mut s, Op::Box(shape)).unwrap_err().message;
     assert_eq!(m, format!("the box spans {} cells; at most 2000000", i64::MAX));
-    let line = Line { from: lo, to: hi, slot: Some(1), mode: Mode::Add, name: None };
+    let line = Line { from: lo, to: hi, slot: Some(1), mode: Mode::Add, selection: false, name: None };
     assert!(o.run(&mut s, Op::Line(line)).unwrap_err().message.contains("over 4096"));
     let read = GetVoxels { from: Some(lo), to: Some([i32::MAX, i32::MIN, i32::MIN]), ..GetVoxels::default() };
     assert!(o.run(&mut s, Op::GetVoxels(read)).unwrap_err().message.contains("the box spans 4294967296 cells"));
@@ -2111,7 +2112,7 @@ fn file_names_stay_data_beside_the_names_make_object_gives() {
 /// What a brush drag from `from` to `to` adds to an empty scene, as world cells.
 fn dragged(shape: Shape, from: [i32; 3], to: [i32; 3]) -> Vec<[i32; 3]> {
     let mut s = empty();
-    let brush = Brush { tool: Tool::Add, shape, mirror: [false; 3], lock: None, color: 7, size: 1 };
+    let brush = Brush { tool: Tool::Add, shape, mirror: [false; 3], lock: None, color: 7, size: 1, inside: false };
     // Gestures work in map cells; add starts on the cell in front of the face pressed.
     let (from, to) = (s.to_map(from), s.to_map(to));
     let t = Target { voxel: [from[0], from[1] - 1, from[2]], normal: [0, 1, 0], value: 1, ground: false };
@@ -2142,4 +2143,107 @@ fn an_agent_s_circle_and_line_draw_what_the_brush_draws() {
     // map cells (never negative): z is -1.5 halfway, which half away from zero takes to -2.
     let (from, to) = ([-4, 10, -1], [0, 10, -2]);
     assert_eq!(called("line", json!({"from": from, "to": to, "slot": 7})), dragged(Shape::Line, from, to));
+}
+
+/// An 8 x 4 x 8 block of slot 10 at x and z 0..7, with the 4 x 4 x 4 middle (2..5) selected.
+fn block_with_a_selected_middle() -> Scene {
+    let mut s = empty();
+    let at = |x, y, z| s.to_map([x, y, z]);
+    let cells: Vec<_> = (0..8)
+        .flat_map(|x| (0..4).flat_map(move |y| (0..8).map(move |z| [x, y, z])))
+        .map(|p| at(p[0], p[1], p[2]))
+        .collect();
+    let middle: Vec<_> = (2..6)
+        .flat_map(|x| (0..4).flat_map(move |y| (2..6).map(move |z| [x, y, z])))
+        .map(|p| at(p[0], p[1], p[2]))
+        .collect();
+    s.edit(cells.into_iter().map(|p| (p, 10)));
+    s.select(middle, vxr_core::select::Mode::Replace);
+    s
+}
+
+#[test]
+fn a_shape_limited_to_the_selection_changes_what_the_limited_brush_changes() {
+    // Break caught: the agent's `selection: true` and the brush's region option drifting
+    // apart. Each row is a tool call and the same drag with a limited brush.
+    let rows = [
+        (
+            "box",
+            json!({"from": [0, 2, 0], "to": [7, 2, 7], "mode": "erase"}),
+            Tool::Erase,
+            Shape::Box,
+            [0, 2, 0],
+            [7, 2, 7],
+        ),
+        (
+            "line",
+            json!({"from": [0, 3, 0], "to": [7, 3, 7], "mode": "erase"}),
+            Tool::Erase,
+            Shape::Line,
+            [0, 3, 0],
+            [7, 3, 7],
+        ),
+        (
+            "sphere",
+            json!({"center": [4, 2, 4], "radius": 3, "slot": 7, "mode": "paint"}),
+            Tool::Paint,
+            Shape::Sphere,
+            [4, 2, 4],
+            [7, 2, 4],
+        ),
+        (
+            "circle",
+            json!({"center": [3, 1, 3], "radius": 2, "slot": 7, "mode": "paint"}),
+            Tool::Paint,
+            Shape::Circle,
+            [3, 1, 3],
+            [5, 1, 3],
+        ),
+    ];
+    let mut counts = Vec::new();
+    for (tool, mut args, brush_tool, shape, from, to) in rows {
+        let mut b = block_with_a_selected_middle();
+        let brush = Brush { tool: brush_tool, shape, mirror: [false; 3], lock: None, color: 7, size: 1, inside: true };
+        let t = Target { voxel: b.to_map(from), normal: [0, 1, 0], value: 10, ground: false };
+        let Press::Drag(mut g) = b.press(brush, t) else { panic!("expected a drag") };
+        let to = b.to_map(to);
+        g.move_to(&mut b, to);
+        let changed = g.release(&mut b);
+
+        let mut s = block_with_a_selected_middle();
+        let mut o = Session::new(&s, None);
+        args["selection"] = json!(true);
+        let said = call(&mut o, &mut s, tool, args);
+        assert!(said.starts_with(&format!("{changed} cells changed")), "{tool}: {said}");
+        o.apply(&mut s).unwrap();
+        assert_eq!(voxels(&s), voxels(&b), "{tool}");
+        counts.push(changed);
+    }
+    // The box and the line cross the 4 x 4 middle; the ball and the disc are cut to it.
+    assert_eq!(counts, [16, 4, 63, 15]);
+}
+
+#[test]
+fn the_selection_option_on_face_and_erase_and_its_refusals() {
+    let mut s = block_with_a_selected_middle();
+    let mut o = Session::new(&s, None);
+    // The top face is 64 voxels; 16 of them are selected.
+    let said = call(&mut o, &mut s, "face", json!({"cell": [0, 3, 0], "mode": "erase", "selection": true}));
+    assert!(said.starts_with("16 cells changed"), "{said}");
+    assert_eq!((get(&mut o, &mut s, [2, 3, 2]), get(&mut o, &mut s, [1, 3, 1])), (0, 10));
+    // Listed cells: one selected, one not, one already erased.
+    let said = call(&mut o, &mut s, "erase", json!({"cells": [[2, 2, 2], [0, 0, 0], [2, 3, 2]], "selection": true}));
+    assert!(said.starts_with("1 cells changed"), "{said}");
+    assert_eq!((get(&mut o, &mut s, [2, 2, 2]), get(&mut o, &mut s, [0, 0, 0])), (0, 10));
+    // Add is never limited, so asking for it is a mistake worth saying.
+    assert_eq!(
+        err(&mut o, &mut s, "box", json!({"from": [0, 0, 0], "to": [1, 1, 1], "slot": 7, "selection": true})),
+        (ErrorKind::Invalid, "selection: true limits mode erase and paint; add is never limited".into())
+    );
+    call(&mut o, &mut s, "select", json!({"none": true}));
+    assert_eq!(
+        err(&mut o, &mut s, "line", json!({"from": [0, 0, 0], "to": [7, 0, 0], "mode": "erase", "selection": true})),
+        (ErrorKind::Invalid, "nothing is selected: call select first".into())
+    );
+    assert_eq!(get(&mut o, &mut s, [0, 0, 0]), 10, "a refused call changes nothing");
 }
