@@ -26,7 +26,7 @@ run wasm-bindgen --target web --no-typescript --out-dir "$dist/pkg" target/wasm3
 run wasm-opt -Oz --converge --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext \
   --enable-mutable-globals --enable-reference-types -o "$dist/pkg/vxr_web_bg.wasm" "$dist/pkg/vxr_web_bg.wasm"
 [ -d "$here/node_modules" ] || npm ci --prefix "$here" --no-audit --no-fund
-# The page: site/ (Preact, the landing page and the boot skeleton pre-rendered into index.html)
+# The page: site/ (Preact, the landing page and the boot screen pre-rendered into index.html)
 # plus www/ (app.js, gate.js, _headers and the icons, copied as they are).
 VITE_CONFIG_NATIVE_IGNORE_WARNING=true "$here/node_modules/.bin/vite" build "$here/site" --logLevel warn
 # /about is the same page with the landing forced on (www/gate.js reads the path).

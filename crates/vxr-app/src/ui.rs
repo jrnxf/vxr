@@ -868,6 +868,9 @@ pub struct Hybrid {
     /// The touch layout: the bottom dock in place of the rail, larger targets and gestures
     /// (set by the editor, see `Editor::set_touch`).
     pub touch: bool,
+    /// The panels slide in from the nearest edge of the screen when the editor first draws
+    /// (set by the window host; the headless checks leave it off, so their shots stay still).
+    pub intro: bool,
     /// The palette shows beside the rail, or above the dock (their colour buttons toggle it).
     pub palette_open: bool,
     /// The palette opened only for the colour editor or a swap or copy, and closes with them.
@@ -1249,6 +1252,7 @@ impl Hybrid {
             frame: true,
             hits: HashMap::new(),
             touch: false,
+            intro: false,
             palette_open: false,
             palette_for_edit: false,
             dock_top: 0.0,
@@ -1697,6 +1701,7 @@ impl Hybrid {
     /// Draw the whole UI and return what the app should do.
     pub fn ui(&mut self, ctx: &Context, stats: &Stats) -> Vec<Action> {
         self.apply_theme(ctx);
+        Self::intro_tick(ctx, self.intro);
         self.keys(ctx);
         self.hits.clear();
         let screen = ctx.content_rect();
@@ -2079,6 +2084,63 @@ impl Hybrid {
         true
     }
 
+    /// How long each panel takes to slide in, and the delay of the panels at the left and
+    /// right edges, then the bottom, after the top bar.
+    const INTRO_SECS: f64 = 0.36;
+    const INTRO_STAGGER: f64 = 0.04;
+
+    /// Count the editor's frames and start the intro's clock on the second: the first one
+    /// can take long (shaders, the scene's upload), and the page shows the boot cube until it
+    /// is drawn. The panels wait off screen until then.
+    fn intro_tick(ctx: &Context, on: bool) {
+        let key = Id::unique("intro");
+        let (frames, start) = ctx.data(|d| d.get_temp::<(u32, Option<f64>)>(key)).unwrap_or((0, None));
+        if !on {
+            ctx.data_mut(|d| d.insert_temp(key, (u32::MAX, Some(f64::NEG_INFINITY))));
+            return;
+        }
+        let now = ctx.input(|i| i.time);
+        let start = start.or((frames >= 1).then_some(now));
+        ctx.data_mut(|d| d.insert_temp(key, (frames.saturating_add(1), start)));
+        if start.is_none_or(|t| now - t < Self::INTRO_SECS + 3.0 * Self::INTRO_STAGGER + 0.1) {
+            ctx.request_repaint();
+        }
+    }
+
+    /// While the intro runs, how far the panel at `rect` is from its place: it slides in from
+    /// its nearest screen edge, the top first, then the sides, then the bottom.
+    fn intro_offset(ctx: &Context, rect: Rect) -> Option<egui::Vec2> {
+        let (_, start) = ctx.data(|d| d.get_temp::<(u32, Option<f64>)>(Id::unique("intro"))).unwrap_or((0, None));
+        let elapsed = start.map_or(0.0, |t| ctx.input(|i| i.time) - t);
+        // A while past the end, so the last frame puts every panel back in place.
+        if elapsed > Self::INTRO_SECS + 3.0 * Self::INTRO_STAGGER + 0.1 {
+            return None;
+        }
+        let screen = ctx.content_rect();
+        let gap = 24.0;
+        let edges = [
+            (rect.top() - screen.top(), 0.0, vec2(0.0, screen.top() - rect.bottom() - gap)),
+            (rect.left() - screen.left(), 1.0, vec2(screen.left() - rect.right() - gap, 0.0)),
+            (screen.right() - rect.right(), 1.0, vec2(screen.right() - rect.left() + gap, 0.0)),
+            (screen.bottom() - rect.bottom(), 2.0, vec2(0.0, screen.bottom() - rect.top() + gap)),
+        ];
+        let (_, step, away) = edges.into_iter().min_by(|a, b| a.0.total_cmp(&b.0))?;
+        let t = ((elapsed - step * Self::INTRO_STAGGER) / Self::INTRO_SECS).clamp(0.0, 1.0) as f32;
+        Some(away * (1.0 - egui::emath::easing::cubic_out(t)))
+    }
+
+    /// Slide the layer of `id` (drawn at `rect`) in while the intro runs, after any fit to the
+    /// phone's region (`scaled`).
+    pub(crate) fn intro_slide(ctx: &Context, order: Order, id: &str, rect: Rect, scaled: bool) {
+        let Some(offset) = Self::intro_offset(ctx, rect) else {
+            return;
+        };
+        let layer = egui::LayerId::new(order, Id::unique(id));
+        let base =
+            if scaled { ctx.layer_transform_to_global(layer).unwrap_or_default() } else { TSTransform::IDENTITY };
+        ctx.set_transform_layer(layer, TSTransform::from_translation(offset) * base);
+    }
+
     // .panel
     fn panel(ctx: &Context, id: &str, rect: Rect, order: Order, contents: impl FnOnce(&mut Ui, Rect)) {
         // On a phone the panels over the view are solid, so the camera bar behind one does not show.
@@ -2114,6 +2176,9 @@ impl Hybrid {
         contents: impl FnOnce(&mut Ui, Rect),
     ) {
         let scaled = Self::fit_panel(ctx, id, order, rect);
+        if order == Order::Middle {
+            Self::intro_slide(ctx, order, id, rect, scaled);
+        }
         Area::new(Id::unique(id)).fade_in(false).order(order).fixed_pos(rect.min).constrain(false).show(ctx, |ui| {
             if scaled {
                 // The screen clips the panel where it would be unscaled, not where it shows.
@@ -5744,6 +5809,8 @@ impl Hybrid {
         }
         let top = if self.touch { TOP } else { screen.bottom() - 12.0 - size.y };
         let corner = Rect::from_min_size(pos2(screen.right() - 12.0 - size.x, top), size);
+        // The render shows outside egui, at render_rect, so the intro moves the rect itself.
+        let corner = if full { corner } else { corner.translate(Self::intro_offset(ctx, corner).unwrap_or_default()) };
         // A phone held sideways with the assistant open has no room for it beside the dock.
         if self.phone && !full && corner.intersects(self.dock_area.expand(8.0)) {
             return;
@@ -6265,6 +6332,7 @@ impl Hybrid {
             ctx.move_to_top(egui::LayerId::new(Order::Middle, Id::unique("hint")));
             return;
         }
+        Self::intro_slide(ctx, Order::Middle, "hint", rect, false);
         Area::new(Id::unique("hint")).fade_in(false).order(Order::Middle).fixed_pos(rect.min).constrain(false).show(
             ctx,
             |ui| {

@@ -3,7 +3,7 @@
 # serve crates/vxr-web/dist/ on 127.0.0.1 with the deploy's headers (check-server.js, with a
 # stand-in model provider), run check.js in the page (every tool, camera, undo/redo, Cmd-K,
 # the assistant, Open, Save, resize, the projects list and drafts), check the landing page and
-# the boot skeleton (check-landing.js: first visit with progress and an early click, /about, the
+# the boot screen (check-landing.js: first visit with progress and an early click, /about, the
 # returning-visit skip, ?open= ?project= ?embed, which also leave the first-run tour out), check
 # the embed folder the editor exported as its own page (check-embed.js: the exported viewer and
 # scene go live, and the poster frames the scene as the first live frame does), check
@@ -66,7 +66,7 @@ axi() { chrome-devtools-axi "$@"; }
 # Empty the page's projects store (and take its scene as saved, so nothing is kept as the
 # page goes): each page here starts with nothing to restore unless a step left it on purpose.
 forget() { axi eval "async () => { window.vxr?.forget_projects(); await window.vxrProjects?.clear(); return 'ok' }" >/dev/null || true; }
-# The landing page and the boot skeleton (check-landing.js): this profile's first visit, then
+# The landing page and the boot screen (check-landing.js): this profile's first visit, then
 # its returning and deep-link visits, before anything else opens the page. The first visit holds
 # the wasm back for 6 s from its request, so the progress and an early click can be seen.
 landing() { axi eval --full "async () => ($(cat "$here/check-landing.js"))('$1')" | unwrap; }
@@ -82,7 +82,7 @@ axi screenshot "$shots/web-landing.png" >/dev/null
 land_results+=$'\n'"$(landing ready-click)"
 axi open "$url" >/dev/null
 land_results+=$'\n'"$(landing again)"
-axi screenshot "$shots/web-boot-skeleton.png" >/dev/null
+axi screenshot "$shots/web-boot.png" >/dev/null
 landing again-done >/dev/null
 for q in "?open=scene.vox" "?project=abc" "?embed"; do
   land_results+=$'\n'"$(landing clear)"

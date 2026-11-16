@@ -1,4 +1,4 @@
-// The landing page and the boot skeleton, checked in the browser by crates/vxr-web/check
+// The landing page and the boot screen, checked in the browser by crates/vxr-web/check
 // (chrome-devtools-axi eval, one stage per call so the check can screenshot between them):
 //   async (stage) => lines of "ok <step>" or "FAIL <step>: <why>".
 // The page is dist/ at 1280x800; the stages follow the visits of one fresh browser profile:
@@ -6,7 +6,7 @@
 //   early    clicked before the editor is ready: "Opening", then the editor goes in on its own
 //   ready    /about with the editor ready: the landing again, the tour waiting behind it, and
 //            Open the editor with no wait, which starts the tour
-//   again    a returning visit: no landing, the boot skeleton in the editor's places
+//   again    a returning visit: no landing, the boot cube until the editor draws
 //   deep     ?open= ?project= ?embed skip the landing and the tour for a browser that never saw them
 async (stage) => {
   const out = [];
@@ -28,7 +28,7 @@ async (stage) => {
     step('the landing says no account is needed and where to sign in', /No account needed/.test(text(document.querySelector('.reassure'))) && !!document.querySelector('.reassure a[href="/account"]') && !!document.querySelector('.land-top a[href="/account"]'));
     step('the landing links the repository', !!document.querySelector('.land-top a[href^="https://github.com/"]'));
     step('the island picture is the editor\'s own shot', $('land-frame').firstElementChild.complete && $('land-frame').firstElementChild.naturalWidth === 1280, 'not loaded');
-    step('the boot skeleton and the error message stay out of the landing', !shown($('boot')) && !shown($('msg')));
+    step('the boot screen and the error message stay out of the landing', !shown($('boot')) && !shown($('msg')));
     step('the editor behind the landing takes no keys or pointer', $('c').inert);
     // The wasm is held back by the check server, so the rest is already in and the editor is not.
     const got = await until(() => /· \d+%/.test($('land-load').textContent), 15000);
@@ -61,20 +61,11 @@ async (stage) => {
     for (let i = 0; i < 300 && !window.vxr; i++) await sleep(50);
     step('a returning visit skips the landing', root.dataset.landing === 'off' && !shown($('landing')), root.dataset.landing);
     step('the editor started', !!window.vxr && !$('c').inert);
-    step('the skeleton is gone once the editor has drawn', root.hasAttribute('data-booted') && !shown($('boot')));
-    // Each outline holds the editor's own part of the screen it stands in for.
-    const rect = (el) => { const r = el.getBoundingClientRect(); return [r.left, r.top, r.right, r.bottom]; };
-    const holds = (sk, name) => {
-      const a = rect(document.querySelector(sk)), b = window.vxr.hit_rect(name);
-      return b.length === 4 && b[0] >= a[0] - 1 && b[1] >= a[1] - 1 && b[2] <= a[2] + 1 && b[3] <= a[3] + 1;
-    };
-    for (const [sk, name] of [['.sk-title', 'scene-select'], ['.sk-dock', 'select'], ['.sk-dock', 'rail-color'], ['.sk-actions', 'ai-toggle'], ['.sk-stats', 'stats']]) {
-      step(`the skeleton's ${sk.slice(4)} outline holds the editor's ${name}`, holds(sk, name), `${rect(document.querySelector(sk))} vs ${window.vxr.hit_rect(name)}`);
-    }
+    step('the boot screen is gone once the editor has drawn', root.hasAttribute('data-booted') && !shown($('boot')));
     // Show it again for the screenshot, as it is before the first frame (the editor sets
     // data-booted on every frame, so a rule holds it open instead).
     document.styleSheets[0].insertRule('html[data-booted] #boot { opacity: 1 !important; visibility: visible !important; transition: none !important }', 0);
-    step('the skeleton is six outlines and the cube', document.querySelectorAll('#boot .sk').length === 6 && !!document.querySelector('#boot .sk-mark') && getComputedStyle($('boot')).display === 'block');
+    step('the boot screen is the cube alone', document.querySelectorAll('#boot > *').length === 1 && !!document.querySelector('#boot .sk-mark') && getComputedStyle($('boot')).display === 'block');
   } else if (stage === 'again-done') {
     document.styleSheets[0].deleteRule(0);
   } else if (stage === 'clear') {
