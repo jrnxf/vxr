@@ -599,6 +599,30 @@ pub struct PaletteCopy {
     pub to: u8,
 }
 
+/// Shift the hue, saturation and value of several palette slots at once, as the palette's group edit does (Shift-click swatches, then the three sliders): every voxel of those slots changes with them, in one undo step. Give slots, or selection: true for the slots the selected voxels use. Hue turns the colours around the wheel in degrees; saturation and value scale by a percent (-100 removes it, 100 doubles it), so greys stay grey and a ramp keeps its order.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PaletteAdjust {
+    /// The slots to shift, 1 to 255.
+    #[serde(default)]
+    pub slots: Vec<u8>,
+    /// Shift the slots the selected voxels use, instead of slots (on one model only).
+    #[serde(default)]
+    pub selection: bool,
+    /// Degrees to turn the hue, -180 to 180.
+    #[serde(default)]
+    #[schemars(range(min = -180, max = 180))]
+    pub hue: f32,
+    /// Percent to scale the saturation by, -100 to 100.
+    #[serde(default)]
+    #[schemars(range(min = -100, max = 100))]
+    pub saturation: f32,
+    /// Percent to scale the value (brightness) by, -100 to 100.
+    #[serde(default)]
+    #[schemars(range(min = -100, max = 100))]
+    pub value: f32,
+}
+
 /// Where look looks from.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
@@ -731,6 +755,7 @@ ops! {
     "palette_set" => PaletteSet(PaletteSet),
     "palette_swap" => PaletteSwap(PaletteSwap),
     "palette_copy" => PaletteCopy(PaletteCopy),
+    "palette_adjust" => PaletteAdjust(PaletteAdjust),
     "material_set" => MaterialSet(MaterialSet),
     "make_object" => MakeObject(MakeObject),
     "move_object" => MoveObject(MoveObject),

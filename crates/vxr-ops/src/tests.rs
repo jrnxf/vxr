@@ -93,6 +93,7 @@ fn tool_schemas() {
             "palette_set",
             "palette_swap",
             "palette_copy",
+            "palette_adjust",
             "material_set",
             "make_object",
             "move_object",
@@ -1619,6 +1620,41 @@ fn select_face_volume_and_invert() {
     assert!(e.contains("face, volume, all, none or invert"), "{e}");
     // Selections are not edits: only the erase is staged.
     assert_eq!(o.changes(&s).removed.len(), 1);
+}
+
+#[test]
+fn palette_adjust_shifts_slots_or_the_selection_s_slots() {
+    let mut s = small();
+    let before = s.palette;
+    let mut o = Session::new(&s, None);
+    // A third of a turn moves each channel to the next: red becomes green.
+    let t = call(&mut o, &mut s, "palette_adjust", json!({"slots": [20, 10, 20], "hue": 120}));
+    assert_eq!(t, "shifted 2 slots (19 voxels use them): slot 10: #8c5528 -> #288c55; slot 20: #d72323 -> #23d723");
+    // The slots of the selected voxels: only slot 20's are selected. Half the value.
+    call(&mut o, &mut s, "select", json!({"color": 20}));
+    let t = call(&mut o, &mut s, "palette_adjust", json!({"selection": true, "value": -50}));
+    assert_eq!(t, "shifted 1 slot (3 voxels use it): slot 20: #23d723 -> #116c11");
+    assert_eq!(s.palette[10], [0x28, 0x8c, 0x55, 255]);
+    let c = o.changes(&s);
+    assert_eq!((c.repainted.len(), c.palette.len()), (0, 2), "colours change, voxels do not");
+    for (args, want) in [
+        (json!({"hue": 10}), "give slots or selection: true"),
+        (json!({"slots": [10], "selection": true, "hue": 10}), "give slots or selection: true"),
+        (json!({"slots": [0], "hue": 10}), "slot 0"),
+        (json!({"slots": [10]}), "all 0"),
+        (json!({"slots": [10], "hue": 181}), "hue is 181: give -180 to 180"),
+        (json!({"slots": [10], "saturation": -101}), "saturation is -101"),
+        (json!({"slots": [10], "value": 100.5}), "value is 100.5"),
+    ] {
+        let e = err(&mut o, &mut s, "palette_adjust", args.clone()).1;
+        assert!(e.contains(want), "{args}: {e}");
+    }
+    call(&mut o, &mut s, "select", json!({"none": true}));
+    let e = err(&mut o, &mut s, "palette_adjust", json!({"selection": true, "hue": 10})).1;
+    assert!(e.contains("nothing is selected"), "{e}");
+    // Discarded, the palette is the file's again.
+    o.discard(&mut s);
+    assert_eq!(s.palette, before);
 }
 
 #[test]

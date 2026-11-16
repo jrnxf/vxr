@@ -652,6 +652,10 @@ fn the_ui_s_other_actions_have_tools() {
     c.ok("hide_layer", json!({"layer": 0}));
     c.ok("delete_object", json!({"node": 7}));
     c.ok("palette_copy", json!({"from": 1, "to": 200}));
+    let e = c.err("palette_adjust", json!({"selection": true, "hue": 30}));
+    assert!(e.contains("selection works on one model"), "{e}");
+    let t = c.ok("palette_adjust", json!({"slots": [201, 202], "hue": 120, "value": -50}));
+    assert!(t.starts_with("shifted 2 slots ("), "{t}");
     c.ok("edit_object", json!({"node": 1}));
     c.ok("resize", json!({"size": [8, 3, 8]}));
     let t = c.ok("face", json!({"cell": [0, 0, 0], "slot": 9}));
@@ -673,12 +677,12 @@ fn the_ui_s_other_actions_have_tools() {
     let w = summary(&mut d)["world"].clone();
     assert_eq!(w["nodes"].as_array().unwrap().len(), 7, "the gem is gone: {w}");
     assert!(w["layers"].as_array().unwrap().iter().any(|l| l["id"] == 0 && l["hidden"] == true), "{w}");
-    // Ten edits, ten undo steps, and the selections none.
+    // Eleven edits, eleven undo steps, and the selections none.
     let mut steps = 0;
     while !c.tool("undo", json!({})).1 {
         steps += 1;
     }
-    assert_eq!(steps, 10);
+    assert_eq!(steps, 11);
     c.ok("save", json!({"path": "undone.vox"}));
     assert_eq!(std::fs::read(dir.0.join("undone.vox")).unwrap(), bytes);
 }

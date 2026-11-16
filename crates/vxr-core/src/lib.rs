@@ -7,6 +7,7 @@
 //! - [`files`]: those exports as files (OBJ with `.mtl` and texture, the slices PNG), a
 //!   stored zip of several, and the `.vox` save (checked to read back, written atomically).
 //! - [`history`]: undo and redo steps.
+//! - [`palette`]: HSV, and the group edit of several palette slots (hue, saturation, value).
 //! - [`scene`]: a brick map with its palette and history, and `.vox` open and save.
 //! - [`model`]: hollow and fill, of the selection or the whole model, and resize and crop
 //!   of the model bounds.
@@ -23,6 +24,7 @@ pub mod export;
 pub mod files;
 pub mod history;
 pub mod model;
+pub mod palette;
 pub mod scene;
 pub mod select;
 pub mod tools;

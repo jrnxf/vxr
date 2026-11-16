@@ -19,6 +19,7 @@ use std::collections::{HashMap, HashSet};
 use serde_json::Value;
 use vxr_core::history::At;
 use vxr_core::material::{Kind, Material};
+use vxr_core::palette::{Shift, slots_of};
 use vxr_core::scene::MAX_EXTENT;
 use vxr_core::select::{Clip, bounds};
 use vxr_core::tools::{MAX_RADIUS, ball_cells, box_cells, line_cells, line_steps};
@@ -836,6 +837,55 @@ impl Session {
                     m.kind.name(),
                     settings(&m),
                     self.slot_count(scene, to)
+                ))
+            }
+            Op::PaletteAdjust(a) => {
+                let slots = match (a.slots.is_empty(), a.selection) {
+                    (false, false) => {
+                        let mut slots = a.slots.iter().map(|&s| slot(s)).collect::<Result<Vec<_>, _>>()?;
+                        slots.sort_unstable();
+                        slots.dedup();
+                        slots
+                    }
+                    (true, true) if scene.at() == At::World => {
+                        return Err(invalid(
+                            "selection works on one model: give slots, or open an object with edit_object first",
+                        ));
+                    }
+                    (true, true) => {
+                        let slots = slots_of(self.selection.iter().map(|&p| self.get(scene, p)));
+                        if slots.is_empty() {
+                            return Err(invalid("nothing is selected: call select first, or give slots"));
+                        }
+                        slots
+                    }
+                    _ => return Err(invalid("give slots or selection: true, one of them")),
+                };
+                for (name, v, max) in
+                    [("hue", a.hue, 180.0), ("saturation", a.saturation, 100.0), ("value", a.value, 100.0)]
+                {
+                    if !(-max..=max).contains(&v) {
+                        return Err(invalid(format!("{name} is {v}: give -{max} to {max}")));
+                    }
+                }
+                let shift = Shift { hue: a.hue, sat: a.saturation / 100.0, val: a.value / 100.0 };
+                if shift.is_zero() {
+                    return Err(invalid("hue, saturation and value are all 0: nothing to shift"));
+                }
+                self.open(scene);
+                let base: Vec<_> = slots.iter().map(|&s| (s, scene.palette[s as usize])).collect();
+                scene.shift_colors(&base, shift);
+                let voxels: usize = slots.iter().map(|&s| self.slot_count(scene, s)).sum();
+                let lines: Vec<String> = base
+                    .iter()
+                    .map(|&(s, old)| format!("slot {s}: {} -> {}", hex(old), hex(scene.palette[s as usize])))
+                    .collect();
+                Ok(format!(
+                    "shifted {} slot{} ({voxels} voxels use {}): {}",
+                    slots.len(),
+                    if slots.len() == 1 { "" } else { "s" },
+                    if slots.len() == 1 { "it" } else { "them" },
+                    lines.join("; ")
                 ))
             }
             Op::Undo(_) => {

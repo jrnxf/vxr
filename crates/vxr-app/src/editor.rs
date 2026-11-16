@@ -1865,6 +1865,18 @@ impl Editor {
                 Action::Ortho(on) => self.cam.ortho = on,
                 Action::Recolor { slot, rgba } => self.scene.put_color(slot, rgba),
                 Action::SetMaterial { slot, material } => self.scene.put_material(slot, material),
+                Action::ShiftColors(shift) => self.scene.shift_colors(&self.ui.group_base, shift),
+                Action::SelectUsedColors => {
+                    let slots = self.scene.colors_used();
+                    let of = if self.scene.selected_count() > 0 { "the selection" } else { "the model" };
+                    let msg = match slots.len() {
+                        0 => "No colors in use yet".to_string(),
+                        1 => format!("Slot {} is the only color in {of}", slots[0]),
+                        n => format!("Selected the {n} colors in {of}"),
+                    };
+                    self.ui.select_colors(slots);
+                    self.ui.toast(&self.ctx, msg);
+                }
                 Action::CommitColor => {
                     self.scene.commit();
                 }

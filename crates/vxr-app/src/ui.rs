@@ -15,6 +15,7 @@ use vxr_core::material::{Kind, Material};
 use crate::color::{Hsv, hex, parse_hex};
 use crate::render::{EXPORT_SIZES, RenderSettings, SPP_CHOICES, TURNTABLE_FRAMES};
 use crate::theme::{self, Theme, ThemeChoice, th};
+use vxr_core::palette::Shift;
 
 mod account;
 mod activity;
@@ -315,6 +316,12 @@ pub enum Action {
     },
     /// Erase every voxel of the slot, in the selection or the whole model as above.
     RemoveColor(u8),
+    /// Show the palette's selected slots shifted by this from their colours before the group
+    /// edit (`Hybrid::group_base`), inside the open colour edit.
+    ShiftColors(Shift),
+    /// Select, in the palette, the slots the selected voxels use (the whole model's while
+    /// nothing is selected).
+    SelectUsedColors,
     /// Keep only the voxels seen from outside the selection, or the whole model.
     Hollow,
     /// Fill the space the selection, or the whole model, encloses with the current colour.
@@ -698,6 +705,14 @@ pub struct Hybrid {
     pub can_redo: bool,
     pub color_edit: Option<ColorEdit>,
     pub slot_op: Option<SlotOp>,
+    /// The palette's selected slots while more than one is (Shift-click a swatch), in the
+    /// order picked, the current slot among them; else empty. The colour editor then edits
+    /// them as a group.
+    pub colors: Vec<u8>,
+    /// The selected slots' colours before the group edit, which the sliders shift.
+    pub group_base: Vec<(u8, [u8; 4])>,
+    /// Where the group edit's sliders stand.
+    pub group_shift: Shift,
     /// Show the live path-traced render corner.
     pub show_render: bool,
     /// Where the render corner's image goes this frame, in points: the corner, or the whole
@@ -1029,6 +1044,7 @@ const COMMANDS: &[Command] = &[
     Command { label: "Copy color to…", keys: &[], run: |h| h.arm_slot_op(SlotOp::Copy) },
     Command { label: "Replace color with…", keys: &[], run: |h| h.arm_slot_op(SlotOp::Replace) },
     Command { label: "Remove color", keys: &[], run: |h| h.actions.push(Action::RemoveColor(h.slot)) },
+    Command { label: "Select used colors", keys: &[], run: |h| h.actions.push(Action::SelectUsedColors) },
     Command {
         label: "Toggle render preview",
         keys: &[],
@@ -1085,6 +1101,9 @@ impl Hybrid {
             can_redo: false,
             color_edit: None,
             slot_op: None,
+            colors: Vec::new(),
+            group_base: Vec::new(),
+            group_shift: Shift::default(),
             show_render: true,
             render_rect: None,
             full_render: false,
@@ -1466,6 +1485,58 @@ impl Hybrid {
             _ => {}
         }
         self.slot = slot;
+        self.colors.clear();
+    }
+
+    /// Shift-click a swatch: add it to the palette's selected slots, or take it out. The
+    /// colour editor opens on them as a group once there are two.
+    fn toggle_color(&mut self, slot: u8) {
+        let mut colors = std::mem::take(&mut self.colors);
+        if colors.is_empty() {
+            colors.push(self.slot);
+        }
+        match colors.iter().position(|&c| c == slot) {
+            Some(i) => {
+                colors.remove(i);
+            }
+            None => colors.push(slot),
+        }
+        self.select_colors(colors);
+    }
+
+    /// Make `slots` the palette's selected slots (the last is the current one) and open the
+    /// colour editor on them; one slot or none ends the selection.
+    pub fn select_colors(&mut self, slots: Vec<u8>) {
+        self.slot_op = None;
+        if let Some(&last) = slots.last() {
+            self.slot = last;
+        }
+        self.colors = if slots.len() > 1 { slots } else { Vec::new() };
+        self.rebase_colors();
+        if !self.colors.is_empty() {
+            self.open_color_edit();
+        }
+    }
+
+    /// Start the group edit again from the colours as they are, the sliders at zero.
+    fn rebase_colors(&mut self) {
+        self.group_base = self.colors.iter().map(|&s| (s, self.palette[s as usize])).collect();
+        self.group_shift = Shift::default();
+    }
+
+    /// Keep the palette's selection true to the scene: it ends when the current slot leaves
+    /// it (a pick, the [ and ] keys), and its sliders return to zero when the colours are no
+    /// longer what they set (an undo, an agent's edit).
+    fn sync_colors(&mut self) {
+        if self.colors.is_empty() {
+            return;
+        }
+        if !self.colors.contains(&self.slot) {
+            self.colors.clear();
+            self.rebase_colors();
+        } else if self.group_base.iter().any(|&(s, c)| self.palette[s as usize] != self.group_shift.apply(c)) {
+            self.rebase_colors();
+        }
     }
 
     fn color(&self, slot: u8) -> Color32 {
@@ -4644,7 +4715,9 @@ impl Hybrid {
     fn palette_slots(&self) -> (Vec<u8>, bool, usize) {
         let used_count = self.used.iter().skip(1).filter(|u| **u).count();
         let all = self.palette_all || self.slot_op.is_some() || used_count == 0;
-        let slots = (1..=255u8).filter(|&i| all || self.used[i as usize] || i == self.slot).collect();
+        let slots = (1..=255u8)
+            .filter(|&i| all || self.used[i as usize] || i == self.slot || self.colors.contains(&i))
+            .collect();
         (slots, all, used_count)
     }
 
@@ -4673,6 +4746,7 @@ impl Hybrid {
 
     // The palette: a flyout beside the rail from its colour, or over the dock from the dock's.
     fn palette_panel(&mut self, ctx: &Context, screen: Rect) {
+        self.sync_colors();
         if self.palette_for_edit && self.color_edit.is_none() && self.slot_op.is_none() {
             (self.palette_open, self.palette_for_edit) = (false, false);
         }
@@ -4840,6 +4914,10 @@ impl Hybrid {
             if on {
                 p.rect_filled(r.expand(3.0), CornerRadius::same(7), th().text);
                 p.rect_filled(r.expand(1.5), CornerRadius::same(5), th().panel_solid);
+            } else if self.colors.contains(&slot) {
+                // Selected with the current slot: the same ring, thinner, in the accent.
+                p.rect_filled(r.expand(2.5), CornerRadius::same(6), th().accent);
+                p.rect_filled(r.expand(1.0), CornerRadius::same(5), th().panel_solid);
             }
             p.rect(r, CornerRadius::same(4), self.color(slot), Stroke::new(1.0, th().tint(20)), StrokeKind::Inside);
             if self.materials[slot as usize].kind != Kind::Diffuse {
@@ -4866,6 +4944,8 @@ impl Hybrid {
             if resp.double_clicked() {
                 self.slot = slot;
                 self.open_color_edit();
+            } else if resp.clicked() && shift && !cmd && self.slot_op.is_none() {
+                self.toggle_color(slot);
             } else if resp.clicked() {
                 self.click_slot(slot);
             }
@@ -4894,9 +4974,130 @@ impl Hybrid {
         }
     }
 
+    /// Where the colour editor goes: over the dock beside the palette on whichever side
+    /// fits, level with its bottom; beside the rail right of it, level with its top, kept on
+    /// screen.
+    fn color_edit_rect(&self, screen: Rect, w: f32, h: f32) -> Rect {
+        match self.hits.get("palette").copied().filter(|_| self.palette_open) {
+            Some(pal) if self.touch => {
+                let x =
+                    if pal.left() - 8.0 - w >= screen.left() + 12.0 { pal.left() - 8.0 - w } else { pal.right() + 8.0 };
+                Rect::from_min_size(pos2(x, (pal.bottom() - h).max(TOP)), vec2(w, h))
+            }
+            Some(pal) => {
+                let top = pal.top().min(screen.bottom() - 12.0 - h);
+                Rect::from_min_size(pos2(pal.right() + 8.0, top.max(TOP)), vec2(w, h))
+            }
+            None => Rect::from_min_size(pos2(self.aside_right(screen) - w, TOP), vec2(w, h)),
+        }
+    }
+
+    // The colour editor while several slots are selected: three sliders that shift them all.
+    fn group_editor(&mut self, ctx: &Context, screen: Rect) {
+        let w = 232.0;
+        let inner_w = w - 24.0;
+        let n = self.colors.len();
+        let mut job = LayoutJob::default();
+        let fmt = |color| TextFormat { font_id: sans(11.0), color, line_height: Some(15.95), ..Default::default() };
+        job.append(
+            "Shifts every selected color, and the voxels that use them. Shift-click a swatch to add or take one out. Click one to edit it alone.",
+            0.0,
+            fmt(th().faint),
+        );
+        job.wrap.max_width = inner_w;
+        let note = ctx.fonts_mut(|f| f.layout_job(job));
+        // Chips of the selected colours, 9 to a row.
+        const CHIP: f32 = 18.0;
+        const CHIP_STEP: f32 = 23.0;
+        let per_row = ((inner_w + CHIP_STEP - CHIP) / CHIP_STEP).floor() as usize;
+        let chip_rows = n.div_ceil(per_row).min(3);
+        let chips_h = chip_rows as f32 * CHIP_STEP - (CHIP_STEP - CHIP);
+        let h = 12.0 + 15.0 + 12.0 + chips_h + 12.0 + 3.0 * 34.0 + 8.0 + note.size().y + 12.0;
+        let rect = self.color_edit_rect(screen, w, h);
+        self.hits.insert("color-edit".into(), rect);
+        let mut close = false;
+        let mut shift = self.group_shift;
+        let (mut changed, mut done) = (false, false);
+        let mut hits = Vec::new();
+        Self::panel(ctx, "color-edit", rect, Order::Middle, |ui, rect| {
+            let inner = rect.shrink(12.0);
+            let p = ui.painter().clone();
+            let hy = inner.top() + 7.5;
+            let g = p.layout_job(spaced("EDIT COLORS", sans_semibold(11.0), th().muted, 0.88));
+            p.galley(pos2(inner.left(), hy - g.size().y / 2.0), g, th().muted);
+            let x = Rect::from_center_size(pos2(inner.right() - 6.0, hy), vec2(16.0, 22.0));
+            let xr = ui.interact(x, Id::unique("color-edit-x"), Sense::click());
+            hits.push(("color-edit-x", x));
+            p.text(
+                x.center(),
+                Align2::CENTER_CENTER,
+                "×",
+                sans(18.0),
+                if xr.hovered() { th().text } else { th().faint },
+            );
+            close |= xr.clicked();
+            p.text(pos2(x.left() - 6.0, hy), Align2::RIGHT_CENTER, format!("{n} slots"), mono(11.0), th().faint);
+            let top = inner.top() + 15.0 + 12.0;
+            let shown = chip_rows * per_row;
+            for (i, &slot) in self.colors.iter().take(shown).enumerate() {
+                let at = pos2(inner.left() + (i % per_row) as f32 * CHIP_STEP, top + (i / per_row) as f32 * CHIP_STEP);
+                let r = Rect::from_min_size(at, vec2(CHIP, CHIP));
+                if i + 1 == shown && n > shown {
+                    // More than fit: the last chip counts the rest.
+                    p.rect(r, CornerRadius::same(4), th().tint(9), Stroke::new(1.0, th().line), StrokeKind::Inside);
+                    p.text(r.center(), Align2::CENTER_CENTER, format!("+{}", n - shown + 1), mono(9.0), th().muted);
+                } else {
+                    p.rect(
+                        r,
+                        CornerRadius::same(4),
+                        self.color(slot),
+                        Stroke::new(1.0, th().tint(38)),
+                        StrokeKind::Inside,
+                    );
+                }
+            }
+            let mut y = top + chips_h + 12.0;
+            let (mut sat, mut val) = (shift.sat * 100.0, shift.val * 100.0);
+            let signed: fn(f32) -> String = |v| format!("{v:+.0}%");
+            let rows: [SliderRow; 3] = [
+                ("group-hue", "Hue", &mut shift.hue, -180.0, 180.0, |v| format!("{v:+.0}°")),
+                ("group-sat", "Saturation", &mut sat, -100.0, 100.0, signed),
+                ("group-val", "Value", &mut val, -100.0, 100.0, signed),
+            ];
+            for (id, label, v, lo, hi, f) in rows {
+                let r = Rect::from_min_size(pos2(inner.left(), y), vec2(inner.width(), 34.0));
+                hits.push((id, r));
+                let (c, d) = slider(ui, r, id, label, v, lo, hi, f);
+                // Whole degrees and percents, so the number shown is the number set.
+                *v = v.round();
+                (changed, done) = (changed | c, done | d);
+                y += 34.0;
+            }
+            (shift.sat, shift.val) = (sat / 100.0, val / 100.0);
+            p.galley(pos2(inner.left(), y + 8.0), note, th().faint);
+        });
+        for (k, r) in hits {
+            self.hits.insert(k.into(), r);
+        }
+        if changed && shift != self.group_shift {
+            self.group_shift = shift;
+            self.actions.push(Action::ShiftColors(shift));
+        }
+        if done {
+            self.actions.push(Action::CommitColor);
+        }
+        if close {
+            self.color_edit = None;
+        }
+    }
+
     // The colour editor: not in the mockups. A .panel beside #palette, built from its parts
     // (.ph header, #current-style fields, #edit-color buttons, .note).
     fn color_editor(&mut self, ctx: &Context, screen: Rect) {
+        self.sync_colors();
+        if self.color_edit.is_some() && !self.colors.is_empty() {
+            return self.group_editor(ctx, screen);
+        }
         let Some(mut ed) = self.color_edit.take() else { return };
         let slot = self.slot;
         let c = self.palette[slot as usize];
@@ -4982,20 +5183,7 @@ impl Hybrid {
         } else {
             h
         };
-        let rect = match self.hits.get("palette").copied().filter(|_| self.palette_open) {
-            // Over the dock beside the palette on whichever side fits, level with its bottom;
-            // beside the rail right of it, level with its top, kept on screen.
-            Some(pal) if self.touch => {
-                let x =
-                    if pal.left() - 8.0 - w >= screen.left() + 12.0 { pal.left() - 8.0 - w } else { pal.right() + 8.0 };
-                Rect::from_min_size(pos2(x, (pal.bottom() - h).max(TOP)), vec2(w, h))
-            }
-            Some(pal) => {
-                let top = pal.top().min(screen.bottom() - 12.0 - h);
-                Rect::from_min_size(pos2(pal.right() + 8.0, top.max(TOP)), vec2(w, h))
-            }
-            None => Rect::from_min_size(pos2(self.aside_right(screen) - w, TOP), vec2(w, h)),
-        };
+        let rect = self.color_edit_rect(screen, w, h);
         let (mut close, mut commit, mut live) = (false, false, false);
         let mut new_mat = None;
         let mut op = None;

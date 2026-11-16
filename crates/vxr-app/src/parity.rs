@@ -24,6 +24,8 @@ fn tool(a: &Action) -> Option<&'static str> {
         Action::SetMaterial { .. } => Some("material_set"),
         Action::SwapColors(..) => Some("palette_swap"),
         Action::CopyColor { .. } => Some("palette_copy"),
+        // The palette's selection is `slots`, or `selection: true` for the used colours.
+        Action::ShiftColors(_) | Action::SelectUsedColors => Some("palette_adjust"),
         // In world mode rotate and flip turn the picked object: `transform_object`.
         Action::Transform(_) => Some("transform"),
         Action::SelectAll | Action::InvertSelection | Action::SelectColor | Action::Deselect => Some("select"),
@@ -120,6 +122,8 @@ fn with_tools() -> Vec<Action> {
         Action::SetMaterial { slot: 1, material: Material::default() },
         Action::SwapColors(1, 2),
         Action::CopyColor { from: 1, to: 2 },
+        Action::ShiftColors(vxr_core::palette::Shift::default()),
+        Action::SelectUsedColors,
         Action::Transform(Transform::Rotate(0)),
         Action::SelectAll,
         Action::InvertSelection,

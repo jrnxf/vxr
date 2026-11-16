@@ -787,6 +787,40 @@ async () => {
   const removed = col(used)[4] === 0 && st().voxels === beforeRemove - c0[4];
   await key('z', cmd);
   step('Remove erases every voxel of the color, one undo', removed && removeToast === `Removed slot ${used}: ${c0[4]} voxels` && st().voxels === beforeRemove, JSON.stringify([removeToast, col(used), st().voxels, st().selected]));
+  {
+    // The group edit: Shift-click a second swatch, then the Hue slider turns both colours.
+    while (st().slot > used) await key('[');
+    while (st().slot < used) await key(']');
+    let other = 1;
+    while (other === used || col(other)[4] === 0 || !at(`sw${other}`)) other++;
+    const o0 = col(other);
+    const sw = at(`sw${other}`);
+    ptr('pointermove', sw[0], sw[1], 0, { shiftKey: true }); await frames();
+    ptr('pointerdown', sw[0], sw[1], 0, { shiftKey: true }); await frames();
+    ptr('pointerup', sw[0], sw[1], 0, { shiftKey: true }); await frames(3);
+    const picked = st().colors;
+    const hr = window.vxr.hit_rect('group-hue');
+    step('Shift-click a swatch selects it with the current one and the editor edits both', JSON.stringify(picked) === JSON.stringify([used, other]) && hr.length === 4 && !at('sv'), JSON.stringify([picked, hr]));
+    const y = (hr[1] + hr[3]) / 2;
+    await drag((hr[0] + hr[2]) / 2, y, hr[0] + 1 + ((hr[2] - hr[0] - 2) * 5) / 6, y);
+    const turn = (c) => [c[2], c[0], c[1], c[3], c[4]].join();
+    const turned = col(used).join() === turn(c0) && col(other).join() === turn(o0);
+    const mid = [col(used), col(other)];
+    await key('z', cmd);
+    await frames(2);
+    step('the Hue slider at +120 turns both colors, no voxel changes, one undo', turned && col(used).join() === c0.join() && col(other).join() === o0.join(), JSON.stringify([c0, o0, mid]));
+    await clickAt(`sw${used}`);
+    step('a plain click on a swatch ends the selection', st().colors.length === 0 && st().slot === used && !!at('sv'), JSON.stringify(st().colors));
+    await key('k', cmd);
+    for (const ch of 'select used colors') await key(ch);
+    await key('Enter');
+    await frames(2);
+    const all = st().colors;
+    let inUse = 0;
+    for (let i = 1; i < 256; i++) if (col(i)[4] > 0) inUse++;
+    step('Cmd-K Select used colors selects every color in the model', all.length === inUse && inUse > 1 && st().toast === `Selected the ${inUse} colors in the model`, JSON.stringify([all, inUse, st().toast]));
+    await clickAt(`sw${used}`);
+  }
   step('the palette shows the colors in use, not an unused slot', !!at(`sw${used}`) && !at(`sw${free}`));
   await clickAt('palette-all');
   step('its All button shows every slot', !!at(`sw${free}`));

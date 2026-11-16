@@ -731,14 +731,21 @@ fn the_housekeeping_select_and_palette_tools_change_the_window_and_undo_gives_th
     );
     assert_eq!(w.scene.history().position(), position + 1);
     assert_eq!((w.scene.palette[12], w.scene.palette[13]), ([0x2a, 0x6f, 0xb0, 255], [0x3a, 0x7b, 0xd9, 255]));
+    // The group edit, on the slots of the selected voxels (the grey slab keeps its grey at
+    // any hue): one undo step in the window.
+    assert!(call(&mut w, &mut a, "select", json!({"all": true})).starts_with("123 voxels selected"));
+    let t = call(&mut w, &mut a, "palette_adjust", json!({"selection": true, "hue": 120}));
+    assert_eq!(t, "shifted 2 slots (123 voxels use them): slot 8: #808080 -> #808080; slot 13: #3a7bd9 -> #d93a7b");
+    assert_eq!(w.scene.history().position(), position + 2);
+    assert_eq!(w.scene.palette[13], [0xd9, 0x3a, 0x7b, 255]);
     call(&mut w, &mut a, "show_world", json!({}));
-    // Eleven edits applied, one undo step each (the delete was undone): undone, the save is
+    // Twelve edits applied, one undo step each (the delete was undone): undone, the save is
     // the file's bytes.
     let mut steps = 0;
     while w.scene.undo() {
         steps += 1;
     }
-    assert_eq!(steps, 11);
+    assert_eq!(steps, 12);
     assert_eq!(w.scene.to_vox().unwrap(), bytes);
 }
 

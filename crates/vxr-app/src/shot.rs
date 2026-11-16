@@ -7519,6 +7519,105 @@ fn palette(s: &mut Shot, dir: &Path) -> Result<(), String> {
     )?;
     s.ed.scene.deselect();
 
+    // Shift-click a second swatch: the editor becomes the group editor on both slots.
+    s.ed.ui.slot = used;
+    s.frames(2);
+    let other = (1..=255u8)
+        .find(|&i| i != used && counts[i as usize] > 0 && s.ed.ui.hits.contains_key(&format!("sw{i}")))
+        .ok_or("no second used swatch on screen")?;
+    let (cg, co) = (s.ed.scene.palette[used as usize], s.ed.scene.palette[other as usize]);
+    let p = s.at(&format!("sw{other}"))?;
+    s.ui_drag(p, p, egui::Modifiers::SHIFT);
+    check(
+        s.ed.ui.colors == [used, other]
+            && s.ed.ui.slot == other
+            && s.ed.ui.hits.contains_key("group-hue")
+            && !s.ed.ui.hits.contains_key("sv"),
+        format!("Shift-click selects slots {used} and {other} and the editor edits both"),
+    )?;
+    // The hue slider at five sixths is +120 degrees: every channel moves to the next one.
+    let r = s.ed.ui.hits["group-hue"];
+    let turn = |c: [u8; 4]| [c[2], c[0], c[1], c[3]];
+    s.ui_drag(
+        r.center(),
+        egui::pos2(r.left() + 1.0 + (r.width() - 2.0) * 5.0 / 6.0, r.center().y),
+        egui::Modifiers::NONE,
+    );
+    s.frames(2);
+    s.save_png(&dir.join("color-group.png"))?;
+    check(
+        s.ed.scene.palette[used as usize] == turn(cg)
+            && s.ed.scene.palette[other as usize] == turn(co)
+            && s.ed.scene.map.counts == counts
+            && s.ed.ui.group_shift == vxr_core::palette::Shift { hue: 120.0, sat: 0.0, val: 0.0 },
+        format!(
+            "the Hue slider at +120 turns both colours ({cg:?} -> {:?}, {co:?} -> {:?}) and no voxel changes",
+            s.ed.scene.palette[used as usize], s.ed.scene.palette[other as usize]
+        ),
+    )?;
+    // Value down to a half from there: the drag starts from the colours before the group edit.
+    let r = s.ed.ui.hits["group-val"];
+    s.ui_drag(r.center(), egui::pos2(r.left() + 1.0 + (r.width() - 2.0) / 4.0, r.center().y), egui::Modifiers::NONE);
+    let both = vxr_core::palette::Shift { hue: 120.0, sat: 0.0, val: -0.5 };
+    check(
+        s.ed.scene.palette[used as usize] == both.apply(cg) && s.ed.scene.palette[other as usize] == both.apply(co),
+        format!("the Value slider at -50% then halves them: {:?}", s.ed.scene.palette[used as usize]),
+    )?;
+    s.ed.undo();
+    check(
+        s.ed.scene.palette[used as usize] == turn(cg) && s.ed.scene.palette[other as usize] == turn(co),
+        "one undo takes back the Value drag for both slots".into(),
+    )?;
+    s.ed.undo();
+    s.frames(2);
+    check(
+        s.ed.scene.palette[used as usize] == cg
+            && s.ed.scene.palette[other as usize] == co
+            && s.ed.ui.group_shift == vxr_core::palette::Shift::default()
+            && s.ed.ui.colors == [used, other],
+        "and one more the Hue drag; the sliders return to zero and the slots stay selected".into(),
+    )?;
+    // A plain click ends the selection: the editor is the one colour's again.
+    s.ui_click(&format!("sw{used}"))?;
+    check(
+        s.ed.ui.colors.is_empty() && s.ed.ui.slot == used && s.ed.ui.hits.contains_key("sv"),
+        "a plain click on a swatch ends the selection".into(),
+    )?;
+    // Cmd-K Select used colors: the selection's colours, or the model's with none selected.
+    let cmd_k = |s: &mut Shot| {
+        let key =
+            |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+        s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+        s.frames_with(1, vec![egui::Event::Text("select used colors".into())]);
+        s.frames_with(3, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    };
+    let mut two = Vec::new();
+    s.ed.scene.for_each_voxel(|p, v| {
+        if (v == used || v == other) && two.iter().filter(|&&(_, w)| w == v).count() < 2 {
+            two.push((p, v));
+        }
+    });
+    s.ed.scene.select(two.iter().map(|c| c.0), vxr_core::select::Mode::Replace);
+    cmd_k(s);
+    let mut want = vec![used, other];
+    want.sort_unstable();
+    check(
+        s.ed.ui.colors == want
+            && s.ed.ui.hits.contains_key("group-hue")
+            && s.ed.ui.toast_text() == Some("Selected the 2 colors in the selection"),
+        format!("Cmd-K Select used colors selects the selection's slots {want:?}"),
+    )?;
+    s.ed.scene.deselect();
+    cmd_k(s);
+    let in_use: Vec<u8> = (1..=255u8).filter(|&i| counts[i as usize] > 0).collect();
+    check(
+        s.ed.ui.colors == in_use
+            && s.ed.ui.toast_text() == Some(format!("Selected the {} colors in the model", in_use.len()).as_str()),
+        format!("with nothing selected it selects the {} colours in the model", in_use.len()),
+    )?;
+    s.save_png(&dir.join("color-group-all.png"))?;
+    s.ui_click(&format!("sw{used}"))?;
+
     // The palette shows the colours in use (and the current one); All shows every slot.
     s.ed.ui.slot = used;
     s.frames(2);
