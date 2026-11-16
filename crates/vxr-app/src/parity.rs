@@ -56,6 +56,8 @@ fn tool(a: &Action) -> Option<&'static str> {
         Action::ToggleWorld => Some("show_world"),
         Action::Duplicate { .. } => Some("duplicate"),
         Action::PickNode(_) => Some("edit_object"),
+        // Picking several rows is how the UI groups them at once; agents name them in `group`.
+        Action::PickAlso(_) => Some("group"),
         Action::SetHidden(..) | Action::ToggleHidden => Some("hide"),
         Action::Group => Some("group"),
         Action::PlaceNode { .. } | Action::ShiftNode { .. } => Some("reorder"),
@@ -160,6 +162,7 @@ fn with_tools() -> Vec<Action> {
         Action::ToggleWorld,
         Action::Duplicate { linked: false },
         Action::PickNode(1),
+        Action::PickAlso(1),
         Action::SetHidden(1, true),
         Action::ToggleHidden,
         Action::Group,

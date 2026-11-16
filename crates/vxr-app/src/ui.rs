@@ -359,6 +359,9 @@ pub enum Action {
     },
     /// A scene tree row was clicked: pick that object in world mode, or edit its model.
     PickNode(usize),
+    /// A scene tree row was Cmd-clicked in world mode: add it to the picked rows, or take it
+    /// out, so Cmd-G, Backspace and H act on all of them.
+    PickAlso(usize),
     /// Hide or show a tree node in world mode (the row's eye).
     SetHidden(usize, bool),
     /// Hide or show the picked object (H).
@@ -906,6 +909,8 @@ pub struct Hybrid {
     pub tree: Vec<TreeRow>,
     pub tree_on: Option<usize>,
     pub picked_node: Option<usize>,
+    /// Every picked node in world mode (more than one after a Cmd-click in the tree).
+    pub picks: Vec<usize>,
     /// The layers listed under the tree in world mode, and the picked node's layer.
     pub layers: Vec<LayerRow>,
     pub layer_on: Option<i32>,
@@ -1266,6 +1271,7 @@ impl Hybrid {
             tree: Vec::new(),
             tree_on: None,
             picked_node: None,
+            picks: Vec::new(),
             tree_scroll: 0,
             tree_drag: None,
             layers: Vec::new(),
@@ -2851,6 +2857,7 @@ impl Hybrid {
         self.hits.insert("tree".into(), rect);
         let objects = self.tree.iter().filter(|r| !r.group).count();
         let (on, scroll, layer_on) = (self.tree_on, self.tree_scroll, self.layer_on);
+        let picks = self.picks.clone();
         let mut renaming = self.renaming.take();
         let mut drag = self.tree_drag.take();
         let mut focus = std::mem::take(&mut self.rename_focus);
@@ -2897,7 +2904,7 @@ impl Hybrid {
                     hits.push((format!("tree-eye-{}", row.node), eye));
                 }
                 let hover = resp.hovered() || eye_resp.as_ref().is_some_and(|e| e.hovered());
-                let is_on = on == Some(row.node);
+                let is_on = on == Some(row.node) || world && picks.contains(&row.node);
                 let p = ui.painter();
                 if is_on {
                     p.rect_filled(r, CornerRadius::same(7), th().accent_bg);
@@ -2944,6 +2951,8 @@ impl Hybrid {
                     run.push(Action::SetHidden(row.node, !row.hidden));
                 } else if resp.double_clicked() {
                     start_rename = Some(named);
+                } else if resp.clicked() && world && ui.input(|i| i.modifiers.command) {
+                    run.push(Action::PickAlso(row.node));
                 } else if resp.clicked() {
                     run.push(Action::PickNode(row.node));
                 }
@@ -6095,6 +6104,16 @@ impl Hybrid {
             }
             (None, _, _) if self.world => {
                 let mut v = vec![("Click", "pick an object"), ("Drag", "move it")];
+                if self.picks.len() > 1 {
+                    let v = [
+                        ("⌘-click a row", "pick more"),
+                        ("⌘G", "group"),
+                        ("H", "hide"),
+                        ("⌫", "delete"),
+                        ("Esc", "pick nothing"),
+                    ];
+                    return self.hint_panel(ctx, screen, &v);
+                }
                 if self.picked.is_some() {
                     v.extend([("Arrows", "nudge"), ("⌘D", "duplicate"), ("⌘⇧D", "linked copy"), ("⌫", "delete")]);
                 }

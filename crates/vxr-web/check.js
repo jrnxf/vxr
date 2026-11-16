@@ -1961,6 +1961,30 @@ async () => {
     await key('Enter');
     step("Cmd-K 'Ungroup' takes it out again", st().tree.length === 8 && st().picked === 'slab', JSON.stringify(st()));
     for (let i = 0; i < 2; i++) await key('z', cmd);
+    // Cmd-click on a second row picks both; Cmd-G groups them as one undo step, and
+    // Backspace deletes them both as one undo step.
+    await pause();
+    await chip(`tree-${slab}`);
+    const treesRow = window.vxr.hit(`tree-${trees}`);
+    await click(treesRow[0], treesRow[1], cmd);
+    s = st();
+    const pickedSelected = s.selected;
+    step('Cmd-click on a second tree row picks both', JSON.stringify(s.picks) === JSON.stringify([slab, trees]) && s.treeOn === trees && s.selected > 0, JSON.stringify(s.picks));
+    await key('g', cmd);
+    s = st();
+    const pairRow = s.tree.find((r) => r.name === 'group 1');
+    step('Cmd-G groups both picked rows in one new group', s.tree.length === 9 && s.picked === 'group 1' && pairRow && pairRow.depth === 0 && s.tree.filter((r) => r.depth === 1 && (r.node === slab || r.node === trees)).length === 2 && s.selected === pickedSelected, JSON.stringify(s.tree));
+    await key('z', cmd);
+    step('grouping both picked rows is one undo step', st().tree.length === 8 && same(bytes(), worldFile));
+    await pause();
+    await chip(`tree-${slab}`);
+    await click(treesRow[0], treesRow[1], cmd);
+    await key('Backspace');
+    s = st();
+    step('Backspace deletes both picked rows', s.tree.length === 2 && s.picks.length === 0, JSON.stringify(s.tree));
+    await key('z', cmd);
+    step('deleting both picked rows is one undo step', st().tree.length === 8 && same(bytes(), worldFile));
+    await key('Escape');
     // A drag of a tree row moves it in the tree (onto a group row: into the group), and
     // Cmd-K steps the picked row down among its group, one undo step each.
     const treeOrder = () => st().tree.map((r) => `${r.name}:${r.depth}`).join(',');

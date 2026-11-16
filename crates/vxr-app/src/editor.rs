@@ -1163,6 +1163,10 @@ impl Editor {
     /// say to Tab into an object first.
     fn world_action(&mut self, a: Action) {
         let picked = self.scene.picked();
+        let picks = self.scene.picks();
+        if picks.len() > 1 {
+            return self.world_action_on_picks(a, picks);
+        }
         let s = &mut self.scene;
         match (a, picked) {
             (Action::Deselect, _) => {
@@ -1228,6 +1232,58 @@ impl Editor {
                 None,
             ) => self.ui.toast(&self.ctx, "Click an object to pick it first"),
             _ => self.ui.toast(&self.ctx, "Tab into an object to edit its voxels"),
+        }
+    }
+
+    /// A selection action in world mode with several rows picked (Cmd-click in the tree):
+    /// Group puts them in one new group, Delete removes them all and Deselect picks nothing,
+    /// each one undo step. Other actions say to pick one row.
+    fn world_action_on_picks(&mut self, a: Action, picks: Vec<usize>) {
+        let s = &mut self.scene;
+        let n = picks.len();
+        let msg = match a {
+            Action::Deselect => {
+                s.pick(None);
+                return;
+            }
+            Action::Group => match s.edit_world(|w| w.group(&picks)) {
+                Ok(Some(g)) => {
+                    s.pick(Some(g));
+                    format!("Grouped {n} as {}", node_name(s.world().unwrap(), g))
+                }
+                _ => "Pick rows of one group to group them: drag a row in first to move it".to_string(),
+            },
+            Action::DeleteSelection => {
+                // A picked row under another picked row goes with it.
+                let gone = s.edit_world(|w| {
+                    let mut gone = 0;
+                    for &i in &picks {
+                        gone += usize::from(w.in_tree(i) && w.remove(i));
+                    }
+                    gone
+                });
+                match gone {
+                    Ok(k) if k > 0 => format!("Deleted {n} objects and groups"),
+                    _ => return,
+                }
+            }
+            _ => "Click one row to pick only it: ⌘G, ⌫ and H act on all picked rows".to_string(),
+        };
+        self.ui.toast(&self.ctx, msg);
+    }
+
+    /// Hide every picked row, or show them all when the last picked one is hidden (H with
+    /// several rows picked), as one undo step.
+    fn hide_picks(&mut self) {
+        let (picks, Some(w)) = (self.scene.picks(), self.scene.world()) else { return };
+        let Some(&last) = picks.last() else { return };
+        let hidden = !w.tree.nodes[last].hidden;
+        let n = picks.len();
+        let hide = |w: &mut vxr_core::world::World| picks.iter().for_each(|&i| w.set_hidden(i, hidden));
+        if self.scene.edit_world(hide).is_ok() {
+            let msg =
+                if hidden { format!("Hid {n} objects and groups") } else { format!("Showing {n} objects and groups") };
+            self.ui.toast(&self.ctx, msg);
         }
     }
 
@@ -1784,6 +1840,7 @@ impl Editor {
         self.ui.camera_hints = self.space || self.cam_drag.is_some();
         self.ui.picked = self.scene.picked().map(|i| node_name(self.scene.world().unwrap(), i));
         self.ui.picked_node = self.scene.picked();
+        self.ui.picks = self.scene.picks();
         self.ui.tree = tree_rows(&self.scene);
         self.ui.layers = layer_rows(&self.scene);
         self.ui.layer_on = self.scene.picked().zip(self.scene.world()).map(|(i, w)| w.tree.nodes[i].layer);
@@ -2002,9 +2059,13 @@ impl Editor {
                 }
                 Action::ToggleWorld => self.toggle_world(),
                 Action::PickNode(i) => self.pick_node(i),
+                Action::PickAlso(i) => {
+                    self.scene.pick_also(i);
+                }
                 Action::SetHidden(i, hidden) => self.set_hidden(i, hidden),
                 Action::PlaceNode { node, parent, before } => self.place_node(node, parent, before),
                 Action::ShiftNode { down } => self.shift_node(down),
+                Action::ToggleHidden if self.scene.picks().len() > 1 => self.hide_picks(),
                 Action::ToggleHidden => match (self.scene.picked(), self.scene.world()) {
                     (Some(i), Some(w)) => self.set_hidden(i, !w.tree.nodes[i].hidden),
                     _ => self.ui.toast(&self.ctx, "Pick an object in the world to hide it"),

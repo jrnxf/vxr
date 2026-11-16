@@ -70,6 +70,9 @@ pub struct Scene {
     at: At,
     /// The object picked in world mode, whose voxels show selected there.
     picked: Option<usize>,
+    /// Other objects or groups picked beside it with Cmd-click in the scene tree, in the
+    /// order they were picked.
+    also: Vec<usize>,
     /// The world edit in progress (a drag, or an AI change's new objects).
     world_stroke: Option<WorldStroke>,
 }
@@ -177,6 +180,7 @@ impl Scene {
             world: None,
             at: At::Map,
             picked: None,
+            also: Vec::new(),
             world_stroke: None,
         }
     }
@@ -444,9 +448,33 @@ impl Scene {
         let ok = self.at == At::World && i.is_none_or(|i| self.world.as_ref().is_some_and(|w| w.in_tree(i)));
         if ok {
             self.picked = i;
+            self.also.clear();
             self.show_picked();
         }
         ok
+    }
+
+    /// Every picked object or group, in the order picked, ending with [`Scene::picked`].
+    pub fn picks(&self) -> Vec<usize> {
+        self.also.iter().copied().chain(self.picked).collect()
+    }
+
+    /// Add object or group `i` to the picks, or take it out if it is one (the one picked
+    /// before it becomes [`Scene::picked`]), as Cmd-click in the scene tree does. Not an undo
+    /// step. False outside world mode or if `i` is not a node under the root.
+    pub fn pick_also(&mut self, i: usize) -> bool {
+        if self.at != At::World || !self.world.as_ref().is_some_and(|w| w.in_tree(i)) {
+            return false;
+        }
+        if self.picked == Some(i) {
+            self.picked = self.also.pop();
+        } else if let Some(k) = self.also.iter().position(|&n| n == i) {
+            self.also.remove(k);
+        } else {
+            self.also.extend(self.picked.replace(i));
+        }
+        self.show_picked();
+        true
     }
 
     /// The object whose voxel shows at map cell `p`, in world mode.
@@ -454,11 +482,11 @@ impl Scene {
         self.world.as_ref().filter(|_| self.at == At::World)?.object_at(self.to_world(p))
     }
 
-    /// Select the picked object's voxels in the world map, or nothing.
+    /// Select the picked objects' voxels in the world map, or nothing.
     fn show_picked(&mut self) {
         let mut cells = HashSet::new();
-        if let (Some(i), Some(w)) = (self.picked, &self.world) {
-            if w.in_tree(i) {
+        if let Some(w) = &self.world {
+            for i in self.also.iter().copied().chain(self.picked).filter(|&i| w.in_tree(i)) {
                 for o in w.objects_under(i) {
                     w.for_each_object_voxel(o, |q, _| {
                         let p = self.to_map(q);
@@ -467,9 +495,9 @@ impl Scene {
                         }
                     });
                 }
-            } else {
-                self.picked = None;
             }
+        } else {
+            (self.picked, self.also) = (None, Vec::new());
         }
         self.selection = cells;
         self.selection_version += 1;
@@ -498,8 +526,9 @@ impl Scene {
             At::World => w.shown_map()?,
             At::Map => return Err("no world".into()),
         };
+        self.also.retain(|&i| w.in_tree(i));
         if self.picked.is_some_and(|i| !w.in_tree(i)) {
-            self.picked = None;
+            self.picked = self.also.pop();
         }
         map.track_dirty(self.map.tracking());
         let size = map.size_voxels();
@@ -685,6 +714,7 @@ impl Scene {
             if s.made.take().is_some() {
                 // Back to a new scene: the map is its one model again, as it was.
                 (self.world, self.source, self.at, self.picked) = (None, None, At::Map, None);
+                self.also.clear();
             } else if self.at == At::World {
                 // It fitted when the edit began, so it fits again.
                 let _ = self.load(At::World);
@@ -975,6 +1005,7 @@ impl Scene {
             map.track_dirty(self.map.tracking());
             (self.map, self.origin, self.pivot, self.floor) = (map, lo, m.pivot, m.floor);
             (self.world, self.source, self.at, self.picked) = (None, None, At::Map, None);
+            self.also.clear();
             self.reshapes += 1;
         } else if !(c.added.is_empty() && (c.replaced.is_empty() || elsewhere) && c.at[0] == c.at[1] && at == self.at)
             || at == At::World

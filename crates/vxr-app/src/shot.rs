@@ -3999,6 +3999,93 @@ fn groups(s: &mut Shot, bytes: &[u8], dir: &Path) -> Result<(), String> {
     s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
     s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
 
+    // Cmd-click on a row picks it beside the others: both rows show on and all their voxels
+    // show selected. Cmd-G groups the picks as one, H hides them all, Backspace deletes
+    // them all, each one undo step; an action for one row says so and changes nothing.
+    s.frames(30);
+    s.ui_click(&format!("tree-{slab}"))?;
+    let p = s.at(&format!("tree-{trees}"))?;
+    s.ui_drag(p, p, egui::Modifiers::COMMAND);
+    let voxels_of = |s: &Shot, i: usize| {
+        let w = s.ed.scene.world().unwrap();
+        w.objects_under(i)
+            .iter()
+            .map(|&o| {
+                let mut n = 0;
+                w.for_each_object_voxel(o, |_, _| n += 1);
+                n
+            })
+            .sum::<usize>()
+    };
+    let both = voxels_of(s, slab) + voxels_of(s, trees);
+    check(
+        s.ed.scene.picks() == [slab, trees]
+            && s.ed.ui.picks == [slab, trees]
+            && s.ed.ui.tree_on == Some(trees)
+            && s.ed.scene.selected_count() == both,
+        format!("Cmd-click picks a second row: both show selected ({} of {both} voxels)", s.ed.scene.selected_count()),
+    )?;
+    s.frames(20);
+    s.save_png(&dir.join("app-tree-picks.png"))?;
+    let (top, start) = (s.ed.scene.world().unwrap().tree.children(0).to_vec(), s.ed.scene.history().position());
+    s.frames_with(2, vec![key(egui::Key::ArrowRight, egui::Modifiers::NONE)]);
+    check(
+        s.ed.scene.world_voxels(false) == world
+            && s.ed.scene.history().position() == start
+            && s.ed.ui.toast_text().is_some_and(|t| t.starts_with("Click one row to pick only it")),
+        format!("an arrow with two rows picked moves nothing and says why ({:?})", s.ed.ui.toast_text()),
+    )?;
+    let shown = s.ed.scene.world_voxels(true);
+    s.frames_with(2, vec![key(egui::Key::H, egui::Modifiers::NONE)]);
+    let hidden = |s: &Shot| {
+        let w = s.ed.scene.world().unwrap();
+        [slab, trees].map(|i| w.tree.nodes[i].hidden)
+    };
+    check(
+        hidden(s) == [true, true] && s.ed.scene.world_voxels(true).len() < shown.len(),
+        format!("H hides both picked rows ({:?}, {:?})", hidden(s), s.ed.ui.toast_text()),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
+    check(
+        hidden(s) == [false, false] && s.ed.scene.world_voxels(true) == shown,
+        "hiding both is one undo step".into(),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::G, cmd)]);
+    let g = s.ed.scene.picked().filter(|&g| g != slab && g != trees);
+    let w = s.ed.scene.world().unwrap();
+    let mut order = vec![slab, trees];
+    order.sort_by_key(|&i| top.iter().position(|&k| k == i));
+    check(
+        g.is_some_and(|g| w.tree.children(g) == order.as_slice() && w.tree.children(0).len() == top.len() - 1)
+            && s.ed.scene.picks().len() == 1
+            && s.ed.scene.world_voxels(false) == world,
+        format!("Cmd-G puts both picked rows into one new group, in place ({:?})", s.ed.ui.toast_text()),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
+    check(s.ed.scene.world().unwrap().tree.children(0) == top, "grouping both is one undo step".into())?;
+    s.ui_click(&format!("tree-{slab}"))?;
+    let p = s.at(&format!("tree-{trees}"))?;
+    s.ui_drag(p, p, egui::Modifiers::COMMAND);
+    s.frames_with(2, vec![key(egui::Key::Backspace, egui::Modifiers::NONE)]);
+    let gone = |s: &Shot| [slab, trees].map(|i| s.ed.scene.world().unwrap().in_tree(i));
+    check(
+        gone(s) == [false, false] && s.ed.scene.picks().is_empty(),
+        format!("Backspace deletes both picked rows ({:?})", s.ed.ui.toast_text()),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
+    check(gone(s) == [true, true] && s.ed.scene.world_voxels(false) == world, "deleting both is one undo step".into())?;
+    s.ui_click(&format!("tree-{slab}"))?;
+    let p = s.at(&format!("tree-{trees}"))?;
+    s.ui_drag(p, p, egui::Modifiers::COMMAND);
+    s.ui_drag(p, p, egui::Modifiers::COMMAND);
+    let out = s.ed.scene.picks() == [slab];
+    s.ui_drag(p, p, egui::Modifiers::COMMAND);
+    s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+    check(
+        out && s.ed.scene.picks().is_empty() && s.ed.scene.selected_count() == 0,
+        "Cmd-click a picked row takes it out, and Escape picks nothing".into(),
+    )?;
+
     // A drag of a tree row moves it in the tree: onto the middle of a group row it goes into
     // the group (the row shows a ring), on the top edge of a row it goes in front of it (a
     // line shows the gap). The objects stay where they show.

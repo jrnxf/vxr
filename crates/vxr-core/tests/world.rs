@@ -1112,3 +1112,56 @@ proptest::proptest! {
         proptest::prop_assert_eq!(w.world_voxels(false), flat);
     }
 }
+
+#[test]
+fn several_picked_rows_show_selected_together_and_group_as_one() {
+    let mut s = vxr_core::Scene::from_vox(&fixture("22-world")).unwrap();
+    let w = s.world().unwrap();
+    let (slab, tree_a) = (find(w, "slab"), find(w, "tree a"));
+    let count = |w: &World, i: usize| {
+        let mut n = 0;
+        w.for_each_object_voxel(i, |_, _| n += 1);
+        n
+    };
+    let (n_slab, n_tree) = (count(w, slab), count(w, tree_a));
+
+    // Cmd-click adds a row: both show selected, and the last one is the picked one.
+    assert!(s.pick(Some(slab)));
+    assert!(s.pick_also(tree_a));
+    assert_eq!((s.picks(), s.picked()), (vec![slab, tree_a], Some(tree_a)));
+    assert_eq!(s.selected_count(), n_slab + n_tree);
+    assert!(!s.pick_also(0), "the root is not a row");
+
+    // Cmd-click on a picked row takes it out; the one before it is picked again.
+    assert!(s.pick_also(tree_a));
+    assert_eq!((s.picks(), s.picked(), s.selected_count()), (vec![slab], Some(slab), n_slab));
+    assert!(s.pick_also(tree_a));
+    assert!(s.pick_also(slab));
+    assert_eq!((s.picks(), s.selected_count()), (vec![tree_a], n_tree));
+
+    // A deleted pick drops out; a plain pick clears the others.
+    assert!(s.pick_also(slab));
+    assert!(s.edit_world(|w| w.remove(tree_a)).unwrap());
+    assert_eq!((s.picks(), s.selected_count()), (vec![slab], n_slab));
+    assert!(s.undo());
+    assert!(s.pick_also(tree_a));
+    assert!(s.pick(Some(tree_a)));
+    assert_eq!(s.picks(), vec![tree_a]);
+
+    // Picks of one group group as one step, in tree order, and keep their voxels.
+    let trees = find(s.world().unwrap(), "trees");
+    assert!(s.pick(Some(trees)));
+    assert!(s.pick_also(slab));
+    let n_trees: usize = s.world().unwrap().objects_under(trees).iter().map(|&o| count(s.world().unwrap(), o)).sum();
+    assert_eq!(s.selected_count(), n_slab + n_trees, "a picked group shows all it holds");
+    let before = s.world_voxels(false);
+    let picks = s.picks();
+    let g = s.edit_world(|w| w.group(&picks)).unwrap().unwrap();
+    let w = s.world().unwrap();
+    let mut both = vec![slab, trees];
+    both.sort_by_key(|&i| w.tree.children(0).iter().position(|&k| k == i));
+    assert_eq!(w.tree.children(g), both.as_slice());
+    assert_eq!(s.world_voxels(false), before);
+    assert!(s.undo());
+    assert!(s.world().unwrap().tree.children(0).contains(&slab));
+}
