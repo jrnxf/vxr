@@ -751,6 +751,11 @@ fn export_writes_the_obj_and_the_slices_under_the_root() {
     let t: Value = serde_json::from_str(&c.ok("export", json!({"kind": "slices"}))).unwrap();
     assert_eq!(t["exported"], json!(["art/rock-slices.png"]));
     assert_eq!(t["what"], "8 layers side by side, 64 x 8 pixels");
+    // A 3x3x3 box: 2 * (3 + 3) pixels wide, 3 + 3 + 2 * 3 - 1 tall.
+    let t: Value = serde_json::from_str(&c.ok("export", json!({"kind": "sprite"}))).unwrap();
+    assert_eq!(t["exported"], json!(["art/rock-sprite.png"]));
+    assert_eq!(t["what"], "the isometric sprite, 12 x 11 pixels on a transparent background");
+    assert_eq!(&std::fs::read(d.0.join("art/rock-sprite.png")).unwrap()[1..4], b"PNG");
     let t: Value = serde_json::from_str(&c.ok("export", json!({"kind": "obj", "path": "out/big.obj"}))).unwrap();
     assert_eq!(t["exported"][0], "out/big.obj");
     assert!(std::fs::read_to_string(d.0.join("out/big.obj")).unwrap().contains("mtllib big.mtl"));
@@ -763,7 +768,7 @@ fn export_writes_the_obj_and_the_slices_under_the_root() {
         (json!({"kind": "obj", "path": "../x.obj"}), "without .."),
         (json!({"kind": "obj", "path": "x.vox"}), "not a .obj file"),
         (json!({"kind": "slices", "path": "x.obj"}), "not a .png file"),
-        (json!({"kind": "gltf"}), "obj, slices, render, turntable or embed"),
+        (json!({"kind": "gltf"}), "obj, slices, sprite, render, turntable or embed"),
     ] {
         let e = c.err("export", args.clone());
         assert!(e.contains(says), "{args}: {e}");

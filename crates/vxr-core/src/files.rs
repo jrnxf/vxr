@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::Scene;
-use crate::export::{TEXTURE_W, obj, slices};
+use crate::export::{TEXTURE_W, obj, slices, sprite, sprite_size};
 
 /// A file to write or download: its name and bytes.
 pub type File = (String, Vec<u8>);
@@ -59,6 +59,24 @@ pub fn slices_png(scene: &Scene) -> Result<(Vec<u8>, [u32; 2], u32), String> {
     scene.for_each_voxel(|p, c| cells.push((p, c)));
     let s = slices(size, cells, &scene.palette);
     Ok((png(s.width, s.height, &s.rgba)?, [s.width, s.height], s.layers))
+}
+
+/// Pixels per voxel step of the isometric sprite export: one voxel is 4 pixels wide and 3
+/// tall, the smallest pixel-art cube. A larger sprite is this one scaled by whole numbers.
+pub const SPRITE_SCALE: u32 = 1;
+
+/// The isometric sprite of what the view shows (the edited model, or every shown object in
+/// the world) as one PNG with a transparent background ([`sprite`]). Returns the PNG and
+/// its size.
+pub fn sprite_png(scene: &Scene) -> Result<(Vec<u8>, [u32; 2]), String> {
+    let size = scene.bounds().size;
+    // The voxels' own box is never larger than the bounds, so this refuses before any work.
+    let [w, h] = sprite_size(size, SPRITE_SCALE);
+    let Some(s) = (w * h <= SLICES_MAX).then(|| sprite(&scene.map, &scene.palette, SPRITE_SCALE)) else {
+        return Err(format!("{}×{}×{} is too large for one image", size[0], size[1], size[2]));
+    };
+    let s = s.ok_or("the scene is empty")?;
+    Ok((png(s.width, s.height, &s.rgba)?, [s.width, s.height]))
 }
 
 /// The embed viewer's files, which a page with a `<voxel-scene>` tag loads from one folder:
@@ -748,5 +766,28 @@ mod tests {
         let (bytes, size, layers) = slices_png(&s).unwrap();
         assert_eq!((size, layers), ([12, 5], 3));
         assert_eq!(&bytes[1..4], b"PNG");
+    }
+
+    #[test]
+    fn sprite_png_is_the_voxels_on_a_transparent_background_and_skips_an_empty_scene() {
+        let mut s = Scene::new([4, 3, 5]);
+        assert_eq!(sprite_png(&s).unwrap_err(), "the scene is empty");
+        s.palette[3] = [200, 100, 50, 255];
+        s.edit([([1, 1, 1], 3), ([1, 2, 1], 3), ([2, 1, 1], 3)]);
+        let (bytes, size) = sprite_png(&s).unwrap();
+        // Two voxels along x and two up, one deep: 2 * 3 wide, 3 + 2 * 2 - 1 tall.
+        assert_eq!(size, [6, 6]);
+        let mut reader = png::Decoder::new(std::io::Cursor::new(&bytes)).read_info().unwrap();
+        let mut px = vec![0; reader.output_buffer_size().unwrap()];
+        let info = reader.next_frame(&mut px).unwrap();
+        assert_eq!((info.width, info.height, info.color_type), (6, 6, png::ColorType::Rgba));
+        let rows: Vec<&[u8]> = px[..info.buffer_size()].chunks(24).collect();
+        // The top row: the upper voxel's top face, then nothing over the lower voxel.
+        assert_eq!(rows[0], [[200, 100, 50, 255]; 4].concat().iter().chain(&[0; 8]).copied().collect::<Vec<u8>>());
+        assert_eq!(rows[5][..8], [0; 8]);
+        assert_eq!(rows[5][16..], [160, 80, 40, 255, 160, 80, 40, 255]);
+        // A scene whose sprite would pass the limit is refused before it is drawn.
+        let big = Scene::new([4000, 4000, 4000]);
+        assert!(sprite_png(&big).unwrap_err().contains("too large"));
     }
 }

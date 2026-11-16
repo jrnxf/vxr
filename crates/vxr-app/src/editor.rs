@@ -2272,8 +2272,8 @@ impl Editor {
         Ok(self.ui.render.to_json().to_string())
     }
 
-    /// A terminal agent's `export`, as the Export menu does it: the OBJ files or the PNG
-    /// slices into [`Editor::agent_files`] for the host, or a render export started whose
+    /// A terminal agent's `export`, as the Export menu does it: the OBJ files, the PNG
+    /// slices or the isometric sprite into [`Editor::agent_files`] for the host, or a render export started whose
     /// answer waits for it ([`Editor::agent_waits`]). Returns what it made.
     fn agent_export(&mut self, conn: u64, args: &serde_json::Value) -> Result<String, String> {
         if self.review.is_some() {
@@ -2291,6 +2291,11 @@ impl Editor {
                 let (png, [w, h], layers) = crate::files::slices_png(&self.scene)?;
                 self.agent_files = vec![(self.slices_name(), png)];
                 Ok(format!("{layers} layers side by side, {w} x {h} pixels"))
+            }
+            Some("sprite") => {
+                let (png, [w, h]) = crate::files::sprite_png(&self.scene)?;
+                self.agent_files = vec![(self.sprite_name(), png)];
+                Ok(format!("the isometric sprite, {w} x {h} pixels on a transparent background"))
             }
             Some("render") => {
                 if self.export.is_some() {
@@ -2322,7 +2327,7 @@ impl Editor {
                 self.agent_rendered = None;
                 Ok("rendering".into())
             }
-            _ => Err("kind: obj, slices, render, turntable or embed".into()),
+            _ => Err("kind: obj, slices, sprite, render, turntable or embed".into()),
         }
     }
 
@@ -2631,6 +2636,11 @@ impl Editor {
     /// The file name for the PNG slices export: the scene's name with `-slices.png`.
     pub fn slices_name(&self) -> String {
         format!("{}-slices.png", self.export_stem())
+    }
+
+    /// The file name for the isometric sprite export: the scene's name with `-sprite.png`.
+    pub fn sprite_name(&self) -> String {
+        format!("{}-sprite.png", self.export_stem())
     }
 
     /// The file name for a render export: the scene's name with `-render.png`.

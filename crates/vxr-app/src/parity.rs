@@ -17,7 +17,7 @@ fn tool(a: &Action) -> Option<&'static str> {
         Action::Save => Some("save"),
         Action::Undo => Some("undo"),
         Action::Redo => Some("redo"),
-        Action::ExportObj | Action::ExportSlices | Action::ExportPng | Action::ExportTurntable | Action::Embed => {
+        Action::ExportObj | Action::ExportSlices | Action::ExportSprite | Action::ExportPng | Action::ExportTurntable | Action::Embed => {
             Some("export")
         }
         Action::Recolor { .. } => Some("palette_set"),
@@ -106,6 +106,7 @@ fn with_tools() -> Vec<Action> {
         Action::Redo,
         Action::ExportObj,
         Action::ExportSlices,
+        Action::ExportSprite,
         Action::ExportPng,
         Action::ExportTurntable,
         Action::Recolor { slot: 1, rgba: [0; 4] },

@@ -157,7 +157,7 @@ Feature names below follow the update log [S1] unless another source is given.
 | PLY (marching cubes) | [S1 0.97.1] | missing | P3 | - |
 | Qubicle `.qb` | [S1 0.97.2] | missing | P3 | - |
 | Slices, cubes, point clouds | [S1 0.99.3]; `o slice` exports a volume as one image [S1 0.98.1] | partial [9]: PNG slices done (the Export menu or Cmd-K: every layer of what the view shows as one PNG, side by side from the bottom, a download in the browser); cubes and point clouds missing | P2 | - |
-| Isometric sprites | Export->iso [S1 0.96.1] | missing | P3 | - |
+| Isometric sprites | Export->iso [S1 0.96.1] | done: Isometric sprite (the Export menu or Cmd-K, and the agent's `export` kind sprite in files mode and live mode): what the view shows as one pixel-art PNG on a transparent background, from the front-right-top corner, each voxel exactly 4 pixels wide (2 pixels across for 1 down), the top, right and left faces in three shades | P3 | - |
 | Baked AO mesh | Export->bake [S1 0.97.2] | missing | P3 | - |
 | Import images | JPEG import, drag in sprites [S1 0.99.5, 0.99.7.2] | missing | P3 | - |
 | Web embed | none | done: the `<voxel-scene>` viewer (`crates/vxr-embed`) and its brick scene file are built and checked; the app's Embed command writes the embed folder (page, brick scene file, path-traced poster, viewer) and copies the tag, natively and in the browser; agents make the same folder with `export` kind embed in live mode (files mode has no GPU for the poster and says so); the browser check opens the folder the editor exported as its own page and sees the exported viewer take the scene live, framed as the poster is. Open, for the owner: hosted share links and a WebGL2 fallback | P2 | - |

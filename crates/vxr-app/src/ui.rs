@@ -261,6 +261,8 @@ pub enum Action {
     ExportObj,
     /// Export the model's layers side by side as one PNG (the host writes the file).
     ExportSlices,
+    /// Export the isometric sprite: one PNG of pixel art on a transparent background.
+    ExportSprite,
     /// Show `rgba` in palette slot `slot` now, inside the open colour edit.
     Recolor {
         slot: u8,
@@ -1018,6 +1020,7 @@ const COMMANDS: &[Command] = &[
     Command { label: "Export turntable", keys: &[], run: |h| h.actions.push(Action::ExportTurntable) },
     Command { label: "Export OBJ", keys: &[], run: |h| h.actions.push(Action::ExportObj) },
     Command { label: "Export PNG slices", keys: &[], run: |h| h.actions.push(Action::ExportSlices) },
+    Command { label: "Export isometric sprite", keys: &[], run: |h| h.actions.push(Action::ExportSprite) },
     Command { label: "Ask AI…", keys: &["Tab"], run: |h| h.open_ask_bar("") },
     Command { label: "Organize into objects (AI)", keys: &[], run: |h| h.organize() },
     Command { label: "Assistant panel", keys: &["⌘", "J"], run: |h| h.toggle_ai() },
@@ -2866,6 +2869,7 @@ impl Hybrid {
             Entry::Row("export-turntable", icon::REFRESH_CW, "Turntable", "PNG frames, animation"),
             Entry::Row("export-obj", icon::BOX, "OBJ with palette texture", ".obj .mtl .png"),
             Entry::Row("export-slices", icon::LAYERS, "PNG slices", ".png"),
+            Entry::Row("export-sprite", icon::AXIS_3D, "Isometric sprite", "pixel art .png"),
             Entry::Row("export-embed", icon::CODE, "Embed for a web page", "<voxel-scene>"),
         ];
         let height = |e: &Entry| match e {
@@ -2949,6 +2953,7 @@ impl Hybrid {
             Some("export-turntable") => self.actions.push(Action::ExportTurntable),
             Some("export-obj") => self.actions.push(Action::ExportObj),
             Some("export-slices") => self.actions.push(Action::ExportSlices),
+            Some("export-sprite") => self.actions.push(Action::ExportSprite),
             Some("export-embed") => self.actions.push(Action::Embed),
             _ => {}
         }

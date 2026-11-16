@@ -30,7 +30,7 @@ use vxr_render::Gpu;
 
 use crate::Editor;
 use crate::editor::Button;
-use crate::files::{File, obj_files, slices_png, vox_bytes};
+use crate::files::{File, obj_files, slices_png, sprite_png, vox_bytes};
 use crate::projects::{Project, Read, THUMB, content_hash};
 use crate::sync::{Auth, Event, Reply};
 use crate::ui::{Action, FontBytes};
@@ -329,6 +329,15 @@ pub fn run_action(ed: &mut Editor, p: &mut dyn Platform, action: Action) {
                     toast(ed, format!("{} {name} ({layers} layers, {w}×{h})", p.verb()))
                 }
                 Ok((None, ..)) => {}
+                Err(e) => toast(ed, format!("Could not export: {e}")),
+            }
+        }
+        Action::ExportSprite => {
+            let written =
+                sprite_png(&ed.scene).and_then(|(png, size)| Ok((p.save_png(&ed.sprite_name(), &png)?, size)));
+            match written {
+                Ok((Some(name), [w, h])) => toast(ed, format!("{} {name} ({w}×{h}, transparent)", p.verb())),
+                Ok((None, _)) => {}
                 Err(e) => toast(ed, format!("Could not export: {e}")),
             }
         }

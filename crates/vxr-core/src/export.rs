@@ -200,3 +200,80 @@ pub fn slices(size: [u32; 3], voxels: impl IntoIterator<Item = ([i32; 3], u8)>, 
     }
     Slices { width: width as u32, height: sz as u32, layers: sy as u32, rgba }
 }
+
+/// An isometric sprite: the model as pixel art, seen from the front-right-top corner.
+pub struct Sprite {
+    pub width: u32,
+    pub height: u32,
+    /// `width` x `height` RGBA pixels; pixels no voxel covers are transparent.
+    pub rgba: Vec<u8>,
+}
+
+/// The size in pixels of the sprite of `extent` voxels (the voxels' bounding box) at `scale`.
+pub fn sprite_size(extent: [u32; 3], scale: u32) -> [u64; 2] {
+    let [ex, ey, ez] = extent.map(u64::from);
+    let s = u64::from(scale);
+    [2 * s * (ex + ez), s * (ex + ez) + 2 * s * ey - 1]
+}
+
+/// The isometric sprite of `map` coloured by `palette`, or None when the map is empty.
+///
+/// The view is the Isometric snap view's corner (+x, +y, +z) as pixel art draws it: two
+/// pixels across for one down. One voxel is exactly `4 * scale` pixels wide: a step of one
+/// voxel along x moves `2 * scale` pixels right and `scale` down, along z the same to the
+/// left, and one voxel up moves `2 * scale` pixels up. Every edge is a clean line of
+/// two-pixel steps at every scale. The top face takes the voxel's colour, the right (+x)
+/// face four fifths of it and the left (+z) face three fifths. The image is the voxels'
+/// bounding box, so two models of one size line up.
+pub fn sprite(map: &crate::BrickMap, palette: &[[u8; 4]; 256], scale: u32) -> Option<Sprite> {
+    let (mut lo, mut hi) = ([i32::MAX; 3], [i32::MIN; 3]);
+    map.for_each(|p, _| {
+        for a in 0..3 {
+            lo[a] = lo[a].min(p[a]);
+            hi[a] = hi[a].max(p[a] + 1);
+        }
+    });
+    if lo[0] > hi[0] {
+        return None;
+    }
+    let extent = [0, 1, 2].map(|a| (hi[a] - lo[a]) as u32);
+    let [width, height] = sprite_size(extent, scale).map(|n| n as usize);
+    let s = scale as i64;
+    // Where the voxel at `lo`'s near corner lands: the box's left edge is column 0 and its
+    // top is row 0.
+    let (ox, oy) = (2 * s * extent[2] as i64, 2 * s * extent[1] as i64);
+    let mut rgba = vec![0u8; width * height * 4];
+    // No depth buffer: a voxel hides another only when no coordinate of it is smaller, and
+    // `for_each` reaches such a voxel later (bricks and their cells both run z, y, x
+    // upwards), so painting in its order paints back to front.
+    map.for_each(|p, c| {
+        let [x, y, z] = [0, 1, 2].map(|a| (p[a] - lo[a]) as i64);
+        let (px, py) = (ox + 2 * s * (x - z), oy + s * (x + z) - 2 * s * y);
+        let [r, g, b, _] = palette[c as usize];
+        let shade = |n: u16| [r, g, b].map(|v| (v as u16 * n / 5) as u8);
+        let (top, right, left) = (shade(5), shade(4), shade(3));
+        let show = [
+            map.get(p[0], p[1] + 1, p[2]) == 0,
+            map.get(p[0] + 1, p[1], p[2]) == 0,
+            map.get(p[0], p[1], p[2] + 1) == 0,
+        ];
+        for i in -2 * s..2 * s {
+            // How far the column is from the voxel's outer edge, in two-pixel steps.
+            let step = if i < 0 { (i + 2 * s) / 2 } else { (2 * s - 1 - i) / 2 };
+            // The side face starts at `side` and is one voxel tall; the top face is above it.
+            let side = -s + step;
+            let (face, shown) = if i < 0 { (left, show[2]) } else { (right, show[1]) };
+            let spans = [(show[0], -s - 1 - step, side, top), (shown, side, side + 2 * s, face)];
+            for (shown, from, to, [r, g, b]) in spans {
+                if !shown {
+                    continue;
+                }
+                for j in from..to {
+                    let at = ((py + j) as usize * width + (px + i) as usize) * 4;
+                    rgba[at..at + 4].copy_from_slice(&[r, g, b, 255]);
+                }
+            }
+        }
+    });
+    Some(Sprite { width: width as u32, height: height as u32, rgba })
+}

@@ -1140,7 +1140,7 @@ fn host_actions() -> Result<(), String> {
     s.ed.scene.edit([([0, 7, 0], 3u8)]);
     s.frames(2);
     let mut p = Fake { cancel: true, ..Default::default() };
-    for a in [Action::Save, Action::ExportObj, Action::ExportSlices] {
+    for a in [Action::Save, Action::ExportObj, Action::ExportSlices, Action::ExportSprite] {
         run_action(&mut s.ed, &mut p, a);
     }
     s.frames(2);
@@ -1176,6 +1176,15 @@ fn host_actions() -> Result<(), String> {
     check(
         p.calls.last().is_some_and(|c| c == "save_png chosen-slices.png true"),
         format!("PNG slices go out as a PNG named for the scene ({:?})", p.calls.last()),
+    )?;
+    run_action(&mut s.ed, &mut p, Action::ExportSprite);
+    s.frames(2);
+    let toast = s.ed.ui.toast_text().unwrap_or_default().to_string();
+    check(
+        p.calls.last().is_some_and(|c| c == "save_png chosen-sprite.png true")
+            && toast.starts_with("Saved chosen-sprite.png (")
+            && toast.ends_with(", transparent)"),
+        format!("the isometric sprite goes out as a PNG named for the scene ({:?}, {toast})", p.calls.last()),
     )?;
     s.ed.ui.theme = vxr_app::theme::ThemeChoice::from_id("nord").unwrap_or_default();
     run_action(&mut s.ed, &mut p, Action::Theme);
@@ -4918,7 +4927,7 @@ fn turntable(s: &mut Shot, dir: &Path) -> Result<(), String> {
 /// host does) cover the model's visible faces, natively in model mode and on 22-world's
 /// shown objects in world mode.
 fn export(s: &mut Shot, dir: &Path) -> Result<(), String> {
-    use vxr_app::files::{obj_files, slices_png};
+    use vxr_app::files::{obj_files, slices_png, sprite_png};
     let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
     s.ui_click("scene-select")?;
     s.frames(12);
@@ -4975,6 +4984,17 @@ fn export(s: &mut Shot, dir: &Path) -> Result<(), String> {
     s.frames_with(1, vec![egui::Event::Text("export png slices".into())]);
     s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
     check(s.host.contains(&Action::ExportSlices), "Cmd-K Export PNG slices asks the host too".into())?;
+    s.host.clear();
+    s.open_file_row("export-sprite")?;
+    check(
+        s.host.contains(&Action::ExportSprite) && !s.ed.ui.file_menu,
+        "its Isometric sprite row asks the host to export and closes the menu".into(),
+    )?;
+    s.host.clear();
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("export isometric sprite".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    check(s.host.contains(&Action::ExportSprite), "Cmd-K Export isometric sprite asks the host too".into())?;
 
     // The slices the native host writes: one tile per layer, every voxel at its cell.
     let decode = |bytes: &[u8]| -> Result<(u32, u32, Vec<u8>), String> {
@@ -5002,6 +5022,53 @@ fn export(s: &mut Shot, dir: &Path) -> Result<(), String> {
             s.ed.slices_name(),
             size[0],
             size[2]
+        ),
+    )?;
+
+    // The sprite the native host writes: the voxels' box seen from the front-right-top
+    // corner, every pixel a shade of a colour in use or clear, and the voxel nearest the
+    // eye, which nothing hides, as a whole pixel-art cube at its place.
+    let (png_bytes, _) = sprite_png(&s.ed.scene)?;
+    std::fs::write(dir.join(s.ed.sprite_name()), &png_bytes).map_err(|e| e.to_string())?;
+    let (w, h, px) = decode(&png_bytes)?;
+    let (mut lo, mut hi) = ([i32::MAX; 3], [i32::MIN; 3]);
+    let mut near = ([0; 3], 0u8);
+    let mut shades = std::collections::HashSet::new();
+    s.ed.scene.for_each_voxel(|p, c| {
+        for a in 0..3 {
+            lo[a] = lo[a].min(p[a]);
+            hi[a] = hi[a].max(p[a] + 1);
+        }
+        if p.iter().sum::<i32>() > near.0.iter().sum::<i32>() {
+            near = (p, c);
+        }
+        let [r, g, b, _] = s.ed.scene.palette[c as usize];
+        for n in [5u16, 4, 3] {
+            shades.insert([r, g, b].map(|v| (v as u16 * n / 5) as u8));
+        }
+    });
+    let [ex, ey, ez] = [0, 1, 2].map(|a| hi[a] - lo[a]);
+    let (clear, mut odd) = (px.chunks(4).filter(|p| p[3] == 0).count(), 0usize);
+    for p in px.chunks(4).filter(|p| p[3] != 0) {
+        odd += (p[3] != 255 || !shades.contains(&[p[0], p[1], p[2]])) as usize;
+    }
+    let [x, y, z] = [0, 1, 2].map(|a| near.0[a] - lo[a]);
+    let (left, top) = (2 * (x - z) + 2 * (ez - 1), (x + z) - 2 * y + 2 * (ey - 1));
+    let [r, g, b, _] = s.ed.scene.palette[near.1 as usize];
+    let shade = |n: u16| [r, g, b].map(|v| (v as u16 * n / 5) as u8);
+    let cube = [[5, 5, 5, 5], [3, 3, 4, 4], [3, 3, 4, 4]];
+    let whole = (0..3).all(|j| {
+        (0..4).all(|i| {
+            let at = (((top + j as i32) * w as i32 + left + i as i32) * 4) as usize;
+            px.get(at..at + 3) == Some(&shade(cube[j][i])[..]) && px[at + 3] == 255
+        })
+    });
+    check(
+        (w as i32, h as i32) == (2 * (ex + ez), ex + ez + 2 * ey - 1) && odd == 0 && clear > 0 && whole,
+        format!(
+            "{}: {w}×{h} for {ex}×{ey}×{ez} voxels, {clear} clear pixels, {odd} of no voxel's colour, the nearest voxel {:?} a whole cube ({whole})",
+            s.ed.sprite_name(),
+            near.0
         ),
     )?;
 
@@ -5068,6 +5135,16 @@ fn export(s: &mut Shot, dir: &Path) -> Result<(), String> {
     let (_, _, px) = decode(&png_bytes)?;
     let filled = px.chunks(4).filter(|p| p[3] != 0).count();
     check(filled == shown.len(), format!("in world mode 22-world-slices.png holds its {filled} shown voxels"))?;
+    // The sprite is the box of the shown voxels only.
+    let (_, [sw, sh]) = sprite_png(&w.ed.scene)?;
+    let ext = [0, 1, 2].map(|a| {
+        let at = shown.keys().map(|p| p[a]);
+        (at.clone().max().unwrap_or(0) + 1 - at.min().unwrap_or(0)) as u32
+    });
+    check(
+        [sw, sh] == [2 * (ext[0] + ext[2]), ext[0] + ext[2] + 2 * ext[1] - 1],
+        format!("in world mode 22-world-sprite.png is {sw}×{sh}, the box of its shown voxels {ext:?}"),
+    )?;
     Ok(())
 }
 
@@ -7996,6 +8073,13 @@ fn agents_look_render(
     )?;
     let (t, e) = s.agent_call(live, claude, "export", json!({"kind": "slices"}));
     check(!e && downloads.join("house-slices.png").is_file(), format!("the PNG slices land in Downloads: {t}"))?;
+    let (t, e) = s.agent_call(live, claude, "export", json!({"kind": "sprite"}));
+    let png = std::fs::read(downloads.join("house-sprite.png")).unwrap_or_default();
+    let want = vxr_app::files::sprite_png(&s.ed.scene).map(|(png, _)| png).unwrap_or_default();
+    check(
+        !e && !png.is_empty() && png == want && t.contains("house-sprite.png") && t.contains("transparent background"),
+        format!("the isometric sprite lands in Downloads, the file the Export menu makes: {t}"),
+    )?;
     let (t, e) = s.agent_call(live, claude, "export", json!({"kind": "render"}));
     let png = std::fs::read(downloads.join("house-render.png")).unwrap_or_default();
     let size = png::Decoder::new(std::io::Cursor::new(png))

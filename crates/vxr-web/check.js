@@ -1045,6 +1045,23 @@ async () => {
       await key('Enter');
       await frames();
       step('Cmd-K Export PNG slices downloads it too', zipName === 'island-slices.png', `${zipName}`);
+      // Isometric sprite: one PNG of pixel art on a clear background, from the row and Cmd-K.
+      zipBlob = null; zipName = null;
+      await click(...hit('scene-select'));
+      await frames(14);
+      await click(...hit('export-sprite'));
+      await frames();
+      const sp = zipBlob ? await slicePixels(zipBlob) : null;
+      step('its Isometric sprite row downloads island-sprite.png: pixel art the size of its box seen from the corner, on a clear background',
+        zipName === 'island-sprite.png' && !st().fileMenu && sp && sp.w === 2 * (b[0] + b[2]) && sp.h === b[0] + b[2] + 2 * b[1] - 1
+          && sp.filled > st().voxels / 100 && sp.filled < sp.w * sp.h * 0.9 && /sprite\.png \(\d+×\d+, transparent\)/.test(st().toast || ''),
+        `${zipName} ${sp && `${sp.w}x${sp.h} ${sp.filled} pixels`} ${b} ${st().toast}`);
+      zipName = null;
+      await key('k', cmd);
+      for (const ch of 'export isometric sprite') await key(ch);
+      await key('Enter');
+      await frames();
+      step('Cmd-K Export isometric sprite downloads it too', zipName === 'island-sprite.png', `${zipName}`);
       // Embed: the row puts the tag on the clipboard inside the click, traces the poster and
       // downloads island-embed.zip: a folder with the page, the scene as a brick scene file,
       // the 1280x800 poster and the viewer's three files as the site serves them.
