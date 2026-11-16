@@ -25,7 +25,8 @@ fn srcs(html: &str) -> Vec<&str> {
 
 /// Catches: a scene file that is not what the view shows, a page or snippet naming a file
 /// the folder does not hold (a renamed viewer file, a stem escaped one way in the name and
-/// another in the tag), and a scene name that breaks out of the page's HTML.
+/// another in the tag), a scene name that breaks out of the page's HTML, and a page that
+/// shows the tag to paste on one line or with other text than the clipboard gets.
 #[test]
 fn the_folder_holds_what_the_view_shows_and_its_page_names_only_its_files() {
     let hostile = "my </pre><script>alert(1)</script> \"island\" & 'co'.vox";
@@ -66,6 +67,11 @@ fn the_folder_holds_what_the_view_shows_and_its_page_names_only_its_files() {
         assert!(page.contains(
             "alt=\"my &lt;/pre&gt;&lt;script&gt;alert(1)&lt;/script&gt; &quot;island&quot; &amp; &#39;co&#39;\""
         ));
+        // The page shows the tag to paste as the clipboard gets it, line for line.
+        let shown = page.split_once("<pre>").unwrap().1.split_once("</pre>").unwrap().0;
+        let unescaped = ["&lt;", "&gt;", "&quot;", "&#39;", "&amp;"].iter().zip(["<", ">", "\"", "'", "&"]);
+        let shown = unescaped.fold(shown.to_string(), |s, (from, to)| s.replace(from, to));
+        assert_eq!(shown, embed_snippet(hostile), "{}", f.name);
         checked += 1;
     }
     assert!(checked >= 20, "only {checked} fixtures had a view to embed");

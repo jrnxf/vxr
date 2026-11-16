@@ -162,7 +162,8 @@ pub fn embed_files(scene: &Scene, name: &str, poster: Vec<u8>, viewer: Vec<File>
 "#,
         loader = EMBED_VIEWER[0],
         tag = snippet.split_once('\n').map_or("", |s| s.1).replace('\n', "\n    "),
-        shown = html(&snippet),
+        // Line by line: `html` turns a line end, like any control character, into a space.
+        shown = snippet.lines().map(html).collect::<Vec<_>>().join("\n"),
     );
     let mut files = vec![
         ("index.html".to_string(), page.into_bytes()),

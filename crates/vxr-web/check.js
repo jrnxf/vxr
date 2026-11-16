@@ -1020,6 +1020,10 @@ async () => {
             && scene && String.fromCharCode(...scene.slice(0, 4)) === 'VXRB' && scene.length > 10000
             && pv && pv.getUint32(16) === 1280 && pv.getUint32(20) === 800,
           `${scene && scene.length} bytes of scene, poster ${pv && pv.getUint32(16)}x${pv && pv.getUint32(20)}`);
+        // Hand the folder to the check's server, which serves it back as a plain host would:
+        // crates/vxr-web/check opens its index.html next (check-embed.js).
+        const kept = await Promise.all(Object.keys(files).map(async (n) => (await fetch('/__embed/' + n, { method: 'PUT', body: files[n] })).status));
+        step('the check keeps the folder to open its page', kept.length === 6 && kept.every((k) => k === 204), JSON.stringify(kept));
         zipName = null;
         tags.length = 0;
         await key('k', cmd);

@@ -5,6 +5,8 @@
 # the assistant, Open, Save, resize, the projects list and drafts), check the landing page and
 # the boot skeleton (check-landing.js: first visit with progress and an early click, /about, the
 # returning-visit skip, ?open= ?project= ?embed, which also leave the first-run tour out), check
+# the embed folder the editor exported as its own page (check-embed.js: the exported viewer and
+# scene go live, and the poster frames the scene as the first live frame does), check
 # the first-run tour (check-tour.js: each step done for real, the replays, Skip and the seen
 # flag, the touch card and words), check that a draft and a
 # key remembered in the browser come back in a new page (check-restore.js for the draft), check that a tablet-sized touch screen starts in the touch layout, pair the
@@ -458,6 +460,16 @@ else
   worker=""
 fi
 axi emulate --viewport "1280x800x1" >/dev/null
+
+# The embed folder check.js exported and handed to the server, as its own page on a plain host
+# (check-embed.js): the viewer and the scene that were really exported go live, and the poster
+# frames the scene as the first live frame does. The folder is kept in shots/ to look at.
+axi open "${url}__embed/island-embed/" >/dev/null
+results+=$'\n'"$(axi eval --full "async () => ($(cat "$here/check-embed.js"))()" | unwrap)"
+axi screenshot "$shots/web-embed-page.png" >/dev/null
+rm -rf "$shots/island-embed"
+[ ! -d "$fixtures/embed/island-embed" ] || cp -R "$fixtures/embed/island-embed" "$shots/island-embed"
+[ "$(grep -c '^ok embed page ' <<<"$results")" -eq 5 ] || results+=$'\nFAIL the exported embed page ran its 5 steps'
 
 export CHROME_DEVTOOLS_AXI_SESSION=$nogpu
 export CHROME_DEVTOOLS_AXI_CHROME_ARGS='--disable-gpu --disable-webgpu'
