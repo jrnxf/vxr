@@ -160,7 +160,7 @@ Feature names below follow the update log [S1] unless another source is given.
 | Isometric sprites | Export->iso [S1 0.96.1] | missing | P3 | - |
 | Baked AO mesh | Export->bake [S1 0.97.2] | missing | P3 | - |
 | Import images | JPEG import, drag in sprites [S1 0.99.5, 0.99.7.2] | missing | P3 | - |
-| Web embed | none | partial: the `<voxel-scene>` embed is proven in `spikes/embed`; the app's Embed command shows "not built yet" | P2 | - |
+| Web embed | none | partial: the `<voxel-scene>` viewer (`crates/vxr-embed`) and its brick scene file are built and checked; the app's Embed command still shows "not built yet" | P2 | - |
 | Runs in a browser, on Apple Silicon and Linux | Windows and Intel Mac only [S5] | done (native wgpu app plus the WebGPU browser build) | P1 | - |
 
 ## Shaders (out of scope tonight)

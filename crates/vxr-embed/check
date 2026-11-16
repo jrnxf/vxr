@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Check the embed end to end in headless Chrome (chrome-devtools-axi on the PATH): serve the
+# built viewer (dist/), the scenes the `scenes` example generates and check.html on
+# 127.0.0.1, and run check.js in the page: a brick scene file draws lit voxels, the tags
+# below it start only when scrolled to, one wasm serves them all, a scene draws only while on
+# screen, the page keeps its scroll, a drag and the arrow keys turn the scene, the `.vox`
+# fallback draws the same picture as its brick scene file, and a damaged or missing file or a
+# browser without WebGPU keeps the poster with a note. Screenshots go into the git-ignored
+# crates/vxr-embed/shots/. Prints ok or FAIL per step and exits 1 on any failure. Run
+# crates/vxr-embed/build first.
+set -euo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
+root="$(cd "$here/../.." && pwd)"
+dist="$here/dist"
+shots="$here/shots"
+port="${VXR_CHECK_PORT:-4811}"
+url="http://127.0.0.1:$port/check.html"
+[ -f "$dist/vxr_embed_bg.wasm" ] || { echo "no $dist: run crates/vxr-embed/build first" >&2; exit 1; }
+command -v chrome-devtools-axi >/dev/null || { echo "chrome-devtools-axi is not on the PATH" >&2; exit 1; }
+mkdir -p "$shots"
+
+cd "$root"
+scenes="$(mktemp -d)"
+./dev cargo run -q --release -p vxr-embed --example scenes -- "$scenes" >&2
+./dev node "$here/check-server.js" "$port" "$dist" "$scenes" "$here" &
+server=$!
+export CHROME_DEVTOOLS_AXI_SESSION=vxr-embed-check-$$
+export CHROME_DEVTOOLS_AXI_CHROME_ARGS='--enable-unsafe-webgpu --ignore-gpu-blocklist'
+cleanup() {
+  chrome-devtools-axi stop >/dev/null 2>&1 || true
+  kill "$server" 2>/dev/null || true
+  rm -rf "$scenes"
+}
+trap cleanup EXIT
+for _ in $(seq 50); do curl -sf "$url" >/dev/null && break; sleep 0.1; done
+
+# eval prints the returned string JSON-quoted twice; unwrap it to plain lines.
+unwrap() { sed -n 's/^result: //p' | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{let v=JSON.parse(s);while(typeof v==='string'&&v.startsWith('\"'))v=JSON.parse(v);console.log(v)})"; }
+axi() { chrome-devtools-axi "$@"; }
+stage() { axi eval --full "async () => ($(cat "$here/check.js"))('$1')" | unwrap; }
+shot() { axi screenshot "$shots/embed-$1.png" >/dev/null; echo "wrote $shots/embed-$1.png"; }
+
+axi open "$url" >/dev/null
+axi emulate --viewport "900x700x2" >/dev/null
+axi open "$url" >/dev/null
+results="$(stage first)"
+shot live
+results+=$'\n'"$(stage vox)"
+results+=$'\n'"$(stage fail)"
+shot poster
+
+echo "$results"
+[ -n "$results" ] && ! grep -q '^FAIL' <<<"$results" && [ "$(grep -c '^ok' <<<"$results")" -eq 19 ]

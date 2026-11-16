@@ -16,3 +16,6 @@ prototype/demo/
 /crates/vxr-web/.dev.vars
 /crates/vxr-web/shots/
 /crates/vxr-web/site/node_modules/
+# The embed viewer, made by crates/vxr-embed/build, and its check screenshots.
+/crates/vxr-embed/dist/
+/crates/vxr-embed/shots/

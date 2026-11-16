@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Build the embed viewer into crates/vxr-embed/dist/ (git-ignored): the three files a page
+# with a <voxel-scene> tag needs, side by side.
+#
+#   voxel-scene.js      the loader that defines the element (the one script a page includes)
+#   vxr_embed.js        the wasm-bindgen glue, fetched when an element first comes on screen
+#   vxr_embed_bg.wasm   the viewer (profile embed, wasm-opt -O3)
+#
+# Prints each file's raw and brotli q11 size and fails when the three together pass the
+# budget of 150 KB brotli (docs/decisions.md). The tools come from the nix dev shell
+# (../../dev); with VXR_TOOLS=path they come from the PATH instead.
+set -euo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
+root="$(cd "$here/../.." && pwd)"
+dist="$here/dist"
+budget=150000
+run() { if [ "${VXR_TOOLS:-}" = path ]; then "$@"; else "$root/dev" "$@"; fi; }
+
+cd "$root"
+run cargo build --profile embed --target wasm32-unknown-unknown -p vxr-embed
+rm -rf "$dist"
+mkdir -p "$dist"
+run wasm-bindgen --target web --no-typescript --out-dir "$dist" target/wasm32-unknown-unknown/embed/vxr_embed.wasm
+run wasm-opt -O3 --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext \
+  --enable-mutable-globals --enable-reference-types --strip-debug --strip-producers \
+  -o "$dist/vxr_embed_bg.wasm" "$dist/vxr_embed_bg.wasm"
+cp "$here/web/voxel-scene.js" "$dist/"
+run node --input-type=module -e "
+import fs from 'node:fs';
+import zlib from 'node:zlib';
+const [dist, budget] = process.argv.slice(1);
+let total = 0;
+for (const f of ['vxr_embed_bg.wasm', 'vxr_embed.js', 'voxel-scene.js']) {
+  const raw = fs.readFileSync(dist + '/' + f);
+  const br = zlib.brotliCompressSync(raw, { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 11 } });
+  total += br.length;
+  console.log(f.padEnd(20) + ' ' + String(raw.length).padStart(9) + ' B raw ' + String(br.length).padStart(9) + ' B brotli');
+}
+console.log('embed total'.padEnd(20) + ' ' + String(total).padStart(25) + ' B brotli of ' + budget);
+if (total > +budget) {
+  console.error('FAIL the embed is ' + total + ' B brotli, over its budget of ' + budget + ' B');
+  process.exit(1);
+}
+" "$dist" "$budget"

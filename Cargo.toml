@@ -36,6 +36,12 @@ codegen-units = 1
 strip = true
 panic = "abort"
 
+# The embed viewer: opt-level s is smaller than z here (spikes/embed/RESULTS.md), and nothing in
+# it is worth trading size for speed. crates/vxr-embed/build prints the sizes and checks the budget.
+[profile.embed]
+inherits = "wasm"
+opt-level = "s"
+
 [profile.wasm.package.vxr-core]
 opt-level = "s"
 

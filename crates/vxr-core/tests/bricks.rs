@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 
 use proptest::prelude::*;
-use vxr_core::bricks::{decode, encode};
+use vxr_core::bricks::{decode, encode, open};
 use vxr_core::{BrickMap, Scene};
 
 fn voxels(m: &BrickMap) -> BTreeMap<[i32; 3], u8> {
@@ -259,4 +259,38 @@ fn the_island_as_bricks_is_under_a_third_of_its_vox_and_reads_back() {
     assert!((1..256).all(|s| scene.map.counts[s] == 0 || pal[s] == scene.palette[s]));
     assert!(bytes.len() * 3 < vox.len(), "{} B as bricks, {} B as .vox", bytes.len(), vox.len());
     eprintln!("island: {} B as bricks, {} B as .vox", bytes.len(), vox.len());
+}
+
+/// Voxels as colours, moved so the lowest cell on each axis is 0.
+fn shape(cells: impl IntoIterator<Item = ([i32; 3], [u8; 4])>) -> BTreeMap<[i32; 3], [u8; 4]> {
+    let cells: Vec<_> = cells.into_iter().collect();
+    let lo: [i32; 3] = std::array::from_fn(|a| cells.iter().map(|(p, _)| p[a]).min().unwrap_or(0));
+    cells.into_iter().map(|(p, c)| ([p[0] - lo[0], p[1] - lo[1], p[2] - lo[2]], c)).collect()
+}
+
+/// The embed's open path on every generated `.vox` fixture: it shows the voxels and colours
+/// the editor shows in world mode, hidden objects left out, and the same scene as a brick
+/// scene file opens to the same picture.
+#[test]
+fn open_shows_what_the_editor_shows_of_a_vox_and_reads_brick_files() {
+    let mut hidden = 0;
+    for f in vxr_vox::fixtures::all() {
+        let vox = f.builder.build().write();
+        let Ok(scene) = Scene::from_vox(&vox) else {
+            assert!(open(&vox).is_err(), "{}: a file the editor refuses", f.name);
+            continue;
+        };
+        let (map, palette) = open(&vox).unwrap_or_else(|e| panic!("{}: {e}", f.name));
+        let shown = scene.world_voxels(true);
+        hidden += scene.world_voxels(false).len() - shown.len();
+        let want = shape(shown.into_iter().map(|(p, c)| (p, scene.palette[c as usize])));
+        let got = shape(voxels(&map).into_iter().map(|(p, c)| (p, palette[c as usize])));
+        assert_eq!(got, want, "{}", f.name);
+        let (again, colors) = open(&encode(&map, &palette)).unwrap();
+        assert_eq!(shape(voxels(&again).into_iter().map(|(p, c)| (p, colors[c as usize]))), want, "{}", f.name);
+    }
+    assert!(hidden > 0, "the fixtures hide voxels, so leaving them out is checked");
+    assert_eq!(open(b"VXRB\x02").err().unwrap(), "the brick scene file is a version this viewer does not read");
+    assert!(open(b"VOX ").is_err());
+    assert!(open(b"").is_err());
 }

@@ -490,25 +490,7 @@ impl Scene {
         let w = self.world.as_ref().ok_or("no world")?;
         let (mut map, lo) = match at {
             At::Object(i) => w.object_map(i).ok_or("not an object")?,
-            At::World => {
-                let (lo, hi) = w.shown_box();
-                let mut size = [0u32; 3];
-                for a in 0..3 {
-                    let extent = hi[a] as i64 - lo[a] as i64 + 1;
-                    if extent > MAX_EXTENT as i64 {
-                        return Err(format!("the world would be over {MAX_EXTENT} voxels on an axis ({extent})"));
-                    }
-                    size[a] = extent as u32;
-                }
-                let mut map = BrickMap::new(size);
-                w.for_each_voxel(true, |_, p, c| {
-                    let m: [i32; 3] = std::array::from_fn(|a| p[a] - lo[a]);
-                    if map.get(m[0], m[1], m[2]) == 0 {
-                        map.set(m[0], m[1], m[2], c);
-                    }
-                });
-                (map, lo)
-            }
+            At::World => w.shown_map()?,
             At::Map => return Err("no world".into()),
         };
         if self.picked.is_some_and(|i| !w.in_tree(i)) {

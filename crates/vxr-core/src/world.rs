@@ -361,6 +361,29 @@ impl World {
         if lo[0] > hi[0] { ([0; 3], [0; 3]) } else { (lo, hi) }
     }
 
+    /// Every shown object in one map, in world axes, with the overlap rule, and the world
+    /// cell of its cell (0, 0, 0). An error when the shown objects span more than
+    /// [`MAX_EXTENT`] on an axis.
+    pub fn shown_map(&self) -> Result<(BrickMap, [i32; 3]), String> {
+        let (lo, hi) = self.shown_box();
+        let mut size = [0u32; 3];
+        for a in 0..3 {
+            let extent = hi[a] as i64 - lo[a] as i64 + 1;
+            if extent > MAX_EXTENT as i64 {
+                return Err(format!("the world would be over {MAX_EXTENT} voxels on an axis ({extent})"));
+            }
+            size[a] = extent as u32;
+        }
+        let mut map = BrickMap::new(size);
+        self.for_each_voxel(true, |_, p, c| {
+            let m: [i32; 3] = std::array::from_fn(|a| p[a] - lo[a]);
+            if map.get(m[0], m[1], m[2]) == 0 {
+                map.set(m[0], m[1], m[2], c);
+            }
+        });
+        Ok((map, lo))
+    }
+
     /// The objects showing model `m`: more than one means linked copies.
     pub fn users(&self, m: usize) -> usize {
         self.objects().into_iter().filter(|&i| self.model_of(i) == Some(m)).count()

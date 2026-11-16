@@ -161,6 +161,20 @@ pub fn decode(bytes: &[u8]) -> Result<(BrickMap, [[u8; 4]; 256]), &'static str> 
     Ok((map, palette))
 }
 
+/// What the embed shows of a file from anywhere: a brick scene file as [`decode`] reads
+/// it, or a `.vox` file's shown objects in one map (hidden objects and layers left out)
+/// with the file's palette. Any bytes give `Ok` or `Err`, never a panic. The map's place in
+/// the world is dropped: the viewer frames what it gets.
+pub fn open(bytes: &[u8]) -> Result<(BrickMap, [[u8; 4]; 256]), String> {
+    if bytes.starts_with(&MAGIC) {
+        return decode(bytes).map_err(String::from);
+    }
+    let doc = vxr_vox::Document::read(bytes).map_err(|e| e.to_string())?;
+    let colors = doc.scene().map_err(|e| e.to_string())?;
+    let (map, _) = crate::World::from_doc(&doc)?.shown_map()?;
+    Ok((map, std::array::from_fn(|i| colors.color(i as u8))))
+}
+
 struct Reader<'a> {
     bytes: &'a [u8],
     at: usize,

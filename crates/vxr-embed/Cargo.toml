@@ -1,0 +1,27 @@
+[package]
+name = "vxr-embed"
+description = "vxr's embed viewer: the <voxel-scene> element, a brick scene file or .vox ray marched on WebGPU"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# The example that writes the check's scenes runs natively.
+[dependencies]
+vxr-core.workspace = true
+
+# The viewer itself is WebGPU only: with no WebGPU the page keeps the poster.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+vxr-render.workspace = true
+bytemuck.workspace = true
+wgpu = { version = "30.0.1", default-features = false, features = ["webgpu", "wgsl", "std"] }
+# Pinned exactly: wasm-bindgen-cli in nix/flake.nix must match it.
+wasm-bindgen = "=0.2.129"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["HtmlCanvasElement"] }
+
+[dev-dependencies]
+vxr-vox.workspace = true

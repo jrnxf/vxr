@@ -26,6 +26,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "embed_open"
+path = "fuzz_targets/embed_open.rs"
+test = false
+doc = false
+bench = false
+
 # Keep the fuzz crate out of the repo workspace.
 [workspace]
 members = ["."]
