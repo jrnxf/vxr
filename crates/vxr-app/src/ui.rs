@@ -285,6 +285,8 @@ pub enum Action {
     CancelExport,
     /// For the host: an export finished; take its PNG from `Editor::exported`.
     Exported,
+    /// For the host: the embed's poster is traced; take it from `Editor::embedded`.
+    Embedded,
     /// Move, rotate, flip or loop the selection, or the whole model when nothing is selected.
     Transform(Transform),
     SelectAll,
@@ -2854,6 +2856,7 @@ impl Hybrid {
             Entry::Row("export-render", icon::IMAGE_DOWN, "Render PNG", "R"),
             Entry::Row("export-obj", icon::BOX, "OBJ with palette texture", ".obj .mtl .png"),
             Entry::Row("export-slices", icon::LAYERS, "PNG slices", ".png"),
+            Entry::Row("export-embed", icon::CODE, "Embed for a web page", "<voxel-scene>"),
         ];
         let height = |e: &Entry| match e {
             Entry::Head(_) => 26.0,
@@ -2900,9 +2903,15 @@ impl Hybrid {
                         };
                         let cy = r.center().y;
                         p.text(pos2(r.left() + 16.0, cy), Align2::CENTER_CENTER, *glyph, icon_font(15.0), color);
-                        p.text(pos2(r.left() + 34.0, cy), Align2::LEFT_CENTER, *label, sans(13.0), th().text);
-                        let font = if hint.starts_with('.') { mono(10.5) } else { sans(12.0) };
-                        p.text(pos2(r.right() - 10.0, cy), Align2::RIGHT_CENTER, *hint, font, th().faint);
+                        let name =
+                            p.text(pos2(r.left() + 34.0, cy), Align2::LEFT_CENTER, *label, sans(13.0), th().text);
+                        // File types and the tag in mono; a hint the label leaves no room
+                        // for (a narrow phone) is left out rather than drawn over it.
+                        let font = if hint.starts_with(['.', '<']) { mono(10.5) } else { sans(12.0) };
+                        let g = p.layout_no_wrap(hint.to_string(), font, th().faint);
+                        if r.right() - 10.0 - g.size().x >= name.right() + 8.0 {
+                            p.galley(pos2(r.right() - 10.0 - g.size().x, cy - g.size().y / 2.0), g, th().faint);
+                        }
                         if resp.clicked() {
                             run = Some(*id);
                         }
@@ -2929,6 +2938,7 @@ impl Hybrid {
             }
             Some("export-obj") => self.actions.push(Action::ExportObj),
             Some("export-slices") => self.actions.push(Action::ExportSlices),
+            Some("export-embed") => self.actions.push(Action::Embed),
             _ => {}
         }
         if run.is_some() || outside {

@@ -460,9 +460,26 @@ async function libraryFetch(id, method, path, flat, body) {
 
 // Bytes from the editor are a view of its memory, which moves: anything kept past the call
 // takes a copy (slice).
+// The embed viewer's three files (crates/vxr-embed, copied into embed/ by the build), fetched
+// the first time Embed is used and handed to the editor, which packs them into the embed's zip.
+async function fetchEmbed() {
+  const get = async (name) => {
+    const r = await fetch(new URL('embed/' + name, document.baseURI));
+    if (!r.ok) throw new Error(name + ': HTTP ' + r.status);
+    return new Uint8Array(await r.arrayBuffer());
+  };
+  try {
+    const files = await Promise.all(['voxel-scene.js', 'vxr_embed.js', 'vxr_embed_bg.wasm'].map(get));
+    app.embed_fetched(...files, '');
+  } catch (e) {
+    app.embed_fetched(new Uint8Array(), new Uint8Array(), new Uint8Array(), String(e?.message ?? e));
+  }
+}
+
 window.vxrHost = {
   pickOpen,
   download,
+  fetchEmbed,
   keepToured() {
     try { localStorage.setItem(TOURED_KEY, '1'); } catch {}
   },

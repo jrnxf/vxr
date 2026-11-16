@@ -9,7 +9,8 @@
 //! - [`demo`]: Help's demo tiles, scripted edits replayed into small looping renders.
 //! - [`color`]: hex, RGB and HSV for the palette editor.
 //! - `courier`: the desktop app's HTTPS calls to the vxr Worker for [`sync`].
-//! - [`files`]: OBJ export files, and a zip to download several files at once.
+//! - `embed`: the desktop side of the Embed command: the viewer's files and the folder written.
+//! - [`files`]: OBJ export files, the embed folder's files, and a zip to download several files at once.
 //! - [`fonts`]: loading the UI fonts.
 //! - [`host`]: what the native window and the browser page share: the surface, pointer routing
 //!   and Open, Save and the exports, with a `Platform` for what differs.
@@ -27,6 +28,8 @@ pub mod color;
 pub mod courier;
 pub mod demo;
 pub mod editor;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod embed;
 pub mod files;
 pub mod fonts;
 pub mod host;

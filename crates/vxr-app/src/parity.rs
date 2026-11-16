@@ -55,6 +55,7 @@ fn tool(a: &Action) -> Option<&'static str> {
         | Action::CommitColor
         | Action::CancelExport
         | Action::Exported
+        | Action::Embedded
         | Action::PlaceBox
         | Action::CancelBox
         | Action::ApplyReview

@@ -1,4 +1,5 @@
-//! Model exports as files: OBJ with its `.mtl` and palette texture, PNG slices, and a
+//! Model exports as files: OBJ with its `.mtl` and palette texture, PNG slices, the embed
+//! folder (a page with the `<voxel-scene>` tag and everything it loads), and a
 //! stored (not compressed) zip to hand several files to a browser as one download. And the
 //! `.vox` save: bytes checked to read back as the scene, written so a failure mid-write
 //! never leaves a part-written file.
@@ -58,6 +59,118 @@ pub fn slices_png(scene: &Scene) -> Result<(Vec<u8>, [u32; 2], u32), String> {
     scene.for_each_voxel(|p, c| cells.push((p, c)));
     let s = slices(size, cells, &scene.palette);
     Ok((png(s.width, s.height, &s.rgba)?, [s.width, s.height], s.layers))
+}
+
+/// The embed viewer's files, which a page with a `<voxel-scene>` tag loads from one folder:
+/// the loader the page includes, then the glue and the wasm it fetches
+/// (`crates/vxr-embed/build` makes them).
+pub const EMBED_VIEWER: [&str; 3] = ["voxel-scene.js", "vxr_embed.js", "vxr_embed_bg.wasm"];
+
+/// The poster's size in pixels: the tag's 16:10 shape, sharp at 640 CSS pixels wide on a
+/// screen with two pixels per point.
+pub const EMBED_POSTER: (u32, u32) = (1280, 800);
+
+/// The name an embed's scene file and poster share, from the scene's name: letters, digits,
+/// `-` and `_` stay, every run of anything else becomes one `-`, so the name needs no
+/// escaping in a URL, in HTML or in a shell.
+pub fn embed_stem(name: &str) -> String {
+    let name = name.strip_suffix(".vox").or_else(|| name.strip_suffix(".VOX")).unwrap_or(name);
+    let parts: Vec<&str> =
+        name.split(|c: char| !(c.is_alphanumeric() || c == '-' || c == '_')).filter(|p| !p.is_empty()).collect();
+    if parts.is_empty() { "scene".into() } else { parts.join("-") }
+}
+
+/// Text as HTML text or a quoted attribute's value.
+fn html(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            c if c.is_control() => out.push(' '),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// What a page needs to show the scene named `name` from an embed folder beside it: the
+/// loader's script and the tag, with the poster as its image so it paints before any script.
+pub fn embed_snippet(name: &str) -> String {
+    let stem = embed_stem(name);
+    let alt = name.strip_suffix(".vox").or_else(|| name.strip_suffix(".VOX")).unwrap_or(name).trim();
+    let alt = if alt.is_empty() { "A voxel scene".to_string() } else { html(alt) };
+    format!(
+        "<script src=\"{}\" async></script>\n<voxel-scene src=\"{stem}.vxrb\" alt=\"{alt}\">\n  <img src=\"{stem}.png\" alt=\"\">\n</voxel-scene>",
+        EMBED_VIEWER[0]
+    )
+}
+
+/// The embed folder of what the view shows (the edited model, or every shown object in the
+/// world): `index.html` showing the tag, the scene as a brick scene file, `poster` (a PNG)
+/// and the viewer's files (`viewer`, named as [`EMBED_VIEWER`]). The page and the scene are
+/// first, so a reader of the list finds them there.
+pub fn embed_files(scene: &Scene, name: &str, poster: Vec<u8>, viewer: Vec<File>) -> Result<Vec<File>, String> {
+    if scene.map.counts[1..].iter().all(|&n| n == 0) {
+        return Err("the scene is empty".into());
+    }
+    if let Some(missing) = EMBED_VIEWER.iter().find(|n| !viewer.iter().any(|f| f.0 == **n)) {
+        return Err(format!("the viewer file {missing} is missing"));
+    }
+    let stem = embed_stem(name);
+    let snippet = embed_snippet(name);
+    let title = html(name.strip_suffix(".vox").or_else(|| name.strip_suffix(".VOX")).unwrap_or(name).trim());
+    let title = if title.is_empty() { "A voxel scene".to_string() } else { title };
+    let page = format!(
+        r#"<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{title}</title>
+    <style>
+      body {{ margin: 0 auto; padding: 24px; max-width: 800px; font: 15px/1.5 system-ui, sans-serif; background: #fafaf7; color: #222; }}
+      pre {{ padding: 12px; border-radius: 8px; background: #efede6; overflow-x: auto; font: 13px/1.5 ui-monospace, monospace; }}
+      #file {{ padding: 12px; border-radius: 8px; background: #fde8c8; }}
+      @media (prefers-color-scheme: dark) {{
+        body {{ background: #161616; color: #e8e6e0; }}
+        pre {{ background: #242424; }}
+        #file {{ background: #4a3410; }}
+      }}
+    </style>
+    <script src="{loader}" async></script>
+  </head>
+  <body>
+    <h1>{title}</h1>
+    <p id="file" hidden>
+      Browsers do not run the viewer from a page opened as a file, so only the picture shows. Serve this
+      folder over HTTP: for example run <code>python3 -m http.server</code> in it and open
+      <code>http://localhost:8000</code>.
+    </p>
+    {tag}
+    <p>To put this scene on a page, copy every file of this folder but <code>index.html</code> beside the page and paste this into it:</p>
+    <pre>{shown}</pre>
+    <p>The scene needs WebGPU. A browser without it shows the picture.</p>
+    <script>
+      if (location.protocol === 'file:') document.getElementById('file').hidden = false;
+    </script>
+  </body>
+</html>
+"#,
+        loader = EMBED_VIEWER[0],
+        tag = snippet.split_once('\n').map_or("", |s| s.1).replace('\n', "\n    "),
+        shown = html(&snippet),
+    );
+    let mut files = vec![
+        ("index.html".to_string(), page.into_bytes()),
+        (format!("{stem}.vxrb"), crate::bricks::encode(&scene.map, &scene.palette)),
+        (format!("{stem}.png"), poster),
+    ];
+    files.extend(viewer.into_iter().filter(|f| EMBED_VIEWER.contains(&f.0.as_str())));
+    Ok(files)
 }
 
 /// RGBA8 rows as a PNG file.

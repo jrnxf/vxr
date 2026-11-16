@@ -26,6 +26,8 @@ struct Shot {
     host: Vec<Action>,
     /// The system's light or dark setting, as a window reports it (none: unknown).
     system: Option<egui::Theme>,
+    /// The last text a frame put on the clipboard.
+    copied: Option<String>,
 }
 
 impl Shot {
@@ -48,7 +50,7 @@ impl Shot {
             view_formats: &[],
         });
         let ed = Editor::new(gpu, scene, name, FORMAT, (w, h), ppp, crate::native::fonts())?;
-        Ok(Self { ed, target, time: 0.0, host: Vec::new(), system: None })
+        Ok(Self { ed, target, time: 0.0, host: Vec::new(), system: None, copied: None })
     }
 
     /// Draw `n` frames (egui needs a couple to lay out and upload fonts).
@@ -71,8 +73,13 @@ impl Shot {
             };
             input.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point =
                 Some(self.ed.native_ppp);
-            let (host, _) = self.ed.frame(input, &view);
+            let (host, platform) = self.ed.frame(input, &view);
             self.host.extend(host);
+            for c in platform.commands {
+                if let egui::OutputCommand::CopyText(text) = c {
+                    self.copied = Some(text);
+                }
+            }
         }
     }
 
@@ -318,6 +325,7 @@ fn run_steps(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     world(dir)?;
     new_scene_save(dir)?;
     host_actions()?;
+    embed_export(dir)?;
     new_scene_command(dir)?;
     projects(dir)?;
     library(dir)?;
@@ -890,6 +898,10 @@ struct Fake {
     disk: Option<vxr_app::projects::Memory>,
     /// The session token kept, as the desktop keeps it in the keychain.
     session: Option<String>,
+    /// This build has no embed viewer.
+    no_viewer: bool,
+    /// The last embed folder written: its name and files.
+    embed: Option<(String, Vec<vxr_app::files::File>)>,
 }
 
 impl Platform for Fake {
@@ -966,10 +978,159 @@ impl Platform for Fake {
         self.zip = bytes.to_vec();
         Ok(Some(name.into()))
     }
+    fn embed_viewer(&mut self) -> Result<Option<Vec<vxr_app::files::File>>, String> {
+        if self.no_viewer {
+            return Err("this build has no embed viewer".into());
+        }
+        // Stand-ins named as the viewer's files: the real ones are checked in a browser.
+        Ok(Some(vxr_app::files::EMBED_VIEWER.iter().map(|n| (n.to_string(), n.as_bytes().to_vec())).collect()))
+    }
+    fn save_embed(&mut self, name: &str, files: &[vxr_app::files::File]) -> Result<Option<String>, String> {
+        self.calls.push(format!("save_embed {name}"));
+        if self.cancel {
+            return Ok(None);
+        }
+        self.embed = Some((name.into(), files.to_vec()));
+        Ok(Some(name.into()))
+    }
     fn keep_session(&mut self, token: Option<&str>) {
         self.calls.push(format!("keep_session {}", token.is_some()));
         self.session = token.map(str::to_string);
     }
+}
+
+/// The Embed command: the file menu's row and Cmd-K ask the host and put the tag on the
+/// clipboard in the same frame; the host traces the poster from the viewer's first view at
+/// the tag's shape and then writes the folder: the page, the scene as a brick scene file
+/// that reads back as the scene, the lit poster and the viewer's files. A build without
+/// the viewer, an empty scene and a cancelled dialog each write nothing and say why.
+fn embed_export(dir: &Path) -> Result<(), String> {
+    use vxr_app::files::{EMBED_POSTER, embed_snippet};
+    let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    let mut s = Shot::new(house(), "my house.vox", 2.0)?;
+    s.frames(2);
+    s.ed.ui.render = vxr_app::render::RenderSettings { spp: 0, ..Default::default() };
+    let tag = embed_snippet("my house.vox");
+    s.open_file_row("export-embed")?;
+    check(
+        s.host.contains(&Action::Embed) && !s.ed.ui.file_menu && s.copied.as_deref() == Some(tag.as_str()),
+        format!("the file menu's Embed row asks the host and puts the tag on the clipboard ({:?})", s.copied),
+    )?;
+    s.host.clear();
+    s.copied = None;
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("embed".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    check(
+        s.host.contains(&Action::Embed) && s.copied.as_deref() == Some(tag.as_str()),
+        "Cmd-K Embed does the same".into(),
+    )?;
+
+    let mut p = Fake { no_viewer: true, ..Default::default() };
+    run_action(&mut s.ed, &mut p, Action::Embed);
+    s.frames(2);
+    check(
+        s.ed.export.is_none() && s.ed.ui.toast_text() == Some("Could not embed: this build has no embed viewer"),
+        format!("a build without the viewer traces nothing and says so ({:?})", s.ed.ui.toast_text()),
+    )?;
+
+    let mut p = Fake::default();
+    s.host.clear();
+    run_action(&mut s.ed, &mut p, Action::Embed);
+    check(
+        s.ed.export.as_ref().is_some_and(|x| x.embed && x.size() == EMBED_POSTER),
+        "Embed starts tracing the poster at 1280×800".into(),
+    )?;
+    let mut n = 0;
+    while s.ed.embedded.is_none() && n < 3000 {
+        s.frames(1);
+        let _ = s.ed.gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        n += 1;
+    }
+    let Some(poster) = s.ed.embedded.clone() else {
+        return check(false, format!("the embed's poster did not finish in {n} frames"));
+    };
+    check(
+        s.host.contains(&Action::Embedded) && !s.host.contains(&Action::Exported) && s.ed.exported.is_none(),
+        "the traced poster goes to the host as an embed, not as a PNG to save".into(),
+    )?;
+    p.cancel = true;
+    run_action(&mut s.ed, &mut p, Action::Embedded);
+    check(
+        p.embed.is_none() && p.calls == ["save_embed my-house-embed"],
+        "a cancelled folder dialog writes nothing".into(),
+    )?;
+    p.cancel = false;
+    s.ed.embedded = Some(poster);
+    run_action(&mut s.ed, &mut p, Action::Embedded);
+    s.frames(2);
+    let Some((folder, files)) = p.embed.take() else {
+        return check(false, format!("Embed wrote no folder ({:?})", s.ed.ui.toast_text()));
+    };
+    let names: Vec<&str> = files.iter().map(|f| f.0.as_str()).collect();
+    check(
+        folder == "my-house-embed"
+            && names
+                == [
+                    "index.html",
+                    "my-house.vxrb",
+                    "my-house.png",
+                    "voxel-scene.js",
+                    "vxr_embed.js",
+                    "vxr_embed_bg.wasm",
+                ]
+            && s.ed.ui.toast_text() == Some("Saved my-house-embed (6 files). Its index.html shows the tag to paste."),
+        format!("the folder my-house-embed holds the page, the scene, the poster and the viewer ({names:?})"),
+    )?;
+    let page = String::from_utf8_lossy(&files[0].1);
+    check(
+        page.contains(&tag.replace('\n', "\n    ")[tag.find("<voxel-scene").unwrap_or(0)..]),
+        "its page shows the tag that was copied".into(),
+    )?;
+    let mut want = std::collections::BTreeMap::new();
+    s.ed.scene.for_each_voxel(|c, v| {
+        want.insert(c, s.ed.scene.palette[v as usize]);
+    });
+    let mut got = std::collections::BTreeMap::new();
+    let (map, palette) = vxr_core::bricks::open(&files[1].1)?;
+    map.for_each(|c, v| {
+        got.insert(c, palette[v as usize]);
+    });
+    check(got == want && !want.is_empty(), format!("its scene file reads back as the scene ({} voxels)", got.len()))?;
+    std::fs::write(dir.join("app-embed-poster.png"), &files[2].1).map_err(|e| e.to_string())?;
+    let mut r = png::Decoder::new(std::io::Cursor::new(&files[2].1)).read_info().map_err(|e| e.to_string())?;
+    let mut buf = vec![0; r.output_buffer_size().unwrap_or(0)];
+    let info = r.next_frame(&mut buf).map_err(|e| e.to_string())?;
+    let px = |x: u32, y: u32| {
+        let i = ((y * info.width + x) * 4) as usize;
+        [buf[i], buf[i + 1], buf[i + 2]]
+    };
+    // The house is framed whole in the middle: its pixels differ from the backdrop's at the
+    // same height, and the picture's edges are all backdrop.
+    let (w, h) = (info.width, info.height);
+    let house_px = (0..w).filter(|&x| {
+        let (a, b) = (px(x, h / 2), px(2, h / 2));
+        (0..3).any(|i| a[i].abs_diff(b[i]) > 24)
+    });
+    let (lo, hi) = house_px.fold((w, 0), |(lo, hi), x| (lo.min(x), hi.max(x)));
+    check(
+        (w, h) == EMBED_POSTER && lo > w / 20 && hi < w - w / 20 && hi - lo > w / 4,
+        format!("its poster is {w}×{h} with the house whole in the middle (columns {lo} to {hi})"),
+    )?;
+
+    let mut s = Shot::new(Scene::new([16, 16, 16]), "empty.vox", 2.0)?;
+    s.frames(2);
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("embed".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    run_action(&mut s.ed, &mut p, Action::Embed);
+    s.frames(2);
+    check(
+        s.copied.is_none()
+            && s.ed.export.is_none()
+            && s.ed.ui.toast_text() == Some("Could not embed: the scene is empty"),
+        format!("an empty scene copies and traces nothing and says so ({:?})", s.ed.ui.toast_text()),
+    )
 }
 
 /// The file actions the UI asks of a host, run by the one [`run_action`] both hosts use,

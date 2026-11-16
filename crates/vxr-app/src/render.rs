@@ -175,6 +175,8 @@ pub struct Export {
     /// The camera when the export started (orbiting meanwhile does not restart it).
     cam: OrbitCamera,
     readback: Option<Readback>,
+    /// The picture is an embed's poster rather than a PNG to save.
+    pub embed: bool,
 }
 
 impl Export {
@@ -187,7 +189,21 @@ impl Export {
         settings: &RenderSettings,
         backdrop: [[u8; 3]; 2],
     ) -> Result<Self, String> {
-        let (w, h) = settings.export_size();
+        Self::start_sized(gpu, layout, palette, materials, cam, settings, backdrop, settings.export_size())
+    }
+
+    /// As [`Export::start`], at `size` pixels rather than the panel's export size.
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_sized(
+        gpu: &Gpu,
+        layout: &wgpu::BindGroupLayout,
+        palette: &[[u8; 4]; 256],
+        materials: &[Material; 256],
+        cam: OrbitCamera,
+        settings: &RenderSettings,
+        backdrop: [[u8; 3]; 2],
+        (w, h): (u32, u32),
+    ) -> Result<Self, String> {
         if !Preview::fits(&gpu.device, w, h) {
             return Err(format!("{w}×{h} is too large for this GPU"));
         }
@@ -198,7 +214,7 @@ impl Export {
         // Only the finished image is shown, so no coarse first frame.
         preview.follow = false;
         preview.set_backdrop(backdrop);
-        Ok(Self { preview, cam, readback: None })
+        Ok(Self { preview, cam, readback: None, embed: false })
     }
 
     pub fn size(&self) -> (u32, u32) {

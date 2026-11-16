@@ -985,6 +985,51 @@ async () => {
       await key('Enter');
       await frames();
       step('Cmd-K Export PNG slices downloads it too', zipName === 'island-slices.png', `${zipName}`);
+      // Embed: the row puts the tag on the clipboard inside the click, traces the poster and
+      // downloads island-embed.zip: a folder with the page, the scene as a brick scene file,
+      // the 1280x800 poster and the viewer's three files as the site serves them.
+      zipBlob = null; zipName = null;
+      const tags = [];
+      const realWrite = navigator.clipboard?.writeText;
+      if (navigator.clipboard) navigator.clipboard.writeText = (t) => (tags.push(t), Promise.resolve());
+      try {
+        await click(...hit('scene-select'));
+        await frames(14);
+        const row = !!hit('export-embed');
+        await click(...hit('export-embed'));
+        const tag = '<script src="voxel-scene.js" async></script>\n<voxel-scene src="island.vxrb" alt="island">\n  <img src="island.png" alt="">\n</voxel-scene>';
+        step('its Embed row puts the tag on the clipboard inside the click', row && !st().fileMenu && tags.length === 1 && tags[0] === tag, JSON.stringify(tags));
+        await frames(2);
+        const tracing = st().render.export !== null;
+        for (let i = 0; i < 6000 && !zipName; i++) await frames(1);
+        const files = zipBlob ? unzip(new Uint8Array(await zipBlob.arrayBuffer())) : {};
+        const at = (n) => files['island-embed/' + n];
+        const names = Object.keys(files).join(',');
+        const want = ['index.html', 'island.vxrb', 'island.png', 'voxel-scene.js', 'vxr_embed.js', 'vxr_embed_bg.wasm'].map((n) => 'island-embed/' + n).join(',');
+        step('Embed traces the poster and downloads island-embed.zip, one folder of six files', tracing && zipName === 'island-embed.zip' && names === want, `${zipName} ${names} ${st().toast}`);
+        const served = await Promise.all(['voxel-scene.js', 'vxr_embed.js', 'vxr_embed_bg.wasm'].map(async (n) => new Uint8Array(await (await fetch('embed/' + n)).arrayBuffer())));
+        const viewer = ['voxel-scene.js', 'vxr_embed.js', 'vxr_embed_bg.wasm'].every((n, i) => at(n) && same(at(n), served[i]));
+        const wasm = at('vxr_embed_bg.wasm');
+        step('the zip carries the viewer as the site serves it', viewer && wasm && wasm.length > 100000 && wasm[1] === 0x61 && wasm[2] === 0x73 && wasm[3] === 0x6d, `${wasm && wasm.length} bytes of wasm`);
+        const page = at('index.html') ? new TextDecoder().decode(at('index.html')) : '';
+        const scene = at('island.vxrb');
+        const poster = at('island.png');
+        const pv = poster && new DataView(poster.buffer, poster.byteOffset);
+        step('with a page showing the tag, the scene as a brick scene file and a 1280x800 poster',
+          page.includes('<voxel-scene src="island.vxrb" alt="island">') && page.includes('<img src="island.png" alt="">')
+            && scene && String.fromCharCode(...scene.slice(0, 4)) === 'VXRB' && scene.length > 10000
+            && pv && pv.getUint32(16) === 1280 && pv.getUint32(20) === 800,
+          `${scene && scene.length} bytes of scene, poster ${pv && pv.getUint32(16)}x${pv && pv.getUint32(20)}`);
+        zipName = null;
+        tags.length = 0;
+        await key('k', cmd);
+        for (const ch of 'embed') await key(ch);
+        await key('Enter');
+        for (let i = 0; i < 6000 && !zipName; i++) await frames(1);
+        step('Cmd-K Embed copies the tag and downloads it too', zipName === 'island-embed.zip' && tags.length === 1 && tags[0] === tag, `${zipName} ${JSON.stringify(tags)}`);
+      } finally {
+        if (navigator.clipboard && realWrite) navigator.clipboard.writeText = realWrite;
+      }
     } finally {
       URL.createObjectURL = realUrl;
       HTMLAnchorElement.prototype.click = realA;

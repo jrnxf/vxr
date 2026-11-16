@@ -226,6 +226,19 @@ impl Platform for Desktop {
         Ok(files.first().map(|f| f.0.clone()))
     }
 
+    fn embed_viewer(&mut self) -> Result<Option<Vec<File>>, String> {
+        vxr_app::embed::viewer(&vxr_app::embed::dir()).map(Some)
+    }
+
+    fn save_embed(&mut self, name: &str, files: &[File]) -> Result<Option<String>, String> {
+        let Some(parent) =
+            rfd::FileDialog::new().set_title(format!("Choose where to put the folder {name}")).pick_folder()
+        else {
+            return Ok(None);
+        };
+        vxr_app::embed::write_folder(&parent, name, files).map(Some)
+    }
+
     fn persist_theme(&mut self, id: &str) -> Result<(), String> {
         save_theme(id)
     }

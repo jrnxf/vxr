@@ -11,7 +11,7 @@ const EMBED_WGSL: &str = include_str!("embed.wgsl");
 const BLIT_WGSL: &str = include_str!("blit.wgsl");
 
 /// Half the vertical field of view, radians.
-const HALF_FOV: f32 = 0.35;
+const HALF_FOV: f32 = vxr_core::bricks::VIEW_HALF_FOV;
 
 struct Gpu {
     instance: wgpu::Instance,
@@ -216,20 +216,9 @@ impl Viewer {
             Ok(scene) => scene,
             Err(e) => return e,
         };
-        // The tight box of the voxels, so a small model in a big map is still framed.
-        let (mut lo, mut hi) = ([i32::MAX; 3], [i32::MIN; 3]);
-        map.for_each(|p, _| {
-            for a in 0..3 {
-                lo[a] = lo[a].min(p[a]);
-                hi[a] = hi[a].max(p[a] + 1);
-            }
-        });
-        if lo[0] > hi[0] {
+        let Some((centre, radius)) = vxr_core::bricks::framing(&map) else {
             return "the scene has no voxels to show".into();
-        }
-        let half: [f32; 3] = std::array::from_fn(|a| (hi[a] - lo[a]) as f32 * 0.5);
-        let centre = std::array::from_fn(|a| lo[a] as f32 + half[a]);
-        let radius = (half[0] * half[0] + half[1] * half[1] + half[2] * half[2]).sqrt();
+        };
         GPU.with(|g| {
             let g = g.borrow();
             let Some(g) = g.as_ref() else { return "the viewer has no GPU device".into() };
@@ -299,8 +288,7 @@ impl Viewer {
             // An orbit around the middle of the voxels, y up, far enough to fit their ball
             // in the shorter side of the picture.
             let aspect = w as f32 / h as f32;
-            let fit = if aspect < 1.0 { 1.0 / aspect } else { 1.0 };
-            let dist = scene.radius.max(0.5) / HALF_FOV.sin() * zoom * fit;
+            let dist = vxr_core::bricks::view_distance(scene.radius, aspect) * zoom;
             let (sy, cy) = yaw.sin_cos();
             let (sp, cp) = pitch.sin_cos();
             let fwd = [-cp * sy, -sp, -cp * cy];

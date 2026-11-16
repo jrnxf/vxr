@@ -30,6 +30,39 @@ pub const VERSION: u8 = 1;
 
 const MASK_BYTES: usize = MASK_WORDS * 4;
 
+/// The embed's first view, which the app's poster is traced from so the live scene takes
+/// over in place: radians around +y and above the horizon (`voxel-scene.js` starts there),
+/// and half the vertical field of view.
+pub const VIEW_YAW: f32 = 0.7;
+pub const VIEW_PITCH: f32 = 0.5;
+pub const VIEW_HALF_FOV: f32 = 0.35;
+
+/// What the embed frames: the middle of the tight box of `map`'s voxels and the radius of
+/// the ball around it, so a small model in a big map still fills the picture. None when the
+/// map has no voxels.
+pub fn framing(map: &BrickMap) -> Option<([f32; 3], f32)> {
+    let (mut lo, mut hi) = ([i32::MAX; 3], [i32::MIN; 3]);
+    map.for_each(|p, _| {
+        for a in 0..3 {
+            lo[a] = lo[a].min(p[a]);
+            hi[a] = hi[a].max(p[a] + 1);
+        }
+    });
+    if lo[0] > hi[0] {
+        return None;
+    }
+    let half: [f32; 3] = std::array::from_fn(|a| (hi[a] - lo[a]) as f32 * 0.5);
+    let radius = (half[0] * half[0] + half[1] * half[1] + half[2] * half[2]).sqrt();
+    Some((std::array::from_fn(|a| lo[a] as f32 + half[a]), radius))
+}
+
+/// How far from the middle the embed's eye sits to fit a ball of `radius` in a picture of
+/// `aspect` (width over height): in its shorter side.
+pub fn view_distance(radius: f32, aspect: f32) -> f32 {
+    let fit = if aspect < 1.0 { 1.0 / aspect } else { 1.0 };
+    radius.max(0.5) / VIEW_HALF_FOV.sin() * fit
+}
+
 /// `map` and the colours its voxels use, as a brick scene file.
 pub fn encode(map: &BrickMap, palette: &[[u8; 4]; 256]) -> Vec<u8> {
     let bricks = map.live_bricks();

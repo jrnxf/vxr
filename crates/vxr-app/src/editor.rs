@@ -161,6 +161,8 @@ pub struct Editor {
     pub export: Option<Export>,
     /// The last finished export's PNG and size, for the host to save or download.
     pub exported: Option<(Vec<u8>, (u32, u32))>,
+    /// The last finished embed poster (a PNG), for the host to write with the embed folder.
+    pub embedded: Option<Vec<u8>>,
     /// Files a terminal agent's `export` made, for the host to hand over with its answer (the
     /// desktop app writes them into Downloads, the browser downloads them).
     pub agent_files: Vec<crate::files::File>,
@@ -320,6 +322,7 @@ impl Editor {
             frame_at: (0.0, 0.0),
             export: None,
             exported: None,
+            embedded: None,
             agent_files: Vec::new(),
             agent_render: None,
             agent_rendered: None,
@@ -374,6 +377,7 @@ impl Editor {
         self.preview.set_materials(&self.gpu.queue, &self.materials);
         self.preview.restart();
         self.export = None;
+        self.embedded = None;
         self.shape = (scene.reshapes(), scene.origin);
         self.scene = scene;
         self.last_object = None;
@@ -1766,6 +1770,7 @@ impl Editor {
             self.ai_dock = dock;
         }
         let mut host = std::mem::take(&mut self.agent_host);
+        let mut copy = None;
         actions.extend(std::iter::repeat_n(Action::ToggleWorld, tabs));
         if let Some(text) = self.ui.asked.take() {
             self.asks.push(text.clone());
@@ -1874,6 +1879,14 @@ impl Editor {
                     self.export = None;
                     self.ui.toast(&self.ctx, "Export cancelled");
                 }
+                Action::Embed => {
+                    // The tag goes on the clipboard with this frame's output, so a browser
+                    // takes it inside the click that asked (a later write can be refused).
+                    if self.scene.map.voxels > 0 {
+                        copy = Some(crate::files::embed_snippet(&self.ui.scene_name));
+                    }
+                    host.push(Action::Embed);
+                }
                 other => host.push(other),
             }
         }
@@ -1901,7 +1914,9 @@ impl Editor {
             host.push(done);
         }
         self.autosave();
-        (host, out.platform_output)
+        let mut platform = out.platform_output;
+        platform.commands.extend(copy.map(egui::OutputCommand::CopyText));
+        (host, platform)
     }
 
     /// Help's demos: move the ones that showed last frame on to this frame's time, and give
@@ -2537,6 +2552,56 @@ impl Editor {
         format!("{}-render.png", self.export_stem())
     }
 
+    /// Start tracing an embed's poster: what the `<voxel-scene>` tag draws first (the whole
+    /// scene from the viewer's first view, in the tag's shape) with the Render panel's
+    /// light and samples, so the live scene takes over from the picture in place. The host
+    /// gets [`Action::Embedded`] when it is traced.
+    pub fn start_embed(&mut self) -> Result<(), String> {
+        let r = (|| {
+            if self.export.is_some() {
+                return Err("a render is running: wait for it or cancel it in the Render panel".to_string());
+            }
+            let (centre, radius) = vxr_core::bricks::framing(&self.scene.map).ok_or("the scene is empty")?;
+            let (w, h) = crate::files::EMBED_POSTER;
+            let cam = vxr_render::OrbitCamera {
+                target: centre.into(),
+                yaw: vxr_core::bricks::VIEW_YAW,
+                pitch: vxr_core::bricks::VIEW_PITCH,
+                distance: vxr_core::bricks::view_distance(radius, w as f32 / h as f32),
+                fov_y: vxr_core::bricks::VIEW_HALF_FOV * 2.0,
+                ortho: false,
+            };
+            let mut x = Export::start_sized(
+                &self.gpu,
+                &self.layout,
+                &self.scene.palette,
+                &self.scene.materials,
+                cam,
+                &self.ui.render,
+                vxr_render::ViewColors::NEUTRAL.sky,
+                (w, h),
+            )?;
+            x.embed = true;
+            Ok(x)
+        })();
+        match r {
+            Ok(x) => {
+                self.export = Some(x);
+                self.embedded = None;
+                let spp = self.ui.render.samples();
+                self.ui.toast(
+                    &self.ctx,
+                    format!("Rendering the embed's picture at {spp} spp. The tag is on the clipboard."),
+                );
+                Ok(())
+            }
+            Err(e) => {
+                self.ui.toast(&self.ctx, format!("Could not embed: {e}"));
+                Err(format!("could not embed: {e}"))
+            }
+        }
+    }
+
     /// Start a PNG export of the corner's view with the Render panel's settings.
     pub fn start_export(&mut self) -> Result<(), String> {
         let r = Export::start(
@@ -2767,8 +2832,19 @@ impl Editor {
         if corner.is_some() {
             self.preview.after_submit(dev);
         }
+        let embed = self.export.as_ref().is_some_and(|x| x.embed);
         let done = self.export.as_mut().and_then(|x| x.after_submit(&self.gpu).map(|r| (r, x.size())));
         match done {
+            Some((Ok(png), _)) if embed => {
+                self.export = None;
+                self.embedded = Some(png);
+                Some(Action::Embedded)
+            }
+            Some((Err(e), _)) if embed => {
+                self.export = None;
+                self.ui.toast(&self.ctx, format!("Could not embed: {e}"));
+                None
+            }
             Some((Ok(png), (w, h))) if self.agent_render.is_some() && self.agent_rendered.is_none() => {
                 self.export = None;
                 self.agent_files = vec![(self.export_name(), png)];

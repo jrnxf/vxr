@@ -134,6 +134,20 @@ pub trait Platform {
         Err("there is no download here".into())
     }
 
+    /// The embed viewer's files, named as [`crate::files::EMBED_VIEWER`], which an embed
+    /// folder carries: at once, or None while they are on their way (a browser fetches them
+    /// from the site; the page then runs [`Action::Embedded`] again). An error says why
+    /// this build or page has none.
+    fn embed_viewer(&mut self) -> Result<Option<Vec<File>>, String> {
+        Err("there is no embed viewer here".into())
+    }
+
+    /// Write an embed's files as a folder named `name` where the user picks (one zip named
+    /// `name` in the browser); returns the name it was given, or None when the user cancelled.
+    fn save_embed(&mut self, _name: &str, _files: &[File]) -> Result<Option<String>, String> {
+        Err("there is no download here".into())
+    }
+
     /// The scene now has this name (the window's title).
     fn named(&mut self, _name: &str) {}
 
@@ -266,7 +280,39 @@ pub fn run_action(ed: &mut Editor, p: &mut dyn Platform, action: Action) {
                 Err(e) => toast(ed, format!("Could not download: {e}")),
             }
         }
-        Action::Embed => toast(ed, "The embed export is not built yet".into()),
+        Action::Embed => {
+            // Asked before the picture is traced: a build without the viewer says so at
+            // once, and a browser starts fetching it now.
+            match p.embed_viewer() {
+                Ok(_) => {
+                    let _ = ed.start_embed();
+                }
+                Err(e) => toast(ed, format!("Could not embed: {e}")),
+            }
+        }
+        Action::Embedded => {
+            let Some(poster) = ed.embedded.take() else { return };
+            let viewer = match p.embed_viewer() {
+                Ok(Some(viewer)) => viewer,
+                Ok(None) => {
+                    // Still on their way: the page asks again when they land.
+                    ed.embedded = Some(poster);
+                    return;
+                }
+                Err(e) => return toast(ed, format!("Could not embed: {e}")),
+            };
+            let name = &ed.ui.scene_name;
+            let folder = format!("{}-embed", crate::files::embed_stem(name));
+            let written = crate::files::embed_files(&ed.scene, name, poster, viewer)
+                .and_then(|files| Ok((p.save_embed(&folder, &files)?, files.len())));
+            match written {
+                Ok((Some(name), files)) => {
+                    toast(ed, format!("{} {name} ({files} files). Its index.html shows the tag to paste.", p.verb()))
+                }
+                Ok((None, _)) => {}
+                Err(e) => toast(ed, format!("Could not embed: {e}")),
+            }
+        }
         Action::ExportObj => {
             let mut quads = 0;
             let scene = &ed.scene;

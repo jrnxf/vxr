@@ -31,6 +31,8 @@ extern "C" {
     fn page_keep_theme(id: &str);
     #[wasm_bindgen(js_namespace = vxrHost, js_name = keepToured)]
     fn page_keep_toured();
+    #[wasm_bindgen(js_namespace = vxrHost, js_name = fetchEmbed)]
+    fn page_fetch_embed();
     #[wasm_bindgen(js_namespace = vxrHost, js_name = hasHandles)]
     fn page_has_handles() -> bool;
     #[wasm_bindgen(js_namespace = vxrHost, js_name = saveVox)]
@@ -57,6 +59,21 @@ extern "C" {
     fn page_store_hold(id: &str);
     #[wasm_bindgen(js_namespace = vxrHost, js_name = storeHeld)]
     fn page_store_held(id: &str) -> bool;
+}
+
+/// The embed viewer's files, which the page fetches from the site's `embed/` folder the
+/// first time Embed is used (they are not in the editor's wasm: most visits never embed).
+#[derive(Default)]
+enum Viewer {
+    #[default]
+    Unasked,
+    Fetching,
+    Here(Vec<File>),
+    Failed(String),
+}
+
+thread_local! {
+    static VIEWER: RefCell<Viewer> = const { RefCell::new(Viewer::Unasked) };
 }
 
 /// What a browser does for [`run_action`]: Open is the page's file picker, which calls
@@ -183,6 +200,31 @@ impl Platform for Browser {
     fn persist_tour_seen(&mut self) -> Result<(), String> {
         page_keep_toured();
         Ok(())
+    }
+
+    fn embed_viewer(&mut self) -> Result<Option<Vec<File>>, String> {
+        VIEWER.with_borrow_mut(|v| match v {
+            Viewer::Unasked => {
+                *v = Viewer::Fetching;
+                page_fetch_embed();
+                Ok(None)
+            }
+            Viewer::Fetching => Ok(None),
+            Viewer::Here(files) => Ok(Some(files.clone())),
+            // Said once; the next Embed fetches again.
+            Viewer::Failed(_) => {
+                let Viewer::Failed(why) = std::mem::take(v) else { unreachable!() };
+                Err(format!("the viewer did not download ({why}). Check the connection and choose Embed again"))
+            }
+        })
+    }
+
+    fn save_embed(&mut self, name: &str, files: &[File]) -> Result<Option<String>, String> {
+        // Inside a folder, so unpacking the zip gives the folder a desktop Embed writes.
+        let inside: Vec<File> = files.iter().map(|(f, bytes)| (format!("{name}/{f}"), bytes.clone())).collect();
+        let name = format!("{name}.zip");
+        page_download(&zip(&inside), &name, "application/zip");
+        Ok(Some(name))
     }
 
     fn challenge(&mut self) -> Option<String> {
@@ -690,6 +732,25 @@ impl App {
         self.woken = true;
         let ctx = self.host.editor.ctx.clone();
         self.host.editor.ui.toast(&ctx, format!("Could not open {name}: {why}"));
+    }
+
+    /// The embed viewer's files the page fetched for Embed (`loader`, `glue` and `module`, in
+    /// the order of `vxr_app::files::EMBED_VIEWER`), or with `error` why it could not. An
+    /// embed whose picture is already traced is written now. (No argument may be named
+    /// `wasm`: in the generated glue it would hide the module every call goes through.)
+    pub fn embed_fetched(&mut self, loader: Vec<u8>, glue: Vec<u8>, module: Vec<u8>, error: &str) {
+        self.woken = true;
+        VIEWER.with_borrow_mut(|v| {
+            *v = if error.is_empty() {
+                let names = vxr_app::files::EMBED_VIEWER;
+                Viewer::Here(names.iter().map(|n| n.to_string()).zip([loader, glue, module]).collect())
+            } else {
+                Viewer::Failed(error.into())
+            }
+        });
+        if self.host.editor.embedded.is_some() {
+            run_action(&mut self.host.editor, &mut Browser::default(), vxr_app::ui::Action::Embedded);
+        }
     }
 
     /// A Save the page took finished: written through a handle to the file `name`. Nothing

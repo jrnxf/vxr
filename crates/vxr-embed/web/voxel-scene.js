@@ -53,6 +53,8 @@
       this.canvas = root.querySelector('canvas');
       this.img = root.querySelector('img');
       this.note = root.querySelector('p');
+      // The first view. The app traces its poster from the same one (VIEW_YAW and VIEW_PITCH
+      // in crates/vxr-core/src/bricks.rs), so the live scene takes over in place.
       this.yaw = 0.7;
       this.pitch = 0.5;
       this.zoom = 1;
