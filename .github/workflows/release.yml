@@ -39,6 +39,8 @@ on:
       - crates/vxr-app/examples/icon.rs
       - crates/vxr-app/fetch-fonts
       - crates/vxr-app/fonts.sha256
+      - crates/vxr-embed/build
+      - crates/vxr-web/cloudflare-build
   workflow_dispatch:
 
 # A newer push to a pull request replaces its run; a release always runs to the end.
@@ -120,6 +122,13 @@ jobs:
           rustup toolchain install "$RUST" --profile minimal --target aarch64-apple-darwin,x86_64-apple-darwin
           rustup default "$RUST"
 
+      # Before the bundle, which copies crates/vxr-embed/dist into Contents/Resources/embed. The
+      # wasm tools come pinned and checked by sha256 from the Workers build script.
+      - name: Build the embed viewer
+        run: |
+          eval "$(crates/vxr-web/cloudflare-build --tools)"
+          VXR_TOOLS=path crates/vxr-embed/build
+
       - name: Build for arm64 and x86_64
         run: crates/vxr-app/bundle out aarch64-apple-darwin x86_64-apple-darwin
 
@@ -134,6 +143,9 @@ jobs:
           grep -qx 'Signature=adhoc' signature.txt
           plutil -p "$app/Contents/Info.plist"
           ls "$app/Contents/Resources/fonts" "$app/Contents/Resources/vxr.icns"
+          # Without these the Embed command says the build has no embed viewer.
+          ls "$app/Contents/Resources/embed/voxel-scene.js" "$app/Contents/Resources/embed/vxr_embed.js" \
+            "$app/Contents/Resources/embed/vxr_embed_bg.wasm"
           # macOS 13 is the oldest the formula allows, for both slices.
           for arch in arm64 x86_64; do
             vtool -arch "$arch" -show-build "$bin" | tee build.txt

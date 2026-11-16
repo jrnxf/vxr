@@ -4,6 +4,9 @@
 # sha256, into target/tools/, install the Worker's npm packages (package-lock.json), then run
 # ./build with them. Also runs on an Apple Silicon Mac, to try it outside nix. Bump the versions
 # here with nix/flake.lock and Cargo.lock.
+#
+# With --tools it only installs the tools and prints the export lines that put them on the PATH,
+# for `eval` (release.yml builds the embed viewer with them).
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/../.." && pwd)"
@@ -54,6 +57,9 @@ fetch() {
   echo "$2  $3" | shasum -a 256 -c - >/dev/null
 }
 
+# --tools: keep stdout for the export lines alone, so the install's own output is never eval'd.
+if [ "${1:-}" = --tools ]; then exec 3>&1 1>&2; fi
+
 mkdir -p "$tools/bin"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -79,6 +85,17 @@ if [ ! -x "$tools/binaryen-version_$binaryen/bin/wasm-opt" ]; then
   fetch "https://github.com/WebAssembly/binaryen/releases/download/version_$binaryen/binaryen-version_$binaryen-$binaryen_target.tar.gz" \
     "$binaryen_sha" "$tmp/binaryen.tar.gz"
   tar -xzf "$tmp/binaryen.tar.gz" -C "$tools"
+fi
+
+if [ "${1:-}" = --tools ]; then
+  cargo --version
+  wasm-bindgen --version
+  wasm-opt --version
+  for name in RUSTUP_HOME CARGO_HOME RUSTUP_TOOLCHAIN PATH; do
+    value="${!name}"
+    printf "export %s='%s'\n" "$name" "${value//\'/\'\\\'\'}" >&3
+  done
+  exit 0
 fi
 
 cargo --version
