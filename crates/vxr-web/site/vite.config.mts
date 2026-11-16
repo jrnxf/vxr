@@ -13,7 +13,7 @@ logger.warnOnce = (msg, options) => {
   if (!msg.includes("fonts/")) warnOnce(msg, options)
 }
 
-// The landing page and the boot skeleton, pre-rendered into dist/index.html (build runs this
+// The landing page and the boot screen, pre-rendered into dist/index.html (build runs this
 // after the wasm is in dist/). www/ is the public folder: app.js, gate.js, _headers and the
 // icons are copied as they are.
 export default defineConfig({

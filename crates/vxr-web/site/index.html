@@ -10,9 +10,9 @@
     <!--
   The vxr editor in the browser. Everything on the canvas (scene and UI) is the Rust editor
   (pkg/, built by crates/vxr-web/build); app.js forwards input, opens files and downloads saves.
-  The boot skeleton and the landing page (#root) are Preact, pre-rendered into this file at
+  The boot screen and the landing page (#root) are Preact, pre-rendered into this file at
   build time (src/entry.tsx). First visits start on the landing page while the editor loads
-  behind it; later visits show the boot skeleton until the editor draws. gate.js picks which.
+  behind it; later visits show the boot cube until the editor draws. gate.js picks which.
 -->
     <script src="/gate.js"></script>
     <link rel="modulepreload" href="/pkg/vxr_web.js" />

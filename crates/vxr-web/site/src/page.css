@@ -1,4 +1,4 @@
-/* The page around the editor's canvas (site/index.html): the canvas, the boot skeleton
+/* The page around the editor's canvas (site/index.html): the canvas, the boot screen
    (src/Boot.tsx) and the error message. The landing page's own styles are landing/landing.css. */
 @font-face {
   font-family: Geist;
@@ -114,9 +114,8 @@ canvas#c {
   white-space: nowrap;
 }
 
-/* The boot skeleton: the editor's panels as outlines where they will be, with the cube in the
-   middle, until the editor draws its first frame (app.js sets html[data-booted]). The
-   places follow the top bar, dock, view bar and corners in crates/vxr-app/src/ui.rs. */
+/* The boot screen: the cube in the middle until the editor draws its first frame (app.js sets
+   html[data-booted]). Then it fades as the editor's panels slide in from the edges. */
 #boot {
   position: fixed;
   inset: 0;
@@ -133,48 +132,6 @@ html[data-booted] #boot {
   transition:
     opacity 200ms ease,
     visibility 0s 200ms;
-}
-#boot .sk {
-  position: absolute;
-  background: #171717;
-  border: 1px solid rgb(255 255 255 / 10%);
-  border-radius: 12px;
-}
-.sk-title {
-  left: 12px;
-  top: 12px;
-  width: 406px;
-  height: 42px;
-}
-.sk-dock {
-  left: 12px;
-  top: 62px;
-  width: 46px;
-  height: 530px;
-}
-.sk-actions {
-  right: 12px;
-  top: 12px;
-  width: 258px;
-  height: 42px;
-}
-.sk-view {
-  right: 12px;
-  bottom: 138px;
-  width: 172px;
-  height: 40px;
-}
-.sk-corner {
-  right: 12px;
-  bottom: 12px;
-  width: 208px;
-  height: 117px;
-}
-.sk-stats {
-  left: 12px;
-  bottom: 12px;
-  width: 306px;
-  height: 26px;
 }
 .sk-mark {
   position: absolute;
@@ -195,20 +152,6 @@ html[data-booted] #boot {
     animation: none;
   }
 }
-/* The touch layout (a phone) has a different arrangement: keep only the top bar's place. */
-@media (max-width: 700px) {
-  .sk-title {
-    width: calc(100% - 24px);
-  }
-  .sk-dock,
-  .sk-actions,
-  .sk-view,
-  .sk-corner,
-  .sk-stats {
-    display: none;
-  }
-}
-
 /* Before the editor draws: shadcn Neutral, light or dark like the System theme. */
 @media (prefers-color-scheme: light) {
   html,
@@ -224,10 +167,6 @@ html[data-booted] #boot {
   }
   #boot {
     background: #ffffff;
-  }
-  #boot .sk {
-    background: #fafafa;
-    border-color: rgb(0 0 0 / 10%);
   }
   .sk-mark path:nth-of-type(1) {
     fill: #171717;

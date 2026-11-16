@@ -3,7 +3,7 @@
 import "./page.css"
 import "./landing/landing.css"
 
-// The page's one script. At build time `prerender` writes the boot skeleton and the landing
+// The page's one script. At build time `prerender` writes the boot screen and the landing
 // page into index.html (so they paint with no JavaScript); in the browser, a first visit
 // (gate.js sets html[data-landing]) hydrates the landing page, and a returning visit loads
 // nothing more.

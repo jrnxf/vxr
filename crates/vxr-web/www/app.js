@@ -289,7 +289,7 @@ function bridgeFlush() {
 }
 
 function show(title, text) {
-  // An error replaces the landing page and the boot skeleton.
+  // An error replaces the landing page and the boot screen.
   document.documentElement.dataset.landing = 'off';
   document.documentElement.dataset.booted = '';
   msg.hidden = false;
@@ -650,7 +650,7 @@ let cursor = '';
 function step(now) {
   app.frame(now / 1000);
   bridgeFlush();
-  // The first drawn frame ends the boot skeleton (www/style.css).
+  // The first drawn frame ends the boot screen (site/src/page.css).
   document.documentElement.dataset.booted = '';
 }
 
