@@ -260,6 +260,10 @@ pub enum Action {
     Snap(View),
     /// Orthographic (true) or perspective projection.
     Ortho(bool),
+    /// Move the camera to the view saved in slot (0 to 9).
+    GoToView(i32),
+    /// Save the camera's view into slot (0 to 9) as an undo step.
+    SaveView(i32),
     Embed,
     /// Export what the view shows as OBJ with its palette texture (the host writes the files).
     ExportObj,
@@ -801,6 +805,11 @@ pub struct Hybrid {
     pub view: Option<View>,
     /// The View flyout beside the camera bar is open.
     pub view_panel: bool,
+    /// Which of the ten saved view slots hold a view (set by the editor).
+    pub saved_views: [bool; vxr_core::views::SLOTS as usize],
+    /// The next click on a saved view slot saves the view into it (the flyout's Save, or
+    /// Cmd-K Save view to a slot) instead of going to it.
+    pub save_view_pick: bool,
     /// Show the camera moves in the hint bar: Space is held or the camera is being dragged
     /// (set by the editor).
     pub camera_hints: bool,
@@ -1138,6 +1147,8 @@ const COMMANDS: &[Command] = &[
     Command { label: "Render settings", keys: &["R"], run: |h| h.toggle_render_panel() },
     Command { label: "Full render view", keys: &[], run: |h| h.toggle_full_render() },
     Command { label: "Focus on a point…", keys: &[], run: |h| h.arm_focus_pick() },
+    Command { label: "Saved views", keys: &[], run: |h| h.view_panel = true },
+    Command { label: "Save view to a slot…", keys: &[], run: |h| h.arm_save_view() },
     Command { label: "Export PNG", keys: &[], run: |h| h.actions.push(Action::ExportPng) },
     Command { label: "Export turntable", keys: &[], run: |h| h.actions.push(Action::ExportTurntable) },
     Command { label: "Export OBJ", keys: &[], run: |h| h.actions.push(Action::ExportObj) },
@@ -1197,6 +1208,8 @@ impl Hybrid {
             render_dock: None,
             render_panel: false,
             focus_pick: false,
+            saved_views: [false; vxr_core::views::SLOTS as usize],
+            save_view_pick: false,
             render: RenderSettings::default(),
             sun_hex: String::new(),
             bounds: [0; 3],
@@ -1453,6 +1466,12 @@ impl Hybrid {
         self.show_render = true;
     }
 
+    /// Open the View flyout with its saved view slots waiting for the slot to save into.
+    pub fn arm_save_view(&mut self) {
+        self.view_panel = true;
+        self.save_view_pick = true;
+    }
+
     /// Swap the path-traced image between the corner and the whole view (it shows the corner).
     pub fn toggle_full_render(&mut self) {
         self.full_render = !self.full_render;
@@ -1536,6 +1555,7 @@ impl Hybrid {
         }
         if self.slot_op.take().is_some()
             || std::mem::take(&mut self.focus_pick)
+            || std::mem::take(&mut self.save_view_pick)
             || self.color_edit.take().is_some()
             || self.bounds_panel.take().is_some()
         {
@@ -3300,7 +3320,7 @@ impl Hybrid {
         if !self.view_panel {
             return;
         }
-        let size = vec2(204.0, 176.0);
+        let size = vec2(204.0, 272.0);
         let floor = screen.bottom() - 12.0;
         let nav = self.hits.get("nav").copied().unwrap_or(Rect::from_min_size(screen.right_bottom(), egui::Vec2::ZERO));
         let right = nav.right().min(screen.right() - 12.0);
@@ -3325,6 +3345,8 @@ impl Hybrid {
         self.hits.insert("view-flyout".into(), rect);
         let (ortho, view) = (self.ortho, self.view);
         let mut guides = [self.grid, self.ground, self.frame];
+        let (saved, mut pick) = (self.saved_views, self.save_view_pick);
+        let mut tip = None;
         let mut run = Vec::new();
         let mut hits = Vec::new();
         let mut close = false;
@@ -3395,7 +3417,46 @@ impl Hybrid {
                 }
                 hits.push((id.to_string(), c));
             }
+            // Saved views: the file's ten camera slots. A full slot goes to its view and an
+            // empty one saves the view into it; with Save on, any slot saves.
+            ui.painter().line_segment(
+                [pos2(rect.left() + 10.0, hy + 165.5), pos2(rect.right() - 10.0, hy + 165.5)],
+                Stroke::new(1.0, th().line),
+            );
+            let save = Rect::from_min_size(pos2(rect.right() - 12.0 - 52.0, hy + 172.0), vec2(52.0, 20.0));
+            if view_chip(ui, save, "view-save", "Save", "", pick) {
+                pick = !pick;
+            }
+            hits.push(("view-save".to_string(), save));
+            let sw = (rect.width() - 24.0 - 4.0 * 4.0) / 5.0;
+            for (k, &full) in saved.iter().enumerate() {
+                let c = Rect::from_min_size(
+                    pos2(rect.left() + 12.0 + (k % 5) as f32 * (sw + 4.0), hy + 200.0 + (k / 5) as f32 * 28.0),
+                    vec2(sw, 24.0),
+                );
+                let id = format!("view-slot-{}", k + 1);
+                let resp = slot_chip(ui, c, &id, k + 1, full, pick);
+                if resp.clicked() {
+                    run.push(if pick || !full { Action::SaveView(k as i32) } else { Action::GoToView(k as i32) });
+                    pick = false;
+                } else if resp.hovered() {
+                    tip = Some(match (pick, full) {
+                        (true, true) => format!("Save over view {}", k + 1),
+                        (_, false) => format!("Save as view {}", k + 1),
+                        (false, true) => format!("Go to view {}", k + 1),
+                    });
+                }
+                hits.push((id, c));
+            }
+            // The section's heading says what a click on the hovered slot does: a tooltip
+            // would cover the heading and Save, the flyout sitting low on the screen.
+            let g = match &tip {
+                Some(t) => ui.painter().layout_no_wrap(t.clone(), sans(11.0), th().muted),
+                None => ui.painter().layout_job(spaced("SAVED VIEWS", sans(9.0), th().faint, 0.72)),
+            };
+            ui.painter().galley(pos2(rect.left() + 12.0, hy + 182.0 - g.size().y / 2.0), g, th().faint);
         });
+        self.save_view_pick = pick;
         [self.grid, self.ground, self.frame] = guides;
         self.hits.extend(hits);
         self.actions.extend(run);
@@ -6004,6 +6065,10 @@ impl Hybrid {
                 };
                 vec![("Click", armed.as_str()), ("Esc", "cancel")]
             }
+            (None, _, _) if self.save_view_pick && self.view_panel => {
+                let v = [("Click", "the slot to save the view into"), ("Esc", "cancel")];
+                return self.hint_panel(ctx, screen, &v);
+            }
             (None, _, _) if self.focus_pick => {
                 let v = [("Click", "the point to focus on"), ("Esc", "cancel"), ("Right-drag", "orbit")];
                 return self.hint_panel(ctx, screen, &v);
@@ -6588,6 +6653,29 @@ fn view_chip(ui: &mut Ui, c: Rect, id: &str, label: &str, key: &str, on: bool) -
     let kc = if on { th().accent.gamma_multiply(0.8) } else { th().faint };
     p.text(pos2(c.right() - 4.0, c.bottom() - 2.0), Align2::RIGHT_BOTTOM, key, mono_medium(8.5), kc);
     resp.clicked()
+}
+
+/// A saved view slot of the View flyout: its number, bright when it holds a view and faint
+/// when empty, with a ring on every slot while a save waits for one.
+fn slot_chip(ui: &mut Ui, c: Rect, id: &str, n: usize, full: bool, armed: bool) -> egui::Response {
+    let resp = ui.interact(c, Id::unique(id), Sense::click());
+    let hover = resp.hovered();
+    let p = ui.painter();
+    let border = if armed {
+        th().ring
+    } else if hover {
+        th().tint(64)
+    } else {
+        th().line2
+    };
+    if full {
+        p.rect(c, CornerRadius::same(7), th().hover, Stroke::new(1.0, border), StrokeKind::Inside);
+    } else {
+        p.rect_stroke(c, CornerRadius::same(7), Stroke::new(1.0, border), StrokeKind::Inside);
+    }
+    let color = if hover || full { th().text } else { th().faint };
+    p.text(c.center(), Align2::CENTER_CENTER, n.to_string(), mono_medium(11.0), color);
+    resp
 }
 
 /// A separator's width in the dock.

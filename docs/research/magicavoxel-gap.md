@@ -10,7 +10,7 @@ Status as of 2026-11-16 (Monday; Phase 3, after the web embed and the exports fo
 - **Priority**: P1 is needed before a MagicaVoxel user could switch, P2 is expected soon after, P3 is nice to have or out of scope for now.
 - **Why**: which reason people love MagicaVoxel it serves (see `docs/market-research.md`, "Why it is loved"): **minutes** (results in minutes), **sculpt** (the hand-sculpting feel), **palette** (palette-first work), **render** (a beautiful built-in renderer), **lossless** (lossless `.vox`). A dash means it serves none of them directly.
 - **Build order**: the numbers in brackets, such as [1], are the Part 3 order in which the done rows were built (1 lossless save, 2 palette editing, 3 preview, render and materials, 4 line and center brushes, 5 selection and transform, 6 model tools, 7 camera and view, 8 world editor, 9 export).
-- **Next, in order**: scene tree multi-select (reorder is done), saved camera views (click to focus is done). Sort palette, image import (done) and saved views are P3 rows pulled forward because a switching user meets them early.
+- **Next, in order**: scene tree multi-select (reorder is done; saved camera views and click to focus are done). Sort palette, image import (done) and saved views are P3 rows pulled forward because a switching user meets them early.
 
 MagicaVoxel versions: 0.99.7.2 (July 2025) is the current build and is Windows-only. The Mac build stopped at 0.99.6.2 (September 2020) [S1]. A user switching from the Mac build expects the 0.99.6 set; a Windows user expects 0.99.7's palette groups, layer sorting and animation timeline.
 
@@ -129,7 +129,7 @@ Feature names below follow the update log [S1] unless another source is given.
 | View cube and axis snap views | 26 standard views, hotkey 5 for face views [S1 0.99] | partial [7] (six side views and isometric on 0 to 6 and the View flyout; no 26-view cube) | P2 | - |
 | Grid and ground | Frame grids with spacing, infinite ground [S1 0.98.1, 0.97.5] | done [7] (a voxel grid on the ground inside the bounds and a ground that fades into the background; View flyout, G, Cmd-K; no grid spacing setting) | P2 | minutes |
 | Bounding box display | Select on any of the six bounding box faces [S1 0.98.1] | partial [7] (the bounds frame is drawn, faint where voxels hide it; View flyout, Cmd-K; no face selection on it) | P2 | - |
-| Save and load views | 7/8, F5/F7, camera slots [S1 0.99, 0.99.6.2] | missing (cameras kept by lossless save [1], and read and edited with undo in `vxr_core::Scene`; no control in the editor and no agent tool yet) | P3 | - |
+| Save and load views | 7/8, F5/F7, camera slots [S1 0.99, 0.99.6.2] | done (launch item 3, a P3 pulled forward: the View flyout's ten SAVED VIEWS slots go to a view or save the view into a slot, Cmd-K Saved views and Save view to a slot…, the file's `rCAM` slots as MagicaVoxel keeps them, one undo step per save; agents get `save_view`; no 7/8 or F5/F7 keys, as the number keys snap to side views) | P3 | - |
 | Camera control panel | FOV, position, pitch/yaw/roll [S1 0.99.6.2, 0.99.6.4] | missing | P3 | - |
 | Free (fly) camera | Pers/Free modes [S1 0.97.5, 0.99.6.4] | missing | P3 | - |
 

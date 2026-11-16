@@ -106,6 +106,24 @@ impl Session {
             "selection": selection,
             "staged": self.staged_text(scene),
         });
+        let views: Vec<String> = scene
+            .saved_views()
+            .into_iter()
+            .map(|(k, v)| {
+                let t = v.target.map(|c| (c * 10.0).round() / 10.0);
+                format!(
+                    "view {}: target {t:?}, yaw {:.0}, pitch {:.0}, distance {:.1}, {}",
+                    k + 1,
+                    v.yaw.to_degrees(),
+                    v.pitch.to_degrees(),
+                    v.distance,
+                    if v.ortho { "orthographic" } else { "perspective" }
+                )
+            })
+            .collect();
+        if !views.is_empty() {
+            out["saved_views"] = json!(views);
+        }
         if !recoloured.is_empty() {
             out["slots_recoloured_unused"] = json!(recoloured);
         }

@@ -674,6 +674,27 @@ pub struct ImageImport {
     pub at: Option<Cell>,
 }
 
+/// Save a view into one of the file's ten saved view slots, as the View flyout's saved views do: the user can go to it with one click, and it is saved in the file as a MagicaVoxel camera (rCAM), in one undo step. A slot that holds a view is replaced. The yaw and pitch are the user's orbit: yaw 0 looks from the front (+z), 90 from the right (+x); pitch 30 looks down from 30 degrees above. scene_summary lists the views saved so far.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SaveView {
+    /// The slot, 1 to 10.
+    #[schemars(range(min = 1, max = 10))]
+    pub slot: u8,
+    /// The point the view looks at and turns around, in world coordinates (the middle of cell [x, y, z] is [x + 0.5, y + 0.5, z + 0.5]).
+    pub target: [f32; 3],
+    /// Degrees around the vertical axis: 0 from the front (+z), 90 from the right (+x), 180 from the back.
+    pub yaw: f32,
+    /// Degrees above the horizon, -90 (from straight below) to 90 (from straight above).
+    #[schemars(range(min = -90, max = 90))]
+    pub pitch: f32,
+    /// How far the eye is from the target, in voxels, above 0.
+    pub distance: f32,
+    /// Parallel (orthographic) projection instead of perspective.
+    #[serde(default)]
+    pub orthographic: bool,
+}
+
 /// What palette_sort orders the colours by.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
@@ -824,6 +845,7 @@ ops! {
     "palette_import" => PaletteImport(PaletteImport),
     "image_import" => ImageImport(ImageImport),
     "material_set" => MaterialSet(MaterialSet),
+    "save_view" => SaveView(SaveView),
     "make_object" => MakeObject(MakeObject),
     "move_object" => MoveObject(MoveObject),
     "transform_object" => TransformObject(TransformObject),

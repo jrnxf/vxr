@@ -99,6 +99,7 @@ fn tool_schemas() {
             "palette_import",
             "image_import",
             "material_set",
+            "save_view",
             "make_object",
             "move_object",
             "transform_object",
@@ -1791,6 +1792,43 @@ fn image_import_puts_the_same_voxels_as_import_image() {
     ] {
         assert_eq!(err(&mut o, &mut s, "image_import", args), (ErrorKind::Invalid, why.to_string()));
     }
+}
+
+#[test]
+fn save_view_saves_what_the_view_flyout_saves_and_undoes() {
+    use vxr_core::views::SavedView;
+    let v = SavedView { target: [2.5, 4.0, -1.5], yaw: 1.25, pitch: -0.5, distance: 42.0, ortho: true };
+    let mut want = small();
+    assert!(want.save_view(4, v, 45.0));
+    let mut s = small();
+    let mut o = Session::new(&s, None);
+    let args = json!({"slot": 5, "target": v.target, "yaw": v.yaw.to_degrees(), "pitch": v.pitch.to_degrees(), "distance": 42, "orthographic": true});
+    let t = call(&mut o, &mut s, "save_view", args.clone());
+    assert!(t.starts_with("saved view 5: looking at [2.5, 4.0, -1.5]"), "{t}");
+    assert_eq!(s.cameras, want.cameras, "the same camera as the flyout's Save");
+    assert_eq!(
+        json(&o.summary(&s))["saved_views"],
+        json!(["view 5: target [2.5, 4.0, -1.5], yaw 72, pitch -29, distance 42.0, orthographic"])
+    );
+    assert!(call(&mut o, &mut s, "save_view", args).starts_with("replaced view 5"));
+    o.discard(&mut s);
+    let mut o = Session::new(&s, None);
+    assert!(s.cameras.is_empty() && json(&o.summary(&s)).get("saved_views").is_none(), "discarded: no camera");
+    for (args, why) in [
+        (json!({"slot": 0, "target": [0, 0, 0], "yaw": 0, "pitch": 0, "distance": 9}), "slot 0: the slots are 1 to 10"),
+        (
+            json!({"slot": 11, "target": [0, 0, 0], "yaw": 0, "pitch": 0, "distance": 9}),
+            "slot 11: the slots are 1 to 10",
+        ),
+        (json!({"slot": 1, "target": [0, 0, 0], "yaw": 0, "pitch": 91, "distance": 9}), "pitch 91: -90 to 90"),
+        (
+            json!({"slot": 1, "target": [0, 0, 0], "yaw": 0, "pitch": 0, "distance": 0}),
+            "target, yaw and distance must be numbers, and distance above 0",
+        ),
+    ] {
+        assert_eq!(err(&mut o, &mut s, "save_view", args), (ErrorKind::Invalid, why.to_string()));
+    }
+    assert!(s.cameras.is_empty());
 }
 
 #[test]

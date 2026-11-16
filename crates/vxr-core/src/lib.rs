@@ -19,6 +19,7 @@
 //!   from and saved losslessly into `.vox`.
 //! - [`tools`]: the editing tools (add, erase, paint, pick with the voxel, box, face, line
 //!   and center brushes, mirror on three axes and axis lock), as presses, drags and releases.
+//! - [`views`]: saved views, the file's camera slots as the editor's orbit camera.
 
 pub mod brickmap;
 pub mod bricks;
@@ -31,6 +32,7 @@ pub mod palette;
 pub mod scene;
 pub mod select;
 pub mod tools;
+pub mod views;
 pub mod world;
 
 pub use brickmap::BrickMap;

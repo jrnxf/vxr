@@ -33,6 +33,9 @@ use crate::look::Camera;
 use crate::parts::{self, Part};
 use crate::text::{clean, hex, parse_hex};
 
+/// The field of view a saved view records, in degrees: the editor's.
+const VIEW_FOV: f32 = 45.0;
+
 /// Limits per request (`docs/research/ai.md` section 5, and per turn from test 1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
@@ -961,6 +964,36 @@ impl Session {
                     if n == 1 { " 1".to_string() } else { format!("s 1 to {n}") },
                     first.join(", "),
                     if n > 8 { ", …" } else { "" }
+                ))
+            }
+            Op::SaveView(a) => {
+                if !(1..=vxr_core::views::SLOTS).contains(&(a.slot as i32)) {
+                    return Err(invalid(format!("slot {}: the slots are 1 to 10", a.slot)));
+                }
+                if !(-90.0..=90.0).contains(&a.pitch) {
+                    return Err(invalid(format!("pitch {}: -90 to 90", a.pitch)));
+                }
+                let finite = a.target.iter().chain([&a.yaw, &a.distance]).all(|v| v.is_finite());
+                if !finite || a.distance <= 0.0 {
+                    return Err(invalid("target, yaw and distance must be numbers, and distance above 0"));
+                }
+                let v = vxr_core::views::SavedView {
+                    target: a.target,
+                    yaw: a.yaw.to_radians(),
+                    pitch: a.pitch.to_radians(),
+                    distance: a.distance,
+                    ortho: a.orthographic,
+                };
+                let was = scene.saved_view(a.slot as i32 - 1).is_some();
+                self.open(scene);
+                if !scene.put_view(a.slot as i32 - 1, v, VIEW_FOV) {
+                    return Err(invalid("that view cannot be saved"));
+                }
+                let how = if a.orthographic { "orthographic" } else { "perspective" };
+                let did = if was { "replaced" } else { "saved" };
+                Ok(format!(
+                    "{did} view {}: looking at {:?} from yaw {} pitch {}, {} voxels away, {how}",
+                    a.slot, a.target, a.yaw, a.pitch, a.distance
                 ))
             }
             Op::ImageImport(a) => {
@@ -2201,6 +2234,7 @@ impl Session {
     fn revert(&mut self, scene: &mut Scene) {
         if self.open {
             scene.revert_voxels();
+            scene.revert_cameras();
             for i in 1..=255u8 {
                 if scene.palette[i as usize] != self.palette_before[i as usize] {
                     scene.put_color(i, self.palette_before[i as usize]);

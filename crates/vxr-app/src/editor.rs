@@ -248,6 +248,7 @@ fn review_allows(a: &Action) -> bool {
             | Action::Zoom(_)
             | Action::Snap(_)
             | Action::Ortho(_)
+            | Action::GoToView(_)
             | Action::CancelExport
             | Action::ApplyReview
             | Action::DiscardReview
@@ -861,6 +862,30 @@ impl Editor {
         let area = (x1 - x0) * (y1 - y0);
         let shown = (x1.min(1.0) - x0.max(-1.0)).max(0.0) * (y1.min(1.0) - y0.max(-1.0)).max(0.0);
         (if area > 0.0 { shown / area } else { 0.0 }, (y1.min(1.0) - y0.max(-1.0)).max(0.0) / 2.0)
+    }
+
+    /// Move the camera to the view saved in slot `slot` (0 to 9). False, leaving the camera,
+    /// when the slot is empty.
+    pub fn go_to_view(&mut self, slot: i32) -> bool {
+        let Some(v) = self.scene.saved_view(slot) else { return false };
+        let o = self.scene.origin.map(|a| a as f32);
+        self.cam.target = Vec3::from(v.target) - Vec3::from(o);
+        (self.cam.yaw, self.cam.pitch, self.cam.distance, self.cam.ortho) = (v.yaw, v.pitch, v.distance, v.ortho);
+        true
+    }
+
+    /// Save the camera's view into slot `slot` (0 to 9) as one undo step.
+    pub fn save_view(&mut self, slot: i32) -> bool {
+        let o = self.scene.origin.map(|a| a as f32);
+        let c = &self.cam;
+        let v = vxr_core::views::SavedView {
+            target: (c.target + Vec3::from(o)).into(),
+            yaw: c.yaw,
+            pitch: c.pitch,
+            distance: c.distance,
+            ortho: c.ortho,
+        };
+        self.scene.save_view(slot, v, c.fov_y.to_degrees())
     }
 
     /// Back to the starting view: the home angle in perspective, framing the scene.
@@ -1767,6 +1792,7 @@ impl Editor {
             _ => self.scene.picked(),
         };
         (self.ui.ortho, self.ui.view) = (self.cam.ortho, self.cam.view());
+        self.ui.saved_views = std::array::from_fn(|k| self.scene.saved_view(k as i32).is_some());
         self.ui.marquee = self.marquee.map(|m| {
             let (a, b) = (m.start, m.end);
             egui::Rect::from_two_pos(egui::pos2(a[0], a[1]), egui::pos2(b[0], b[1])) / self.ppp
@@ -1890,6 +1916,20 @@ impl Editor {
                 Action::Zoom(zoom_in) => self.zoom_step(zoom_in),
                 Action::Snap(v) => self.cam.snap(v),
                 Action::Ortho(on) => self.cam.ortho = on,
+                Action::GoToView(slot) => {
+                    if !self.go_to_view(slot) {
+                        self.ui
+                            .toast(&self.ctx, format!("View {} is empty: click it to save the view there", slot + 1));
+                    }
+                }
+                Action::SaveView(slot) => {
+                    let msg = if self.save_view(slot) {
+                        format!("Saved the view as view {}", slot + 1)
+                    } else {
+                        "Could not save this view: frame the scene and try again".to_string()
+                    };
+                    self.ui.toast(&self.ctx, msg);
+                }
                 Action::Recolor { slot, rgba } => self.scene.put_color(slot, rgba),
                 Action::SetMaterial { slot, material } => self.scene.put_material(slot, material),
                 Action::ShiftColors(shift) => self.scene.shift_colors(&self.ui.group_base, shift),

@@ -772,13 +772,24 @@ fn the_housekeeping_select_and_palette_tools_change_the_window_and_undo_gives_th
     assert!(t.starts_with("imported a 2x1 image at [0, 40, 0] (its bottom-left pixel; it spans x 0 to 1, y 40 to 40): 1 cells changed in 1 slot; "), "{t}");
     assert_eq!((w.scene.history().position(), w.scene.map.voxels), (position + 5, voxels + 1));
     call(&mut w, &mut a, "show_world", json!({}));
-    // Fifteen edits applied, one undo step each (the delete was undone): undone, the save is
+    // A saved view: one undo step in the window, read back as the same view.
+    let t = call(
+        &mut w,
+        &mut a,
+        "save_view",
+        json!({"slot": 7, "target": [1, 2, 3], "yaw": 180, "pitch": -10, "distance": 15, "orthographic": true}),
+    );
+    assert_eq!(t, "saved view 7: looking at [1.0, 2.0, 3.0] from yaw 180 pitch -10, 15 voxels away, orthographic");
+    assert_eq!(w.scene.history().position(), position + 6);
+    let v = w.scene.saved_view(6).unwrap();
+    assert_eq!((v.target, v.distance, v.ortho), ([1.0, 2.0, 3.0], 15.0, true));
+    // Sixteen edits applied, one undo step each (the delete was undone): undone, the save is
     // the file's bytes.
     let mut steps = 0;
     while w.scene.undo() {
         steps += 1;
     }
-    assert_eq!(steps, 15);
+    assert_eq!(steps, 16);
     assert_eq!(w.scene.to_vox().unwrap(), bytes);
 }
 

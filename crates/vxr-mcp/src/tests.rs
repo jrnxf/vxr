@@ -709,18 +709,29 @@ fn the_ui_s_other_actions_have_tools() {
         "{t}"
     );
     c.ok("show_world", json!({}));
+    // A saved view, in the world: the file has no cameras, so it is saved as a new rCAM.
+    let t = c.ok("save_view", json!({"slot": 2, "target": [0.5, 1, 0.5], "yaw": 90, "pitch": 30, "distance": 20}));
+    assert_eq!(t, "saved view 2: looking at [0.5, 1.0, 0.5] from yaw 90 pitch 30, 20 voxels away, perspective");
     c.ok("save", json!({}));
     let mut d = Client::new(&dir.0);
     d.ok("open", json!({"path": "world.vox"}));
+    let views = summary(&mut d)["saved_views"].clone();
+    assert!(
+        views
+            .as_array()
+            .unwrap()
+            .contains(&json!("view 2: target [0.5, 1.0, 0.5], yaw 90, pitch 30, distance 20.0, perspective")),
+        "{views}"
+    );
     let w = summary(&mut d)["world"].clone();
     assert_eq!(w["nodes"].as_array().unwrap().len(), 7, "the gem is gone: {w}");
     assert!(w["layers"].as_array().unwrap().iter().any(|l| l["id"] == 0 && l["hidden"] == true), "{w}");
-    // Fourteen edits, fourteen undo steps, and the selections none.
+    // Fifteen edits, fifteen undo steps, and the selections none.
     let mut steps = 0;
     while !c.tool("undo", json!({})).1 {
         steps += 1;
     }
-    assert_eq!(steps, 14);
+    assert_eq!(steps, 15);
     c.ok("save", json!({"path": "undone.vox"}));
     assert_eq!(std::fs::read(dir.0.join("undone.vox")).unwrap(), bytes);
 }

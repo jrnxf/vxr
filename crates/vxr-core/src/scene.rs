@@ -611,22 +611,45 @@ impl Scene {
     /// dragged through many steps becomes one undo step at [`Scene::commit`]. Returns false
     /// if the scene has no camera `c.id` or `c` holds a value that is not finite.
     pub fn put_camera(&mut self, c: Camera) -> bool {
+        self.cameras.iter().any(|o| o.id == c.id) && self.put_camera_or_add(c)
+    }
+
+    /// [`Scene::put_camera`], adding camera `c.id` after the others if the scene has none.
+    pub(crate) fn put_camera_or_add(&mut self, c: Camera) -> bool {
         let finite = [c.radius, c.frustum, c.fov].into_iter().chain(c.focus).chain(c.angle).all(f32::is_finite);
         if !finite {
             return false;
         }
-        let Some(k) = self.cameras.iter().position(|o| o.id == c.id) else { return false };
-        let old = self.cameras[k];
-        if old == c {
+        let old = match self.cameras.iter().position(|o| o.id == c.id) {
+            Some(k) => Some(std::mem::replace(&mut self.cameras[k], c)),
+            None => {
+                self.cameras.push(c);
+                None
+            }
+        };
+        if old == Some(c) {
             return true;
         }
-        self.cameras[k] = c;
         let s = self.stroke.get_or_insert_default();
         match s.cameras.iter_mut().find(|x| x.new.id == c.id) {
             Some(x) => x.new = c,
             None => s.cameras.push(CameraChange { old, new: c }),
         }
         true
+    }
+
+    /// Put back every saved camera the open edit changed or added, keeping the edit open.
+    pub fn revert_cameras(&mut self) {
+        let Some(s) = &mut self.stroke else { return };
+        for c in std::mem::take(&mut s.cameras) {
+            let k = self.cameras.iter().position(|k| k.id == c.new.id);
+            match (k, c.old) {
+                (Some(k), Some(old)) => self.cameras[k] = old,
+                (Some(k), None) => _ = self.cameras.remove(k),
+                (None, Some(old)) => self.cameras.push(old),
+                (None, None) => {}
+            }
+        }
     }
 
     /// Set one saved camera as an undoable step. Returns false if the scene has no camera `c.id` or `c` is not finite.
@@ -718,7 +741,7 @@ impl Scene {
             voxels: s.changes.into_iter().filter(|c| c.old != c.new).collect(),
             colors: s.colors.into_iter().filter(|c| c.old != c.new).collect(),
             materials: s.materials.into_iter().filter(|c| c.old != c.new).collect(),
-            cameras: s.cameras.into_iter().filter(|c| c.old != c.new).collect(),
+            cameras: s.cameras.into_iter().filter(|c| c.old != Some(c.new)).collect(),
             selection,
             bounds: s.bounds.filter(|b| b.old != b.new),
             world,
@@ -895,8 +918,12 @@ impl Scene {
             self.materials[c.index as usize] = if revert { c.old } else { c.new };
         }
         for c in &step.cameras {
-            if let Some(k) = self.cameras.iter_mut().find(|k| k.id == c.new.id) {
-                *k = if revert { c.old } else { c.new };
+            let k = self.cameras.iter().position(|k| k.id == c.new.id);
+            match (k, if revert { c.old } else { Some(c.new) }) {
+                (Some(k), Some(now)) => self.cameras[k] = now,
+                (Some(k), None) => _ = self.cameras.remove(k),
+                (None, Some(now)) => self.cameras.push(now),
+                (None, None) => {}
             }
         }
         if let Some(c) = &step.selection {

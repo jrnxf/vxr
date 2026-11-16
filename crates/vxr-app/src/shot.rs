@@ -4378,8 +4378,117 @@ fn views(dir: &Path) -> Result<(), String> {
     check(s.ed.ui.view == Some(View::Right), "Cmd-K 'Right view'".into())?;
     s.ui_click("view-front")?;
     check(s.ed.ui.view == Some(View::Front), "the flyout's Front button".into())?;
+    saved_views(&mut s, dir)?;
     press(&mut s, egui::Key::Escape);
     check(!s.ed.ui.view_panel, "Escape closes the View flyout".into())?;
+    Ok(())
+}
+
+/// The View flyout's saved views, with the flyout open on a new scene that has none: a click
+/// on an empty slot saves the view there as one undo step, a click on a full slot brings the
+/// camera back to it, Save and then a full slot saves over it, Escape cancels Save, Cmd-K
+/// arms Save and opens the saved views, and undo empties the slot again.
+fn saved_views(s: &mut Shot, dir: &Path) -> Result<(), String> {
+    let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    let command = |s: &mut Shot, q: &str| {
+        s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+        s.frames_with(1, vec![egui::Event::Text(q.into())]);
+        s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    };
+    // Where the view looks from and along, at three points: equal for equal views, whatever
+    // turn of the yaw holds it.
+    let look = |s: &Shot| {
+        let (w, h) = (s.ed.width as f32, s.ed.height as f32);
+        [[w / 2.0, h / 2.0], [10.0, 10.0], [w - 10.0, h - 10.0]].map(|[x, y]| s.ed.cam.ray(x, y, w, h))
+    };
+    let same = |a: &[(glam::Vec3, glam::Vec3); 3], b: &[(glam::Vec3, glam::Vec3); 3]| {
+        a.iter().zip(b).all(|((o, d), (p, e))| (*o - *p).length() < 1e-2 && (*d - *e).length() < 1e-4)
+    };
+    let orbit = |s: &mut Shot| {
+        s.ed.cam.yaw += 1.3;
+        s.ed.cam.pitch = -0.3;
+        s.ed.cam.distance *= 1.6;
+        s.ed.cam.target += glam::Vec3::new(3.0, -2.0, 5.0);
+        s.ed.cam.ortho = !s.ed.cam.ortho;
+        s.frames(2);
+    };
+    let toast = |s: &Shot| s.ed.ui.toast_text().unwrap_or("").to_string();
+    check(
+        s.ed.scene.saved_views().is_empty()
+            && (1..=10).all(|n| s.ed.ui.hits.contains_key(format!("view-slot-{n}").as_str()))
+            && s.ed.ui.hits.contains_key("view-save")
+            && !s.ed.ui.saved_views.iter().any(|f| *f),
+        "the View flyout shows the ten view slots and Save, all empty on a new scene".into(),
+    )?;
+    let position = s.ed.scene.history().position();
+    let first = look(s);
+    s.ui_click("view-slot-3")?;
+    check(
+        s.ed.ui.saved_views[2]
+            && s.ed.scene.saved_view(2).is_some()
+            && s.ed.scene.cameras.len() == 1
+            && s.ed.scene.history().position() > position
+            && toast(s) == "Saved the view as view 3",
+        format!("a click on empty slot 3 saves the view there as one undo step: {}", toast(s)),
+    )?;
+    let saved_at = s.ed.scene.history().position();
+    orbit(s);
+    let moved = !same(&look(s), &first);
+    s.ui_click("view-slot-3")?;
+    check(
+        moved && same(&look(s), &first) && s.ed.scene.history().position() == saved_at,
+        "after an orbit, a click on slot 3 brings the camera back to the saved view, no undo step".into(),
+    )?;
+    s.ui_click("view-save")?;
+    let armed = s.ed.ui.save_view_pick;
+    s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+    check(
+        armed && !s.ed.ui.save_view_pick && s.ed.ui.view_panel,
+        "Save arms saving into a slot, Escape cancels it and keeps the flyout".into(),
+    )?;
+    orbit(s);
+    let second = look(s);
+    s.ui_click("view-save")?;
+    s.ui_click("view-slot-3")?;
+    let over = !s.ed.ui.save_view_pick && s.ed.scene.history().position() > saved_at;
+    orbit(s);
+    s.ui_click("view-slot-3")?;
+    check(
+        over && same(&look(s), &second) && s.ed.scene.cameras.len() == 1,
+        "Save then slot 3 saves the view over it, and slot 3 now goes to the new view".into(),
+    )?;
+    command(s, "save view to a slot");
+    let cmd_armed = s.ed.ui.save_view_pick && s.ed.ui.view_panel;
+    orbit(s);
+    s.frames(2);
+    s.save_png(&dir.join("app-2x-view-saved.png"))?;
+    s.ui_click("view-slot-10")?;
+    check(
+        cmd_armed
+            && s.ed.ui.saved_views[9]
+            && s.ed.scene.saved_view(9).is_some()
+            && toast(s) == "Saved the view as view 10",
+        "Cmd-K Save view to a slot… opens the flyout armed, and slot 10 takes the view".into(),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+    let closed = !s.ed.ui.view_panel;
+    command(s, "saved views");
+    check(
+        closed && s.ed.ui.view_panel && !s.ed.ui.save_view_pick,
+        "Cmd-K Saved views opens the View flyout, not armed".into(),
+    )?;
+    s.ed.undo();
+    s.frames(2);
+    let ten_gone = !s.ed.ui.saved_views[9] && s.ed.scene.saved_view(9).is_none();
+    s.ed.undo();
+    s.ui_click("view-slot-3")?;
+    let back = same(&look(s), &first);
+    s.ed.undo();
+    s.frames(2);
+    check(
+        ten_gone && back && s.ed.scene.cameras.is_empty() && !s.ed.ui.saved_views[2],
+        "undo takes back slot 10, then the save over slot 3, then slot 3".into(),
+    )?;
     Ok(())
 }
 
@@ -9379,6 +9488,40 @@ fn agents_live(dir: &Path) -> Result<(), String> {
         check(s.voxels() == flag && s.ed.ui.agents.edits[3].applied, "Cmd-Z brings the flag back".into())?;
         // The queries and exports after it push the first edits out of ACTIVITY's last 10 calls.
         agents_look_render(&mut s, &mut live, &mut claude, &downloads, dir)?;
+
+        // save_view, from an agent of its own so its edit keeps no other call out of ACTIVITY:
+        // it fills the slot the View flyout shows, one undo step, and the slot then goes to it.
+        let mut viewer = LiveAgent::new(&sock_dir, "opencode");
+        let (view_at, cam) = (s.ed.scene.history().position(), s.ed.cam);
+        let (t, e) = s.agent_call(
+            &mut live,
+            &mut viewer,
+            "save_view",
+            serde_json::json!({"slot": 4, "target": [2.5, 3, -1], "yaw": 30, "pitch": 20, "distance": 40}),
+        );
+        s.live_frames(&mut live, 2);
+        let full = s.ed.ui.saved_views[3];
+        let went = s.ed.go_to_view(3);
+        let c = &s.ed.cam;
+        let target = c.target + glam::Vec3::from(s.ed.scene.origin.map(|v| v as f32));
+        check(
+            !e && t.starts_with("saved view 4")
+                && full
+                && went
+                && (target - glam::Vec3::new(2.5, 3.0, -1.0)).length() < 1e-3
+                && (c.yaw - 30f32.to_radians()).abs() < 1e-4
+                && (c.pitch - 20f32.to_radians()).abs() < 1e-4
+                && (c.distance - 40.0).abs() < 1e-3
+                && !c.ortho
+                && s.ed.scene.history().position() > view_at,
+            format!("save_view fills the View flyout's slot 4 as one undo step, and the slot goes to it: {t}"),
+        )?;
+        s.ed.undo();
+        s.live_frames(&mut live, 2);
+        check(!s.ed.ui.saved_views[3] && s.ed.scene.history().position() == view_at, "undo empties slot 4".into())?;
+        drop(viewer);
+        s.ed.cam = cam;
+        s.live_frames(&mut live, 2);
 
         // A call waits while the user drags, and runs when the drag ends.
         s.tool(Tool::Add, Shape::Voxel);

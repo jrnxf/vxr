@@ -36,6 +36,8 @@ fn tool(a: &Action) -> Option<&'static str> {
         Action::ImportPalette => Some("palette_import"),
         // The tool takes the PNG as base64; the UI's file picker reads the file.
         Action::ImportImage => Some("image_import"),
+        // The tool takes the view's target, yaw, pitch and distance; the UI saves the camera's.
+        Action::SaveView(_) => Some("save_view"),
         // In world mode rotate and flip turn the picked object: `transform_object`.
         Action::Transform(_) => Some("transform"),
         Action::SelectAll | Action::InvertSelection | Action::SelectColor | Action::Deselect => Some("select"),
@@ -71,6 +73,7 @@ fn tool(a: &Action) -> Option<&'static str> {
         | Action::Zoom(_)
         | Action::Snap(_)
         | Action::Ortho(_)
+        | Action::GoToView(_)
         // Closes the colour edit that `Recolor` and `SetMaterial` opened: tools are one step.
         | Action::CommitColor
         | Action::CancelExport

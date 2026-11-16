@@ -451,6 +451,35 @@ async () => {
   step('0 snaps to isometric', st().view === 'Isometric' && st().ortho);
   await chip('view-persp');
   step('Persp: back to perspective', !st().ortho && st().view === null);
+  // Saved views: a click on an empty slot saves the view there as one undo step, a click on
+  // it after the view moved brings the view back, Save then the slot saves over it, and undo
+  // takes the saves back to the opened island.
+  // cam is the target, yaw, pitch and distance: the yaw compared by its turn, as a slot keeps
+  // it from 0 to a full turn.
+  const turn = (d) => Math.abs(d - 2 * Math.PI * Math.round(d / (2 * Math.PI)));
+  const sameCam = (a, b) => a.every((v, i) => (i === 3 ? turn(v - b[i]) : Math.abs(v - b[i])) < 1e-3 * (1 + Math.abs(v)));
+  const camInSlot = st().cam;
+  await chip('view-slot-2');
+  const slotTwoFull = st().savedViews.join() === '2' && (st().toast || '').startsWith('Saved the view as view 2');
+  await key('1');
+  const viewLeftSlot = !sameCam(st().cam, camInSlot);
+  await chip('view-slot-2');
+  step('a click on empty slot 2 saves the view, and after a side view it brings the view back', slotTwoFull && viewLeftSlot && sameCam(st().cam, camInSlot) && st().view === null, `${st().savedViews} ${st().cam} ${camInSlot}`);
+  await key('3');
+  const camFromLeft = st().cam;
+  await chip('view-save');
+  const saveViewArmed = st().saveViewPick;
+  await chip('view-slot-2');
+  await key('0');
+  await chip('view-slot-2');
+  step('Save then slot 2 saves the view over it', saveViewArmed && !st().saveViewPick && sameCam(st().cam, camFromLeft) && st().savedViews.join() === '2', `${st().cam} ${camFromLeft}`);
+  // Undo gives slot 2 its first view back, which puts the camera back for the steps after.
+  await key('z', cmd);
+  await chip('view-slot-2');
+  const firstBack = sameCam(st().cam, camInSlot) && st().savedViews.join() === '2';
+  await key('z', cmd);
+  step('undo takes both saves back: no saved view, the island as opened, and the first view back on the way', firstBack && st().savedViews.length === 0 && same(bytes(), original), `${st().savedViews}`);
+  await chip('view-persp');
   // Guides: grid, ground and bounds on by default; the flyout, G and Cmd-K toggle them.
   step('the grid, ground and bounds show by default', st().guides.join() === 'true,true,true', JSON.stringify(st().guides));
   const guideFlips = [];

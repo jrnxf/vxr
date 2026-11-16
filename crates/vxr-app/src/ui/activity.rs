@@ -185,6 +185,7 @@ pub fn verb(c: &AgentCall, running: bool) -> String {
         "palette_import" => ("Importing a palette", "Imported a palette".into()),
         "image_import" => ("Importing an image", "Imported an image".into()),
         "material_set" => ("Setting a material", "Set a material".into()),
+        "save_view" => ("Saving a view", "Saved a view".into()),
         "move_object" => ("Moving an object", "Moved an object".into()),
         "transform_object" => ("Turning an object", "Turned an object".into()),
         "duplicate" => ("Duplicating", "Duplicated an object".into()),
@@ -233,6 +234,7 @@ pub fn tool_icon(tool: &str) -> char {
         "hide" | "hide_layer" => icon::EYE_OFF,
         "group" | "ungroup" | "reorder" | "new_layer" | "set_layer" | "edit_object" | "show_world" => icon::LAYERS,
         "render_settings" => icon::APERTURE,
+        "save_view" => icon::EYE,
         "review_status" => icon::SHIELD_CHECK,
         _ => icon::BOX,
     }
