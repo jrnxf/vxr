@@ -1592,6 +1592,18 @@ async () => {
       step('redo moves it again', same(bytes(), moved));
       await key('ArrowRight');
       step('an arrow nudges the picked object', !same(bytes(), moved) && st().voxels === w0.voxels);
+      // Rotate from Cmd-K turns the picked object in place; four quarter turns are the same file.
+      const nudged = bytes();
+      const turn = async () => {
+        await key('k', cmd);
+        for (const ch of 'rotate y') await key(ch);
+        await key('Enter');
+      };
+      await turn();
+      s = st();
+      step("Cmd-K 'Rotate Y' turns the picked object and says so", !same(bytes(), nudged) && s.objects === 6 && s.models === w0.models && s.picked === name && s.toast === `Rotated ${name} about Y`, JSON.stringify([s.picked, s.toast, s.objects]));
+      for (let i = 0; i < 3; i++) await turn();
+      step('four quarter turns give back the same file', same(bytes(), nudged) && st().picked === name);
       await key('d', cmd);
       s = st();
       step('Cmd-D duplicates it with its own model and picks the copy', s.objects === 7 && s.models === w0.models + 1 && !!s.picked, JSON.stringify(s));

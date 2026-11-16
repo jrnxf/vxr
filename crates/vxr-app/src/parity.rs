@@ -24,6 +24,7 @@ fn tool(a: &Action) -> Option<&'static str> {
         Action::SetMaterial { .. } => Some("material_set"),
         Action::SwapColors(..) => Some("palette_swap"),
         Action::CopyColor { .. } => Some("palette_copy"),
+        // In world mode rotate and flip turn the picked object: `transform_object`.
         Action::Transform(_) => Some("transform"),
         Action::SelectAll | Action::InvertSelection | Action::SelectColor | Action::Deselect => Some("select"),
         // `selection: true` on box, line, sphere, circle, face and erase.

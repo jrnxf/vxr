@@ -96,6 +96,7 @@ fn tool_schemas() {
             "material_set",
             "make_object",
             "move_object",
+            "transform_object",
             "duplicate",
             "group",
             "ungroup",
@@ -1328,6 +1329,7 @@ fn scoped_calls() -> Vec<(&'static str, Value)> {
         ("palette_swap", json!({"a": 1, "b": 2})),
         ("make_object", json!({"from_slot": 10})),
         ("move_object", json!({"node": 1, "offset": [1, 0, 0]})),
+        ("transform_object", json!({"node": 1, "kind": "rotate", "axis": "y"})),
         ("duplicate", json!({"node": 1})),
         ("group", json!({"nodes": [1]})),
         ("ungroup", json!({"node": 2})),
@@ -1377,6 +1379,44 @@ fn each_scope_is_refused_elsewhere() {
     }
 }
 
+/// `transform_object` is `World::transform` on the node: the same voxels as the core call
+/// on a second copy of the world, one step that undo takes back, and a save that reopens
+/// turned (the file's `nTRN` holds it).
+#[test]
+fn transform_object_turns_a_node_as_the_core_does_and_the_file_keeps_it() {
+    use vxr_core::select::Transform as T;
+    let bytes = world_file();
+    let mut s = Scene::from_vox(&bytes).unwrap();
+    let mut o = Session::new(&s, Some(&bytes));
+    let mut want = s.world().unwrap().clone();
+    let before = s.world_voxels(false);
+
+    assert!(want.transform(2, T::Rotate(0)));
+    let t = call(&mut o, &mut s, "transform_object", json!({"node": 2, "kind": "rotate", "axis": "x"}));
+    assert_eq!(s.world_voxels(false), want.world_voxels(false));
+    assert_ne!(s.world_voxels(false), before, "the trees stand another way");
+    let (lo, size) = want.extent(2).unwrap();
+    let hi: [i32; 3] = std::array::from_fn(|k| lo[k] + size[k] as i32 - 1);
+    assert_eq!(
+        t,
+        format!(
+            "rotated group 2 (3 objects) 90 degrees about X, now from {lo:?} to {hi:?}; 1 node changed in the world, no voxel of any model; staged so far: 1 node in the world"
+        )
+    );
+    assert!(want.transform(1, T::Flip(2)));
+    let t = call(&mut o, &mut s, "transform_object", json!({"node": 1, "kind": "flip", "axis": "z"}));
+    assert!(t.starts_with("flipped object 1 on Z, now from "), "{t}");
+    assert_eq!(s.world_voxels(false), want.world_voxels(false));
+    assert_eq!(s.world().unwrap().tree, want.tree);
+
+    o.apply(&mut s).unwrap();
+    let turned = s.world_voxels(false);
+    let back = Scene::from_vox(&s.to_vox().unwrap()).unwrap();
+    assert_eq!(back.world_voxels(false), turned);
+    assert!(s.undo());
+    assert_eq!(s.world_voxels(false), before, "both turns are one change, one undo");
+}
+
 #[test]
 fn world_tools_refuse_cleanly() {
     let bytes = world_file();
@@ -1385,6 +1425,7 @@ fn world_tools_refuse_cleanly() {
     for (tool, args, says) in [
         ("move_object", json!({"node": 0, "offset": [1, 0, 0]}), "node 0 is the root"),
         ("move_object", json!({"node": 99, "offset": [1, 0, 0]}), "node 99: not an object or group of this world"),
+        ("transform_object", json!({"node": 0, "kind": "flip", "axis": "x"}), "node 0 is the root"),
         ("duplicate", json!({"node": 42}), "node 42: not an object or group"),
         ("ungroup", json!({"node": 1}), "node 1: object 1 is not a group"),
         ("group", json!({"nodes": []}), "nodes: give the objects or groups to group"),

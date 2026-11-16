@@ -631,6 +631,19 @@ impl Session {
                 let t = self.world_edit(scene, |w| w.move_by(a.node, a.offset))?.1;
                 Ok(format!("moved {what} by {:?}{}; {t}", a.offset, self.extent_text(scene, a.node)))
             }
+            Op::TransformObject(a) => {
+                let what = self.node(scene, a.node)?;
+                let (t, did) = match a.kind {
+                    TurnKind::Rotate => (vxr_core::select::Transform::Rotate(a.axis.index()), "rotated"),
+                    TurnKind::Flip => (vxr_core::select::Transform::Flip(a.axis.index()), "flipped"),
+                };
+                let (turned, text) = self.world_edit(scene, |w| w.transform(a.node, t))?;
+                if !turned {
+                    return Err(invalid(format!("node {}: {what} holds no object to turn", a.node)));
+                }
+                let how = if a.kind == TurnKind::Rotate { "90 degrees about" } else { "on" };
+                Ok(format!("{did} {what} {how} {:?}{}; {text}", a.axis, self.extent_text(scene, a.node)))
+            }
             Op::Duplicate(a) => {
                 let what = self.node(scene, a.node)?;
                 let (c, t) = self.world_edit(scene, |w| w.duplicate(a.node, a.linked))?;
@@ -2106,6 +2119,7 @@ struct Lane {
 fn world_args(op: &mut Op) -> (Vec<&mut usize>, Option<&mut i32>) {
     match op {
         Op::MoveObject(a) => (vec![&mut a.node], None),
+        Op::TransformObject(a) => (vec![&mut a.node], None),
         Op::Duplicate(a) => (vec![&mut a.node], None),
         Op::Group(a) => (a.nodes.iter_mut().collect(), None),
         Op::Ungroup(a) => (vec![&mut a.node], None),

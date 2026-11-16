@@ -95,7 +95,7 @@ pub(crate) fn edit_object_tool() -> (&'static str, String, Value) {
 pub(crate) fn show_world_tool() -> (&'static str, String, Value) {
     (
         "show_world",
-        "In a file with several objects, show the world of every object again after edit_object, for the world tools (move_object, duplicate, group, ungroup, hide, set_layer, delete_object, rename, new_layer, hide_layer). Voxels cannot be edited while it shows.".into(),
+        "In a file with several objects, show the world of every object again after edit_object, for the world tools (move_object, transform_object, duplicate, group, ungroup, hide, set_layer, delete_object, rename, new_layer, hide_layer). Voxels cannot be edited while it shows.".into(),
         json!({"type": "object", "properties": {}, "additionalProperties": false}),
     )
 }

@@ -3131,6 +3131,7 @@ fn model_tools(dir: &Path) -> Result<(), String> {
 /// the model it edits.
 fn world(dir: &Path) -> Result<(), String> {
     use vxr_core::history::At;
+    use vxr_core::select::Transform;
     let bytes = vxr_vox::fixtures::all()
         .into_iter()
         .find(|f| f.name == "22-world")
@@ -3226,6 +3227,51 @@ fn world(dir: &Path) -> Result<(), String> {
     check(d == 1 && n.0[1] == after.0[1], "an arrow nudges the picked object one cell along the ground".into())?;
     s.frames_with(2, vec![key(egui::Key::ArrowUp, egui::Modifiers::SHIFT)]);
     check(place(&s, o)?.0[1] == n.0[1] + 1, "Shift-Up raises it one cell".into())?;
+    // Rotate and flip the picked object from Cmd-K: the core's turn, shown and said.
+    let run = |s: &mut Shot, command: &str| {
+        s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+        s.frames_with(1, vec![egui::Event::Text(command.into())]);
+        s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    };
+    let name = vxr_app::editor::node_name(s.ed.scene.world().ok_or("no world")?, o);
+    for (command, t, says) in [
+        ("rotate y", Transform::Rotate(1), format!("Rotated {name} about Y")),
+        ("flip x", Transform::Flip(0), format!("Flipped {name} on X")),
+    ] {
+        let mut want = s.ed.scene.world().ok_or("no world")?.clone();
+        let (was, cells, turn) = (place(&s, o)?, s.voxels(), want.tree.nodes[o].local.r);
+        want.transform(o, t);
+        run(&mut s, command);
+        let w = s.ed.scene.world().ok_or("no world")?;
+        let now = place(&s, o)?;
+        let fits = match t {
+            Transform::Rotate(_) => now.1 == [was.1[2], was.1[1], was.1[0]],
+            _ => now == was,
+        };
+        check(
+            w.tree == want.tree
+                && w.tree.nodes[o].local.r != turn
+                && fits
+                && s.voxels() == cells
+                && s.ed.scene.picked() == Some(o)
+                && s.ed.ui.toast_text() == Some(says.as_str()),
+            format!(
+                "Cmd-K '{command}' turns the picked object in place, {:?} to {:?} ({:?})",
+                was.1,
+                now.1,
+                s.ed.ui.toast_text()
+            ),
+        )?;
+        s.frames_with(2, vec![key(egui::Key::Z, egui::Modifiers::COMMAND)]);
+        let undone = place(&s, o)? == was && s.ed.scene.world().is_some_and(|w| w.tree != want.tree);
+        s.frames_with(2, vec![key(egui::Key::Z, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT)]);
+        check(
+            undone && s.ed.scene.world().is_some_and(|w| w.tree == want.tree),
+            format!("'{command}' is one undo step, and redo puts it back"),
+        )?;
+    }
+    s.frames(2);
+    s.save_png(&dir.join("app-2x-world-turned.png"))?;
     let counts = |s: &Shot| s.ed.scene.world().map_or((0, 0), |w| (w.objects().len(), w.models.len()));
     let (n0, m0) = counts(&s);
     s.frames_with(2, vec![key(egui::Key::D, egui::Modifiers::COMMAND)]);
@@ -3255,6 +3301,13 @@ fn world(dir: &Path) -> Result<(), String> {
     let had = s.ed.scene.picked().is_some();
     s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
     check(had && s.ed.scene.picked().is_none() && s.ed.scene.selected_count() == 0, "Escape picks nothing".into())?;
+    let tree = s.ed.scene.world().ok_or("no world")?.tree.clone();
+    run(&mut s, "rotate y");
+    check(
+        s.ed.scene.world().is_some_and(|w| w.tree == tree)
+            && s.ed.ui.toast_text() == Some("Click an object to pick it first"),
+        format!("with no object picked, 'rotate y' turns nothing and says to pick one ({:?})", s.ed.ui.toast_text()),
+    )?;
     s.stroke(p, &[]);
     s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
     s.frames_with(1, vec![egui::Event::Text("duplicate object".into())]);

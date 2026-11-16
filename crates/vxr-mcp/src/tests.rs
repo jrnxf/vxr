@@ -378,6 +378,21 @@ fn a_save_keeps_every_chunk_the_edit_did_not_touch() {
             .starts_with(&format!("moved object {node} by [0, 0, 2]"))
     );
     c.ok("undo", json!({}));
+    // A turn is saved in the file (the slab stands on its side there) and undo takes it back.
+    assert!(
+        c.ok("transform_object", json!({"node": node, "kind": "rotate", "axis": "x"}))
+            .starts_with(&format!("rotated object {node} 90 degrees about X, now from "))
+    );
+    c.ok("save", json!({}));
+    let flat = vxr_core::Scene::from_vox(&original).unwrap().world_voxels(false);
+    let saved = std::fs::read(dir.0.join("world.vox")).unwrap();
+    let turned = vxr_core::Scene::from_vox(&saved).unwrap().world_voxels(false);
+    let tall = |v: &std::collections::BTreeMap<[i32; 3], u8>| {
+        let ys = v.iter().filter(|(_, k)| **k == GREY).map(|(p, _)| p[1]);
+        ys.clone().max().unwrap() - ys.min().unwrap() + 1
+    };
+    assert_eq!((tall(&flat), tall(&turned)), (1, 8));
+    c.ok("undo", json!({}));
     c.ok("edit_object", json!({"node": node}));
 
     // Unedited, a save is the file's own bytes.

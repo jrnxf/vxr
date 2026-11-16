@@ -1122,6 +1122,18 @@ impl Editor {
                     self.ui.toast(&self.ctx, "No room in the scene for that");
                 }
             }
+            (Action::Transform(t @ (Transform::Rotate(axis) | Transform::Flip(axis))), Some(i)) => {
+                let name = node_name(s.world().unwrap(), i);
+                let turn = matches!(t, Transform::Rotate(_));
+                let axis = ["X", "Y", "Z"][axis.min(2)];
+                let msg = match s.edit_world(|w| w.transform(i, t)) {
+                    Ok(true) if turn => format!("Rotated {name} about {axis}"),
+                    Ok(true) => format!("Flipped {name} on {axis}"),
+                    Ok(false) => format!("{name} holds no object to turn"),
+                    Err(_) => "No room in the scene for that".to_string(),
+                };
+                self.ui.toast(&self.ctx, msg);
+            }
             (Action::DeleteSelection, Some(i)) => {
                 let name = node_name(s.world().unwrap(), i);
                 if s.edit_world(|w| w.remove(i)) == Ok(true) {
@@ -1158,7 +1170,7 @@ impl Editor {
             }
             (
                 Action::Duplicate { .. }
-                | Action::Transform(Transform::Move(_))
+                | Action::Transform(Transform::Move(_) | Transform::Rotate(_) | Transform::Flip(_))
                 | Action::DeleteSelection
                 | Action::Group
                 | Action::Ungroup,

@@ -95,7 +95,7 @@ impl Session {
         let hi: Cell = std::array::from_fn(|a| b.lo[a] + b.size[a] as i32 - 1);
         let mut out = json!({
             "mode": match scene.at() {
-                At::World => "world: the world tools (move_object, duplicate, group, ungroup, hide, set_layer, delete_object, rename, new_layer, hide_layer) change its objects and layers; voxels cannot be edited until one object's model is open",
+                At::World => "world: the world tools (move_object, transform_object, duplicate, group, ungroup, hide, set_layer, delete_object, rename, new_layer, hide_layer) change its objects and layers; voxels cannot be edited until one object's model is open",
                 At::Object(_) => "model: every voxel tool edits this object's model, make_object makes some of its voxels an object of their own and rename names objects; the other world tools need the world shown",
                 At::Map => "model: every voxel tool edits it, and make_object makes some of its voxels an object of their own (the scene becomes a world of objects)",
             },
@@ -446,7 +446,7 @@ fn world_list(scene: &Scene, w: &vxr_core::World) -> Value {
         })
         .collect();
     let mut out = json!({
-        "about": "the objects and groups of the world by node number, in tree order (parent 0 is the top). move_object, duplicate, group, ungroup, hide, set_layer, delete_object and rename take these numbers while the world shows; edit_object opens an object's model. linked objects share one model, so a voxel edit changes each. Names are under file_content.",
+        "about": "the objects and groups of the world by node number, in tree order (parent 0 is the top). move_object, transform_object, duplicate, group, ungroup, hide, set_layer, delete_object and rename take these numbers while the world shows; edit_object opens an object's model. linked objects share one model, so a voxel edit changes each. Names are under file_content.",
         "nodes": nodes,
         "layers": w.layers().iter().map(|l| json!({"id": l.id, "hidden": l.hidden})).collect::<Vec<_>>(),
     });

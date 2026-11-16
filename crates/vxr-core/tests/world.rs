@@ -867,3 +867,97 @@ fn editing_one_models_voxels_re_encodes_only_that_models_chunk() {
     let changed: Vec<_> = (0..a.len()).filter(|&i| a[i] != b[i]).map(|i| a[i].id).collect();
     assert_eq!(changed, [*chunk::XYZI], "only the slab's voxel chunk differs");
 }
+
+/// Every voxel of every object as (object, world cell, colour), in model order.
+fn placed(w: &World) -> Vec<(usize, [i32; 3], u8)> {
+    let mut out = Vec::new();
+    for i in w.objects() {
+        w.for_each_object_voxel(i, |p, c| out.push((i, p, c)));
+    }
+    out
+}
+
+/// One of the 48 turns and mirrors a `.vox` `_r` byte can hold.
+fn any_turn() -> impl proptest::strategy::Strategy<Value = [[i32; 3]; 3]> {
+    use proptest::prelude::*;
+    (0u8..128).prop_filter_map("not a rotation byte", vxr_vox::scene::rotation_from_byte)
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig {
+        cases: std::env::var("PROPTEST_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(256),
+        ..proptest::prelude::ProptestConfig::default()
+    })]
+
+    /// Rotate and flip any object or group of a world whose objects and group are already
+    /// turned and mirrored every way a file can say: each voxel under the node goes where
+    /// the selection's rule sends its cell within the node's box, every other object stays,
+    /// no model changes, the file keeps it through `nTRN` (saved and reopened: same voxels
+    /// per object, same transforms, and MagicaVoxel's composition of the file agrees), and
+    /// four quarter turns or two flips give back the tree exactly.
+    #[test]
+    fn objects_and_groups_rotate_and_flip_in_place_and_the_file_keeps_it(
+        sizes in proptest::collection::vec(proptest::array::uniform3(1i32..=5), 2),
+        turns in proptest::collection::vec(any_turn(), 4),
+        at in proptest::collection::vec(proptest::array::uniform3(-9i32..=9), 4),
+        steps in proptest::collection::vec((0usize..4, proptest::bool::ANY, 0usize..3), 1..6),
+    ) {
+        use vxr_core::select::Transform;
+        // Every cell holds its own colour, so a model put down the wrong way round shows.
+        let mut b = Builder::new(200);
+        let models: Vec<usize> = sizes
+            .iter()
+            .map(|&s| {
+                let n = s[0] * s[1] * s[2];
+                let cells = (0..n).map(|i| [(i % s[0]) as u8, (i / s[0] % s[1]) as u8, (i / (s[0] * s[1])) as u8, 1 + i as u8]);
+                b.model(s, cells.collect())
+            })
+            .collect();
+        b.root.push(SceneNode::shape(models[0], Some(turns[0]), at[0]).named("a"));
+        b.root.push(
+            SceneNode::group(
+                Some(turns[1]),
+                at[1],
+                vec![
+                    SceneNode::shape(models[1], Some(turns[2]), at[2]).named("b"),
+                    SceneNode::shape(models[0], Some(turns[3]), at[3]).named("linked"),
+                ],
+            )
+            .named("g"),
+        );
+        let (mut doc, mut w) = open(&b.build().write());
+        let nodes = ["a", "g", "b", "linked"].map(|n| find(&w, n));
+        let models_before: Vec<_> = (0..w.models.len()).map(|m| w.vox_voxels(m)).collect();
+
+        for &(node, flip, axis) in &steps {
+            let i = nodes[node];
+            let t = if flip { Transform::Flip(axis) } else { Transform::Rotate(axis) };
+            let (lo, size) = w.extent(i).unwrap();
+            let hi: [i32; 3] = std::array::from_fn(|k| lo[k] + size[k] as i32 - 1);
+            let under = w.objects_under(i);
+            let want: Vec<_> = placed(&w)
+                .into_iter()
+                .map(|(o, p, c)| (o, if under.contains(&o) { t.apply(p, lo, hi) } else { p }, c))
+                .collect();
+            let tree = w.tree.clone();
+            proptest::prop_assert!(w.transform(i, t));
+            proptest::prop_assert_eq!(placed(&w), want, "{:?} of node {}", t, node);
+            for _ in 0..if flip { 1 } else { 3 } {
+                w.transform(i, t);
+            }
+            proptest::prop_assert_eq!(&w.tree, &tree, "{:?} of node {} does not come back", t, node);
+            w.transform(i, t);
+        }
+        proptest::prop_assert!(!w.transform(0, Transform::Rotate(1)), "the root does not turn");
+        let models_after: Vec<_> = (0..w.models.len()).map(|m| w.vox_voxels(m)).collect();
+        proptest::prop_assert_eq!(models_after, models_before);
+
+        proptest::prop_assert_eq!(w.save_into(&mut doc).unwrap(), WorldSave::Kept);
+        let (doc2, back) = open(&doc.write());
+        proptest::prop_assert_eq!(placed(&back), placed(&w));
+        proptest::prop_assert_eq!(outline(&back), outline(&w));
+        let flat: BTreeMap<[i32; 3], u8> =
+            doc2.scene().unwrap().world_voxels(Rule::Compose).into_iter().map(|(p, c)| (vox_to_world(p), c)).collect();
+        proptest::prop_assert_eq!(w.world_voxels(false), flat);
+    }
+}

@@ -1013,6 +1013,7 @@ mod tests {
                 "palette_copy",
                 "material_set",
                 "move_object",
+                "transform_object",
                 "duplicate",
                 "group",
                 "ungroup",

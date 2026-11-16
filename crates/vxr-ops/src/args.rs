@@ -459,6 +459,23 @@ pub struct MoveObject {
     pub offset: Cell,
 }
 
+/// What transform_object does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum TurnKind {
+    Rotate,
+    Flip,
+}
+
+/// Rotate or flip an object or group of the world in place, as Rotate X and Flip X do on the picked object in world mode. rotate: 90 degrees about axis (counter-clockwise looking down it) around the middle of the box the node fills; flip: mirror across the middle on axis. Call it again for 180 or 270 degrees. node is its number from the summary's world list. A group turns with everything in it. No model changes, so a linked copy turns on its own, and the file keeps the turn.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TransformObject {
+    pub node: usize,
+    pub kind: TurnKind,
+    pub axis: Axis,
+}
+
 /// Copy an object or group of the world and put the copy beside it on +x, as Cmd-D does. linked makes a linked copy that shares the models (editing one changes every copy, as Cmd-Shift-D does); otherwise each copied object gets its own model. The result gives the copy's node.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -717,6 +734,7 @@ ops! {
     "material_set" => MaterialSet(MaterialSet),
     "make_object" => MakeObject(MakeObject),
     "move_object" => MoveObject(MoveObject),
+    "transform_object" => TransformObject(TransformObject),
     "duplicate" => Duplicate(Duplicate),
     "group" => Group(Group),
     "ungroup" => Ungroup(Ungroup),
@@ -771,8 +789,8 @@ impl Op {
     /// model too, for the objects make_object stages.
     pub fn scope(name: &str) -> Scope {
         match name {
-            "move_object" | "duplicate" | "group" | "ungroup" | "hide" | "set_layer" | "delete_object"
-            | "new_layer" | "hide_layer" => Scope::World,
+            "move_object" | "transform_object" | "duplicate" | "group" | "ungroup" | "hide" | "set_layer"
+            | "delete_object" | "new_layer" | "hide_layer" => Scope::World,
             "place" | "erase" | "box" | "line" | "sphere" | "circle" | "face" | "fill" | "paint" | "select"
             | "transform" | "copy" | "cut" | "paste" | "delete" | "hollow" | "fill_inside" | "resize" | "crop"
             | "palette_swap" | "make_object" => Scope::Model,

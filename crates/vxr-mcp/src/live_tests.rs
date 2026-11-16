@@ -600,6 +600,12 @@ fn the_world_tools_change_the_window_and_undo_gives_the_file_back() {
     let t = call(&mut w, &mut a, "set_layer", json!({"node": 7, "layer": 0}));
     assert!(t.starts_with("put object 7 on layer 0; 1 node changed"), "{t}");
     assert_eq!(shown(&w), 2 * 39 + 1);
+    // A quarter turn stands a tree another way, the same count showing.
+    let before = w.scene.world_voxels(true);
+    let t = call(&mut w, &mut a, "transform_object", json!({"node": 3, "kind": "rotate", "axis": "x"}));
+    assert!(t.starts_with("rotated object 3 90 degrees about X, now from "), "{t}");
+    let after = w.scene.world_voxels(true);
+    assert!(after.len() == before.len() && after != before);
     // A move that does nothing says so and makes no step.
     let t = call(&mut w, &mut a, "move_object", json!({"node": 3, "offset": [0, 0, 0]}));
     assert!(t.ends_with("; warning: nothing changed"), "{t}");
@@ -608,9 +614,9 @@ fn the_world_tools_change_the_window_and_undo_gives_the_file_back() {
     let (t, e) = edit(&host, &mut w, &mut a, "hide", json!({"node": 3}));
     assert!(e && t.contains("show_world"), "{t}");
     call(&mut w, &mut a, "show_world", json!({}));
-    // Seven edits, seven undo steps: undone, the save is the file's bytes.
-    assert_eq!(w.scene.history().position(), 7);
-    for _ in 0..7 {
+    // Eight edits, eight undo steps: undone, the save is the file's bytes.
+    assert_eq!(w.scene.history().position(), 8);
+    for _ in 0..8 {
         assert!(w.scene.undo());
     }
     assert!(!w.scene.undo());

@@ -14,6 +14,7 @@ use vxr_vox::{Document, WorldSave};
 
 use crate::brickmap::BrickMap;
 use crate::scene::{MAX_EXTENT, vox_to_world, world_to_vox};
+use crate::select::Transform;
 
 /// Most models a file may hold, and most cells (their sizes multiplied out) across them.
 /// Each model is a dense grid of brick slots over its size, so a few bytes of `SIZE` chunk
@@ -443,6 +444,49 @@ impl World {
         let local = mat_vec(&transpose(&parent.r), world_to_vox(d));
         let t = &mut self.tree.nodes[i].local.t;
         *t = std::array::from_fn(|a| t[a] + local[a]);
+    }
+
+    /// Turn node `i` a quarter turn about a vxr axis ([`Transform::Rotate`]) or mirror it
+    /// along one ([`Transform::Flip`]), in place: every voxel of its objects goes where
+    /// [`Transform::apply`] sends its world cell within the box the node fills
+    /// ([`World::extent`]), the rule a selection in a model follows. Only the node's own
+    /// transform changes, so models and linked copies elsewhere keep theirs and the file
+    /// keeps it as the `nTRN`'s `_r` and `_t`. [`Transform::Move`] is [`World::move_by`].
+    /// False, with nothing changed, for the root, an empty group or [`Transform::Loop`].
+    pub fn transform(&mut self, i: usize, t: Transform) -> bool {
+        let parents = self.tree.parents();
+        let Some(p) = parents.get(i).copied().flatten() else { return false };
+        match t {
+            Transform::Move(d) => {
+                self.move_by(i, d);
+                return true;
+            }
+            Transform::Loop(..) => return false,
+            Transform::Rotate(a) | Transform::Flip(a) if a > 2 => return false,
+            Transform::Rotate(_) | Transform::Flip(_) => {}
+        }
+        let Some((lo, size)) = self.extent(i) else { return false };
+        let hi: [i32; 3] = std::array::from_fn(|k| lo[k] + size[k] as i32 - 1);
+        // The rule is affine in the cell, q = M p + c, in vxr axes. In the file's axes it is
+        // q = R p + d with R = C M C^-1 and d = C c, where C is `world_to_vox`.
+        let c = t.apply([0; 3], lo, hi);
+        let unit = |k: usize| std::array::from_fn(|a| (a == k) as i32);
+        let cols: [[i32; 3]; 3] = std::array::from_fn(|k| {
+            let m = t.apply(vox_to_world(unit(k)), lo, hi);
+            world_to_vox(std::array::from_fn(|a| m[a] - c[a]))
+        });
+        let r = transpose(&cols);
+        let d = world_to_vox(c);
+        // Transforms place cell centres in doubled coordinates (cell q is 2q + 1), so the
+        // step that sends cell p to R p + d moves centres by d + (1 - R 1) / 2.
+        let ones = mat_vec(&r, [1; 3]);
+        let step = Affine { r, t: std::array::from_fn(|k| d[k] + (1 - ones[k]) / 2) };
+        let parent = self.transform_in(&parents, p);
+        let back = transpose(&parent.r);
+        let inverse = Affine { r: back, t: mat_vec(&back, parent.t).map(|v| -v) };
+        let node = &mut self.tree.nodes[i];
+        node.local = inverse.then(&step).then(&parent).then(&node.local);
+        true
     }
 
     /// The objects at or under node `i`.
