@@ -1276,6 +1276,22 @@ impl Editor {
             Action::FillSelection => {
                 s.fill_selection(self.ui.slot);
             }
+            Action::ReplaceColor { from, to } => {
+                let within = if s.selected_count() > 0 { " in the selection" } else { "" };
+                let msg = match s.replace_color(from, to) {
+                    0 => format!("No voxels of slot {from}{within}"),
+                    n => format!("Replaced slot {from} with slot {to}{within}: {n} voxels"),
+                };
+                self.ui.toast(&self.ctx, msg);
+            }
+            Action::RemoveColor(from) => {
+                let within = if s.selected_count() > 0 { " in the selection" } else { "" };
+                let msg = match s.replace_color(from, 0) {
+                    0 => format!("No voxels of slot {from}{within}"),
+                    n => format!("Removed slot {from}{within}: {n} voxels"),
+                };
+                self.ui.toast(&self.ctx, msg);
+            }
             Action::Hollow => {
                 let n = s.hollow();
                 let msg = if n > 0 { format!("Hollowed: removed {n} voxels") } else { "Nothing to hollow".into() };
@@ -1857,6 +1873,8 @@ impl Editor {
                 | Action::Deselect
                 | Action::DeleteSelection
                 | Action::FillSelection
+                | Action::ReplaceColor { .. }
+                | Action::RemoveColor(_)
                 | Action::Hollow
                 | Action::FillInterior
                 | Action::Resize(_)

@@ -145,7 +145,7 @@ pub struct Place {
     pub name: Option<String>,
 }
 
-/// Clear listed cells (at most 4096), or every voxel of one or more parts. For a region use box with mode erase.
+/// Clear listed cells (at most 4096), every voxel of one or more parts, or every voxel of slot from_slot (remove a colour). For a region use box with mode erase.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Erase {
@@ -157,6 +157,9 @@ pub struct Erase {
     /// Several part ids or names.
     #[serde(default)]
     pub parts: Vec<String>,
+    /// Clear every voxel of this slot.
+    #[schemars(range(min = 1, max = 255))]
+    pub from_slot: Option<u8>,
     /// Clear only those of them that are selected (select first).
     #[serde(default)]
     pub selection: bool,
@@ -268,7 +271,7 @@ pub struct Fill {
     pub slot: u8,
 }
 
-/// Recolour filled cells: of parts, of slot from_slot, the selection, or in a box (from, to). Empty cells stay empty.
+/// Recolour filled cells: of parts, of slot from_slot (replace a colour; with selection: true only the selected ones), the selection, or in a box (from, to). Empty cells stay empty.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Paint {
@@ -283,7 +286,7 @@ pub struct Paint {
     /// Recolour every voxel of this slot.
     #[schemars(range(min = 1, max = 255))]
     pub from_slot: Option<u8>,
-    /// Recolour the selection.
+    /// Recolour the selection, or with from_slot only its voxels of that slot.
     #[serde(default)]
     pub selection: bool,
     pub from: Option<Cell>,

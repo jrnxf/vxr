@@ -7421,6 +7421,51 @@ fn palette(s: &mut Shot, dir: &Path) -> Result<(), String> {
     check(s.ed.scene.palette[free as usize + 1] == cu, format!("copy slot {used} to slot {}", free + 1))?;
     s.ed.undo();
 
+    // Replace: the colour's voxels take another slot and both slots keep their colours.
+    s.ed.ui.slot = used;
+    s.frames(2);
+    s.ui_click("replace")?;
+    check(s.ed.ui.slot_op == Some(vxr_app::ui::SlotOp::Replace), "Replace… arms the next swatch click".into())?;
+    s.save_png(&dir.join("color-replace.png"))?;
+    s.ui_click(&format!("sw{free}"))?;
+    let m = &s.ed.scene.map;
+    let n = counts[used as usize];
+    check(
+        m.counts[free as usize] == n
+            && m.counts[used as usize] == 0
+            && (s.ed.scene.palette[used as usize], s.ed.scene.palette[free as usize]) == (cu, cf)
+            && s.ed.ui.slot == free
+            && s.ed.ui.toast_text() == Some(format!("Replaced slot {used} with slot {free}: {n} voxels").as_str()),
+        format!("replace slot {used} with slot {free}: {n} voxels take the slot, no colour changes"),
+    )?;
+    s.ed.undo();
+    check(s.ed.scene.map.counts == counts, "one undo reverts the replace".into())?;
+
+    // Remove, with some of the colour selected: only the selected voxels go.
+    s.ed.ui.slot = used;
+    let mut some = Vec::new();
+    s.ed.scene.for_each_voxel(|p, v| {
+        if v == used && some.len() < 5 {
+            some.push(p);
+        }
+    });
+    s.ed.scene.select(some, vxr_core::select::Mode::Replace);
+    s.frames(2);
+    s.ui_click("remove-color")?;
+    check(
+        s.ed.scene.map.counts[used as usize] == n - 5
+            && s.ed.scene.map.voxels == voxels - 5
+            && s.ed.scene.selected_count() == 0
+            && s.ed.ui.toast_text() == Some(format!("Removed slot {used} in the selection: 5 voxels").as_str()),
+        format!("Remove erases the 5 selected voxels of slot {used} and leaves its other {}", n - 5),
+    )?;
+    s.ed.undo();
+    check(
+        s.ed.scene.map.counts == counts && s.ed.scene.selected_count() == 5,
+        "one undo gives back the voxels and the selection".into(),
+    )?;
+    s.ed.scene.deselect();
+
     // The palette shows the colours in use (and the current one); All shows every slot.
     s.ed.ui.slot = used;
     s.frames(2);

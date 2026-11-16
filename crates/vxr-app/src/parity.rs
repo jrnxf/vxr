@@ -30,6 +30,9 @@ fn tool(a: &Action) -> Option<&'static str> {
         Action::BrushInside => Some("box"),
         Action::DeleteSelection => Some("delete"),
         Action::FillSelection => Some("fill"),
+        // `from_slot` on paint and on erase, with `selection: true` for the selection.
+        Action::ReplaceColor { .. } => Some("paint"),
+        Action::RemoveColor(_) => Some("erase"),
         Action::Hollow => Some("hollow"),
         Action::FillInterior => Some("fill_inside"),
         Action::Resize(_) => Some("resize"),
@@ -124,6 +127,8 @@ fn with_tools() -> Vec<Action> {
         Action::Deselect,
         Action::DeleteSelection,
         Action::FillSelection,
+        Action::ReplaceColor { from: 1, to: 2 },
+        Action::RemoveColor(1),
         Action::Hollow,
         Action::FillInterior,
         Action::Resize([1, 1, 1]),

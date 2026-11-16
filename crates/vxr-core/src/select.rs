@@ -37,6 +37,13 @@ pub fn inside(selection: &HashSet<[i32; 3]>, p: [i32; 3]) -> bool {
     selection.is_empty() || selection.contains(&p)
 }
 
+/// Whether a replace or a remove of colour `from` changes the voxel `v` at map cell `p`: it
+/// has that colour and, with a selection to stay inside (`only`), it is selected. The one rule
+/// for [`Scene::replace_color`] and the agent's `paint` and `erase` with `from_slot`.
+pub fn of_color(only: Option<&HashSet<[i32; 3]>>, p: [i32; 3], v: u8, from: u8) -> bool {
+    v == from && only.is_none_or(|s| s.contains(&p))
+}
+
 /// Every cell connected to `p` through faces for which `filled` holds, `p` first; empty when
 /// `p` is not filled ([`Scene::volume`]).
 pub fn connected(filled: impl Fn([i32; 3]) -> bool, p: [i32; 3]) -> Vec<[i32; 3]> {
@@ -313,6 +320,24 @@ impl Scene {
         self.commit();
         let cells: Vec<_> = self.selection().collect();
         self.edit(cells.into_iter().map(|p| (p, v)))
+    }
+
+    /// Give every voxel of palette index `from` the index `to`, or erase them when `to` is 0
+    /// (MagicaVoxel's replace colour and remove colour), as one undo step. While voxels are
+    /// selected only the selected ones change ([`of_color`]). Returns how many changed.
+    pub fn replace_color(&mut self, from: u8, to: u8) -> usize {
+        self.commit();
+        if from == 0 || self.map.counts[from as usize] == 0 {
+            return 0;
+        }
+        let only = (self.selected_count() > 0).then_some(&self.selection);
+        let mut cells = Vec::new();
+        self.for_each_voxel(|p, v| {
+            if of_color(only, p, v, from) {
+                cells.push((p, to));
+            }
+        });
+        self.edit(cells)
     }
 
     /// Copy the selected voxels to the clipboard. Returns how many were copied.

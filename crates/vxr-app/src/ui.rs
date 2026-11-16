@@ -307,6 +307,14 @@ pub enum Action {
     DeleteSelection,
     /// Paint the selection with the current colour.
     FillSelection,
+    /// Give every voxel of slot `from` the slot `to`: in the selection while voxels are
+    /// selected, else in the whole model.
+    ReplaceColor {
+        from: u8,
+        to: u8,
+    },
+    /// Erase every voxel of the slot, in the selection or the whole model as above.
+    RemoveColor(u8),
     /// Keep only the voxels seen from outside the selection, or the whole model.
     Hollow,
     /// Fill the space the selection, or the whole model, encloses with the current colour.
@@ -599,6 +607,8 @@ const SELECTION_H: f32 = 378.0;
 pub enum SlotOp {
     Swap,
     Copy,
+    /// Give the current colour's voxels the clicked slot.
+    Replace,
 }
 
 /// The colour editor's two tabs.
@@ -1017,6 +1027,8 @@ const COMMANDS: &[Command] = &[
     Command { label: "Edit material", keys: &[], run: |h| h.open_material_edit() },
     Command { label: "Swap color with…", keys: &[], run: |h| h.arm_slot_op(SlotOp::Swap) },
     Command { label: "Copy color to…", keys: &[], run: |h| h.arm_slot_op(SlotOp::Copy) },
+    Command { label: "Replace color with…", keys: &[], run: |h| h.arm_slot_op(SlotOp::Replace) },
+    Command { label: "Remove color", keys: &[], run: |h| h.actions.push(Action::RemoveColor(h.slot)) },
     Command {
         label: "Toggle render preview",
         keys: &[],
@@ -1447,6 +1459,9 @@ impl Hybrid {
             Some(SlotOp::Swap) if slot != self.slot => self.actions.push(Action::SwapColors(self.slot, slot)),
             Some(SlotOp::Copy) if slot != self.slot => {
                 self.actions.push(Action::CopyColor { from: self.slot, to: slot })
+            }
+            Some(SlotOp::Replace) if slot != self.slot => {
+                self.actions.push(Action::ReplaceColor { from: self.slot, to: slot })
             }
             _ => {}
         }
@@ -4898,12 +4913,13 @@ impl Hybrid {
                 let what = match op {
                     SlotOp::Swap => format!("Click a slot to swap with slot {slot}. "),
                     SlotOp::Copy => "Click a slot to give it this color. ".to_string(),
+                    SlotOp::Replace => "Click the slot this color's voxels take. ".to_string(),
                 };
                 job.append(&what, 0.0, fmt(th().text));
                 job.append("Esc cancels.", 0.0, fmt(th().muted));
             }
             None => job.append(
-                "Swap trades places with the next slot you click and keeps the scene's look. Copy gives that slot this color.",
+                "Swap trades places with the next slot you click and keeps the scene's look. Copy gives that slot this color. Replace gives this color's voxels that slot and Remove erases them, inside the selection when there is one.",
                 0.0,
                 fmt(th().faint),
             ),
@@ -4942,7 +4958,8 @@ impl Hybrid {
             + 3.0 * 28.0
             + 2.0 * 6.0
             + 12.0
-            + 28.0
+            + 2.0 * 28.0
+            + 6.0
             + 10.0
             + note.size().y
             + 12.0;
@@ -5172,6 +5189,19 @@ impl Hybrid {
                 if small_button(ui, br, glyph, label, name, self.slot_op == Some(o)).clicked() {
                     op = Some(if self.slot_op == Some(o) { None } else { Some(o) });
                 }
+            }
+            // Replace and remove: the colour's voxels, not its slot.
+            let by = by + 28.0 + 6.0;
+            let br = Rect::from_min_size(pos2(inner.left(), by), vec2(half, 28.0));
+            hits.push(("replace", br));
+            let on = self.slot_op == Some(SlotOp::Replace);
+            if small_button(ui, br, icon::PAINT_BUCKET, "Replace…", "replace", on).clicked() {
+                op = Some(if on { None } else { Some(SlotOp::Replace) });
+            }
+            let br = Rect::from_min_size(pos2(inner.left() + half + 6.0, by), vec2(half, 28.0));
+            hits.push(("remove-color", br));
+            if small_button(ui, br, icon::ERASER, "Remove", "remove-color", false).clicked() {
+                self.actions.push(Action::RemoveColor(slot));
             }
             p.galley(pos2(inner.left(), by + 28.0 + 10.0), note, th().faint);
         });
@@ -5583,6 +5613,7 @@ impl Hybrid {
                 armed = match op {
                     SlotOp::Swap => format!("a slot to swap with slot {}", self.slot),
                     SlotOp::Copy => format!("a slot to copy slot {} to", self.slot),
+                    SlotOp::Replace => format!("the slot that slot {}'s voxels take", self.slot),
                 };
                 vec![("Click", armed.as_str()), ("Esc", "cancel")]
             }

@@ -473,10 +473,16 @@ impl Session {
                 self.edit(scene, a.cells, Mode::Add, slot, a.name.as_deref())
             }
             Op::Erase(a) => {
-                let cells = match (self.parts_cells(scene, &a.part, &a.parts)?, a.cells.is_empty()) {
-                    (Some(_), false) => return Err(invalid("give cells or parts, not both")),
-                    (Some(cells), true) => cells,
-                    (None, _) => {
+                let parts = self.parts_cells(scene, &a.part, &a.parts)?;
+                if usize::from(parts.is_some()) + usize::from(!a.cells.is_empty()) + usize::from(a.from_slot.is_some())
+                    > 1
+                {
+                    return Err(invalid("give only one of cells, parts and from_slot"));
+                }
+                let cells = match (parts, a.from_slot) {
+                    (Some(cells), _) => cells,
+                    (None, Some(from)) => self.of_color(scene, from, a.selection)?,
+                    (None, None) => {
                         self.list_limit(a.cells.len())?;
                         a.cells
                     }
@@ -540,8 +546,7 @@ impl Session {
                 let cells: Vec<Cell> = if let Some(cells) = self.parts_cells(scene, &a.part, &a.parts)? {
                     cells
                 } else if let Some(from) = a.from_slot {
-                    let from = self::slot(from)?;
-                    self.voxels_where(scene, |_, v| v == from)
+                    self.of_color(scene, from, a.selection)?
                 } else if a.selection {
                     self.selected(scene)
                 } else if let (Some(f), Some(t)) = (a.from, a.to) {
@@ -1115,6 +1120,18 @@ impl Session {
             self.selection.iter().filter(|&&p| self.get(scene, p) != 0).map(|&p| scene.to_world(p)).collect();
         out.sort_unstable();
         out
+    }
+
+    /// Replace colour and remove colour (`from_slot` on paint and erase): the voxels of slot
+    /// `from`, with `only` just the selected ones, by the rule the editor's commands use
+    /// ([`vxr_core::select::of_color`]).
+    fn of_color(&self, scene: &Scene, from: u8, only: bool) -> Result<Vec<Cell>, Error> {
+        let from = slot(from)?;
+        if only && self.selected(scene).is_empty() {
+            return Err(invalid("nothing is selected: call select first"));
+        }
+        let only = only.then_some(&self.selection);
+        Ok(self.voxels_where(scene, |q, v| vxr_core::select::of_color(only, scene.to_map(q), v, from)))
     }
 
     /// The region option (`selection: true` on a shape or on erase): the cells of `cells` an

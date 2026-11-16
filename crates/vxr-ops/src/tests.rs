@@ -652,7 +652,7 @@ fn parts_by_id_and_name() {
     let (_, m) = err(&mut o, &mut s, "paint", json!({"slot": 8, "part": "boat"}));
     assert_eq!(m, "no part matches \"boat\"; find_parts lists them");
     let (_, m) = err(&mut o, &mut s, "erase", json!({"part": "p1", "cells": [[0, 0, 0]]}));
-    assert!(m.contains("not both"));
+    assert!(m.contains("only one of cells, parts and from_slot"));
     // Several parts in one call.
     let mut s3 = small();
     let mut o3 = Session::new(&s3, None);
@@ -2245,5 +2245,70 @@ fn the_selection_option_on_face_and_erase_and_its_refusals() {
         err(&mut o, &mut s, "line", json!({"from": [0, 0, 0], "to": [7, 0, 0], "mode": "erase", "selection": true})),
         (ErrorKind::Invalid, "nothing is selected: call select first".into())
     );
+    assert_eq!(get(&mut o, &mut s, [0, 0, 0]), 10, "a refused call changes nothing");
+}
+
+#[test]
+fn paint_and_erase_by_slot_change_what_replace_and_remove_colour_change() {
+    // Break caught: the agent's `from_slot` (with and without `selection: true`) and the
+    // editor's Replace color and Remove color drifting apart. The block's bottom layer is
+    // slot 11, the rest slot 10; a quarter of each is selected.
+    let block = || {
+        let mut s = block_with_a_selected_middle();
+        let floor: Vec<_> = voxels(&s).into_iter().filter(|c| c.0[1] == 0).map(|c| (s.to_map(c.0), 11)).collect();
+        s.edit(floor);
+        s
+    };
+    let rows = [
+        ("paint", json!({"slot": 7, "from_slot": 10, "selection": true}), 10, 7, true),
+        ("erase", json!({"from_slot": 11, "selection": true}), 11, 0, true),
+        ("paint", json!({"slot": 7, "from_slot": 10}), 10, 7, false),
+        ("erase", json!({"from_slot": 11}), 11, 0, false),
+    ];
+    let mut counts = Vec::new();
+    for (tool, args, from, to, limited) in rows {
+        let mut b = block();
+        // The editor's command stays inside a selection whenever there is one.
+        if !limited {
+            b.deselect();
+        }
+        let changed = b.replace_color(from, to);
+
+        let mut s = block();
+        let mut o = Session::new(&s, None);
+        let said = call(&mut o, &mut s, tool, args);
+        assert!(said.starts_with(&format!("{changed} cells changed")), "{tool}: {said}");
+        o.apply(&mut s).unwrap();
+        assert_eq!(voxels(&s), voxels(&b), "{tool}");
+        counts.push(changed);
+    }
+    // 192 voxels of slot 10 with 48 selected, 64 of slot 11 with 16 selected.
+    assert_eq!(counts, [48, 16, 192, 64]);
+}
+
+#[test]
+fn erase_by_slot_and_the_selection_limit_refuse_what_they_cannot_do() {
+    let mut s = block_with_a_selected_middle();
+    let mut o = Session::new(&s, None);
+    assert_eq!(
+        err(&mut o, &mut s, "erase", json!({"from_slot": 10, "cells": [[0, 0, 0]]})),
+        (ErrorKind::Invalid, "give only one of cells, parts and from_slot".into())
+    );
+    assert_eq!(
+        err(&mut o, &mut s, "erase", json!({"from_slot": 0})),
+        (ErrorKind::Invalid, "slot 0 is empty, not a colour: slots are 1 to 255".into())
+    );
+    call(&mut o, &mut s, "select", json!({"none": true}));
+    // Before, paint with from_slot ignored `selection: true` and recoloured the whole model.
+    for (tool, args) in [
+        ("paint", json!({"slot": 7, "from_slot": 10, "selection": true})),
+        ("erase", json!({"from_slot": 10, "selection": true})),
+    ] {
+        assert_eq!(
+            err(&mut o, &mut s, tool, args),
+            (ErrorKind::Invalid, "nothing is selected: call select first".into()),
+            "{tool}"
+        );
+    }
     assert_eq!(get(&mut o, &mut s, [0, 0, 0]), 10, "a refused call changes nothing");
 }
