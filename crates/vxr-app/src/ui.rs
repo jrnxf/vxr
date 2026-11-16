@@ -13,7 +13,7 @@ use std::sync::Arc;
 use vxr_core::material::{Kind, Material};
 
 use crate::color::{Hsv, hex, parse_hex};
-use crate::render::{EXPORT_SIZES, RenderSettings, SPP_CHOICES, TURNTABLE_FRAMES};
+use crate::render::{EXPORT_SIZES, FOCUS_RANGE, RenderSettings, SPP_CHOICES, TURNTABLE_FRAMES};
 use crate::theme::{self, Theme, ThemeChoice, th};
 use vxr_core::palette::{Shift, SortKey};
 
@@ -233,6 +233,7 @@ mod icon {
     pub const CIRCLE_HELP: char = '\u{e082}';
     pub const KEYBOARD: char = '\u{e284}';
     pub const PLAY: char = '\u{e13c}';
+    pub const FOCUS: char = '\u{e29e}';
 }
 
 pub use vxr_core::select::{Region, Transform};
@@ -786,6 +787,9 @@ pub struct Hybrid {
     render_dock: Option<Rect>,
     /// The Render panel is open, and what it edits.
     pub render_panel: bool,
+    /// The next click on the scene sets the Render panel's focus (its crosshair button, or
+    /// Cmd-K Focus on a point) instead of using the tool.
+    pub focus_pick: bool,
     pub render: RenderSettings,
     /// Text of the Render panel's sun colour field.
     sun_hex: String,
@@ -1133,6 +1137,7 @@ const COMMANDS: &[Command] = &[
     },
     Command { label: "Render settings", keys: &["R"], run: |h| h.toggle_render_panel() },
     Command { label: "Full render view", keys: &[], run: |h| h.toggle_full_render() },
+    Command { label: "Focus on a point…", keys: &[], run: |h| h.arm_focus_pick() },
     Command { label: "Export PNG", keys: &[], run: |h| h.actions.push(Action::ExportPng) },
     Command { label: "Export turntable", keys: &[], run: |h| h.actions.push(Action::ExportTurntable) },
     Command { label: "Export OBJ", keys: &[], run: |h| h.actions.push(Action::ExportObj) },
@@ -1191,6 +1196,7 @@ impl Hybrid {
             full_render: false,
             render_dock: None,
             render_panel: false,
+            focus_pick: false,
             render: RenderSettings::default(),
             sun_hex: String::new(),
             bounds: [0; 3],
@@ -1441,6 +1447,12 @@ impl Hybrid {
         }
     }
 
+    /// Wait for a click on the scene to set the focus there (the render corner shows, to see it).
+    pub fn arm_focus_pick(&mut self) {
+        self.focus_pick = true;
+        self.show_render = true;
+    }
+
     /// Swap the path-traced image between the corner and the whole view (it shows the corner).
     pub fn toggle_full_render(&mut self) {
         self.full_render = !self.full_render;
@@ -1522,7 +1534,11 @@ impl Hybrid {
         if self.ask_bar.take().is_some() || std::mem::take(&mut self.ai.menu) {
             return;
         }
-        if self.slot_op.take().is_some() || self.color_edit.take().is_some() || self.bounds_panel.take().is_some() {
+        if self.slot_op.take().is_some()
+            || std::mem::take(&mut self.focus_pick)
+            || self.color_edit.take().is_some()
+            || self.bounds_panel.take().is_some()
+        {
             return;
         }
         if std::mem::take(&mut self.agents_panel) {
@@ -5764,6 +5780,7 @@ impl Hybrid {
         let mut rs = self.render.clone();
         let mut hits = Vec::new();
         let (mut close, mut export, mut turntable) = (false, false, false);
+        let mut pick = None;
         let mut hex_text = std::mem::take(&mut self.sun_hex);
         Self::panel(ctx, "render-panel", rect, Order::Middle, |ui, rect| {
             let inner = rect.shrink(12.0);
@@ -5802,10 +5819,23 @@ impl Hybrid {
                 ("rs-blur", "Depth of field", &mut rs.blur, 0.0, 1.0, |v| {
                     if v <= 0.0 { "off".into() } else { format!("{:.0}%", v * 100.0) }
                 }),
-                ("rs-focus", "Focus", &mut rs.focus, 0.25, 2.0, |v| format!("{v:.2}× target")),
+                ("rs-focus", "Focus", &mut rs.focus, FOCUS_RANGE.0, FOCUS_RANGE.1, |v| format!("{v:.2}× target")),
             ];
             for (id, label, v, lo, hi, fmt) in sliders {
-                let r = next(row);
+                let mut r = next(row);
+                if id == "rs-focus" {
+                    // The crosshair beside it: the next click on the scene sets the focus.
+                    let b = Rect::from_min_size(pos2(r.right() - 28.0, r.top() + 3.0), vec2(28.0, 28.0));
+                    r.max.x = b.left() - 10.0;
+                    hits.push(("rs-focus-pick", b));
+                    let resp = small_button(ui, b, icon::FOCUS, "", "rs-focus-pick", self.focus_pick);
+                    if resp.hovered() {
+                        tooltip(ui.ctx(), b, "Focus on a point", &[], None);
+                    }
+                    if resp.clicked() {
+                        pick = Some(!self.focus_pick);
+                    }
+                }
                 hits.push((id, r));
                 slider(ui, r, id, label, v, lo, hi, fmt);
             }
@@ -5953,6 +5983,9 @@ impl Hybrid {
         if turntable {
             self.actions.push(Action::ExportTurntable);
         }
+        if let Some(on) = pick {
+            self.focus_pick = on;
+        }
         if close {
             self.render_panel = false;
         }
@@ -5970,6 +6003,10 @@ impl Hybrid {
                     SlotOp::Replace => format!("the slot that slot {}'s voxels take", self.slot),
                 };
                 vec![("Click", armed.as_str()), ("Esc", "cancel")]
+            }
+            (None, _, _) if self.focus_pick => {
+                let v = [("Click", "the point to focus on"), ("Esc", "cancel"), ("Right-drag", "orbit")];
+                return self.hint_panel(ctx, screen, &v);
             }
             (None, _, _) if self.review.is_some() => {
                 let v = [("↵", "apply"), ("Esc", "discard"), ("Right-drag", "orbit"), ("Scroll", "zoom")];
@@ -6960,10 +6997,11 @@ fn small_button(ui: &mut Ui, r: Rect, glyph: char, label: &str, id: &str, on: bo
     let g = p.layout_no_wrap(label.into(), sans(SIZE), color);
     let icon = label_icon(glyph, SIZE);
     let iw = icon.size;
-    let total = iw + 6.0 + g.size().x;
+    let gap = if label.is_empty() { 0.0 } else { 6.0 };
+    let total = iw + gap + g.size().x;
     let x = r.center().x - total / 2.0;
     p.text(pos2(x + iw / 2.0, r.center().y), Align2::CENTER_CENTER, glyph, icon, color);
-    p.galley(pos2(x + iw + 6.0, r.center().y - g.size().y / 2.0), g, color);
+    p.galley(pos2(x + iw + gap, r.center().y - g.size().y / 2.0), g, color);
     resp
 }
 

@@ -999,6 +999,21 @@ async () => {
     const phys = st().render;
     await click(...hit('rs-physical-sky'));
     step('the physical sky toggles and restarts the corner', phys.physicalSky && phys.restarts > skyRestarts && !st().render.physicalSky, JSON.stringify(phys));
+    // Click to focus: the crosshair arms it, Escape cancels it, and a click on the island's
+    // middle puts that voxel in focus with no edit.
+    {
+      await click(...hit('rs-focus-pick'));
+      const armed = st().render.focusPick;
+      await key('Escape');
+      const cancelled = !st().render.focusPick && st().render.panel;
+      await click(...hit('rs-focus-pick'));
+      const voxels = st().voxels;
+      await click(mx, my);
+      await frames(2);
+      const f = st().render;
+      const toast = st().toast || '';
+      step('the crosshair arms click to focus, Escape cancels it, a click on the island sets the focus with no edit', armed && cancelled && !f.focusPick && toast.startsWith(`Focus set to ${f.focus.toFixed(2)}× target`) && st().voxels === voxels, `${JSON.stringify(f)} ${toast}`);
+    }
     const realUrl = URL.createObjectURL;
     const realA = HTMLAnchorElement.prototype.click;
     let png = null, pngName = null;

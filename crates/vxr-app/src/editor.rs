@@ -799,6 +799,24 @@ impl Editor {
         self.cam.pitch = (back.y / self.cam.distance).clamp(-1.0, 1.0).asin();
     }
 
+    /// The armed focus pick: put the voxel (or ground) under pixel `p` in focus, as the Render
+    /// panel's focus. A click on nothing keeps it armed for another try.
+    pub fn focus_at(&mut self, p: [f32; 2]) {
+        let (o, d) = self.ray(p);
+        let Some(f) = self.scene.target(o, d).and_then(|t| crate::render::focus_on(&self.cam, t.voxel)) else {
+            self.ui.toast(&self.ctx, "Nothing there to focus on: click a voxel or the ground, or press Esc");
+            return;
+        };
+        self.ui.focus_pick = false;
+        self.ui.render.focus = f;
+        let off = if self.ui.render.blur <= 0.0 {
+            ". Depth of field is off: raise it in the Render panel to see the blur"
+        } else {
+            ""
+        };
+        self.ui.toast(&self.ctx, format!("Focus set to {f:.2}× target{off}"));
+    }
+
     /// How much of the scene's box the view shows: the share of its projected rectangle on
     /// screen, and its height as a share of the view's (for the checks).
     pub fn scene_in_view(&self) -> (f32, f32) {
@@ -994,6 +1012,12 @@ impl Editor {
             || self.world_drag.is_some()
             || self.cam_drag.is_some()
         {
+            return;
+        }
+        if b == Button::Left && self.ui.focus_pick {
+            if let Some(p) = self.pointer {
+                self.focus_at(p);
+            }
             return;
         }
         // As MagicaVoxel: X-click orbits around the voxel clicked from then on.
@@ -2340,7 +2364,27 @@ impl Editor {
     /// them (no undo step), and every setting after.
     fn agent_render_settings(&mut self, client: &str, args: &serde_json::Value) -> Result<String, String> {
         let before = self.ui.render.clone();
-        self.ui.render.set_from(args)?;
+        // `focus_on` is a world cell, put in focus from the user's view as a click with the
+        // Render panel's crosshair does it.
+        let mut rest = args.clone();
+        let cell = rest.as_object_mut().and_then(|o| o.remove("focus_on"));
+        let mut next = before.clone();
+        next.set_from(&rest)?;
+        if let Some(c) = cell {
+            if rest.get("focus").is_some() {
+                return Err("focus_on: give focus or focus_on, not both".into());
+            }
+            let n: Vec<i32> = c
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_i64().and_then(|n| i32::try_from(n).ok())).collect())
+                .unwrap_or_default();
+            let cell: [i32; 3] = n.try_into().map_err(|_| "focus_on: a world cell [x, y, z] of whole numbers")?;
+            let map = self.scene.to_map(cell);
+            next.focus = crate::render::focus_on(&self.cam, map).ok_or_else(|| {
+                format!("focus_on {cell:?}: behind the user's view, so nothing there can be in focus; pick a cell in front of it")
+            })?;
+        }
+        self.ui.render = next;
         if self.ui.render != before {
             self.ui.toast(&self.ctx, format!("{client} changed the render settings"));
         }

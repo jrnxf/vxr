@@ -5027,6 +5027,54 @@ fn render_panel(s: &mut Shot, dir: &Path) -> Result<(), String> {
     s.ui_drag(from, to, egui::Modifiers::NONE);
     let ap = s.ed.preview.lighting.aperture;
     check(sky && ap > 0.0, format!("sky backdrop toggle on, depth of field slider: lens radius {ap:.1} voxels"))?;
+    // Click to focus: the crosshair arms it and Escape cancels it, Cmd-K arms it again; a
+    // click on nothing keeps it armed, and a click on a voxel near the bottom of the view puts
+    // that voxel on the focus plane, uses no tool and makes no undo step.
+    s.ui_click("rs-focus-pick")?;
+    let armed = s.ed.ui.focus_pick;
+    s.save_png(&dir.join("app-2x-focus-pick.png"))?;
+    s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+    let cancelled = !s.ed.ui.focus_pick && s.ed.ui.render_panel;
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("focus on a point".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    check(
+        armed && cancelled && s.ed.ui.focus_pick,
+        "the Render panel's crosshair arms click to focus, Escape cancels it, Cmd-K Focus on a point… arms it".into(),
+    )?;
+    let (w, h) = (s.ed.width as f32, s.ed.height as f32);
+    let (voxels, position) = (s.voxels(), s.ed.scene.history().position());
+    let sky = (0..40).map(|k| [w * (0.05 + 0.0225 * k as f32), h * 0.12]).find(|&p| {
+        s.ed.pointer_moved(Some(p));
+        s.ed.cursor().is_none()
+    });
+    let Some(sky) = sky else { return check(false, "no empty pixel along the top of the view".into()) };
+    s.ed.button(Button::Left, true, false);
+    s.ed.button(Button::Left, false, false);
+    s.frames(1);
+    let missed = s.ed.ui.focus_pick && s.ed.ui.toast_text().is_some_and(|t| t.starts_with("Nothing there to focus on"));
+    let p = s.top_face_pixel([w * 0.5, h * 0.8])?;
+    let cell = s.ed.cursor().map(|t| t.voxel).unwrap_or_default();
+    let want = vxr_app::render::focus_on(&s.ed.cam, cell).unwrap_or(0.0);
+    s.ed.button(Button::Left, true, false);
+    s.ed.button(Button::Left, false, false);
+    s.frames(2);
+    let got = s.ed.preview.lighting.focus;
+    check(
+        missed
+            && !s.ed.ui.focus_pick
+            && s.ed.ui.render.focus == want
+            && want < 0.95
+            && (got - want * s.ed.cam.distance).abs() < 1e-3
+            && s.voxels() == voxels
+            && s.ed.scene.history().position() == position
+            && s.ed.ui.toast_text().is_some_and(|t| t.starts_with(&format!("Focus set to {want:.2}× target"))),
+        format!(
+            "a click on the sky at {sky:?} keeps it armed; a click on voxel {cell:?} at {p:?} sets the focus to \
+             {want:.3}× target ({got:.1} voxels), with no edit and no undo step"
+        ),
+    )?;
+    s.ed.ui.render.focus = 1.0;
     let restarts = s.ed.preview.restarts;
     s.ui_click("rs-physical-sky")?;
     s.frames(1);
@@ -8929,6 +8977,33 @@ fn agents_look_render(
     )?;
     let (t, e) = s.agent_call(live, claude, "render_settings", json!({"gamma": 1.5, "vignette": 3}));
     check(e && t.contains("vignette") && (s.ed.ui.render.gamma - 1.8).abs() < 1e-6, format!("all or nothing: {t}"))?;
+    // focus_on: a world cell in focus from the user's view, as the panel's crosshair puts it.
+    let mut first = None;
+    s.ed.scene.for_each_voxel(|p, _| {
+        first.get_or_insert(p);
+    });
+    let map = first.unwrap_or_default();
+    let cell = s.ed.scene.to_world(map);
+    let want = vxr_app::render::focus_on(&s.ed.cam, map).unwrap_or(0.0);
+    let (t, e) = s.agent_call(live, claude, "render_settings", json!({"focus_on": cell, "gamma": 2.0}));
+    let v: Value = serde_json::from_str(&t).unwrap_or_default();
+    let set = !e && s.ed.ui.render.focus == want && v["focus"].as_f64().is_some_and(|f| (f - want as f64).abs() < 1e-3);
+    let eye = s.ed.cam.eye() + (s.ed.cam.eye() - s.ed.cam.target).normalize() * 4.0;
+    let behind = s.ed.scene.to_world(eye.floor().as_ivec3().to_array());
+    let mut refused = Vec::new();
+    for bad in [json!({"focus_on": behind}), json!({"focus_on": cell, "focus": 1.0}), json!({"focus_on": [1, 2]})] {
+        let (t, e) = s.agent_call(live, claude, "render_settings", bad.clone());
+        refused.push(
+            e && t.starts_with("focus_on") && s.ed.ui.render.focus == want && (s.ed.ui.render.gamma - 2.0).abs() < 1e-6,
+        );
+    }
+    check(
+        set && refused == [true; 3],
+        format!(
+            "render_settings focus_on {cell:?} sets the focus to {want:.3}× target; a cell behind the view, \
+             focus_on with focus and a short cell are refused and change nothing: {refused:?} {t}"
+        ),
+    )?;
     check(s.ed.scene.history().position() == position, "render settings are no undo step".into())?;
 
     // Exports into the downloads folder, under the scene's name.

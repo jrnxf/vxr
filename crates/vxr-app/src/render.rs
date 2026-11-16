@@ -27,6 +27,8 @@ pub const TURNTABLE_FRAMES: [u32; 4] = [8, 16, 32, 64];
 const TURNTABLE_PIXELS: u64 = 250_000_000;
 #[cfg(not(target_arch = "wasm32"))]
 const TURNTABLE_PIXELS: u64 = 1_000_000_000;
+/// The Render panel's focus range, as a multiple of the orbit distance.
+pub const FOCUS_RANGE: (f32, f32) = (0.25, 2.0);
 /// GPU time per frame an export may use.
 const EXPORT_BUDGET_MS: f64 = 12.0;
 
@@ -129,7 +131,7 @@ impl RenderSettings {
                 "gamma" => next.gamma = num(1.0, 3.0)?,
                 "vignette" => next.vignette = num(0.0, 1.0)?,
                 "depth_of_field" => next.blur = num(0.0, 1.0)?,
-                "focus" => next.focus = num(0.25, 2.0)?,
+                "focus" => next.focus = num(FOCUS_RANGE.0, FOCUS_RANGE.1)?,
                 "samples" => {
                     let n = v.as_u64().unwrap_or(0);
                     next.spp = SPP_CHOICES
@@ -193,6 +195,15 @@ impl RenderSettings {
     pub fn turntable_frames(&self) -> u32 {
         TURNTABLE_FRAMES[self.frames.min(TURNTABLE_FRAMES.len() - 1)]
     }
+}
+
+/// The focus (a multiple of the orbit distance, in [`FOCUS_RANGE`]) that puts map cell
+/// `cell`'s centre on the plane in focus as `cam` sees it: the path tracer measures focus from
+/// the orbit eye along the view direction. `None` when the cell is not in front of the eye.
+pub fn focus_on(cam: &OrbitCamera, cell: [i32; 3]) -> Option<f32> {
+    let point = Vec3::from(cell.map(|c| c as f32 + 0.5));
+    let along = (point - cam.eye()).dot(cam.basis().0);
+    (along > 0.0).then(|| (along / cam.distance).clamp(FOCUS_RANGE.0, FOCUS_RANGE.1))
 }
 
 /// A render export in progress.
@@ -413,6 +424,37 @@ mod tests {
             assert!(r.set_from(&bad).is_err(), "{bad}");
             assert_eq!(r, want, "{bad} changed nothing");
         }
+    }
+
+    /// Focus is the depth along the view direction, not the distance from the eye: a cell
+    /// beside or above the target is as much in focus as the target.
+    #[test]
+    fn focus_on_puts_the_cell_on_the_focus_plane() {
+        let level = OrbitCamera {
+            target: Vec3::new(10.5, 5.5, 10.5),
+            yaw: 0.0,
+            pitch: 0.0,
+            distance: 20.0,
+            fov_y: 0.8,
+            ortho: false,
+        };
+        let tilted = OrbitCamera { yaw: 0.7, pitch: 0.5, ..level };
+        let up = tilted.target + tilted.basis().2 * 8.0;
+        let above = up.floor().as_ivec3().to_array();
+        let r = |v: Option<f32>| v.map(|f| (f * 1000.0).round() / 1000.0);
+        for (cam, cell, want) in [
+            (&level, [10, 5, 10], Some(1.0)),
+            (&level, [10, 5, 20], Some(0.5)),
+            (&level, [25, 5, 10], Some(1.0)),
+            (&level, [10, 5, -40], Some(2.0)),
+            (&level, [10, 5, 40], None),
+            (&tilted, [10, 5, 10], Some(1.0)),
+        ] {
+            assert_eq!(r(focus_on(cam, cell)), want, "{cell:?}");
+        }
+        // A cell up the screen from the target, off its centre by under a voxel.
+        let f = focus_on(&tilted, above).unwrap();
+        assert!((f - 1.0).abs() < 0.05, "{above:?} {f}");
     }
 
     #[test]

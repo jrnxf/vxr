@@ -81,6 +81,7 @@ fn render_settings_tool() -> (&'static str, String, Value) {
             "vignette": num(0.0, 1.0, "vignette: 0 is off, 1 takes the corners to black"),
             "depth_of_field": num(0.0, 1.0, "depth of field blur (the aperture): 0 is off"),
             "focus": num(0.25, 2.0, "focus distance as a multiple of the distance to the view's target"),
+            "focus_on": {"type": "array", "items": {"type": "integer"}, "minItems": 3, "maxItems": 3, "description": "a world cell [x, y, z] to put in focus as the user's view sees it, as a click with the panel's crosshair does (instead of focus; kept in the panel's range)"},
             "samples": {"type": "integer", "enum": [64, 256, 1024, 4096], "description": "samples per pixel the corner stops at and an export traces"},
             "export_size": {"type": "string", "enum": ["720p", "1080p", "1440p", "4k"], "description": "the render export's size (16:9)"},
             "turntable_frames": {"type": "integer", "enum": [8, 16, 32, 64], "description": "frames in a turntable export: one full turn in that many equal steps"},
