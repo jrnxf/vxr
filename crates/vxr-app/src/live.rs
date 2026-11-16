@@ -210,7 +210,7 @@ impl Live {
             return Ok(json!({"exported": written, "what": what, "note": "written as one folder into the user's Downloads folder"}).to_string());
         }
         let (mut written, mut names) = (Vec::new(), Vec::new());
-        let files = unused_names(&self.downloads, files, &ed.scene)?;
+        let files = unused_names(&self.downloads, files, &ed.scene, ed.agent_selection.as_deref())?;
         for (name, bytes) in &files {
             let path = self.downloads.join(name);
             write_new(&path, bytes).map_err(|e| format!("could not write {name} into Downloads: {e}"))?;
@@ -229,10 +229,11 @@ fn unused_names(
     dir: &Path,
     files: Vec<crate::files::File>,
     scene: &vxr_core::Scene,
+    selection: vxr_core::files::Only,
 ) -> Result<Vec<crate::files::File>, String> {
     let Some((old, new)) = unused_stem(dir, &files) else { return Ok(files) };
     if files.len() > 1 {
-        return Ok(crate::files::obj_files(scene, &new)?.0);
+        return Ok(crate::files::obj_files(scene, &new, selection)?.0);
     }
     Ok(files.into_iter().map(|(n, b)| (n.replacen(old.as_str(), &new, 1), b)).collect())
 }
@@ -266,11 +267,11 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let mut scene = vxr_core::Scene::new([4, 4, 4]);
         scene.edit([([1, 1, 1], 3)]);
-        let export = || crate::files::obj_files(&scene, "my house").unwrap().0;
+        let export = || crate::files::obj_files(&scene, "my house", None).unwrap().0;
         for want in
             [["my-house.obj", "my-house.mtl", "my-house.png"], ["my-house-1.obj", "my-house-1.mtl", "my-house-1.png"]]
         {
-            let files = unused_names(&dir, export(), &scene).unwrap();
+            let files = unused_names(&dir, export(), &scene, None).unwrap();
             let names: Vec<&str> = files.iter().map(|f| f.0.as_str()).collect();
             assert_eq!(names, want);
             for (name, bytes) in &files {
@@ -286,7 +287,7 @@ mod tests {
         }
         let slices = vec![("my-house-slices.png".to_string(), vec![1])];
         write_new(&dir.join(&slices[0].0), &slices[0].1).unwrap();
-        let again = unused_names(&dir, slices, &scene).unwrap();
+        let again = unused_names(&dir, slices, &scene, None).unwrap();
         assert_eq!(again[0].0, "my-house-slices-1.png");
         std::fs::remove_dir_all(&dir).unwrap();
     }

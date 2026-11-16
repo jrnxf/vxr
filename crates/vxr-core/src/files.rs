@@ -10,24 +10,46 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::Scene;
-use crate::export::{TEXTURE_W, obj, slices, sprite, sprite_size};
+use crate::export::{TEXTURE_W, obj, slices, sprite, sprite_of, sprite_size};
 
 /// A file to write or download: its name and bytes.
 pub type File = (String, Vec<u8>);
 
+/// The selected cells an export takes instead of everything the view shows: map cells, of
+/// which those holding a voxel count. The user's selection ([`Scene::selection`]) or an
+/// agent's own.
+pub type Only<'a> = Option<&'a [[i32; 3]]>;
+
+/// What an export without a selection could not find, with what to do next.
+const NO_SELECTION: &str = "nothing is selected: select voxels first";
+
+/// The voxels of `only` and their inclusive bounds, or why there are none.
+type Picked = (BTreeMap<[i32; 3], u8>, [i32; 3], [i32; 3]);
+fn picked(scene: &Scene, only: &[[i32; 3]]) -> Result<Picked, String> {
+    let voxels: BTreeMap<[i32; 3], u8> =
+        only.iter().map(|&p| (p, scene.map.get(p[0], p[1], p[2]))).filter(|v| v.1 != 0).collect();
+    let (lo, hi) = crate::select::bounds(voxels.keys().copied()).ok_or(NO_SELECTION)?;
+    Ok((voxels, lo, hi))
+}
+
 /// The OBJ export of what the view shows (the edited model, or every shown object in the
-/// world), named `<stem>.obj`, `<stem>.mtl` and `<stem>.png`, and its quad count. The OBJ
-/// names its `.mtl` and the `.mtl` its texture, and both split names at whitespace and end
-/// them at `#`, so each run of those in `stem` becomes `-`.
-pub fn obj_files(scene: &Scene, stem: &str) -> Result<(Vec<File>, usize), String> {
+/// world), or of the voxels of `only` alone, named `<stem>.obj`, `<stem>.mtl` and
+/// `<stem>.png`, and its quad count. A selection is exported as a model of its own: its
+/// faces against voxels left out are part of it. The OBJ names its `.mtl` and the `.mtl`
+/// its texture, and both split names at whitespace and end them at `#`, so each run of
+/// those in `stem` becomes `-`.
+pub fn obj_files(scene: &Scene, stem: &str, only: Only) -> Result<(Vec<File>, usize), String> {
     let parts: Vec<&str> =
         stem.split(|c: char| c.is_whitespace() || c.is_control() || c == '#').filter(|p| !p.is_empty()).collect();
     let stem = if parts.is_empty() { "vxr".to_string() } else { parts.join("-") };
     let stem = stem.as_str();
     let mut voxels = BTreeMap::new();
-    scene.for_each_voxel(|p, c| {
-        voxels.insert(scene.to_world(p), c);
-    });
+    match only {
+        Some(cells) => voxels.extend(picked(scene, cells)?.0.into_iter().map(|(p, c)| (scene.to_world(p), c))),
+        None => scene.for_each_voxel(|p, c| {
+            voxels.insert(scene.to_world(p), c);
+        }),
+    }
     if voxels.is_empty() {
         return Err("the scene is empty".into());
     }
@@ -44,10 +66,18 @@ pub fn obj_files(scene: &Scene, stem: &str) -> Result<(Vec<File>, usize), String
 const SLICES_MAX: u64 = 1 << 26;
 
 /// The PNG slices of what the view shows (the edited model's bounds, or the world's), as
-/// one PNG: every layer from the bottom up, side by side. Returns the PNG, its size and the
-/// number of layers.
-pub fn slices_png(scene: &Scene) -> Result<(Vec<u8>, [u32; 2], u32), String> {
-    let size = scene.bounds().size;
+/// one PNG: every layer from the bottom up, side by side. With `only`, the slices of those
+/// voxels alone, in their own box. Returns the PNG, its size and the number of layers.
+pub fn slices_png(scene: &Scene, only: Only) -> Result<(Vec<u8>, [u32; 2], u32), String> {
+    let mut cells = Vec::new();
+    let size = match only {
+        Some(sel) => {
+            let (voxels, lo, hi) = picked(scene, sel)?;
+            cells.extend(voxels.into_iter().map(|(p, c)| ([0, 1, 2].map(|a| p[a] - lo[a]), c)));
+            [0, 1, 2].map(|a| (hi[a] - lo[a] + 1) as u32)
+        }
+        None => scene.bounds().size,
+    };
     if scene.map.counts[1..].iter().all(|&n| n == 0) {
         return Err("the scene is empty".into());
     }
@@ -55,8 +85,9 @@ pub fn slices_png(scene: &Scene) -> Result<(Vec<u8>, [u32; 2], u32), String> {
     if pixels > SLICES_MAX {
         return Err(format!("{}×{}×{} is too large for one image", size[0], size[1], size[2]));
     }
-    let mut cells = Vec::new();
-    scene.for_each_voxel(|p, c| cells.push((p, c)));
+    if only.is_none() {
+        scene.for_each_voxel(|p, c| cells.push((p, c)));
+    }
     let s = slices(size, cells, &scene.palette);
     Ok((png(s.width, s.height, &s.rgba)?, [s.width, s.height], s.layers))
 }
@@ -66,14 +97,22 @@ pub fn slices_png(scene: &Scene) -> Result<(Vec<u8>, [u32; 2], u32), String> {
 pub const SPRITE_SCALE: u32 = 1;
 
 /// The isometric sprite of what the view shows (the edited model, or every shown object in
-/// the world) as one PNG with a transparent background ([`sprite`]). Returns the PNG and
-/// its size.
-pub fn sprite_png(scene: &Scene) -> Result<(Vec<u8>, [u32; 2]), String> {
-    let size = scene.bounds().size;
+/// the world) as one PNG with a transparent background ([`sprite`]). With `only`, the
+/// sprite of those voxels alone, as a model of their own. Returns the PNG and its size.
+pub fn sprite_png(scene: &Scene, only: Only) -> Result<(Vec<u8>, [u32; 2]), String> {
+    let part = only.map(|sel| picked(scene, sel)).transpose()?;
+    let size = match &part {
+        Some((_, lo, hi)) => [0, 1, 2].map(|a| (hi[a] - lo[a] + 1) as u32),
+        None => scene.bounds().size,
+    };
     // The voxels' own box is never larger than the bounds, so this refuses before any work.
     let [w, h] = sprite_size(size, SPRITE_SCALE);
-    let Some(s) = (w * h <= SLICES_MAX).then(|| sprite(&scene.map, &scene.palette, SPRITE_SCALE)) else {
+    if w * h > SLICES_MAX {
         return Err(format!("{}×{}×{} is too large for one image", size[0], size[1], size[2]));
+    }
+    let s = match &part {
+        Some((voxels, ..)) => sprite_of(&scene.map, &scene.palette, SPRITE_SCALE, &|p| voxels.contains_key(&p)),
+        None => sprite(&scene.map, &scene.palette, SPRITE_SCALE),
     };
     let s = s.ok_or("the scene is empty")?;
     Ok((png(s.width, s.height, &s.rgba)?, [s.width, s.height]))
@@ -732,9 +771,9 @@ mod tests {
     #[test]
     fn obj_files_name_each_other_and_skip_an_empty_scene() {
         let mut s = Scene::new([4, 4, 4]);
-        assert!(obj_files(&s, "x").is_err());
+        assert!(obj_files(&s, "x", None).is_err());
         s.edit([([1, 1, 1], 3)]);
-        let (files, quads) = obj_files(&s, "rock").unwrap();
+        let (files, quads) = obj_files(&s, "rock", None).unwrap();
         let names: Vec<&str> = files.iter().map(|f| f.0.as_str()).collect();
         assert_eq!(names, ["rock.obj", "rock.mtl", "rock.png"]);
         assert_eq!(quads, 6);
@@ -748,7 +787,7 @@ mod tests {
         let mut s = Scene::new([4, 4, 4]);
         s.edit([([1, 1, 1], 3)]);
         for (stem, want) in [(" my  house\t#2 ", "my-house-2"), ("#", "vxr")] {
-            let (files, _) = obj_files(&s, stem).unwrap();
+            let (files, _) = obj_files(&s, stem, None).unwrap();
             let names: Vec<&str> = files.iter().map(|f| f.0.as_str()).collect();
             assert_eq!(names, [format!("{want}.obj"), format!("{want}.mtl"), format!("{want}.png")]);
             let line = |i: usize, key: &str| {
@@ -761,9 +800,9 @@ mod tests {
     #[test]
     fn slices_png_is_one_strip_of_layers_and_skips_an_empty_scene() {
         let mut s = Scene::new([4, 3, 5]);
-        assert!(slices_png(&s).is_err());
+        assert!(slices_png(&s, None).is_err());
         s.edit([([1, 1, 1], 3)]);
-        let (bytes, size, layers) = slices_png(&s).unwrap();
+        let (bytes, size, layers) = slices_png(&s, None).unwrap();
         assert_eq!((size, layers), ([12, 5], 3));
         assert_eq!(&bytes[1..4], b"PNG");
     }
@@ -771,10 +810,10 @@ mod tests {
     #[test]
     fn sprite_png_is_the_voxels_on_a_transparent_background_and_skips_an_empty_scene() {
         let mut s = Scene::new([4, 3, 5]);
-        assert_eq!(sprite_png(&s).unwrap_err(), "the scene is empty");
+        assert_eq!(sprite_png(&s, None).unwrap_err(), "the scene is empty");
         s.palette[3] = [200, 100, 50, 255];
         s.edit([([1, 1, 1], 3), ([1, 2, 1], 3), ([2, 1, 1], 3)]);
-        let (bytes, size) = sprite_png(&s).unwrap();
+        let (bytes, size) = sprite_png(&s, None).unwrap();
         // Two voxels along x and two up, one deep: 2 * 3 wide, 3 + 2 * 2 - 1 tall.
         assert_eq!(size, [6, 6]);
         let mut reader = png::Decoder::new(std::io::Cursor::new(&bytes)).read_info().unwrap();
@@ -788,6 +827,6 @@ mod tests {
         assert_eq!(rows[5][16..], [160, 80, 40, 255, 160, 80, 40, 255]);
         // A scene whose sprite would pass the limit is refused before it is drawn.
         let big = Scene::new([4000, 4000, 4000]);
-        assert!(sprite_png(&big).unwrap_err().contains("too large"));
+        assert!(sprite_png(&big, None).unwrap_err().contains("too large"));
     }
 }

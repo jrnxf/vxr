@@ -60,7 +60,7 @@ Feature names below follow the update log [S1] unless another source is given.
 | Scale and repeat | Console commands `scale`, `repeat` [S1 0.98] | missing | P3 | - |
 | Shear | Command `shear z 0.2 0.2` [S1 0.99.6.2] | missing | P3 | - |
 | Mask and texture with a pattern model | Modify->Mask/Texture [S1 0.99.6.2] | missing | P3 | - |
-| Export only the selection | [S1 0.98.1] | missing | P2 | - |
+| Export only the selection | [S1 0.98.1] | done: the Export menu's Only the selection switch (Cmd-K Export only the selection) makes OBJ, PNG slices and Isometric sprite take the selected voxels alone, as a model of their own under `<scene>-selection` names, while some are selected; the agent's `export` takes `selection: true` for those kinds in files mode and live mode (its own selection). Render, turntable and embed always take the scene | P2 | - |
 
 ## Model tools
 

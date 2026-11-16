@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use proptest::prelude::*;
 use vxr_core::export::{Quad, Sprite, obj, quads, slices, sprite};
+use vxr_core::files::{obj_files, slices_png, sprite_png};
 use vxr_core::{BrickMap, Scene};
 
 /// The generated fixtures, plus the island when it has been built.
@@ -259,6 +260,51 @@ proptest! {
         cases: std::env::var("PROPTEST_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(256),
         ..ProptestConfig::default()
     })]
+
+    /// Exporting a selection gives, byte for byte, what exporting a scene that holds only
+    /// those voxels gives: the OBJ centred on them, the slices and the sprite in the
+    /// selection's own box. Selected cells that hold no voxel do not count, and a
+    /// selection without any voxel is refused.
+    #[test]
+    fn a_selection_exports_as_a_scene_of_only_its_voxels(
+        // Cells on both sides of a brick edge (8) on every axis; the flag is "selected".
+        cells in prop::collection::btree_map([5..11i32, 6..11i32, 4..11i32], (1..4u8, any::<bool>()), 1..60),
+        empty in prop::collection::vec([0..16i32, 0..16i32, 0..16i32], 0..8),
+    ) {
+        const NONE: &str = "nothing is selected: select voxels first";
+        let colours = |s: &mut Scene| {
+            s.palette[1] = [250, 20, 40, 255];
+            s.palette[2] = [30, 240, 60, 255];
+            s.palette[3] = [15, 25, 235, 255];
+        };
+        let mut all = Scene::new([16, 16, 16]);
+        colours(&mut all);
+        all.edit(cells.iter().map(|(p, (c, _))| (*p, *c)));
+        let picked: Vec<_> = cells.iter().filter(|(_, (_, on))| *on).map(|(p, (c, _))| (*p, *c)).collect();
+        // The selection: the picked voxels, and cells that hold nothing.
+        let empty: Vec<[i32; 3]> = empty.into_iter().filter(|p| !cells.contains_key(p)).collect();
+        let sel: Vec<[i32; 3]> = empty.iter().copied().chain(picked.iter().map(|(p, _)| *p)).collect();
+        let (obj, slices, sprite) =
+            (obj_files(&all, "m", Some(&sel)), slices_png(&all, Some(&sel)), sprite_png(&all, Some(&sel)));
+        if picked.is_empty() {
+            prop_assert_eq!(obj.err(), Some(NONE.to_string()));
+            prop_assert_eq!(slices.err(), Some(NONE.to_string()));
+            prop_assert_eq!(sprite.err(), Some(NONE.to_string()));
+            return Ok(());
+        }
+        let mut only = Scene::new([16, 16, 16]);
+        colours(&mut only);
+        only.edit(picked.iter().copied());
+        prop_assert_eq!(obj.clone().unwrap(), obj_files(&only, "m", None).unwrap());
+        prop_assert_eq!(sprite.unwrap(), sprite_png(&only, None).unwrap());
+        // The slices of a whole scene are its bounds, so fit them to the voxels first.
+        only.crop();
+        prop_assert_eq!(slices.unwrap(), slices_png(&only, None).unwrap());
+        // Unless every voxel is selected, the selection is not the whole scene.
+        if picked.len() < cells.len() {
+            prop_assert_ne!(obj.unwrap(), obj_files(&all, "m", None).unwrap());
+        }
+    }
 
     /// The sprite is what a painter makes: every voxel stamped as the one-voxel cube, the
     /// farthest first, each at its place by the three steps.

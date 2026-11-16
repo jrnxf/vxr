@@ -66,7 +66,7 @@ fn own_tools() -> Vec<(&'static str, String, Value)> {
         edit_object_tool(),
         show_world_tool(),
         export_tool(
-            "Export the open scene (the model being edited, or every shown object of a world) as files under the root, as the Export menu does. kind obj writes <name>.obj with its <name>.mtl and 256x1 palette texture <name>.png; kind slices writes every layer of the model's bounds side by side, the bottom on the left, as one PNG; kind sprite writes the isometric sprite, one PNG of pixel art on a transparent background seen from the front-right-top corner, each voxel 4 pixels wide (2 pixels across for 1 down) and the top, right and left faces in three shades of its colour. path is where (relative to the root, ending in .obj for obj and .png for slices and sprite), by default beside the scene: <scene>.obj, <scene>-slices.png or <scene>-sprite.png; an earlier file there is replaced. kind render, the path-traced picture, kind turntable, a path-traced picture per frame of one turn, and kind embed, the folder for a web page with its path-traced poster, are made on the GPU by the vxr window: open the file in vxr and use vxr mcp --live for them, or look for a quick picture.",
+            "Export the open scene (the model being edited, or every shown object of a world) as files under the root, as the Export menu does. kind obj writes <name>.obj with its <name>.mtl and 256x1 palette texture <name>.png; kind slices writes every layer of the model's bounds side by side, the bottom on the left, as one PNG; kind sprite writes the isometric sprite, one PNG of pixel art on a transparent background seen from the front-right-top corner, each voxel 4 pixels wide (2 pixels across for 1 down) and the top, right and left faces in three shades of its colour. path is where (relative to the root, ending in .obj for obj and .png for slices and sprite), by default beside the scene: <scene>.obj, <scene>-slices.png or <scene>-sprite.png; an earlier file there is replaced. selection true exports only the selected voxels for these three kinds (select first), by default as <scene>-selection.obj, <scene>-selection-slices.png or <scene>-selection-sprite.png. kind render, the path-traced picture, kind turntable, a path-traced picture per frame of one turn, and kind embed, the folder for a web page with its path-traced poster, are made on the GPU by the vxr window: open the file in vxr and use vxr mcp --live for them, or look for a quick picture.",
             Some(json!({"type": "string", "description": "where to write, relative to the root folder, without .."})),
         ),
         (
@@ -105,6 +105,7 @@ pub(crate) fn export_tool(description: &str, path: Option<Value>) -> (&'static s
     let mut props = json!({
         "kind": {"type": "string", "enum": ["obj", "slices", "sprite", "render", "turntable", "embed"], "description": "obj: OBJ with .mtl and palette texture; slices: every layer as one PNG; sprite: one isometric pixel-art PNG on a transparent background; render: the path-traced PNG; turntable: a folder of path-traced PNG frames, one full turn of the view, and the animated PNG of them; embed: a folder for a web page, with the <voxel-scene> viewer, the scene, a path-traced poster and an index.html showing the tag"},
     });
+    props["selection"] = json!({"type": "boolean", "description": "true: export only the selected voxels (select them first), as a model of their own, for kind obj, slices and sprite. The slices and the sprite take the selection's own box, the OBJ is centred on the selection, and the files get -selection in their names. Refused when nothing is selected. Default false: everything the view shows"});
     if let Some(p) = path {
         props["path"] = p;
     }
@@ -455,7 +456,18 @@ impl Files {
         let kind =
             args.get("kind").and_then(Value::as_str).ok_or("kind: obj, slices, sprite, render, turntable or embed")?;
         let o = self.open.as_ref().ok_or(NO_SCENE)?;
-        let stem = o.rel.strip_suffix(".vox").or_else(|| o.rel.strip_suffix(".VOX")).unwrap_or(&o.rel).to_string();
+        let only = match args.get("selection") {
+            None | Some(Value::Null) => false,
+            Some(v) => v.as_bool().ok_or("selection: true or false")?,
+        };
+        if only && !matches!(kind, "obj" | "slices" | "sprite") {
+            return Err("selection: only for kind obj, slices and sprite".into());
+        }
+        let cells: Vec<[i32; 3]> = o.scene.selection().collect();
+        let stem = o.rel.strip_suffix(".vox").or_else(|| o.rel.strip_suffix(".VOX")).unwrap_or(&o.rel);
+        // The selection's files get their own names, so they never replace the whole scene's.
+        let stem = format!("{stem}{}", if only { "-selection" } else { "" });
+        let part = if only { "the selection: " } else { "" };
         let (ext, default) = match kind {
             "obj" => ("obj", format!("{stem}.obj")),
             "slices" => ("png", format!("{stem}-slices.png")),
@@ -473,21 +485,22 @@ impl Files {
         let rel = args.get("path").and_then(Value::as_str).map(str::to_string).unwrap_or(default);
         let path = self.resolve_as(&rel, ext)?;
         let o = self.open.as_ref().unwrap();
+        let only = only.then_some(cells.as_slice());
         let (files, what) = match kind {
             "obj" => {
                 let name = path.file_stem().and_then(|n| n.to_str()).ok_or("path: a file name")?.to_string();
-                let (files, quads) = vxr_core::files::obj_files(&o.scene, &name)?;
-                (files, format!("{quads} quads"))
+                let (files, quads) = vxr_core::files::obj_files(&o.scene, &name, only)?;
+                (files, format!("{part}{quads} quads"))
             }
             "sprite" => {
                 let name = path.file_name().and_then(|n| n.to_str()).ok_or("path: a file name")?.to_string();
-                let (png, [w, h]) = vxr_core::files::sprite_png(&o.scene)?;
-                (vec![(name, png)], format!("the isometric sprite, {w} x {h} pixels on a transparent background"))
+                let (png, [w, h]) = vxr_core::files::sprite_png(&o.scene, only)?;
+                (vec![(name, png)], format!("{part}the isometric sprite, {w} x {h} pixels on a transparent background"))
             }
             _ => {
                 let name = path.file_name().and_then(|n| n.to_str()).ok_or("path: a file name")?.to_string();
-                let (png, [w, h], layers) = vxr_core::files::slices_png(&o.scene)?;
-                (vec![(name, png)], format!("{layers} layers side by side, {w} x {h} pixels"))
+                let (png, [w, h], layers) = vxr_core::files::slices_png(&o.scene, only)?;
+                (vec![(name, png)], format!("{part}{layers} layers side by side, {w} x {h} pixels"))
             }
         };
         let dir = path.parent().ok_or("path: a file name")?;

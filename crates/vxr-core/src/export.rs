@@ -226,8 +226,22 @@ pub fn sprite_size(extent: [u32; 3], scale: u32) -> [u64; 2] {
 /// face four fifths of it and the left (+z) face three fifths. The image is the voxels'
 /// bounding box, so two models of one size line up.
 pub fn sprite(map: &crate::BrickMap, palette: &[[u8; 4]; 256], scale: u32) -> Option<Sprite> {
+    sprite_of(map, palette, scale, &|_| true)
+}
+
+/// [`sprite`] of only the voxels of `map` that `keep` says yes to, as a model of their own:
+/// a face against a voxel left out shows.
+pub fn sprite_of(
+    map: &crate::BrickMap,
+    palette: &[[u8; 4]; 256],
+    scale: u32,
+    keep: &dyn Fn([i32; 3]) -> bool,
+) -> Option<Sprite> {
     let (mut lo, mut hi) = ([i32::MAX; 3], [i32::MIN; 3]);
     map.for_each(|p, _| {
+        if !keep(p) {
+            return;
+        }
         for a in 0..3 {
             lo[a] = lo[a].min(p[a]);
             hi[a] = hi[a].max(p[a] + 1);
@@ -246,17 +260,17 @@ pub fn sprite(map: &crate::BrickMap, palette: &[[u8; 4]; 256], scale: u32) -> Op
     // No depth buffer: a voxel hides another only when no coordinate of it is smaller, and
     // `for_each` reaches such a voxel later (bricks and their cells both run z, y, x
     // upwards), so painting in its order paints back to front.
+    let open = |p: [i32; 3]| map.get(p[0], p[1], p[2]) == 0 || !keep(p);
     map.for_each(|p, c| {
+        if !keep(p) {
+            return;
+        }
         let [x, y, z] = [0, 1, 2].map(|a| (p[a] - lo[a]) as i64);
         let (px, py) = (ox + 2 * s * (x - z), oy + s * (x + z) - 2 * s * y);
         let [r, g, b, _] = palette[c as usize];
         let shade = |n: u16| [r, g, b].map(|v| (v as u16 * n / 5) as u8);
         let (top, right, left) = (shade(5), shade(4), shade(3));
-        let show = [
-            map.get(p[0], p[1] + 1, p[2]) == 0,
-            map.get(p[0] + 1, p[1], p[2]) == 0,
-            map.get(p[0], p[1], p[2] + 1) == 0,
-        ];
+        let show = [open([p[0], p[1] + 1, p[2]]), open([p[0] + 1, p[1], p[2]]), open([p[0], p[1], p[2] + 1])];
         for i in -2 * s..2 * s {
             // How far the column is from the voxel's outer edge, in two-pixel steps.
             let step = if i < 0 { (i + 2 * s) / 2 } else { (2 * s - 1 - i) / 2 };

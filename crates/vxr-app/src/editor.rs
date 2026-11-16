@@ -182,6 +182,9 @@ pub struct Editor {
     /// The folder [`Editor::agent_files`] go into as one (an agent's embed) instead of as
     /// loose files.
     pub agent_folder: Option<String>,
+    /// The cells [`Editor::agent_files`] were made from, when they are an export of the
+    /// agent's selection only.
+    pub agent_selection: Option<Vec<[i32; 3]>>,
     /// Where the embed viewer's files come from, set by the host ([`Editor::viewer`]).
     pub embed_viewer: Option<ViewerSource>,
     /// Export sizes this GPU can render.
@@ -342,6 +345,7 @@ impl Editor {
             agent_rendered: None,
             agent_poster: None,
             agent_folder: None,
+            agent_selection: None,
             embed_viewer: None,
             export_fits: [false; 4],
             shape: (0, [0; 3]),
@@ -2281,21 +2285,37 @@ impl Editor {
         }
         self.agent_files.clear();
         self.agent_folder = None;
-        match args.get("kind").and_then(serde_json::Value::as_str) {
+        // The agent says which part it wants: the user's "Only the selection" switch is not
+        // its to read, the selection is its own (the one its `select` made), and a call
+        // with nothing selected is refused rather than widened.
+        let kind = args.get("kind").and_then(serde_json::Value::as_str);
+        let only = match args.get("selection") {
+            None | Some(serde_json::Value::Null) => false,
+            Some(v) => v.as_bool().ok_or("selection: true or false")?,
+        };
+        if only && !matches!(kind, Some("obj" | "slices" | "sprite")) {
+            return Err("selection: only for kind obj, slices and sprite".into());
+        }
+        self.agent_selection = only.then(|| self.agents.selection(conn, &self.scene));
+        let stem = self.part_stem(only);
+        let part = if only { "the selection: " } else { "" };
+        let only = self.agent_selection.clone();
+        let only = only.as_deref();
+        match kind {
             Some("obj") => {
-                let (files, quads) = crate::files::obj_files(&self.scene, &self.export_stem())?;
+                let (files, quads) = crate::files::obj_files(&self.scene, &stem, only)?;
                 self.agent_files = files;
-                Ok(format!("{quads} quads"))
+                Ok(format!("{part}{quads} quads"))
             }
             Some("slices") => {
-                let (png, [w, h], layers) = crate::files::slices_png(&self.scene)?;
-                self.agent_files = vec![(self.slices_name(), png)];
-                Ok(format!("{layers} layers side by side, {w} x {h} pixels"))
+                let (png, [w, h], layers) = crate::files::slices_png(&self.scene, only)?;
+                self.agent_files = vec![(format!("{stem}-slices.png"), png)];
+                Ok(format!("{part}{layers} layers side by side, {w} x {h} pixels"))
             }
             Some("sprite") => {
-                let (png, [w, h]) = crate::files::sprite_png(&self.scene)?;
-                self.agent_files = vec![(self.sprite_name(), png)];
-                Ok(format!("the isometric sprite, {w} x {h} pixels on a transparent background"))
+                let (png, [w, h]) = crate::files::sprite_png(&self.scene, only)?;
+                self.agent_files = vec![(format!("{stem}-sprite.png"), png)];
+                Ok(format!("{part}the isometric sprite, {w} x {h} pixels on a transparent background"))
             }
             Some("render") => {
                 if self.export.is_some() {
@@ -2633,14 +2653,33 @@ impl Editor {
         if n.is_empty() { "vxr" } else { n }.to_string()
     }
 
+    /// The name stem of an OBJ, slices or sprite export: [`Editor::export_stem`], with
+    /// `-selection` for an export of the selection, so it never takes the place of the
+    /// whole scene's export.
+    pub fn part_stem(&self, selection: bool) -> String {
+        format!("{}{}", self.export_stem(), if selection { "-selection" } else { "" })
+    }
+
+    /// The selected voxels, when the OBJ, slices and sprite exports take only those now: the
+    /// Export menu's "Only the selection" is on and some are selected. With nothing
+    /// selected the switch changes nothing, so it is safe to leave on.
+    pub fn exports_selection(&self) -> Option<Vec<[i32; 3]>> {
+        (self.ui.export_selection && self.scene.selected_count() > 0).then(|| self.scene.selection().collect())
+    }
+
+    /// What an export's toast says first when it took only the selection.
+    pub fn export_part(&self) -> &'static str {
+        if self.exports_selection().is_some() { "the selection, " } else { "" }
+    }
+
     /// The file name for the PNG slices export: the scene's name with `-slices.png`.
     pub fn slices_name(&self) -> String {
-        format!("{}-slices.png", self.export_stem())
+        format!("{}-slices.png", self.part_stem(self.exports_selection().is_some()))
     }
 
     /// The file name for the isometric sprite export: the scene's name with `-sprite.png`.
     pub fn sprite_name(&self) -> String {
-        format!("{}-sprite.png", self.export_stem())
+        format!("{}-sprite.png", self.part_stem(self.exports_selection().is_some()))
     }
 
     /// The file name for a render export: the scene's name with `-render.png`.

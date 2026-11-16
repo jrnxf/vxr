@@ -440,6 +440,12 @@ impl Agents {
         Some(if (*at, *reshapes) == made_on { sel.clone() } else { Vec::new() })
     }
 
+    /// Connection `conn`'s selection on `scene` now (map cells): its own once it has made
+    /// one, the user's until then.
+    pub fn selection(&self, conn: u64, scene: &Scene) -> Vec<Cell> {
+        self.selection_of(conn, (scene.at(), scene.reshapes())).unwrap_or_else(|| scene.selection().collect())
+    }
+
     /// Run one tool call from connection `conn`, named `client`, into `review`, the agents'
     /// change under review: an edit is staged there with the agent's own selection (its
     /// lane), drawn as a ghost until the user applies or discards it; a query sees the scene

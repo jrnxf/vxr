@@ -1062,6 +1062,54 @@ async () => {
       await key('Enter');
       await frames();
       step('Cmd-K Export isometric sprite downloads it too', zipName === 'island-sprite.png', `${zipName}`);
+      // Only the selection: with one colour selected and the switch on, the slices and the
+      // OBJ hold those voxels alone, under names of their own; switched off, the whole scene.
+      const toolWas = st().tool;
+      await key('s');
+      await click(mx, my);
+      await frames();
+      const picked = st().selected;
+      await click(...hit('scene-select'));
+      await frames(14);
+      await click(...hit('export-selection'));
+      await frames(3);
+      const stayed = st().fileMenu;
+      zipBlob = null; zipName = null;
+      await click(...hit('export-slices'));
+      await frames();
+      const part = zipBlob ? await slicePixels(zipBlob) : null;
+      step('with a colour selected and Only the selection on, PNG slices downloads island-selection-slices.png: the selected voxels alone in their own box',
+        stayed && picked > 0 && picked < st().voxels && zipName === 'island-selection-slices.png' && part && part.filled === picked
+          && part.w * part.h <= b[0] * b[1] * b[2] && /selection-slices\.png \(the selection, \d+ layers/.test(st().toast || ''),
+        `${zipName} ${part && `${part.w}x${part.h} ${part.filled} pixels`} ${picked} selected, ${st().toast}`);
+      zipBlob = null; zipName = null;
+      await click(...hit('scene-select'));
+      await frames(14);
+      await click(...hit('export-obj'));
+      await frames();
+      const partFiles = zipBlob ? unzip(new Uint8Array(await zipBlob.arrayBuffer())) : {};
+      const partObj = partFiles['island-selection.obj'] ? new TextDecoder().decode(partFiles['island-selection.obj']) : '';
+      const partHeader = partObj.match(/^# vxr OBJ export: (\d+) voxels, (\d+) quads/);
+      step('and OBJ downloads island-selection-obj.zip holding only the selected voxels',
+        zipName === 'island-selection-obj.zip' && Object.keys(partFiles).join(',') === 'island-selection.obj,island-selection.mtl,island-selection.png'
+          && partHeader && +partHeader[1] === picked && partObj.includes('mtllib island-selection.mtl'),
+        `${zipName} ${Object.keys(partFiles)} ${partHeader && partHeader[0]} ${picked} selected`);
+      await click(...hit('scene-select'));
+      await frames(14);
+      await click(...hit('export-selection'));
+      await frames(3);
+      zipBlob = null; zipName = null;
+      await click(...hit('export-slices'));
+      await frames();
+      const whole = zipBlob ? await slicePixels(zipBlob) : null;
+      step('switched off, PNG slices is the whole scene again with the colour still selected',
+        zipName === 'island-slices.png' && whole && whole.filled === st().voxels && picked > 0 && st().selected === picked,
+        `${zipName} ${whole && whole.filled} ${st().selected}`);
+      await key('Escape');
+      const toolKey = { Add: 'a', Erase: 'e', Paint: 'p', Pick: 'i', Select: 's' }[toolWas];
+      if (toolKey) await key(toolKey);
+      await frames();
+      step('Escape deselects and the tool is back', st().selected === 0 && st().tool === toolWas, `${st().selected} ${st().tool} ${toolWas}`);
       // Embed: the row puts the tag on the clipboard inside the click, traces the poster and
       // downloads island-embed.zip: a folder with the page, the scene as a brick scene file,
       // the 1280x800 poster and the viewer's three files as the site serves them.

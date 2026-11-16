@@ -306,37 +306,44 @@ pub fn run_action(ed: &mut Editor, p: &mut dyn Platform, action: Action) {
                 Err(e) => toast(ed, format!("Could not embed: {e}")),
             }
         }
+        Action::ExportSelection => {
+            let now = ed.ui.toggle_export_selection();
+            toast(ed, now);
+        }
         Action::ExportObj => {
             let mut quads = 0;
             let scene = &ed.scene;
-            let made = p.save_all(&ed.export_stem(), &mut |stem| {
-                obj_files(scene, stem).map(|(files, q)| {
+            let (only, part) = (ed.exports_selection(), ed.export_part());
+            let made = p.save_all(&ed.part_stem(only.is_some()), &mut |stem| {
+                obj_files(scene, stem, only.as_deref()).map(|(files, q)| {
                     quads = q;
                     files
                 })
             });
             match made {
-                Ok(Some(name)) => toast(ed, format!("{} {name} ({quads} quads)", p.verb())),
+                Ok(Some(name)) => toast(ed, format!("{} {name} ({part}{quads} quads)", p.verb())),
                 Ok(None) => {}
                 Err(e) => toast(ed, format!("Could not export: {e}")),
             }
         }
         Action::ExportSlices => {
-            let written = slices_png(&ed.scene)
+            let part = ed.export_part();
+            let written = slices_png(&ed.scene, ed.exports_selection().as_deref())
                 .and_then(|(png, size, layers)| Ok((p.save_png(&ed.slices_name(), &png)?, size, layers)));
             match written {
                 Ok((Some(name), [w, h], layers)) => {
-                    toast(ed, format!("{} {name} ({layers} layers, {w}×{h})", p.verb()))
+                    toast(ed, format!("{} {name} ({part}{layers} layers, {w}×{h})", p.verb()))
                 }
                 Ok((None, ..)) => {}
                 Err(e) => toast(ed, format!("Could not export: {e}")),
             }
         }
         Action::ExportSprite => {
-            let written =
-                sprite_png(&ed.scene).and_then(|(png, size)| Ok((p.save_png(&ed.sprite_name(), &png)?, size)));
+            let part = ed.export_part();
+            let written = sprite_png(&ed.scene, ed.exports_selection().as_deref())
+                .and_then(|(png, size)| Ok((p.save_png(&ed.sprite_name(), &png)?, size)));
             match written {
-                Ok((Some(name), [w, h])) => toast(ed, format!("{} {name} ({w}×{h}, transparent)", p.verb())),
+                Ok((Some(name), [w, h])) => toast(ed, format!("{} {name} ({part}{w}×{h}, transparent)", p.verb())),
                 Ok((None, _)) => {}
                 Err(e) => toast(ed, format!("Could not export: {e}")),
             }

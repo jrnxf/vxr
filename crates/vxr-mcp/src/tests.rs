@@ -761,7 +761,33 @@ fn export_writes_the_obj_and_the_slices_under_the_root() {
     assert!(std::fs::read_to_string(d.0.join("out/big.obj")).unwrap().contains("mtllib big.mtl"));
     c.ok("export", json!({"kind": "slices", "path": "s.png"}));
     assert!(d.0.join("s.png").is_file());
+    // Only the selection: refused with nothing selected, then the top layer alone (3x1x3),
+    // in its own box and under names of its own, beside the whole scene's files.
+    let whole = std::fs::read(d.0.join("art/rock-sprite.png")).unwrap();
+    let e = c.err("export", json!({"kind": "slices", "selection": true}));
+    assert!(e.contains("nothing is selected: select voxels first"), "{e}");
+    assert!(!d.0.join("art/rock-selection-slices.png").exists());
+    c.ok("select", json!({"from": [-1, 2, -1], "to": [1, 2, 1]}));
+    let t: Value = serde_json::from_str(&c.ok("export", json!({"kind": "slices", "selection": true}))).unwrap();
+    assert_eq!(t["exported"], json!(["art/rock-selection-slices.png"]));
+    assert_eq!(t["what"], "the selection: 1 layers side by side, 3 x 3 pixels");
+    let t: Value = serde_json::from_str(&c.ok("export", json!({"kind": "sprite", "selection": true}))).unwrap();
+    assert_eq!(t["exported"], json!(["art/rock-selection-sprite.png"]));
+    assert_eq!(t["what"], "the selection: the isometric sprite, 12 x 7 pixels on a transparent background");
+    let t: Value = serde_json::from_str(&c.ok("export", json!({"kind": "obj", "selection": true}))).unwrap();
+    assert_eq!(t["exported"], json!(["art/rock-selection.obj", "art/rock-selection.mtl", "art/rock-selection.png"]));
+    assert_eq!(t["what"], "the selection: 6 quads");
+    // A model of its own: one voxel tall, centred and on the ground as every OBJ is.
+    let part = std::fs::read_to_string(d.0.join("art/rock-selection.obj")).unwrap();
+    let mut ys: Vec<&str> = part.lines().filter_map(|l| l.strip_prefix("v ")?.split(' ').nth(1)).collect();
+    ys.sort_unstable();
+    ys.dedup();
+    assert_eq!(ys, ["0", "1"], "{part}");
+    assert_eq!(std::fs::read(d.0.join("art/rock-sprite.png")).unwrap(), whole, "the whole scene's sprite is untouched");
+    c.ok("select", json!({"none": true}));
     for (args, says) in [
+        (json!({"kind": "render", "selection": true}), "selection: only for kind obj, slices and sprite"),
+        (json!({"kind": "obj", "selection": "yes"}), "selection: true or false"),
         (json!({"kind": "render"}), "kind render is the path-traced picture"),
         (json!({"kind": "turntable"}), "kind turntable is a path-traced picture per frame"),
         (json!({"kind": "embed"}), "kind embed is the folder for a web page"),

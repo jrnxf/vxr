@@ -898,6 +898,8 @@ struct Fake {
     /// The last library export saved.
     zip: Vec<u8>,
     obj: Vec<String>,
+    /// The last PNG handed over.
+    png: Vec<u8>,
     /// The desktop's files, as the projects store sees them: each save changes its file there.
     disk: Option<vxr_app::projects::Memory>,
     /// The session token kept, as the desktop keeps it in the keychain.
@@ -943,6 +945,7 @@ impl Platform for Fake {
     }
     fn save_png(&mut self, name: &str, bytes: &[u8]) -> Result<Option<String>, String> {
         self.calls.push(format!("save_png {name} {}", bytes.starts_with(b"\x89PNG")));
+        self.png = bytes.to_vec();
         Ok((!self.cancel).then(|| name.to_string()))
     }
     fn save_all(
@@ -1186,6 +1189,66 @@ fn host_actions() -> Result<(), String> {
             && toast.ends_with(", transparent)"),
         format!("the isometric sprite goes out as a PNG named for the scene ({:?}, {toast})", p.calls.last()),
     )?;
+    // Only the selection: the switch changes nothing while nothing is selected, then the
+    // OBJ, the slices and the sprite take the selected voxels alone under names of their own.
+    use vxr_app::files::{slices_png, sprite_png};
+    run_action(&mut s.ed, &mut p, Action::ExportSelection);
+    s.frames(2);
+    let said = s.ed.ui.toast_text().unwrap_or_default().to_string();
+    run_action(&mut s.ed, &mut p, Action::ExportSlices);
+    check(
+        s.ed.ui.export_selection
+            && said.contains("once voxels are selected")
+            && p.calls.last().is_some_and(|c| c == "save_png chosen-slices.png true")
+            && p.png == slices_png(&s.ed.scene, None)?.0,
+        format!("Only the selection, with nothing selected, still exports the whole scene ({said})"),
+    )?;
+    s.ed.scene.select_color(20, vxr_core::select::Mode::Replace);
+    s.frames(2);
+    let roof: Vec<[i32; 3]> = s.ed.scene.selection().collect();
+    let total = s.voxels();
+    run_action(&mut s.ed, &mut p, Action::ExportSlices);
+    s.frames(2);
+    let toast = s.ed.ui.toast_text().unwrap_or_default().to_string();
+    let (want, [w, h], layers) = slices_png(&s.ed.scene, Some(&roof))?;
+    check(
+        p.calls.last().is_some_and(|c| c == "save_png chosen-selection-slices.png true")
+            && p.png == want
+            && layers == 2
+            && (roof.len() as u64) < total
+            && toast == format!("Saved chosen-selection-slices.png (the selection, 2 layers, {w}×{h})"),
+        format!("with the roof selected the slices are its {} voxels alone, in its own box: {toast}", roof.len()),
+    )?;
+    run_action(&mut s.ed, &mut p, Action::ExportSprite);
+    check(
+        p.calls.last().is_some_and(|c| c == "save_png chosen-selection-sprite.png true")
+            && p.png == sprite_png(&s.ed.scene, Some(&roof))?.0
+            && p.png != sprite_png(&s.ed.scene, None)?.0,
+        format!("and the sprite is the roof alone ({:?})", p.calls.last()),
+    )?;
+    p.stem = None;
+    run_action(&mut s.ed, &mut p, Action::ExportObj);
+    s.frames(2);
+    let toast = s.ed.ui.toast_text().unwrap_or_default().to_string();
+    let quads = vxr_app::files::obj_files(&s.ed.scene, "x", Some(&roof))?.1;
+    check(
+        p.calls.last().is_some_and(|c| c == "save_all chosen-selection")
+            && p.obj == ["chosen-selection.obj", "chosen-selection.mtl", "chosen-selection.png"]
+            && toast == format!("Saved chosen-selection.obj (the selection, {quads} quads)"),
+        format!("and the OBJ is the roof alone, under a name of its own: {toast}"),
+    )?;
+    run_action(&mut s.ed, &mut p, Action::ExportSelection);
+    s.frames(2);
+    let said = s.ed.ui.toast_text().unwrap_or_default().to_string();
+    run_action(&mut s.ed, &mut p, Action::ExportSprite);
+    check(
+        !s.ed.ui.export_selection
+            && said.contains("take the whole scene")
+            && p.calls.last().is_some_and(|c| c == "save_png chosen-sprite.png true")
+            && p.png == sprite_png(&s.ed.scene, None)?.0,
+        format!("switched off, the exports take the whole scene again, the roof still selected ({said})"),
+    )?;
+    s.ed.scene.deselect();
     s.ed.ui.theme = vxr_app::theme::ThemeChoice::from_id("nord").unwrap_or_default();
     run_action(&mut s.ed, &mut p, Action::Theme);
     check(
@@ -4995,6 +5058,26 @@ fn export(s: &mut Shot, dir: &Path) -> Result<(), String> {
     s.frames_with(1, vec![egui::Event::Text("export isometric sprite".into())]);
     s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
     check(s.host.contains(&Action::ExportSprite), "Cmd-K Export isometric sprite asks the host too".into())?;
+    // Only the selection is a switch: its row flips it and keeps the menu open.
+    s.host.clear();
+    s.open_file_row("export-selection")?;
+    s.frames(2);
+    let on = s.ed.ui.export_selection && s.ed.ui.file_menu;
+    s.save_png(&dir.join("app-2x-export-selection.png"))?;
+    s.ui_click("export-selection")?;
+    s.frames(2);
+    check(
+        on && !s.ed.ui.export_selection && s.ed.ui.file_menu && s.host.is_empty(),
+        "its Only the selection row switches on and off, keeps the menu open and exports nothing".into(),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("export only the selection".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    check(
+        s.host.contains(&Action::ExportSelection),
+        "Cmd-K Export only the selection asks the host to switch it".into(),
+    )?;
 
     // The slices the native host writes: one tile per layer, every voxel at its cell.
     let decode = |bytes: &[u8]| -> Result<(u32, u32, Vec<u8>), String> {
@@ -5003,7 +5086,7 @@ fn export(s: &mut Shot, dir: &Path) -> Result<(), String> {
         let info = r.next_frame(&mut px).map_err(|e| e.to_string())?;
         Ok((info.width, info.height, px))
     };
-    let (png_bytes, _, layers) = slices_png(&s.ed.scene)?;
+    let (png_bytes, _, layers) = slices_png(&s.ed.scene, None)?;
     std::fs::write(dir.join(s.ed.slices_name()), &png_bytes).map_err(|e| e.to_string())?;
     let (w, h, px) = decode(&png_bytes)?;
     let size = s.ed.scene.bounds().size;
@@ -5028,7 +5111,7 @@ fn export(s: &mut Shot, dir: &Path) -> Result<(), String> {
     // The sprite the native host writes: the voxels' box seen from the front-right-top
     // corner, every pixel a shade of a colour in use or clear, and the voxel nearest the
     // eye, which nothing hides, as a whole pixel-art cube at its place.
-    let (png_bytes, _) = sprite_png(&s.ed.scene)?;
+    let (png_bytes, _) = sprite_png(&s.ed.scene, None)?;
     std::fs::write(dir.join(s.ed.sprite_name()), &png_bytes).map_err(|e| e.to_string())?;
     let (w, h, px) = decode(&png_bytes)?;
     let (mut lo, mut hi) = ([i32::MAX; 3], [i32::MIN; 3]);
@@ -5074,7 +5157,7 @@ fn export(s: &mut Shot, dir: &Path) -> Result<(), String> {
 
     // What the native host writes, and what it holds.
     let stem = s.ed.export_stem();
-    let (files, quads) = obj_files(&s.ed.scene, &stem)?;
+    let (files, quads) = obj_files(&s.ed.scene, &stem, None)?;
     let out = dir.join("obj");
     std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
     for (name, bytes) in &files {
@@ -5120,7 +5203,7 @@ fn export(s: &mut Shot, dir: &Path) -> Result<(), String> {
     w.frames(2);
     let all = w.ed.scene.world_voxels(false);
     let shown = w.ed.scene.world_voxels(true);
-    let (files, quads) = obj_files(&w.ed.scene, &w.ed.export_stem())?;
+    let (files, quads) = obj_files(&w.ed.scene, &w.ed.export_stem(), None)?;
     let (_, nf, area) = obj_stats(&String::from_utf8_lossy(&files[0].1))?;
     check(
         nf == quads && area as usize == visible_faces(&shown) && shown.len() < all.len(),
@@ -5131,12 +5214,12 @@ fn export(s: &mut Shot, dir: &Path) -> Result<(), String> {
             all.len() - shown.len()
         ),
     )?;
-    let (png_bytes, _, _) = slices_png(&w.ed.scene)?;
+    let (png_bytes, _, _) = slices_png(&w.ed.scene, None)?;
     let (_, _, px) = decode(&png_bytes)?;
     let filled = px.chunks(4).filter(|p| p[3] != 0).count();
     check(filled == shown.len(), format!("in world mode 22-world-slices.png holds its {filled} shown voxels"))?;
     // The sprite is the box of the shown voxels only.
-    let (_, [sw, sh]) = sprite_png(&w.ed.scene)?;
+    let (_, [sw, sh]) = sprite_png(&w.ed.scene, None)?;
     let ext = [0, 1, 2].map(|a| {
         let at = shown.keys().map(|p| p[a]);
         (at.clone().max().unwrap_or(0) + 1 - at.min().unwrap_or(0)) as u32
@@ -8075,11 +8158,58 @@ fn agents_look_render(
     check(!e && downloads.join("house-slices.png").is_file(), format!("the PNG slices land in Downloads: {t}"))?;
     let (t, e) = s.agent_call(live, claude, "export", json!({"kind": "sprite"}));
     let png = std::fs::read(downloads.join("house-sprite.png")).unwrap_or_default();
-    let want = vxr_app::files::sprite_png(&s.ed.scene).map(|(png, _)| png).unwrap_or_default();
+    let want = vxr_app::files::sprite_png(&s.ed.scene, None).map(|(png, _)| png).unwrap_or_default();
     check(
         !e && !png.is_empty() && png == want && t.contains("house-sprite.png") && t.contains("transparent background"),
         format!("the isometric sprite lands in Downloads, the file the Export menu makes: {t}"),
     )?;
+    // Only the selection: the agent's own, never the user's, and refused with none.
+    let user = s.ed.scene.selected_count();
+    let (none, refused) = s.agent_call(live, claude, "export", json!({"kind": "sprite", "selection": true}));
+    let (bad, bad_kind) = s.agent_call(live, claude, "export", json!({"kind": "render", "selection": true}));
+    check(
+        user == 0
+            && refused
+            && none.contains("nothing is selected: select voxels first")
+            && bad_kind
+            && bad.contains("only for kind obj, slices and sprite")
+            && !downloads.join("house-selection-sprite.png").exists(),
+        format!("export of the selection with nothing selected is refused and writes nothing: {none} / {bad}"),
+    )?;
+    let (_, e0) = s.agent_call(live, claude, "select", json!({"color": 20}));
+    let mut roof = Vec::new();
+    s.ed.scene.for_each_voxel(|p, c| {
+        if c == 20 {
+            roof.push(p);
+        }
+    });
+    let (t, e) = s.agent_call(live, claude, "export", json!({"kind": "sprite", "selection": true}));
+    let png = std::fs::read(downloads.join("house-selection-sprite.png")).unwrap_or_default();
+    let want = vxr_app::files::sprite_png(&s.ed.scene, Some(&roof)).map(|(png, _)| png).unwrap_or_default();
+    check(
+        !e0 && !e
+            && !roof.is_empty()
+            && png == want
+            && t.contains("the selection: ")
+            && s.ed.scene.selected_count() == 0
+            && !s.ed.ui.export_selection,
+        format!(
+            "after its select of the roof, the sprite of the selection is the roof alone and the user's selection stays empty: {t}"
+        ),
+    )?;
+    let (t, e) = s.agent_call(live, claude, "export", json!({"kind": "obj", "selection": true}));
+    let (t2, e2) = s.agent_call(live, claude, "export", json!({"kind": "obj", "selection": true}));
+    let quads = vxr_app::files::obj_files(&s.ed.scene, "x", Some(&roof)).map(|f| f.1).unwrap_or(0);
+    let again = std::fs::read_to_string(downloads.join("house-selection-1.obj")).unwrap_or_default();
+    check(
+        !e && !e2
+            && t.contains(&format!("the selection: {quads} quads"))
+            && downloads.join("house-selection.obj").is_file()
+            && again.contains("mtllib house-selection-1.mtl\n")
+            && again.matches("\nf ").count() == quads,
+        format!("its OBJ is the roof alone, and a second one beside it is still the roof: {t} / {t2}"),
+    )?;
+    let _ = s.agent_call(live, claude, "select", json!({"none": true}));
     let (t, e) = s.agent_call(live, claude, "export", json!({"kind": "render"}));
     let png = std::fs::read(downloads.join("house-render.png")).unwrap_or_default();
     let size = png::Decoder::new(std::io::Cursor::new(png))

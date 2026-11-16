@@ -403,7 +403,7 @@ impl Page {
                 (format!("{folder}.zip"), zip(&inside))
             }
             (None, [one]) => one.clone(),
-            (None, _) => (format!("{}-obj.zip", ed.export_stem()), zip(&files)),
+            (None, _) => (format!("{}-obj.zip", ed.part_stem(ed.agent_selection.is_some())), zip(&files)),
         };
         let ctx = ed.ctx.clone();
         ed.ui.toast(&ctx, format!("{client} exported {}", file.0));

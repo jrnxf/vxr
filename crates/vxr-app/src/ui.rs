@@ -263,6 +263,8 @@ pub enum Action {
     ExportSlices,
     /// Export the isometric sprite: one PNG of pixel art on a transparent background.
     ExportSprite,
+    /// Flip "Only the selection" for the OBJ, slices and sprite exports, and say so.
+    ExportSelection,
     /// Show `rgba` in palette slot `slot` now, inside the open colour edit.
     Recolor {
         slot: u8,
@@ -714,6 +716,9 @@ pub struct Hybrid {
     pub tour: Tour,
     /// The file menu under the scene name (New, Open, Save, Export) is open.
     pub file_menu: bool,
+    /// The Export menu's "Only the selection": the OBJ, slices and sprite exports take the
+    /// selected voxels alone while some are selected.
+    pub export_selection: bool,
     /// The picked theme (System follows the system's light or dark setting), and the Theme
     /// menu under the top bar's theme button.
     pub theme: ThemeChoice,
@@ -1021,6 +1026,7 @@ const COMMANDS: &[Command] = &[
     Command { label: "Export OBJ", keys: &[], run: |h| h.actions.push(Action::ExportObj) },
     Command { label: "Export PNG slices", keys: &[], run: |h| h.actions.push(Action::ExportSlices) },
     Command { label: "Export isometric sprite", keys: &[], run: |h| h.actions.push(Action::ExportSprite) },
+    Command { label: "Export only the selection", keys: &[], run: |h| h.actions.push(Action::ExportSelection) },
     Command { label: "Ask AI…", keys: &["Tab"], run: |h| h.open_ask_bar("") },
     Command { label: "Organize into objects (AI)", keys: &[], run: |h| h.organize() },
     Command { label: "Assistant panel", keys: &["⌘", "J"], run: |h| h.toggle_ai() },
@@ -1077,6 +1083,7 @@ impl Hybrid {
             help: Help::default(),
             tour: Tour::default(),
             file_menu: false,
+            export_selection: false,
             theme: ThemeChoice::default(),
             theme_menu: false,
             styled: None,
@@ -2851,6 +2858,8 @@ impl Hybrid {
             Head(&'static str),
             Sep,
             Row(&'static str, char, &'static str, &'static str),
+            /// A switch: its row stays open when clicked and shows a tick while on.
+            Check(&'static str, &'static str, bool, String),
         }
         let key = Id::unique("file-menu-grow");
         if !self.file_menu {
@@ -2867,15 +2876,17 @@ impl Hybrid {
             Entry::Head("EXPORT"),
             Entry::Row("export-render", icon::IMAGE_DOWN, "Render PNG", "R"),
             Entry::Row("export-turntable", icon::REFRESH_CW, "Turntable", "PNG frames, animation"),
+            Entry::Row("export-embed", icon::CODE, "Embed for a web page", "<voxel-scene>"),
+            Entry::Sep,
             Entry::Row("export-obj", icon::BOX, "OBJ with palette texture", ".obj .mtl .png"),
             Entry::Row("export-slices", icon::LAYERS, "PNG slices", ".png"),
             Entry::Row("export-sprite", icon::AXIS_3D, "Isometric sprite", "pixel art .png"),
-            Entry::Row("export-embed", icon::CODE, "Embed for a web page", "<voxel-scene>"),
+            Entry::Check("export-selection", "Only the selection", self.export_selection, self.selection_hint()),
         ];
         let height = |e: &Entry| match e {
             Entry::Head(_) => 26.0,
             Entry::Sep => 9.0,
-            Entry::Row(..) => 32.0,
+            Entry::Row(..) | Entry::Check(..) => 32.0,
         };
         let screen = ctx.content_rect();
         let button = self.hits.get("scene-select").copied().unwrap_or(Rect::NOTHING);
@@ -2885,6 +2896,7 @@ impl Hybrid {
         let rect = Rect::from_min_size(pos2(x, 12.0 + 44.0 + 6.0), vec2(w, h));
         self.hits.insert("file-menu".into(), rect);
         let mut run = None;
+        let mut flip = false;
         let mut hits = Vec::new();
         Self::panel_filled(ctx, "file-menu", rect, Order::Foreground, th().panel_solid, |ui, rect| {
             ui.allocate_rect(rect, Sense::click());
@@ -2930,6 +2942,32 @@ impl Hybrid {
                             run = Some(*id);
                         }
                     }
+                    Entry::Check(id, label, on, hint) => {
+                        let r = Rect::from_min_size(pos2(rect.left() + 6.0, y), vec2(rect.width() - 12.0, 32.0));
+                        let resp = ui.interact(r, Id::unique(*id), Sense::click());
+                        hits.push((id.to_string(), r));
+                        let plate = pressed(r, &resp);
+                        let p = ui.painter();
+                        if resp.hovered() {
+                            p.rect_filled(plate, CornerRadius::same(7), th().hover);
+                        }
+                        let cy = r.center().y;
+                        // The tick's box sits where the other rows have their icon.
+                        let b = Rect::from_center_size(pos2(r.left() + 16.0, cy), vec2(14.0, 14.0));
+                        if *on {
+                            p.rect_filled(b, CornerRadius::same(4), th().accent);
+                            p.text(b.center(), Align2::CENTER_CENTER, icon::CHECK, icon_font(11.0), th().on_accent);
+                        } else {
+                            p.rect_stroke(b, CornerRadius::same(4), Stroke::new(1.0, th().faint), StrokeKind::Inside);
+                        }
+                        let name =
+                            p.text(pos2(r.left() + 34.0, cy), Align2::LEFT_CENTER, *label, sans(13.0), th().text);
+                        let g = p.layout_no_wrap(hint.clone(), sans(12.0), th().faint);
+                        if r.right() - 10.0 - g.size().x >= name.right() + 8.0 {
+                            p.galley(pos2(r.right() - 10.0 - g.size().x, cy - g.size().y / 2.0), g, th().faint);
+                        }
+                        flip |= resp.clicked();
+                    }
                 }
                 y += eh;
             }
@@ -2956,6 +2994,9 @@ impl Hybrid {
             Some("export-sprite") => self.actions.push(Action::ExportSprite),
             Some("export-embed") => self.actions.push(Action::Embed),
             _ => {}
+        }
+        if flip {
+            self.export_selection = !self.export_selection;
         }
         if run.is_some() || outside {
             self.file_menu = false;
@@ -3894,6 +3935,26 @@ impl Hybrid {
     }
 
     /// Open or close the file menu (the scene name).
+    /// What the Export menu's "Only the selection" row says about the selection.
+    fn selection_hint(&self) -> String {
+        match self.selected {
+            0 => "nothing selected".into(),
+            1 => "1 voxel".into(),
+            n => format!("{} voxels", group_thousands(n as u64)),
+        }
+    }
+
+    /// Cmd-K "Export only the selection": flip the Export menu's switch. Returns what the
+    /// exports take now, to say it, since no menu is open to show it.
+    pub fn toggle_export_selection(&mut self) -> String {
+        self.export_selection = !self.export_selection;
+        match (self.export_selection, self.selected) {
+            (false, _) => "OBJ, slices and sprite exports take the whole scene".to_string(),
+            (true, 0) => "OBJ, slices and sprite exports take only the selection, once voxels are selected".to_string(),
+            (true, _) => format!("OBJ, slices and sprite exports take only the selection ({})", self.selection_hint()),
+        }
+    }
+
     pub fn toggle_file_menu(&mut self) {
         self.menu_instant = false;
         self.cmdk = None;
