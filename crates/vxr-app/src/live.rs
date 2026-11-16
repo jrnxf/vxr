@@ -200,10 +200,10 @@ impl Live {
         let files = std::mem::take(&mut ed.agent_files);
         std::fs::create_dir_all(&self.downloads).map_err(|e| format!("could not write into Downloads: {e}"))?;
         let ctx = ed.ctx.clone();
-        // An embed is one new folder, never over one there ("x-embed-1").
+        // An embed or a turntable is one new folder, never over one there ("x-embed-1").
         if let Some(folder) = ed.agent_folder.take() {
             let folder = crate::embed::write_folder(&self.downloads, &folder, &files)
-                .map_err(|e| format!("could not write the embed into Downloads: {e}"))?;
+                .map_err(|e| format!("could not write the folder {folder} into Downloads: {e}"))?;
             let dir = self.downloads.join(&folder);
             let written: Vec<String> = files.iter().map(|f| dir.join(&f.0).to_string_lossy().into_owned()).collect();
             ed.ui.toast(&ctx, format!("{client} exported the folder {folder} into Downloads"));

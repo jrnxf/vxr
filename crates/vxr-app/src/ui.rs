@@ -13,7 +13,7 @@ use std::sync::Arc;
 use vxr_core::material::{Kind, Material};
 
 use crate::color::{Hsv, hex, parse_hex};
-use crate::render::{EXPORT_SIZES, RenderSettings, SPP_CHOICES};
+use crate::render::{EXPORT_SIZES, RenderSettings, SPP_CHOICES, TURNTABLE_FRAMES};
 use crate::theme::{self, Theme, ThemeChoice, th};
 
 mod account;
@@ -287,6 +287,10 @@ pub enum Action {
     Exported,
     /// For the host: the embed's poster is traced; take it from `Editor::embedded`.
     Embedded,
+    /// Start a turntable export (a PNG per frame of one turn) with the Render panel's settings.
+    ExportTurntable,
+    /// For the host: a turntable finished; take its frames from `Editor::turned`.
+    Turned,
     /// Move, rotate, flip or loop the selection, or the whole model when nothing is selected.
     Transform(Transform),
     SelectAll,
@@ -619,6 +623,10 @@ const SWATCH_ROWS: f32 = 8.0;
 /// Swatches to a row.
 const PALETTE_COLS: usize = 8;
 
+/// A render export in progress: its size, samples per pixel so far and the target, and a
+/// turntable's frame (from 1) and count of frames.
+pub type Exporting = ((u32, u32), f32, u32, Option<(u32, u32)>);
+
 /// Readouts for the stats corner.
 #[derive(Clone, Debug, Default)]
 pub struct Stats {
@@ -633,8 +641,8 @@ pub struct Stats {
     pub selected: usize,
     /// The render corner's samples per pixel and whether it is still sampling, if shown.
     pub render: Option<(f32, bool)>,
-    /// A render export in progress: its size, samples per pixel so far and the target.
-    pub export: Option<((u32, u32), f32, u32)>,
+    /// A render export in progress.
+    pub export: Option<Exporting>,
     /// Export sizes this GPU can render (by `EXPORT_SIZES` index).
     pub export_fits: [bool; 4],
 }
@@ -1007,6 +1015,7 @@ const COMMANDS: &[Command] = &[
     Command { label: "Render settings", keys: &["R"], run: |h| h.toggle_render_panel() },
     Command { label: "Full render view", keys: &[], run: |h| h.toggle_full_render() },
     Command { label: "Export PNG", keys: &[], run: |h| h.actions.push(Action::ExportPng) },
+    Command { label: "Export turntable", keys: &[], run: |h| h.actions.push(Action::ExportTurntable) },
     Command { label: "Export OBJ", keys: &[], run: |h| h.actions.push(Action::ExportObj) },
     Command { label: "Export PNG slices", keys: &[], run: |h| h.actions.push(Action::ExportSlices) },
     Command { label: "Ask AI…", keys: &["Tab"], run: |h| h.open_ask_bar("") },
@@ -2854,6 +2863,7 @@ impl Hybrid {
             Entry::Sep,
             Entry::Head("EXPORT"),
             Entry::Row("export-render", icon::IMAGE_DOWN, "Render PNG", "R"),
+            Entry::Row("export-turntable", icon::REFRESH_CW, "Turntable", "PNG frames"),
             Entry::Row("export-obj", icon::BOX, "OBJ with palette texture", ".obj .mtl .png"),
             Entry::Row("export-slices", icon::LAYERS, "PNG slices", ".png"),
             Entry::Row("export-embed", icon::CODE, "Embed for a web page", "<voxel-scene>"),
@@ -2936,6 +2946,7 @@ impl Hybrid {
                     self.toggle_render_panel();
                 }
             }
+            Some("export-turntable") => self.actions.push(Action::ExportTurntable),
             Some("export-obj") => self.actions.push(Action::ExportObj),
             Some("export-slices") => self.actions.push(Action::ExportSlices),
             Some("export-embed") => self.actions.push(Action::Embed),
@@ -5170,7 +5181,10 @@ impl Hybrid {
         self.render_dock = Some(corner);
         self.hits.insert("render".into(), rect);
         let label = match s.export {
-            Some(((w, h), done, of)) => format!("Exporting {w}×{h} · {:.0}/{of} spp", done.floor()),
+            Some(((w, h), done, of, None)) => format!("Exporting {w}×{h} · {:.0}/{of} spp", done.floor()),
+            Some((_, done, of, Some((frame, frames)))) => {
+                format!("Turntable {frame}/{frames} · {:.0}/{of} spp", done.floor())
+            }
             None => format!("{:.0} spp{}", spp.floor(), if live { " · live" } else { "" }),
         };
         let g = ctx.fonts_mut(|f| f.layout_no_wrap(label, sans_medium(10.5), th().text));
@@ -5252,14 +5266,14 @@ impl Hybrid {
         }
         let w = 232.0;
         let row = 34.0;
-        let h = 12.0 + 15.0 + 10.0 + 9.0 * row + 28.0 + 8.0 + 28.0 + 12.0 + 2.0 * (14.0 + 28.0 + 10.0) + 32.0 + 12.0;
+        let h = 12.0 + 15.0 + 10.0 + 9.0 * row + 28.0 + 8.0 + 28.0 + 12.0 + 3.0 * (14.0 + 28.0 + 10.0) + 32.0 + 12.0;
         let right = self.render_dock.map_or(self.aside_right(screen) + 8.0, |r| r.left()) - 8.0;
         let bottom = self.render_dock.map_or(screen.bottom() - 62.0, |r| r.bottom());
         let rect = Rect::from_min_size(pos2(right - w, (bottom - h).max(TOP)), vec2(w, h));
         self.hits.insert("render-panel".into(), rect);
         let mut rs = self.render.clone();
         let mut hits = Vec::new();
-        let (mut close, mut export) = (false, false);
+        let (mut close, mut export, mut turntable) = (false, false, false);
         let mut hex_text = std::mem::take(&mut self.sun_hex);
         Self::panel(ctx, "render-panel", rect, Order::Middle, |ui, rect| {
             let inner = rect.shrink(12.0);
@@ -5344,9 +5358,11 @@ impl Hybrid {
                 rs.physical_sky = !rs.physical_sky;
             }
             next(12.0);
-            // Samples (where the corner stops, and what an export traces) and export size.
+            // Samples (where the corner stops, and what an export traces), export size and
+            // the turntable's count of frames.
             let spp_labels = SPP_CHOICES.map(|n| if n >= 1024 { format!("{}K", n / 1024) } else { n.to_string() });
             let size_labels = EXPORT_SIZES.map(|(_, h)| if h >= 2160 { "4K".to_string() } else { format!("{h}p") });
+            let frame_labels = TURNTABLE_FRAMES.map(|n| n.to_string());
             let n = s.export.map_or(String::new(), |_| " (exporting)".into());
             for (name, names, label, labels, sel, ok) in [
                 (
@@ -5365,6 +5381,14 @@ impl Hybrid {
                     &mut rs.size,
                     s.export_fits,
                 ),
+                (
+                    "rs-frames",
+                    ["rs-frames0", "rs-frames1", "rs-frames2", "rs-frames3"],
+                    "Turntable frames".to_string(),
+                    &frame_labels,
+                    &mut rs.frames,
+                    [true; 4],
+                ),
             ] {
                 let lr = next(14.0);
                 p.text(lr.left_center(), Align2::LEFT_CENTER, label, sans(12.0), th().muted);
@@ -5372,22 +5396,35 @@ impl Hybrid {
                     let (w, h) = EXPORT_SIZES[*sel];
                     p.text(lr.right_center(), Align2::RIGHT_CENTER, format!("{w}×{h}"), mono(11.0), th().faint);
                 }
+                if name == "rs-frames" {
+                    let step = 360.0 / TURNTABLE_FRAMES[*sel] as f32;
+                    p.text(lr.right_center(), Align2::RIGHT_CENTER, format!("{step}° a frame"), mono(11.0), th().faint);
+                }
                 let r = next(28.0);
                 if let Some(k) = segmented(ui, r, &names, labels, *sel, &ok, mono(11.5), &mut hits) {
                     *sel = k;
                 }
                 next(10.0);
             }
-            // Export PNG, the panel's one primary action (the Embed button's look).
-            let r = next(32.0);
+            // Export PNG, the panel's one primary action (the Embed button's look), with the
+            // turntable beside it; a running export takes the whole row to show how far it is.
+            let mut r = next(32.0);
+            if s.export.is_none() {
+                let t = Rect::from_min_max(pos2(r.right() - 92.0, r.top()), r.max);
+                r.set_right(t.left() - 6.0);
+                hits.push(("rs-turntable", t));
+                turntable = small_button(ui, t, icon::REFRESH_CW, "Turntable", "rs-turntable", false).clicked();
+            }
             hits.push(("rs-export", r));
             let resp = ui.interact(r, Id::unique("rs-export"), Sense::click());
             let ink = th().on_accent;
             let p = ui.painter();
             let label = match s.export {
-                Some((_, done, of)) => {
+                Some((_, done, of, frame)) => {
                     p.rect(r, CornerRadius::same(8), th().accent_bg, Stroke::new(1.0, th().line2), StrokeKind::Inside);
+                    // A turntable's share is its finished frames plus this frame's samples.
                     let k = (done / of as f32).clamp(0.0, 1.0);
+                    let k = frame.map_or(k, |(frame, frames)| ((frame - 1) as f32 + k) / frames as f32);
                     let fill = Rect::from_min_size(r.min, vec2(r.width() * k, r.height()));
                     p.rect_filled(fill, CornerRadius::same(8), th().accent.gamma_multiply(0.45));
                     format!("Cancel export · {:.0}%", k * 100.0)
@@ -5422,6 +5459,9 @@ impl Hybrid {
         self.render = rs;
         if export {
             self.actions.push(if s.export.is_some() { Action::CancelExport } else { Action::ExportPng });
+        }
+        if turntable {
+            self.actions.push(Action::ExportTurntable);
         }
         if close {
             self.render_panel = false;

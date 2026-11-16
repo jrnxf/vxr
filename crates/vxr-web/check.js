@@ -918,6 +918,45 @@ async () => {
       URL.createObjectURL = realUrl;
       HTMLAnchorElement.prototype.click = realA;
     }
+    // The turntable: 8 frames beside Export PNG download as one zip of numbered PNGs, and a
+    // tab refuses a turntable too large to hold before it traces anything.
+    {
+      let blob = null, name = null;
+      URL.createObjectURL = (b) => { blob = b; return realUrl.call(URL, b); };
+      HTMLAnchorElement.prototype.click = function () { name = this.download; };
+      try {
+        await click(...hit('rs-frames0'));
+        await click(...hit('rs-turntable'));
+        await frames(2);
+        const first = st().render.frame;
+        const row = !hit('rs-turntable');
+        for (let i = 0; i < 30000 && !name; i++) await frames(1);
+        const files = blob ? unzip(new Uint8Array(await blob.arrayBuffer())) : {};
+        const names = Object.keys(files);
+        const want = [1, 2, 3, 4, 5, 6, 7, 8].map((i) => `island-turntable/island-0${i}.png`);
+        const sized = names.every((n) => { const v = new DataView(files[n].buffer, files[n].byteOffset); return v.getUint32(0) === 0x89504e47 && v.getUint32(16) === 1280 && v.getUint32(20) === 720; });
+        const differ = names.every((n, i) => names.every((m, j) => i === j || !same(files[n], files[m])));
+        step('Turntable renders 8 frames and downloads island-turntable.zip: one folder of numbered 1280x720 PNGs',
+          first && first[0] === 1 && first[1] === 8 && row && name === 'island-turntable.zip' && names.join(',') === want.join(',') && sized && differ
+            && st().toast === 'Downloaded island-turntable.zip (8 frames)' && st().render.export === null && !!hit('rs-turntable'),
+          `${name} ${names} ${JSON.stringify(first)} ${st().toast}`);
+        name = null;
+        const big = hit('rs-size3');
+        await click(...big);
+        await click(...hit('rs-frames3'));
+        await click(...hit('rs-turntable'));
+        await frames(2);
+        const refused = st().toast;
+        const idle = st().render.export === null;
+        if (!idle) await click(...hit('rs-export'));
+        step('64 frames of 4K are refused before any is traced, with what to pick', idle && refused === 'Could not export: 64 frames of 3840×2160 are too much to hold here: pick 16 frames or fewer, or a smaller size' && !name, refused);
+        await click(...hit('rs-size0'));
+        await click(...hit('rs-frames2'));
+      } finally {
+        URL.createObjectURL = realUrl;
+        HTMLAnchorElement.prototype.click = realA;
+      }
+    }
     await click(...hit('rs-spp2'));
     await key('Escape');
     step('Escape closes the Render panel', !st().render.panel && st().render.maxSpp === 1024 && near(st().render.exposure, 1), JSON.stringify(st().render));

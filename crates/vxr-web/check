@@ -68,7 +68,7 @@ axi() { chrome-devtools-axi "$@"; }
 forget() { axi eval "async () => { window.vxr?.forget_projects(); await window.vxrProjects?.clear(); return 'ok' }" >/dev/null || true; }
 # The landing page and the boot skeleton (check-landing.js): this profile's first visit, then
 # its returning and deep-link visits, before anything else opens the page. The first visit holds
-# the wasm back for 6 s, so the progress and an early click can be seen.
+# the wasm back for 6 s from its request, so the progress and an early click can be seen.
 landing() { axi eval --full "async () => ($(cat "$here/check-landing.js"))('$1')" | unwrap; }
 curl -sf "http://127.0.0.1:$port/__hold/6000" >/dev/null
 axi open "$url" >/dev/null

@@ -106,14 +106,17 @@ function standIn(req, res, body) {
   res.end('data: [DONE]\n\n');
 }
 
-// /__hold/<ms> holds back every wasm response for that long from now (the landing page's
-// progress and early click: a slow connection, with the rest of the page already in).
+// /__hold/<ms> holds back every wasm response for that long from the next wasm request (the
+// landing page's progress and early click: a slow connection, with the rest of the page
+// already in). Counting from the request, not from this call, keeps the hold whole however
+// long the browser takes to start.
 let holdUntil = 0;
+let holdNext = 0;
 
 http.createServer((req, res) => {
   const u = decodeURIComponent(new URL(req.url, 'http://x').pathname);
   if (u.startsWith('/__hold/')) {
-    holdUntil = Date.now() + +u.slice(8);
+    holdNext = +u.slice(8);
     res.writeHead(200);
     return res.end('held');
   }
@@ -163,6 +166,10 @@ http.createServer((req, res) => {
       res.writeHead(200, { ...headersFor(u), 'content-type': types[path.extname(f)] || 'application/octet-stream' });
       res.end(data);
     };
+    if (f.endsWith('.wasm') && holdNext) {
+      holdUntil = Date.now() + holdNext;
+      holdNext = 0;
+    }
     if (f.endsWith('.wasm') && holdUntil > Date.now()) setTimeout(send, holdUntil - Date.now());
     else send();
   });

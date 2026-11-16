@@ -166,6 +166,8 @@ pub struct Editor {
     pub exported: Option<(Vec<u8>, (u32, u32))>,
     /// The last finished embed poster (a PNG), for the host to write with the embed folder.
     pub embedded: Option<Vec<u8>>,
+    /// The last finished turntable's frames (PNGs, in order), for the host to write as a folder.
+    pub turned: Option<Vec<Vec<u8>>>,
     /// Files a terminal agent's `export` made, for the host to hand over with its answer (the
     /// desktop app writes them into Downloads, the browser downloads them).
     pub agent_files: Vec<crate::files::File>,
@@ -334,6 +336,7 @@ impl Editor {
             export: None,
             exported: None,
             embedded: None,
+            turned: None,
             agent_files: Vec::new(),
             agent_render: None,
             agent_rendered: None,
@@ -392,6 +395,7 @@ impl Editor {
         self.preview.restart();
         self.export = None;
         self.embedded = None;
+        self.turned = None;
         self.agent_poster = None;
         self.shape = (scene.reshapes(), scene.origin);
         self.scene = scene;
@@ -1638,7 +1642,7 @@ impl Editor {
         let render = self.ui.show_render.then(|| (self.preview.samples(), self.preview.last_rows > 0));
         let export = self.export.as_ref().map(|x| {
             let (done, of) = x.progress();
-            (x.size(), done, of)
+            (x.size(), done, of, x.frame())
         });
         Stats {
             voxels: self.scene.map.voxels,
@@ -1889,6 +1893,12 @@ impl Editor {
                         self.agent_rendered = Some(Err("the user started a render export of their own in vxr".into()));
                     }
                     let _ = self.start_export();
+                }
+                Action::ExportTurntable => {
+                    if self.agent_render.is_some() {
+                        self.agent_rendered = Some(Err("the user started a render export of their own in vxr".into()));
+                    }
+                    let _ = self.start_turntable();
                 }
                 Action::CancelExport => {
                     self.export = None;
@@ -2303,7 +2313,16 @@ impl Editor {
                 self.agent_rendered = None;
                 Ok("rendering".into())
             }
-            _ => Err("kind: obj, slices, render or embed".into()),
+            Some("turntable") => {
+                if self.export.is_some() {
+                    return Err("a render export is already running in vxr: call again once it is done".into());
+                }
+                self.start_turntable()?;
+                self.agent_render = Some(conn);
+                self.agent_rendered = None;
+                Ok("rendering".into())
+            }
+            _ => Err("kind: obj, slices, render, turntable or embed".into()),
         }
     }
 
@@ -2700,6 +2719,35 @@ impl Editor {
         }
     }
 
+    /// Start a turntable export: the corner's view turned once around its target, a PNG per
+    /// frame, with the Render panel's settings.
+    pub fn start_turntable(&mut self) -> Result<(), String> {
+        let r = Export::turntable(
+            &self.gpu,
+            &self.layout,
+            &self.scene.palette,
+            &self.scene.materials,
+            self.cam,
+            &self.ui.render,
+            vxr_render::ViewColors::NEUTRAL.sky,
+        );
+        match r {
+            Ok(x) => {
+                let ((w, h), frames) = (x.size(), self.ui.render.turntable_frames());
+                self.export = Some(x);
+                self.turned = None;
+                self.ui.show_render = true;
+                let spp = self.ui.render.samples();
+                self.ui.toast(&self.ctx, format!("Rendering a turntable: {frames} frames of {w}×{h} at {spp} spp"));
+                Ok(())
+            }
+            Err(e) => {
+                self.ui.toast(&self.ctx, format!("Could not export: {e}"));
+                Err(format!("could not export: {e}"))
+            }
+        }
+    }
+
     /// The scene replaced its map (a resize or crop, or their undo): upload the new one and
     /// keep the camera on the same world point, so the view does not jump.
     fn reshaped(&mut self) {
@@ -2908,13 +2956,34 @@ impl Editor {
         let done = self.export.as_mut().and_then(|x| x.after_submit(&self.gpu).map(|r| (r, x.size())));
         // The export is an agent's, whose answer waits for it.
         let agent = self.agent_render.is_some() && self.agent_rendered.is_none();
+        // One picture, or a turntable's frames.
+        let turn = self.export.as_ref().is_some_and(|x| x.frame().is_some());
+        let done = done.map(|(r, size)| (r.map(|mut pngs| (pngs.pop().unwrap_or_default(), pngs)), size));
         match done {
-            Some((Ok(png), _)) if embed && agent => {
+            Some((Ok((last, mut frames)), (w, h))) if turn => {
+                self.export = None;
+                frames.push(last);
+                let (n, spp) = (frames.len(), self.ui.render.samples());
+                if agent {
+                    let (folder, files) = crate::files::turntable_files(&self.ui.scene_name, frames);
+                    self.agent_files = files;
+                    self.agent_folder = Some(folder);
+                    self.agent_rendered = Some(Ok(format!(
+                        "a turntable: {n} frames of {w} x {h} at {spp} samples per pixel, one full turn of the \
+                         user's view around its target, numbered in order so they loop"
+                    )));
+                    None
+                } else {
+                    self.turned = Some(frames);
+                    Some(Action::Turned)
+                }
+            }
+            Some((Ok((png, _)), _)) if embed && agent => {
                 self.export = None;
                 self.agent_poster = Some(png);
                 None
             }
-            Some((Ok(png), _)) if embed => {
+            Some((Ok((png, _)), _)) if embed => {
                 self.export = None;
                 self.embedded = Some(png);
                 Some(Action::Embedded)
@@ -2927,14 +2996,14 @@ impl Editor {
                 self.ui.toast(&self.ctx, format!("Could not embed: {e}"));
                 None
             }
-            Some((Ok(png), (w, h))) if agent => {
+            Some((Ok((png, _)), (w, h))) if agent => {
                 self.export = None;
                 self.agent_files = vec![(self.export_name(), png)];
                 self.agent_rendered =
                     Some(Ok(format!("rendered {w} x {h} at {} samples per pixel", self.ui.render.samples())));
                 None
             }
-            Some((Ok(png), size)) => {
+            Some((Ok((png, _)), size)) => {
                 self.export = None;
                 self.exported = Some((png, size));
                 Some(Action::Exported)

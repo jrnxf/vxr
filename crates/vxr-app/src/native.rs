@@ -226,7 +226,7 @@ impl Platform for Desktop {
         Ok(files.first().map(|f| f.0.clone()))
     }
 
-    fn save_embed(&mut self, name: &str, files: &[File]) -> Result<Option<String>, String> {
+    fn save_folder(&mut self, name: &str, files: &[File]) -> Result<Option<String>, String> {
         let Some(parent) =
             rfd::FileDialog::new().set_title(format!("Choose where to put the folder {name}")).pick_folder()
         else {

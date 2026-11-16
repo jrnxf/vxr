@@ -174,6 +174,17 @@ pub fn embed_files(scene: &Scene, name: &str, poster: Vec<u8>, viewer: Vec<File>
     Ok(files)
 }
 
+/// A turntable's frames as the files of its folder, and the folder's name: `<stem>-turntable`
+/// holding `<stem>-01.png` and so on, the stem as [`embed_stem`] makes it. The numbers start at
+/// 1 and are padded to one width (at least two digits), so the frames sort by name and
+/// `ffmpeg -i <stem>-%02d.png` reads them.
+pub fn turntable_files(name: &str, frames: Vec<Vec<u8>>) -> (String, Vec<File>) {
+    let stem = embed_stem(name);
+    let width = frames.len().to_string().len().max(2);
+    let files = frames.into_iter().enumerate().map(|(i, png)| (format!("{stem}-{:0width$}.png", i + 1), png)).collect();
+    (format!("{stem}-turntable"), files)
+}
+
 /// RGBA8 rows as a PNG file.
 pub fn png(w: u32, h: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
@@ -486,6 +497,21 @@ mod tests {
             c += 46 + nl;
         }
         out
+    }
+
+    #[test]
+    fn turntable_frames_sort_by_name_in_frame_order() {
+        for n in [1, 8, 64, 100, 1000] {
+            let frames: Vec<Vec<u8>> = (0..n as u32).map(|i| i.to_le_bytes().to_vec()).collect();
+            let (folder, files) = turntable_files("my house #2.vox", frames.clone());
+            assert_eq!(folder, "my-house-2-turntable");
+            let mut sorted = files.clone();
+            sorted.sort();
+            assert_eq!(sorted, files, "{n} frames");
+            assert_eq!(files.iter().map(|f| f.1.clone()).collect::<Vec<_>>(), frames);
+            let last = if n < 100 { format!("{n:02}") } else { n.to_string() };
+            assert_eq!(files[n - 1].0, format!("my-house-2-{last}.png"));
+        }
     }
 
     #[test]

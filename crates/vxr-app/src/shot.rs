@@ -980,8 +980,8 @@ impl Platform for Fake {
         self.zip = bytes.to_vec();
         Ok(Some(name.into()))
     }
-    fn save_embed(&mut self, name: &str, files: &[vxr_app::files::File]) -> Result<Option<String>, String> {
-        self.calls.push(format!("save_embed {name}"));
+    fn save_folder(&mut self, name: &str, files: &[vxr_app::files::File]) -> Result<Option<String>, String> {
+        self.calls.push(format!("save_folder {name}"));
         if self.cancel {
             return Ok(None);
         }
@@ -1054,7 +1054,7 @@ fn embed_export(dir: &Path) -> Result<(), String> {
     p.cancel = true;
     run_action(&mut s.ed, &mut p, Action::Embedded);
     check(
-        p.embed.is_none() && p.calls == ["save_embed my-house-embed"],
+        p.embed.is_none() && p.calls == ["save_folder my-house-embed"],
         "a cancelled folder dialog writes nothing".into(),
     )?;
     p.cancel = false;
@@ -4671,6 +4671,7 @@ fn render_panel(s: &mut Shot, dir: &Path) -> Result<(), String> {
     )?;
     std::fs::write(dir.join("render-export.png"), &png).map_err(|e| e.to_string())?;
     println!("wrote {}", dir.join("render-export.png").display());
+    turntable(s, dir)?;
 
     // Cmd-K starts one, the panel's button cancels it.
     s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
@@ -4737,6 +4738,140 @@ fn visible_faces(voxels: &std::collections::BTreeMap<[i32; 3], u8>) -> usize {
     n
 }
 
+/// A PNG as 160 by 90 cells of mean colour (8 by 8 pixels of a 1280 by 720 picture each), which
+/// averages the path tracer's noise away so two pictures of one view compare as near equal.
+fn cells_of(png: &[u8]) -> Result<Vec<[f32; 3]>, String> {
+    let mut r = png::Decoder::new(std::io::Cursor::new(png)).read_info().map_err(|e| e.to_string())?;
+    let mut buf = vec![0; r.output_buffer_size().unwrap_or(0)];
+    let info = r.next_frame(&mut buf).map_err(|e| e.to_string())?;
+    if (info.width, info.height) != (1280, 720) {
+        return Err(format!("a frame is {}×{}, not 1280×720", info.width, info.height));
+    }
+    let mut cells = vec![[0f32; 3]; 160 * 90];
+    for (i, p) in buf.as_chunks::<4>().0.iter().enumerate() {
+        let cell = &mut cells[(i / 1280 / 8) * 160 + (i % 1280) / 8];
+        for c in 0..3 {
+            cell[c] += p[c] as f32 / 64.0;
+        }
+    }
+    Ok(cells)
+}
+
+/// The mean difference of two [`cells_of`] pictures, in 8-bit levels.
+fn cells_apart(a: &[[f32; 3]], b: &[[f32; 3]]) -> f32 {
+    a.iter().zip(b).map(|(a, b)| (0..3).map(|c| (a[c] - b[c]).abs()).sum::<f32>()).sum::<f32>() / (a.len() * 3) as f32
+}
+
+/// Step frames until `done`, keeping the CPU at most a frame ahead of the GPU; false when
+/// it did not happen in 20,000 frames.
+fn wait_for(s: &mut Shot, done: impl Fn(&Shot) -> bool) -> bool {
+    for _ in 0..20_000 {
+        if done(s) {
+            return true;
+        }
+        s.frames(1);
+        let _ = s.ed.gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    }
+    done(s)
+}
+
+/// The turntable export from the open Render panel: the frame count's control, the button
+/// beside Export PNG, a full turn of the view in equal steps (its last frame against a single
+/// render one step before the first view), the folder the host is handed, and Cmd-K.
+fn turntable(s: &mut Shot, dir: &Path) -> Result<(), String> {
+    let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    s.ui_click("rs-frames0")?;
+    s.frames(1);
+    s.host.clear();
+    s.ui_click("rs-turntable")?;
+    s.frames(1);
+    check(
+        s.ed.ui.render.frames == 0
+            && s.ed.export.as_ref().and_then(|x| x.frame()) == Some((1, 8))
+            && !s.ed.ui.hits.contains_key("rs-turntable")
+            && s.ed.ui.toast_text() == Some("Rendering a turntable: 8 frames of 1280×720 at 64 spp"),
+        format!(
+            "8 frames and the Turntable button start a turntable, which takes the buttons' row ({:?})",
+            s.ed.ui.toast_text()
+        ),
+    )?;
+    wait_for(s, |s| s.ed.export.as_ref().and_then(|x| x.frame()).is_none_or(|f| f.0 >= 4));
+    s.save_png(&dir.join("app-2x-render-turntable.png"))?;
+    let t0 = std::time::Instant::now();
+    wait_for(s, |s| s.ed.turned.is_some());
+    let Some(frames) = s.ed.turned.clone() else {
+        return check(false, "the turntable did not finish".into());
+    };
+    check(
+        frames.len() == 8 && s.host.contains(&Action::Turned) && !s.host.contains(&Action::Exported),
+        format!("it ends with {} frames for the host, not a PNG to save", frames.len()),
+    )?;
+    // One step before the first view, as a single render: the last frame of a full turn.
+    let yaw = s.ed.cam.yaw;
+    s.ed.cam.yaw = yaw - std::f32::consts::FRAC_PI_4;
+    s.ed.start_export()?;
+    wait_for(s, |s| s.ed.exported.is_some());
+    s.ed.cam.yaw = yaw;
+    let Some((single, _)) = s.ed.exported.take() else {
+        return check(false, "the single render to compare with did not finish".into());
+    };
+    let want = cells_of(&single)?;
+    let cells = frames.iter().map(|f| cells_of(f)).collect::<Result<Vec<_>, _>>()?;
+    let apart: Vec<f32> = cells.iter().map(|c| cells_apart(c, &want)).collect();
+    let others = apart[..7].iter().copied().fold(f32::MAX, f32::min);
+    check(
+        apart[7] < 1.0 && others > 4.0 * apart[7].max(0.25),
+        format!(
+            "the frames are one full turn in 8 equal steps: only the last equals the view one step before \
+             the first (levels apart, by frame: {apart:.2?}; {:.1} s for the turn)",
+            t0.elapsed().as_secs_f64()
+        ),
+    )?;
+    for (i, f) in frames.iter().enumerate() {
+        std::fs::write(dir.join(format!("render-turntable-{}.png", i + 1)), f).map_err(|e| e.to_string())?;
+    }
+    let mut p = Fake { cancel: true, ..Default::default() };
+    run_action(&mut s.ed, &mut p, Action::Turned);
+    let cancelled = p.embed.is_none() && s.ed.turned.is_none();
+    p.cancel = false;
+    s.ed.turned = Some(frames.clone());
+    run_action(&mut s.ed, &mut p, Action::Turned);
+    s.frames(2);
+    let (folder, files) = p.embed.take().unwrap_or_default();
+    let names: Vec<&str> = files.iter().map(|f| f.0.as_str()).collect();
+    let stem = vxr_app::files::embed_stem(&s.ed.ui.scene_name);
+    check(
+        cancelled
+            && folder == format!("{stem}-turntable")
+            && names == (1..=8).map(|i| format!("{stem}-0{i}.png")).collect::<Vec<_>>()
+            && files.iter().map(|f| &f.1).eq(frames.iter())
+            && s.ed.ui.toast_text() == Some(&format!("Saved {stem}-turntable (8 frames)")),
+        format!(
+            "the host writes them in order as one folder, and nothing when the dialog is cancelled ({folder}: \
+             {names:?}, {:?})",
+            s.ed.ui.toast_text()
+        ),
+    )?;
+    // Cmd-K starts one too, and the row's Cancel stops it with no frames left behind.
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("export turntable".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    let started = s.ed.export.as_ref().is_some_and(|x| x.frame().is_some());
+    wait_for(s, |s| s.ed.export.as_ref().and_then(|x| x.frame()).is_none_or(|f| f.0 >= 2));
+    s.host.clear();
+    s.ui_click("rs-export")?;
+    s.frames(3);
+    check(
+        started
+            && s.ed.export.is_none()
+            && s.ed.turned.is_none()
+            && s.host.is_empty()
+            && s.ed.ui.hits.contains_key("rs-turntable"),
+        "Cmd-K Export turntable starts one; Cancel export stops it part way and hands the host nothing".into(),
+    )?;
+    Ok(())
+}
+
 /// The top bar's Export menu and the OBJ export: the menu opens, closes and opens the Render
 /// panel, its OBJ row and Cmd-K ask the host to export, and the files (written as the native
 /// host does) cover the model's visible faces, natively in model mode and on 22-world's
@@ -4747,7 +4882,10 @@ fn export(s: &mut Shot, dir: &Path) -> Result<(), String> {
     s.ui_click("scene-select")?;
     s.frames(12);
     check(
-        s.ed.ui.file_menu && s.ed.ui.hits.contains_key("export-obj") && s.ed.ui.hits.contains_key("export-render"),
+        s.ed.ui.file_menu
+            && s.ed.ui.hits.contains_key("export-obj")
+            && s.ed.ui.hits.contains_key("export-render")
+            && s.ed.ui.hits.contains_key("export-turntable"),
         "the scene name opens the file menu with its Export section".into(),
     )?;
     s.save_png(&dir.join("app-2x-export.png"))?;
@@ -4770,6 +4908,11 @@ fn export(s: &mut Shot, dir: &Path) -> Result<(), String> {
     s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
 
     s.host.clear();
+    s.open_file_row("export-turntable")?;
+    s.frames(1);
+    let turning = s.ed.export.as_ref().is_some_and(|x| x.frame().is_some());
+    s.ed.export = None;
+    check(turning && !s.ed.ui.file_menu, "its Turntable row starts a turntable and closes the menu".into())?;
     s.open_file_row("export-obj")?;
     check(
         s.host.contains(&Action::ExportObj) && !s.ed.ui.file_menu,
@@ -7823,6 +7966,48 @@ fn agents_look_render(
         format!("a render export answers once traced, its PNG in Downloads ({size:?}): {t}"),
     )?;
     check(s.ed.exported.is_none(), "the agent's render asks the user nothing".into())?;
+
+    // A turntable: the panel's count of frames, set through render_settings, as one folder.
+    let (t, e) = s.agent_call(live, claude, "render_settings", json!({"turntable_frames": 12}));
+    check(e && t.contains("one of [8, 16, 32, 64]"), format!("a frame count the panel lacks is refused: {t}"))?;
+    let (t, e) = s.agent_call(live, claude, "render_settings", json!({"turntable_frames": 8}));
+    let v: Value = serde_json::from_str(&t).unwrap_or_default();
+    check(!e && v["turntable_frames"] == 8 && s.ed.ui.render.frames == 0, format!("8 frames are set: {t}"))?;
+    s.host.clear();
+    let (t, e) = s.agent_call(live, claude, "export", json!({"kind": "turntable"}));
+    let folder = downloads.join("house-turntable");
+    let frames: Vec<Vec<u8>> =
+        names(&folder).iter().map(|n| std::fs::read(folder.join(n)).unwrap_or_default()).collect();
+    let sizes: Vec<(u32, u32)> = frames
+        .iter()
+        .map(|png| {
+            png::Decoder::new(std::io::Cursor::new(png))
+                .read_info()
+                .map(|r| (r.info().width, r.info().height))
+                .unwrap_or((0, 0))
+        })
+        .collect();
+    let answer: Value = serde_json::from_str(&t).unwrap_or_default();
+    let listed: Vec<&str> = answer["exported"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    let want: Vec<String> = (1..=8).map(|i| format!("house-0{i}.png")).collect();
+    let distinct = frames.iter().collect::<std::collections::BTreeSet<_>>().len();
+    check(
+        !e && names(&folder) == want
+            && listed == want.iter().map(|n| folder.join(n).to_string_lossy().into_owned()).collect::<Vec<_>>()
+            && sizes == [(1280, 720); 8]
+            && distinct == 8
+            && answer["what"]
+                .as_str()
+                .is_some_and(|w| w.starts_with("a turntable: 8 frames of 1280 x 720 at 64 samples"))
+            && s.ed.turned.is_none()
+            && !s.host.contains(&Action::Turned)
+            && s.ed.ui.toast_text() == Some("Claude Code exported the folder house-turntable into Downloads"),
+        format!(
+            "a turntable export answers once every frame is traced: the folder house-turntable in Downloads \
+             with 8 different 1280×720 frames in order, asking the user nothing ({:?}, {sizes:?}): {t}",
+            names(&folder)
+        ),
+    )?;
 
     // The embed folder, as the Embed command makes it, but into Downloads and with the tag
     // in the answer instead of on the user's clipboard.

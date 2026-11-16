@@ -397,7 +397,7 @@ impl Page {
     fn deliver(&mut self, ed: &mut Editor, client: &str, what: &str) -> Result<String, String> {
         let files = std::mem::take(&mut ed.agent_files);
         let file = match (ed.agent_folder.take(), files.as_slice()) {
-            // An embed: its folder inside one zip, as the Embed command downloads it.
+            // An embed or a turntable: its folder inside one zip, as the Export menu downloads it.
             (Some(folder), _) => {
                 let inside: Vec<_> = files.iter().map(|(f, bytes)| (format!("{folder}/{f}"), bytes.clone())).collect();
                 (format!("{folder}.zip"), zip(&inside))

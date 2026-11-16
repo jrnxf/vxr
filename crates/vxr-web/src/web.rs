@@ -221,8 +221,8 @@ impl Platform for Browser {
         Ok(())
     }
 
-    fn save_embed(&mut self, name: &str, files: &[File]) -> Result<Option<String>, String> {
-        // Inside a folder, so unpacking the zip gives the folder a desktop Embed writes.
+    fn save_folder(&mut self, name: &str, files: &[File]) -> Result<Option<String>, String> {
+        // Inside a folder, so unpacking the zip gives the folder the desktop app writes.
         let inside: Vec<File> = files.iter().map(|(f, bytes)| (format!("{name}/{f}"), bytes.clone())).collect();
         let name = format!("{name}.zip");
         page_download(&zip(&inside), &name, "application/zip");
@@ -909,7 +909,7 @@ impl App {
         let e = &self.host.editor;
         let (c, h) = (&e.cam, e.scene.history());
         format!(
-            r#"{{"voxels":{},"tool":"{:?}","shape":"{:?}","mirror":{},"mirrorAxes":[{},{},{}],"lock":{},"brushSize":{},"sizePanel":{},"lifting":{},"span":{},"selected":{},"region":"{:?}","hasClip":{},"bounds":[{},{},{}],"boundsPanel":{},"slot":{},"colorEdit":{},"slotOp":"{:?}","undo":{},"redo":{},"cmdk":{},"name":{:?},"size":[{},{}],"ppp":{},"cam":[{},{},{},{},{},{}],"ortho":{},"inView":[{},{}],"cameraHints":{},"view":{},"viewPanel":{},"fileMenu":{},"confirmNew":{},"theme":"{}","themeMenu":{},"touch":{},"paletteOpen":{},"themeShown":{:?},"guides":[{},{},{}],"mode":"{}","objects":{},"models":{},"picked":{},"tree":[{}],"treeOn":{},"renaming":{},"layers":[{}],"layerOn":{},"render":{{"shown":{},"spp":{},"rows":{},"current":{},"restarts":{},"timestamps":{},"panel":{},"full":{},"size":[{},{}],"maxSpp":{},"exposure":{},"gamma":{},"vignette":{},"aperture":{},"sky":{},"physicalSky":{},"export":{}}},"review":{},"undoLabel":{},"asks":{:?},"unsaved":{},"projectsMenu":{},"projects":[{}],"current":{},"restore":{},"confirmClose":{},"storage":[{},{}],"account":{},"signIn":{{"shown":{},"error":{},"checking":{},"challenge":{}}},"toast":{},"agents":{{"panel":{},"available":{},"web":{},"allowed":{},"review":{},"connecting":{},"error":{},"fail":{},"code":{:?},"clients":[{}],"edits":[{}],"chip":{:?},"live":[{}],"calls":[{}]}},"help":{},"tour":{}}}"#,
+            r#"{{"voxels":{},"tool":"{:?}","shape":"{:?}","mirror":{},"mirrorAxes":[{},{},{}],"lock":{},"brushSize":{},"sizePanel":{},"lifting":{},"span":{},"selected":{},"region":"{:?}","hasClip":{},"bounds":[{},{},{}],"boundsPanel":{},"slot":{},"colorEdit":{},"slotOp":"{:?}","undo":{},"redo":{},"cmdk":{},"name":{:?},"size":[{},{}],"ppp":{},"cam":[{},{},{},{},{},{}],"ortho":{},"inView":[{},{}],"cameraHints":{},"view":{},"viewPanel":{},"fileMenu":{},"confirmNew":{},"theme":"{}","themeMenu":{},"touch":{},"paletteOpen":{},"themeShown":{:?},"guides":[{},{},{}],"mode":"{}","objects":{},"models":{},"picked":{},"tree":[{}],"treeOn":{},"renaming":{},"layers":[{}],"layerOn":{},"render":{{"shown":{},"spp":{},"rows":{},"current":{},"restarts":{},"timestamps":{},"panel":{},"full":{},"size":[{},{}],"maxSpp":{},"exposure":{},"gamma":{},"vignette":{},"aperture":{},"sky":{},"physicalSky":{},"export":{},"frame":{}}},"review":{},"undoLabel":{},"asks":{:?},"unsaved":{},"projectsMenu":{},"projects":[{}],"current":{},"restore":{},"confirmClose":{},"storage":[{},{}],"account":{},"signIn":{{"shown":{},"error":{},"checking":{},"challenge":{}}},"toast":{},"agents":{{"panel":{},"available":{},"web":{},"allowed":{},"review":{},"connecting":{},"error":{},"fail":{},"code":{:?},"clients":[{}],"edits":[{}],"chip":{:?},"live":[{}],"calls":[{}]}},"help":{},"tour":{}}}"#,
             e.scene.map.voxels,
             e.ui.tool,
             e.ui.shape,
@@ -1009,6 +1009,7 @@ impl App {
             e.preview.lighting.sky_backdrop,
             e.preview.lighting.physical_sky,
             e.export.as_ref().map_or("null".into(), |x| format!("{:?}", x.progress().0)),
+            e.export.as_ref().and_then(|x| x.frame()).map_or("null".into(), |(i, n)| format!("[{i},{n}]")),
             e.ui.review.as_ref().map_or("null".into(), |c| format!(
                 r#"{{"prompt":{:?},"agents":{},"summary":{},"counts":[{},{},{}],"objects":{},"world":[{}],"slots":[{}],"steps":[{}],"held":{},"before":{}}}"#,
                 c.prompt,

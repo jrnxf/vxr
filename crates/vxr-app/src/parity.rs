@@ -17,7 +17,9 @@ fn tool(a: &Action) -> Option<&'static str> {
         Action::Save => Some("save"),
         Action::Undo => Some("undo"),
         Action::Redo => Some("redo"),
-        Action::ExportObj | Action::ExportSlices | Action::ExportPng | Action::Embed => Some("export"),
+        Action::ExportObj | Action::ExportSlices | Action::ExportPng | Action::ExportTurntable | Action::Embed => {
+            Some("export")
+        }
         Action::Recolor { .. } => Some("palette_set"),
         Action::SetMaterial { .. } => Some("material_set"),
         Action::SwapColors(..) => Some("palette_swap"),
@@ -55,6 +57,7 @@ fn tool(a: &Action) -> Option<&'static str> {
         | Action::CancelExport
         | Action::Exported
         | Action::Embedded
+        | Action::Turned
         | Action::PlaceBox
         | Action::CancelBox
         | Action::ApplyReview
@@ -104,6 +107,7 @@ fn with_tools() -> Vec<Action> {
         Action::ExportObj,
         Action::ExportSlices,
         Action::ExportPng,
+        Action::ExportTurntable,
         Action::Recolor { slot: 1, rgba: [0; 4] },
         Action::SetMaterial { slot: 1, material: Material::default() },
         Action::SwapColors(1, 2),

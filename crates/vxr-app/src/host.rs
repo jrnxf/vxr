@@ -134,9 +134,10 @@ pub trait Platform {
         Err("there is no download here".into())
     }
 
-    /// Write an embed's files as a folder named `name` where the user picks (one zip named
-    /// `name` in the browser); returns the name it was given, or None when the user cancelled.
-    fn save_embed(&mut self, _name: &str, _files: &[File]) -> Result<Option<String>, String> {
+    /// Write an export's files (an embed, a turntable's frames) as a new folder named `name`
+    /// where the user picks (one zip named `name` in the browser); returns the name it was
+    /// given, or None when the user cancelled.
+    fn save_folder(&mut self, _name: &str, _files: &[File]) -> Result<Option<String>, String> {
         Err("there is no download here".into())
     }
 
@@ -296,7 +297,7 @@ pub fn run_action(ed: &mut Editor, p: &mut dyn Platform, action: Action) {
             let name = &ed.ui.scene_name;
             let folder = format!("{}-embed", crate::files::embed_stem(name));
             let written = crate::files::embed_files(&ed.scene, name, poster, viewer)
-                .and_then(|files| Ok((p.save_embed(&folder, &files)?, files.len())));
+                .and_then(|files| Ok((p.save_folder(&folder, &files)?, files.len())));
             match written {
                 Ok((Some(name), files)) => {
                     toast(ed, format!("{} {name} ({files} files). Its index.html shows the tag to paste.", p.verb()))
@@ -329,6 +330,15 @@ pub fn run_action(ed: &mut Editor, p: &mut dyn Platform, action: Action) {
                 }
                 Ok((None, ..)) => {}
                 Err(e) => toast(ed, format!("Could not export: {e}")),
+            }
+        }
+        Action::Turned => {
+            let Some(frames) = ed.turned.take() else { return };
+            let (folder, files) = crate::files::turntable_files(&ed.ui.scene_name, frames);
+            match p.save_folder(&folder, &files) {
+                Ok(Some(name)) => toast(ed, format!("{} {name} ({} frames)", p.verb(), files.len())),
+                Ok(None) => {}
+                Err(e) => toast(ed, format!("Could not save the turntable: {e}")),
             }
         }
         Action::Exported => {
