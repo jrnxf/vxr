@@ -103,7 +103,7 @@ pub(crate) fn show_world_tool() -> (&'static str, String, Value) {
 /// `export`, in files mode (with `path`) and live mode.
 pub(crate) fn export_tool(description: &str, path: Option<Value>) -> (&'static str, String, Value) {
     let mut props = json!({
-        "kind": {"type": "string", "enum": ["obj", "slices", "render", "turntable", "embed"], "description": "obj: OBJ with .mtl and palette texture; slices: every layer as one PNG; render: the path-traced PNG; turntable: a folder of path-traced PNG frames, one full turn of the view; embed: a folder for a web page, with the <voxel-scene> viewer, the scene, a path-traced poster and an index.html showing the tag"},
+        "kind": {"type": "string", "enum": ["obj", "slices", "render", "turntable", "embed"], "description": "obj: OBJ with .mtl and palette texture; slices: every layer as one PNG; render: the path-traced PNG; turntable: a folder of path-traced PNG frames, one full turn of the view, and the animated PNG of them; embed: a folder for a web page, with the <voxel-scene> viewer, the scene, a path-traced poster and an index.html showing the tag"},
     });
     if let Some(p) = path {
         props["path"] = p;

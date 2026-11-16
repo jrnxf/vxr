@@ -174,15 +174,106 @@ pub fn embed_files(scene: &Scene, name: &str, poster: Vec<u8>, viewer: Vec<File>
     Ok(files)
 }
 
+/// Seconds a turntable's animated file takes for one full turn, whatever its count of frames.
+pub const TURN_SECONDS: u16 = 4;
+
 /// A turntable's frames as the files of its folder, and the folder's name: `<stem>-turntable`
-/// holding `<stem>-01.png` and so on, the stem as [`embed_stem`] makes it. The numbers start at
-/// 1 and are padded to one width (at least two digits), so the frames sort by name and
-/// `ffmpeg -i <stem>-%02d.png` reads them.
-pub fn turntable_files(name: &str, frames: Vec<Vec<u8>>) -> (String, Vec<File>) {
+/// holding `<stem>-01.png` and so on, the stem as [`embed_stem`] makes it, then `<stem>.png`,
+/// the same frames as one animated PNG that loops ([`apng`], one turn in [`TURN_SECONDS`]).
+/// The numbers start at 1 and are padded to one width (at least two digits), so the frames
+/// sort by name and `ffmpeg -i <stem>-%02d.png` reads them.
+pub fn turntable_files(name: &str, frames: Vec<Vec<u8>>) -> Result<(String, Vec<File>), String> {
     let stem = embed_stem(name);
     let width = frames.len().to_string().len().max(2);
-    let files = frames.into_iter().enumerate().map(|(i, png)| (format!("{stem}-{:0width$}.png", i + 1), png)).collect();
-    (format!("{stem}-turntable"), files)
+    let turn = apng(&frames, TURN_SECONDS, frames.len().min(u16::MAX as usize) as u16)?;
+    let mut files: Vec<File> =
+        frames.into_iter().enumerate().map(|(i, png)| (format!("{stem}-{:0width$}.png", i + 1), png)).collect();
+    files.push((format!("{stem}.png"), turn));
+    Ok((format!("{stem}-turntable"), files))
+}
+
+/// PNG files of one size and pixel format as one animated PNG (APNG) that loops for ever,
+/// each frame shown for `num / den` seconds. Nothing is compressed again: every frame's
+/// `IDAT` data is carried over as it is, so the cost is a copy. The first frame is also the
+/// still picture a viewer without APNG shows.
+pub fn apng(frames: &[Vec<u8>], num: u16, den: u16) -> Result<Vec<u8>, String> {
+    const SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+    fn chunk(out: &mut Vec<u8>, kind: &[u8], data: &[&[u8]]) {
+        let len: usize = data.iter().map(|d| d.len()).sum();
+        out.extend((len as u32).to_be_bytes());
+        let from = out.len();
+        out.extend(kind);
+        data.iter().for_each(|d| out.extend(*d));
+        let crc = crc32(&out[from..]);
+        out.extend(crc.to_be_bytes());
+    }
+    /// A PNG chunk: its type and its data.
+    type Chunk<'a> = (&'a [u8], &'a [u8]);
+    /// The chunks of a PNG file, up to `IEND`.
+    fn chunks(png: &[u8]) -> Result<Vec<Chunk<'_>>, String> {
+        let mut rest = png.strip_prefix(SIGNATURE).ok_or("a frame is not a PNG file")?;
+        let mut out = Vec::new();
+        loop {
+            let cut = "a frame's PNG file is cut short";
+            let (head, body) = rest.split_at_checked(8).ok_or(cut)?;
+            let len = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as usize;
+            // The data and its CRC.
+            let (data, after) = body.split_at_checked(len).ok_or(cut)?;
+            rest = after.get(4..).ok_or(cut)?;
+            if &head[4..] == b"IEND" {
+                return Ok(out);
+            }
+            out.push((&head[4..], data));
+        }
+    }
+    if frames.is_empty() {
+        return Err("no frames to animate".into());
+    }
+    let mut out = SIGNATURE.to_vec();
+    let (mut header, mut seq) = (None, 0u32);
+    for (i, frame) in frames.iter().enumerate() {
+        let chunks = chunks(frame)?;
+        let ihdr =
+            chunks.iter().find(|c| c.0 == b"IHDR").filter(|c| c.1.len() == 13).ok_or("a frame has no PNG header")?.1;
+        match header {
+            None => {
+                // Everything before the pixels (the header and, for a file not made here,
+                // its palette or colour space) comes from the first frame.
+                for (kind, data) in chunks.iter().take_while(|c| c.0 != b"IDAT") {
+                    chunk(&mut out, kind, &[data]);
+                    if *kind == b"IHDR" {
+                        chunk(&mut out, b"acTL", &[&(frames.len() as u32).to_be_bytes(), &0u32.to_be_bytes()]);
+                    }
+                }
+                header = Some(ihdr);
+            }
+            Some(first) if first != ihdr => return Err("the frames differ in size or pixel format".into()),
+            Some(_) => {}
+        }
+        // Frame control: the whole picture, replaced each time (no dispose, no blend).
+        let mut control = seq.to_be_bytes().to_vec();
+        control.extend(&ihdr[..8]);
+        control.extend([0; 8]);
+        control.extend(num.to_be_bytes());
+        control.extend(den.to_be_bytes());
+        control.extend([0, 0]);
+        chunk(&mut out, b"fcTL", &[&control]);
+        seq += 1;
+        let before = seq;
+        for (_, data) in chunks.iter().filter(|c| c.0 == b"IDAT") {
+            if i == 0 {
+                chunk(&mut out, b"IDAT", &[data]);
+            } else {
+                chunk(&mut out, b"fdAT", &[&seq.to_be_bytes(), data]);
+                seq += 1;
+            }
+        }
+        if i == 0 && !chunks.iter().any(|c| c.0 == b"IDAT") || i > 0 && seq == before {
+            return Err("a frame has no pixels".into());
+        }
+    }
+    chunk(&mut out, b"IEND", &[]);
+    Ok(out)
 }
 
 /// RGBA8 rows as a PNG file.
@@ -502,15 +593,107 @@ mod tests {
     #[test]
     fn turntable_frames_sort_by_name_in_frame_order() {
         for n in [1, 8, 64, 100, 1000] {
-            let frames: Vec<Vec<u8>> = (0..n as u32).map(|i| i.to_le_bytes().to_vec()).collect();
-            let (folder, files) = turntable_files("my house #2.vox", frames.clone());
+            let frames: Vec<Vec<u8>> =
+                (0..n as u32).map(|i| png(1, 1, &[i as u8, (i >> 8) as u8, 0, 255]).unwrap()).collect();
+            let (folder, mut files) = turntable_files("my house #2.vox", frames.clone()).unwrap();
             assert_eq!(folder, "my-house-2-turntable");
+            // The animated file is last, by order and by name, and holds every frame.
+            let turn = files.pop().unwrap();
+            assert_eq!(turn.0, "my-house-2.png");
+            assert_eq!(animation(&turn.1).0.len(), n);
             let mut sorted = files.clone();
+            sorted.push(turn.clone());
             sorted.sort();
+            assert_eq!(sorted.pop(), Some(turn));
             assert_eq!(sorted, files, "{n} frames");
             assert_eq!(files.iter().map(|f| f.1.clone()).collect::<Vec<_>>(), frames);
             let last = if n < 100 { format!("{n:02}") } else { n.to_string() };
             assert_eq!(files[n - 1].0, format!("my-house-2-{last}.png"));
+        }
+    }
+
+    /// An animated PNG read back by the `png` crate (which checks every CRC and sequence
+    /// number): each frame's pixels, its delay as a fraction, and the count of plays.
+    fn animation(bytes: &[u8]) -> (Vec<Vec<u8>>, Vec<(u16, u16)>, u32) {
+        let mut r = png::Decoder::new(std::io::Cursor::new(bytes)).read_info().unwrap();
+        let control = *r.info().animation_control().expect("an animation");
+        let mut buf = vec![0; r.output_buffer_size().unwrap()];
+        let (mut frames, mut delays) = (Vec::new(), Vec::new());
+        for _ in 0..control.num_frames {
+            let n = r.next_frame(&mut buf).unwrap().buffer_size();
+            let f = r.info().frame_control().unwrap();
+            assert_eq!((f.width, f.height, f.x_offset, f.y_offset), (r.info().width, r.info().height, 0, 0));
+            assert_eq!((f.dispose_op, f.blend_op), (png::DisposeOp::None, png::BlendOp::Source));
+            frames.push(buf[..n].to_vec());
+            delays.push((f.delay_num, f.delay_den));
+        }
+        (frames, delays, control.num_plays)
+    }
+
+    /// `png` with its pixel data cut into `parts` `IDAT` chunks, as other encoders write it.
+    fn split_idat(png: &[u8], parts: usize) -> Vec<u8> {
+        let mut out = png[..8].to_vec();
+        let mut at = 8;
+        while at < png.len() {
+            let len = u32::from_be_bytes(png[at..at + 4].try_into().unwrap()) as usize;
+            let (kind, data) = (&png[at + 4..at + 8], &png[at + 8..at + 8 + len]);
+            let pieces: Vec<&[u8]> =
+                if kind == b"IDAT" { data.chunks(len.div_ceil(parts).max(1)).collect() } else { vec![data] };
+            for piece in pieces {
+                out.extend((piece.len() as u32).to_be_bytes());
+                let from = out.len();
+                out.extend(kind);
+                out.extend(piece);
+                out.extend(crc32(&out[from..]).to_be_bytes());
+            }
+            at += 12 + len;
+        }
+        out
+    }
+
+    proptest::proptest! {
+        /// Every frame of the animated file is the frame that went in, in order, however an
+        /// encoder cut its pixel data into chunks, and the file loops with the given delay.
+        #[test]
+        fn apng_holds_every_frame_in_order(
+            (w, h) in (1u32..12, 1u32..12),
+            seeds in proptest::collection::vec((proptest::prelude::any::<u64>(), 1usize..4), 1..7),
+            (num, den) in (1u16..9, 1u16..70),
+        ) {
+            let pixels: Vec<Vec<u8>> = seeds
+                .iter()
+                .map(|&(seed, _)| {
+                    (0..w * h * 4).map(|i| (seed.wrapping_mul(i as u64 * 2 + 1).wrapping_add(seed >> 7) >> 24) as u8).collect()
+                })
+                .collect();
+            let frames: Vec<Vec<u8>> =
+                pixels.iter().zip(&seeds).map(|(px, &(_, parts))| split_idat(&png(w, h, px).unwrap(), parts)).collect();
+            let file = apng(&frames, num, den).unwrap();
+            let (read, delays, plays) = animation(&file);
+            proptest::prop_assert_eq!(&read, &pixels);
+            proptest::prop_assert_eq!(delays, vec![(num, den); frames.len()]);
+            proptest::prop_assert_eq!(plays, 0);
+            // A viewer without APNG reads the first frame from the same file.
+            let mut still = png::Decoder::new(std::io::Cursor::new(&file)).read_info().unwrap();
+            let mut buf = vec![0; still.output_buffer_size().unwrap()];
+            let n = still.next_frame(&mut buf).unwrap().buffer_size();
+            proptest::prop_assert_eq!(&buf[..n], &pixels[0][..]);
+        }
+    }
+
+    #[test]
+    fn apng_refuses_frames_it_cannot_join() {
+        let (a, b) = (png(2, 2, &[9; 16]).unwrap(), png(2, 1, &[9; 8]).unwrap());
+        let no_pixels = [&a[..33], &a[a.len() - 12..]].concat();
+        for (frames, want) in [
+            (vec![], "no frames to animate"),
+            (vec![a.clone(), b], "the frames differ in size or pixel format"),
+            (vec![a.clone(), b"GIF89a".to_vec()], "a frame is not a PNG file"),
+            (vec![a.clone(), a[..a.len() - 13].to_vec()], "a frame's PNG file is cut short"),
+            (vec![a.clone(), no_pixels.clone()], "a frame has no pixels"),
+            (vec![no_pixels], "a frame has no pixels"),
+        ] {
+            assert_eq!(apng(&frames, 1, 10).unwrap_err(), want);
         }
     }
 

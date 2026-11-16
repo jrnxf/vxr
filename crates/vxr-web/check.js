@@ -932,14 +932,35 @@ async () => {
         const row = !hit('rs-turntable');
         for (let i = 0; i < 30000 && !name; i++) await frames(1);
         const files = blob ? unzip(new Uint8Array(await blob.arrayBuffer())) : {};
+        // The animated file is last. The browser's own decoder reads it: 8 frames, half a
+        // second each (a turn in 4 seconds), for ever, and its last frame is the last file.
+        const turn = files['island-turntable/island.png'];
+        delete files['island-turntable/island.png'];
         const names = Object.keys(files);
+        let anim = 'no file';
+        if (turn && names.length === 8) {
+          const d = new ImageDecoder({ data: turn, type: 'image/png' });
+          await d.tracks.ready;
+          const t = d.tracks.selectedTrack;
+          const px = async (dec, i) => {
+            const { image } = await dec.decode({ frameIndex: i });
+            const c = new OffscreenCanvas(image.displayWidth, image.displayHeight).getContext('2d');
+            c.drawImage(image, 0, 0);
+            const out = [image.duration, c.getImageData(0, 0, image.displayWidth, image.displayHeight).data];
+            image.close();
+            return out;
+          };
+          const [ms, last] = await px(d, 7);
+          const [, file] = await px(new ImageDecoder({ data: files[names[7]], type: 'image/png' }), 0);
+          anim = `${t.animated} ${t.frameCount} ${t.repetitionCount} ${ms} ${same(last, file)}`;
+        }
         const want = [1, 2, 3, 4, 5, 6, 7, 8].map((i) => `island-turntable/island-0${i}.png`);
         const sized = names.every((n) => { const v = new DataView(files[n].buffer, files[n].byteOffset); return v.getUint32(0) === 0x89504e47 && v.getUint32(16) === 1280 && v.getUint32(20) === 720; });
         const differ = names.every((n, i) => names.every((m, j) => i === j || !same(files[n], files[m])));
-        step('Turntable renders 8 frames and downloads island-turntable.zip: one folder of numbered 1280x720 PNGs',
-          first && first[0] === 1 && first[1] === 8 && row && name === 'island-turntable.zip' && names.join(',') === want.join(',') && sized && differ
-            && st().toast === 'Downloaded island-turntable.zip (8 frames)' && st().render.export === null && !!hit('rs-turntable'),
-          `${name} ${names} ${JSON.stringify(first)} ${st().toast}`);
+        step('Turntable renders 8 frames and downloads island-turntable.zip: one folder of numbered 1280x720 PNGs and island.png, which the browser plays as those frames in a loop',
+          first && first[0] === 1 && first[1] === 8 && row && name === 'island-turntable.zip' && names.join(',') === want.join(',') && sized && differ && anim === 'true 8 Infinity 500000 true'
+            && st().toast === 'Downloaded island-turntable.zip (8 frames and the animation)' && st().render.export === null && !!hit('rs-turntable'),
+          `${name} ${names} ${JSON.stringify(first)} ${st().toast} (animation: ${anim})`);
         name = null;
         const big = hit('rs-size3');
         await click(...big);

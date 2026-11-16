@@ -334,11 +334,13 @@ pub fn run_action(ed: &mut Editor, p: &mut dyn Platform, action: Action) {
         }
         Action::Turned => {
             let Some(frames) = ed.turned.take() else { return };
-            let (folder, files) = crate::files::turntable_files(&ed.ui.scene_name, frames);
-            match p.save_folder(&folder, &files) {
-                Ok(Some(name)) => toast(ed, format!("{} {name} ({} frames)", p.verb(), files.len())),
+            let n = frames.len();
+            let saved = crate::files::turntable_files(&ed.ui.scene_name, frames)
+                .and_then(|(folder, files)| p.save_folder(&folder, &files));
+            match saved {
+                Ok(Some(name)) => toast(ed, format!("{} {name} ({n} frames and the animation)", p.verb())),
                 Ok(None) => {}
-                Err(e) => toast(ed, format!("Could not save the turntable: {e}")),
+                Err(e) => toast(ed, format!("Could not save the turntable: {e}. Try the export again")),
             }
         }
         Action::Exported => {

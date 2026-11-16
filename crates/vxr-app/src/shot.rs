@@ -4757,6 +4757,34 @@ fn cells_of(png: &[u8]) -> Result<Vec<[f32; 3]>, String> {
     Ok(cells)
 }
 
+/// Whether `turn` is the animated PNG of `frames`: the same pictures in order, each shown for
+/// an equal share of the four seconds of a turn, looping for ever. Else what differs.
+fn animates(turn: &[u8], frames: &[Vec<u8>]) -> Result<(), String> {
+    let pixels = |png: &[u8]| -> Result<Vec<u8>, String> {
+        let mut r = png::Decoder::new(std::io::Cursor::new(png)).read_info().map_err(|e| e.to_string())?;
+        let mut buf = vec![0; r.output_buffer_size().unwrap_or(0)];
+        r.next_frame(&mut buf).map_err(|e| e.to_string())?;
+        Ok(buf)
+    };
+    let mut r = png::Decoder::new(std::io::Cursor::new(turn)).read_info().map_err(|e| e.to_string())?;
+    let control = *r.info().animation_control().ok_or("the file is a still picture")?;
+    if (control.num_frames as usize, control.num_plays) != (frames.len(), 0) {
+        return Err(format!("{} frames played {} times", control.num_frames, control.num_plays));
+    }
+    let mut buf = vec![0; r.output_buffer_size().unwrap_or(0)];
+    for (i, frame) in frames.iter().enumerate() {
+        r.next_frame(&mut buf).map_err(|e| format!("frame {}: {e}", i + 1))?;
+        let delay = r.info().frame_control().map(|f| (f.delay_num, f.delay_den));
+        if delay != Some((4, frames.len() as u16)) {
+            return Err(format!("frame {} is shown for {delay:?}", i + 1));
+        }
+        if buf != pixels(frame)? {
+            return Err(format!("frame {} is not the picture of its file", i + 1));
+        }
+    }
+    Ok(())
+}
+
 /// The mean difference of two [`cells_of`] pictures, in 8-bit levels.
 fn cells_apart(a: &[[f32; 3]], b: &[[f32; 3]]) -> f32 {
     a.iter().zip(b).map(|(a, b)| (0..3).map(|c| (a[c] - b[c]).abs()).sum::<f32>()).sum::<f32>() / (a.len() * 3) as f32
@@ -4837,7 +4865,8 @@ fn turntable(s: &mut Shot, dir: &Path) -> Result<(), String> {
     s.ed.turned = Some(frames.clone());
     run_action(&mut s.ed, &mut p, Action::Turned);
     s.frames(2);
-    let (folder, files) = p.embed.take().unwrap_or_default();
+    let (folder, mut files) = p.embed.take().unwrap_or_default();
+    let turn = files.pop().unwrap_or_default();
     let names: Vec<&str> = files.iter().map(|f| f.0.as_str()).collect();
     let stem = vxr_app::files::embed_stem(&s.ed.ui.scene_name);
     check(
@@ -4845,11 +4874,23 @@ fn turntable(s: &mut Shot, dir: &Path) -> Result<(), String> {
             && folder == format!("{stem}-turntable")
             && names == (1..=8).map(|i| format!("{stem}-0{i}.png")).collect::<Vec<_>>()
             && files.iter().map(|f| &f.1).eq(frames.iter())
-            && s.ed.ui.toast_text() == Some(&format!("Saved {stem}-turntable (8 frames)")),
+            && s.ed.ui.toast_text() == Some(&format!("Saved {stem}-turntable (8 frames and the animation)")),
         format!(
             "the host writes them in order as one folder, and nothing when the dialog is cancelled ({folder}: \
              {names:?}, {:?})",
             s.ed.ui.toast_text()
+        ),
+    )?;
+    let animated = animates(&turn.1, &frames);
+    std::fs::write(dir.join("render-turntable.png"), &turn.1).map_err(|e| e.to_string())?;
+    check(
+        turn.0 == format!("{stem}.png") && animated.is_ok(),
+        format!(
+            "the folder's last file {} is the 8 frames as one animated PNG that loops, a turn in 4 seconds \
+             ({} KB, the frames {} KB): {animated:?}",
+            turn.0,
+            turn.1.len() / 1024,
+            frames.iter().map(Vec::len).sum::<usize>() / 1024
         ),
     )?;
     // Cmd-K starts one too, and the row's Cancel stops it with no frames left behind.
@@ -7976,8 +8017,10 @@ fn agents_look_render(
     s.host.clear();
     let (t, e) = s.agent_call(live, claude, "export", json!({"kind": "turntable"}));
     let folder = downloads.join("house-turntable");
-    let frames: Vec<Vec<u8>> =
+    let mut frames: Vec<Vec<u8>> =
         names(&folder).iter().map(|n| std::fs::read(folder.join(n)).unwrap_or_default()).collect();
+    // The animated file sorts last; the frames come before it.
+    let animated = frames.pop().map_or(Err("no files".to_string()), |turn| animates(&turn, &frames));
     let sizes: Vec<(u32, u32)> = frames
         .iter()
         .map(|png| {
@@ -7989,22 +8032,24 @@ fn agents_look_render(
         .collect();
     let answer: Value = serde_json::from_str(&t).unwrap_or_default();
     let listed: Vec<&str> = answer["exported"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
-    let want: Vec<String> = (1..=8).map(|i| format!("house-0{i}.png")).collect();
+    let want: Vec<String> = (1..=8).map(|i| format!("house-0{i}.png")).chain(["house.png".to_string()]).collect();
     let distinct = frames.iter().collect::<std::collections::BTreeSet<_>>().len();
     check(
         !e && names(&folder) == want
             && listed == want.iter().map(|n| folder.join(n).to_string_lossy().into_owned()).collect::<Vec<_>>()
             && sizes == [(1280, 720); 8]
             && distinct == 8
-            && answer["what"]
-                .as_str()
-                .is_some_and(|w| w.starts_with("a turntable: 8 frames of 1280 x 720 at 64 samples"))
+            && answer["what"].as_str().is_some_and(|w| {
+                w.starts_with("a turntable: 8 frames of 1280 x 720 at 64 samples") && w.contains("house.png")
+            })
+            && animated.is_ok()
             && s.ed.turned.is_none()
             && !s.host.contains(&Action::Turned)
             && s.ed.ui.toast_text() == Some("Claude Code exported the folder house-turntable into Downloads"),
         format!(
             "a turntable export answers once every frame is traced: the folder house-turntable in Downloads \
-             with 8 different 1280×720 frames in order, asking the user nothing ({:?}, {sizes:?}): {t}",
+             with 8 different 1280×720 frames in order and house.png that animates them ({animated:?}), asking \
+             the user nothing ({:?}, {sizes:?}): {t}",
             names(&folder)
         ),
     )?;

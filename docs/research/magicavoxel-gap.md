@@ -113,7 +113,7 @@ Feature names below follow the update log [S1] unless another source is given.
 | Image-based lighting (`.hdr`) | Sky->IBL [S1 0.99.4.1] | missing | P3 | render |
 | Denoiser | Intel OIDN plugin [S1 0.99.4.2] | done [3]: A-trous in the live corner | P1 | render |
 | Export PNG at a chosen size | Photo mode up to 12000x12000 [S1 0.99.3] | done [3]: 720p to 4K (as the GPU allows) at 64 to 4,096 spp, traced in the background while editing; download in the browser | P1 | render, minutes |
-| Turntable and animation render | [S1 0.99.3, 0.99.7.0] | partial: turntable done (one full turn of the view as 8 to 64 path-traced PNG frames, a folder or one zip in the browser, also the agent's `export` kind turntable); no animated file yet, no animation render | P3 | render, minutes |
+| Turntable and animation render | [S1 0.99.3, 0.99.7.0] | partial: turntable done (one full turn of the view as 8 to 64 path-traced PNG frames, with the same frames as one looping animated PNG, a folder or one zip in the browser, also the agent's `export` kind turntable); no animation render | P3 | render, minutes |
 | Voxel shapes (Lego, marching cubes, clay) | [S1 0.96, 0.99.2] | missing | P3 | - |
 | Editor display modes | AO and constant shading, background fading, grid/edge colours [S1 0.99.5.1] | partial (one lit shading with the mockup background) | P3 | - |
 

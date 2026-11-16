@@ -2965,13 +2965,22 @@ impl Editor {
                 frames.push(last);
                 let (n, spp) = (frames.len(), self.ui.render.samples());
                 if agent {
-                    let (folder, files) = crate::files::turntable_files(&self.ui.scene_name, frames);
-                    self.agent_files = files;
-                    self.agent_folder = Some(folder);
-                    self.agent_rendered = Some(Ok(format!(
-                        "a turntable: {n} frames of {w} x {h} at {spp} samples per pixel, one full turn of the \
-                         user's view around its target, numbered in order so they loop"
-                    )));
+                    match crate::files::turntable_files(&self.ui.scene_name, frames) {
+                        Ok((folder, files)) => {
+                            let turn = files.last().map_or("", |f| f.0.as_str());
+                            self.agent_rendered = Some(Ok(format!(
+                                "a turntable: {n} frames of {w} x {h} at {spp} samples per pixel, one full turn of the \
+                                 user's view around its target, numbered in order so they loop, and {turn}, the same \
+                                 frames as one animated PNG that loops (a turn in {} seconds)",
+                                crate::files::TURN_SECONDS
+                            )));
+                            self.agent_files = files;
+                            self.agent_folder = Some(folder);
+                        }
+                        Err(e) => {
+                            self.agent_rendered = Some(Err(format!("the turntable could not be put together: {e}")))
+                        }
+                    }
                     None
                 } else {
                     self.turned = Some(frames);

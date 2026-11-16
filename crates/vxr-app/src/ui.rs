@@ -2863,7 +2863,7 @@ impl Hybrid {
             Entry::Sep,
             Entry::Head("EXPORT"),
             Entry::Row("export-render", icon::IMAGE_DOWN, "Render PNG", "R"),
-            Entry::Row("export-turntable", icon::REFRESH_CW, "Turntable", "PNG frames"),
+            Entry::Row("export-turntable", icon::REFRESH_CW, "Turntable", "PNG frames, animation"),
             Entry::Row("export-obj", icon::BOX, "OBJ with palette texture", ".obj .mtl .png"),
             Entry::Row("export-slices", icon::LAYERS, "PNG slices", ".png"),
             Entry::Row("export-embed", icon::CODE, "Embed for a web page", "<voxel-scene>"),
