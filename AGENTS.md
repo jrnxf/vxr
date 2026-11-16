@@ -36,6 +36,7 @@ fast voxel scenes: an open-source voxel scene editor (Rust, wgpu) with a one-tag
 - `assets/logo/`: the logo as SVG (the cube, the wordmark and the lockup, each for dark and light backgrounds, and the app icon); `docs/decisions.md` "Logo" has the colours and sizes.
 
 - `docs/plan.md`: what to research and test next, in order. Ask the owner before starting each phase.
+- `docs/launch-todo.md`: the launch work not done yet and the open owner decisions. Tick a box when its work lands.
 - `docs/decisions.md`: every settled decision and why. Update it when a decision changes; do not duplicate it here.
 - `docs/research/`: Phase 1 desk research, one file per topic. `docs/research/magicavoxel-gap.md` lists every MagicaVoxel feature with vxr's status and priority; update its row when a feature lands. `docs/research/ai.md` is the AI research and proposal (assistant and `vxr mcp`); its mocks and screenshots live in the git-ignored `.scratch/ai-mocks/` and are never committed.
 - `docs/market-research.md`: the market case. Reference only.
