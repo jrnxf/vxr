@@ -411,7 +411,15 @@ impl Player {
     }
 
     fn brush(&self, tool: Tool, shape: Shape) -> Brush {
-        Brush { tool, shape, mirror: [self.mirror, false, false], lock: None, color: self.color, size: 1 }
+        Brush {
+            tool,
+            shape,
+            mirror: [self.mirror, false, false],
+            lock: None,
+            color: self.color,
+            size: 1,
+            inside: false,
+        }
     }
 
     /// The camera keeps its place in the world when the map changes under it (Tab).
@@ -441,7 +449,7 @@ impl Player {
                         self.gesture = Some(g);
                     }
                     Press::Picked(v) => self.color = v,
-                    Press::Done(_) | Press::Nothing => {}
+                    Press::Done(_) | Press::Nothing | Press::NoPattern => {}
                 }
             }
             Drag(_) | LiftTo(_) => {

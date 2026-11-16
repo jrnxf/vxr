@@ -460,9 +460,46 @@ async function libraryFetch(id, method, path, flat, body) {
 
 // Bytes from the editor are a view of its memory, which moves: anything kept past the call
 // takes a copy (slice).
+// The embed viewer's three files (crates/vxr-embed, copied into embed/ by the build), fetched
+// the first time Embed is used and handed to the editor, which packs them into the embed's zip.
+async function fetchEmbed() {
+  const get = async (name) => {
+    const r = await fetch(new URL('embed/' + name, document.baseURI));
+    if (!r.ok) throw new Error(name + ': HTTP ' + r.status);
+    return new Uint8Array(await r.arrayBuffer());
+  };
+  try {
+    const files = await Promise.all(['voxel-scene.js', 'vxr_embed.js', 'vxr_embed_bg.wasm'].map(get));
+    app.embed_fetched(...files, '');
+  } catch (e) {
+    app.embed_fetched(new Uint8Array(), new Uint8Array(), new Uint8Array(), String(e?.message ?? e));
+  }
+}
+
+// Import palette: a PNG or text file. No more is read than the editor needs to refuse a
+// file too large for a palette (over 1 MB).
+const paletteInput = Object.assign(document.createElement('input'), { type: 'file', accept: '.png,.hex,.gpl,.txt' });
+paletteInput.addEventListener('change', async () => {
+  const f = paletteInput.files[0];
+  paletteInput.value = '';
+  if (f) app.import_palette(new Uint8Array(await f.slice(0, (1 << 20) + 1).arrayBuffer()), f.name);
+});
+
+// Import image: a PNG to turn into voxels. The editor refuses one over 1024 pixels on a side
+// from its header, before any pixel is decoded.
+const imageInput = Object.assign(document.createElement('input'), { type: 'file', accept: '.png,image/png' });
+imageInput.addEventListener('change', async () => {
+  const f = imageInput.files[0];
+  imageInput.value = '';
+  if (f) app.import_image(new Uint8Array(await f.arrayBuffer()), f.name);
+});
+
 window.vxrHost = {
   pickOpen,
+  pickPalette: () => paletteInput.click(),
+  pickImage: () => imageInput.click(),
   download,
+  fetchEmbed,
   keepToured() {
     try { localStorage.setItem(TOURED_KEY, '1'); } catch {}
   },

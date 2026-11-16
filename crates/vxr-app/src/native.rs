@@ -155,6 +155,29 @@ impl Platform for Desktop {
         read(&path).map(Some)
     }
 
+    fn pick_palette(&mut self) -> Result<Option<(String, Vec<u8>)>, String> {
+        let kinds = ["png", "hex", "gpl", "txt"];
+        let Some(path) = rfd::FileDialog::new().add_filter("Palette", &kinds).pick_file() else {
+            return Ok(None);
+        };
+        // A palette is small: no more of a file is read than the reader needs to refuse it.
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        std::fs::File::open(&path)
+            .and_then(|f| f.take(vxr_core::palette::IMPORT_MAX_BYTES as u64 + 1).read_to_end(&mut bytes))
+            .map_err(|e| format!("{}: {e}", file_name(&path)))?;
+        Ok(Some((file_name(&path), bytes)))
+    }
+
+    fn pick_image(&mut self) -> Result<Option<(String, Vec<u8>)>, String> {
+        let Some(path) = rfd::FileDialog::new().add_filter("PNG image", &["png"]).pick_file() else {
+            return Ok(None);
+        };
+        // The decoder refuses an image over its size from the header, before any pixel.
+        let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", file_name(&path)))?;
+        Ok(Some((file_name(&path), bytes)))
+    }
+
     fn open_project(&mut self, project: &Project) -> Result<Option<Opened>, String> {
         read(project.path.as_deref().ok_or("it has no file")?).map(Some)
     }
@@ -199,6 +222,15 @@ impl Platform for Desktop {
         Ok(Some(file_name(&path)))
     }
 
+    fn save_text(&mut self, name: &str, text: &str) -> Result<Option<String>, String> {
+        let ext = name.rsplit('.').next().unwrap_or("txt");
+        let Some(path) = rfd::FileDialog::new().add_filter("Text", &[ext]).set_file_name(name).save_file() else {
+            return Ok(None);
+        };
+        std::fs::write(&path, text).map_err(|e| e.to_string())?;
+        Ok(Some(file_name(&path)))
+    }
+
     fn save_zip(&mut self, name: &str, bytes: &[u8]) -> Result<Option<String>, String> {
         let Some(path) = rfd::FileDialog::new().add_filter("Zip", &["zip"]).set_file_name(name).save_file() else {
             return Ok(None);
@@ -224,6 +256,15 @@ impl Platform for Desktop {
             std::fs::write(dir.join(name), bytes).map_err(|e| e.to_string())?;
         }
         Ok(files.first().map(|f| f.0.clone()))
+    }
+
+    fn save_folder(&mut self, name: &str, files: &[File]) -> Result<Option<String>, String> {
+        let Some(parent) =
+            rfd::FileDialog::new().set_title(format!("Choose where to put the folder {name}")).pick_folder()
+        else {
+            return Ok(None);
+        };
+        vxr_app::embed::write_folder(&parent, name, files).map(Some)
     }
 
     fn persist_theme(&mut self, id: &str) -> Result<(), String> {
@@ -289,6 +330,7 @@ impl App {
         )?;
         let editor = &mut host.editor;
         editor.ui.theme = load_theme();
+        editor.embed_viewer = Some(Box::new(|| vxr_app::embed::viewer(&vxr_app::embed::dir()).map(Some)));
         editor.ui.tour.seen = load_toured();
         if let Some(dir) = config_dir() {
             editor.projects = Projects::load(Box::new(Folder::new(dir.join("projects"))));

@@ -3,9 +3,10 @@
 //! (circle or sphere) brush (the voxel brush in sizes up to [`MAX_SIZE`]), an optional mirror on any of the three axes ([`Scene::pivot`])
 //! and an optional axis lock that keeps drags on a plane across that axis. A gesture is a
 //! press, any number of moves and a release; the whole gesture is one undo step. All
-//! positions are map cells.
+//! positions are map cells. The pattern brush stamps the clipboard ([`pattern_cells`]).
 
 use crate::Scene;
+use crate::select::Clip;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tool {
@@ -28,12 +29,16 @@ pub enum Shape {
     Circle,
     /// A ball centred on the press, out to the pointer.
     Sphere,
+    /// The clipboard as a stamp ([`pattern_cells`]), set against the face under the pointer:
+    /// a press shows it, a drag moves it and the release leaves it. Add puts its voxels, erase
+    /// clears where it has voxels, paint gives the voxels it covers its colours.
+    Pattern,
 }
 
 impl Shape {
     /// Shapes drawn whole from the press to the pointer, redrawn live as the pointer moves.
     pub fn is_span(self) -> bool {
-        matches!(self, Shape::Box | Shape::Line | Shape::Circle | Shape::Sphere)
+        matches!(self, Shape::Box | Shape::Line | Shape::Circle | Shape::Sphere | Shape::Pattern)
     }
 }
 
@@ -52,6 +57,10 @@ pub struct Brush {
     /// pressed face and as deep as it is wide, out of the face for add and into it for erase
     /// and paint.
     pub size: u8,
+    /// Erase and paint change only selected voxels while any are selected (MagicaVoxel's
+    /// region option, [`crate::select::inside`]). Add is never limited: a selection holds
+    /// only voxels, so there would be no cell left to add to.
+    pub inside: bool,
 }
 
 /// What a ray points at: a voxel face, or the ground plane under the model.
@@ -90,6 +99,8 @@ pub const MAX_SIZE: u8 = 16;
 pub enum Press {
     /// Nothing to do there (for example erasing the ground).
     Nothing,
+    /// The pattern brush has nothing to stamp: the clipboard is empty.
+    NoPattern,
     /// Pick took this palette index.
     Picked(u8),
     /// The edit is done (face brush): one undo step.
@@ -117,6 +128,8 @@ pub struct Gesture {
     /// A box whose base is drawn and whose height now follows the pointer along the drag
     /// axis ([`Gesture::lift`]), until a click or Enter places it.
     pub lifting: bool,
+    /// What the pattern brush stamps: the clipboard as it was at the press.
+    pattern: Option<Clip>,
 }
 
 impl Scene {
@@ -153,7 +166,9 @@ impl Scene {
         self.mirror(p, 0)
     }
 
-    /// Set a cell and its mirror images: up to eight cells with all three axes on.
+    /// Set a cell and its mirror images: up to eight cells with all three axes on. Erase and
+    /// paint change only cells that hold a voxel (a mirror image over empty space stays
+    /// empty) and, with [`Brush::inside`], only selected ones.
     fn put_brush(&mut self, brush: &Brush, p: [i32; 3], v: u8) {
         let mut cells = [p; 8];
         let mut n = 1;
@@ -165,10 +180,17 @@ impl Scene {
                 n *= 2;
             }
         }
+        let add = brush.tool == Tool::Add;
         for (i, &c) in cells[..n].iter().enumerate() {
-            if !cells[..i].contains(&c) {
-                self.put(c, v);
+            if cells[..i].contains(&c) {
+                continue;
             }
+            if !add
+                && (self.map.get(c[0], c[1], c[2]) == 0 || (brush.inside && !crate::select::inside(&self.selection, c)))
+            {
+                continue;
+            }
+            self.put(c, v);
         }
     }
 
@@ -224,6 +246,12 @@ impl Scene {
         if t.ground && brush.tool != Tool::Add {
             return Press::Nothing;
         }
+        let pattern = if brush.shape == Shape::Pattern {
+            let Some(clip) = self.clipboard.clone() else { return Press::NoPattern };
+            Some(clip)
+        } else {
+            None
+        };
         self.commit();
         if brush.shape == Shape::Face {
             if t.ground {
@@ -253,6 +281,7 @@ impl Scene {
             normal,
             drawn: 0,
             lifting: false,
+            pattern,
         };
         if brush.shape == Shape::Voxel {
             self.stamp(&brush, start, normal);
@@ -356,9 +385,20 @@ impl Gesture {
         d2.sqrt().round().min(MAX_RADIUS as f64) as i32
     }
 
+    /// The way the pattern brush's stamp grows from the pointer's cell: out of the pressed
+    /// face for add, into it for erase and paint.
+    fn grow(&self) -> [i32; 3] {
+        if self.brush.tool == Tool::Add { self.normal } else { self.normal.map(|n| -n) }
+    }
+
     /// The bounds of what the drag draws, inclusive.
     pub fn extent(&self) -> ([i32; 3], [i32; 3]) {
         match self.brush.shape {
+            Shape::Pattern => {
+                let size = self.pattern.as_ref().map_or([1; 3], |c| c.size);
+                let lo = self.pattern.as_ref().map_or(self.end, |c| c.against(self.end, self.grow()));
+                (lo, std::array::from_fn(|a| lo[a] + size[a] - 1))
+            }
             Shape::Circle | Shape::Sphere => {
                 let r = self.radius();
                 let flat = |a: usize| self.brush.shape == Shape::Circle && a == self.axis;
@@ -421,6 +461,15 @@ impl Gesture {
                 }
             }
             Shape::Circle | Shape::Sphere => self.draw_round(scene, None),
+            Shape::Pattern => {
+                let Some(clip) = &self.pattern else { return };
+                let (lo, hi) = self.reach(scene);
+                for (p, v) in pattern_cells(clip, self.end, self.grow()) {
+                    if (0..3).all(|a| (lo[a]..=hi[a]).contains(&p[a])) {
+                        scene.put_brush(b, p, if b.tool == Tool::Erase { 0 } else { v });
+                    }
+                }
+            }
             Shape::Voxel | Shape::Face => {}
         }
     }
@@ -545,6 +594,14 @@ pub fn ball_cells(c: [i32; 3], r: i32, flat: Option<usize>, inside: Option<i32>)
             })
         })
     })
+}
+
+/// The cells of the pattern brush and the agents' `stamp` tool: every voxel of `clip` with
+/// its slot, the clip's box set against cell `at` ([`Clip::against`]) and growing along the
+/// unit vector `grow`.
+pub fn pattern_cells(clip: &Clip, at: [i32; 3], grow: [i32; 3]) -> impl Iterator<Item = ([i32; 3], u8)> + '_ {
+    let lo = clip.against(at, grow);
+    clip.voxels.iter().map(move |&(d, v)| (std::array::from_fn(|a| lo[a] + d[a]), v))
 }
 
 /// The cell where a ray crosses the middle of layer `layer` on `axis`, for plane drags.

@@ -1,7 +1,9 @@
 // The browser check's server (crates/vxr-web/check): dist/ with the headers the deploy sends
 // (dist/_headers, the content security policy among them), generated fixtures under
 // /__fixtures/, and a stand-in OpenAI-compatible Chat Completions endpoint under /__fake/v1
-// for the assistant: a scripted provider, not a model.
+// for the assistant: a scripted provider, not a model. A PUT to /__embed/<folder>/<file> keeps
+// a file of an embed folder the page exported, and a GET serves it back as a plain static host
+// would, without the deploy's headers.
 //
 //   node check-server.js <dist> <port> <fixtures> [bridge-port]
 //
@@ -15,7 +17,7 @@ const path = require('node:path');
 const [dist, port, fixtures, bridgePort] = process.argv.slice(2);
 const types = {
   '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.wasm': 'application/wasm',
-  '.ttf': 'font/ttf', '.webp': 'image/webp', '.json': 'application/json', '.txt': 'text/plain', '.vox': 'application/octet-stream',
+  '.ttf': 'font/ttf', '.webp': 'image/webp', '.json': 'application/json', '.txt': 'text/plain', '.vox': 'application/octet-stream', '.png': 'image/png',
 };
 
 // Cloudflare's _headers: a path pattern, then indented "Name: value" lines.
@@ -104,14 +106,17 @@ function standIn(req, res, body) {
   res.end('data: [DONE]\n\n');
 }
 
-// /__hold/<ms> holds back every wasm response for that long from now (the landing page's
-// progress and early click: a slow connection, with the rest of the page already in).
+// /__hold/<ms> holds back every wasm response for that long from the next wasm request (the
+// landing page's progress and early click: a slow connection, with the rest of the page
+// already in). Counting from the request, not from this call, keeps the hold whole however
+// long the browser takes to start.
 let holdUntil = 0;
+let holdNext = 0;
 
 http.createServer((req, res) => {
   const u = decodeURIComponent(new URL(req.url, 'http://x').pathname);
   if (u.startsWith('/__hold/')) {
-    holdUntil = Date.now() + +u.slice(8);
+    holdNext = +u.slice(8);
     res.writeHead(200);
     return res.end('held');
   }
@@ -124,6 +129,28 @@ http.createServer((req, res) => {
   if (u === '/__fake/seen') {
     res.writeHead(200, { 'content-type': 'application/json' });
     return res.end(JSON.stringify(seen));
+  }
+  if (u.startsWith('/__embed/')) {
+    // Only <folder>/<file> of plain names (or <folder>/ for its index.html), under the fixtures folder.
+    const m = /^\/__embed\/([\w-]+)\/([\w.-]*)$/.exec(u);
+    const f = m && path.join(fixtures, 'embed', m[1], path.basename(m[2] || 'index.html'));
+    if (!f) { res.writeHead(404); return res.end(); }
+    if (req.method === 'PUT') {
+      const parts = [];
+      req.on('data', (d) => parts.push(d));
+      req.on('end', () => {
+        fs.mkdirSync(path.dirname(f), { recursive: true });
+        fs.writeFileSync(f, Buffer.concat(parts));
+        res.writeHead(204);
+        res.end();
+      });
+      return;
+    }
+    return fs.readFile(f, (err, data) => {
+      if (err) { res.writeHead(404); return res.end(); }
+      res.writeHead(200, { 'content-type': types[path.extname(f)] || 'application/octet-stream', 'cache-control': 'no-store' });
+      res.end(data);
+    });
   }
   const p = u.startsWith('/__fixtures/') ? path.join(fixtures, u.slice(12)) : path.join(dist, u);
   // A path without an extension is its .html file (Cloudflare's /about for about.html).
@@ -139,6 +166,10 @@ http.createServer((req, res) => {
       res.writeHead(200, { ...headersFor(u), 'content-type': types[path.extname(f)] || 'application/octet-stream' });
       res.end(data);
     };
+    if (f.endsWith('.wasm') && holdNext) {
+      holdUntil = Date.now() + holdNext;
+      holdNext = 0;
+    }
     if (f.endsWith('.wasm') && holdUntil > Date.now()) setTimeout(send, holdUntil - Date.now());
     else send();
   });

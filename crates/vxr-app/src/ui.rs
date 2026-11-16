@@ -13,8 +13,9 @@ use std::sync::Arc;
 use vxr_core::material::{Kind, Material};
 
 use crate::color::{Hsv, hex, parse_hex};
-use crate::render::{EXPORT_SIZES, RenderSettings, SPP_CHOICES};
+use crate::render::{EXPORT_SIZES, FOCUS_RANGE, RenderSettings, SPP_CHOICES, TURNTABLE_FRAMES};
 use crate::theme::{self, Theme, ThemeChoice, th};
+use vxr_core::palette::{Shift, SortKey};
 
 mod account;
 mod activity;
@@ -164,6 +165,7 @@ mod icon {
     pub const PIPETTE: char = '\u{e13b}';
     pub const POINTER: char = '\u{e1c3}';
     pub const SQUARE_DASHED: char = '\u{e1cb}';
+    pub const STAMP: char = '\u{e3bb}';
     pub const LAYERS: char = '\u{e529}';
     pub const PLUS: char = '\u{e13d}';
     pub const MINUS: char = '\u{e11c}';
@@ -182,6 +184,7 @@ mod icon {
     pub const COPY: char = '\u{e09e}';
     pub const APERTURE: char = '\u{e040}';
     pub const IMAGE_DOWN: char = '\u{e53c}';
+    pub const IMAGE_UP: char = '\u{e5cb}';
     pub const SUN: char = '\u{e178}';
     pub const SUNSET: char = '\u{e17a}';
     pub const SLASH: char = '\u{e51d}';
@@ -230,6 +233,7 @@ mod icon {
     pub const CIRCLE_HELP: char = '\u{e082}';
     pub const KEYBOARD: char = '\u{e284}';
     pub const PLAY: char = '\u{e13c}';
+    pub const FOCUS: char = '\u{e29e}';
 }
 
 pub use vxr_core::select::{Region, Transform};
@@ -256,11 +260,29 @@ pub enum Action {
     Snap(View),
     /// Orthographic (true) or perspective projection.
     Ortho(bool),
+    /// Move the camera to the view saved in slot (0 to 9).
+    GoToView(i32),
+    /// Save the camera's view into slot (0 to 9) as an undo step.
+    SaveView(i32),
     Embed,
     /// Export what the view shows as OBJ with its palette texture (the host writes the files).
     ExportObj,
     /// Export the model's layers side by side as one PNG (the host writes the file).
     ExportSlices,
+    /// Export the isometric sprite: one PNG of pixel art on a transparent background.
+    ExportSprite,
+    /// Export the palette as a 256 x 1 PNG (false) or as `.hex` text (true).
+    ExportPalette(bool),
+    /// Ask for a palette file (a PNG or text) and give its colours to slots 1 up (the host
+    /// picks the file).
+    ImportPalette,
+    /// Ask for a PNG image and put it into the model as voxels one cell thick (the host
+    /// picks the file).
+    ImportImage,
+    /// Flip "Only the selection" for the OBJ, slices and sprite exports, and say so.
+    ExportSelection,
+    /// Flip the region option (erase and paint stay inside the selection), and say so.
+    BrushInside,
     /// Show `rgba` in palette slot `slot` now, inside the open colour edit.
     Recolor {
         slot: u8,
@@ -285,6 +307,12 @@ pub enum Action {
     CancelExport,
     /// For the host: an export finished; take its PNG from `Editor::exported`.
     Exported,
+    /// For the host: the embed's poster is traced; take it from `Editor::embedded`.
+    Embedded,
+    /// Start a turntable export (a PNG per frame of one turn) with the Render panel's settings.
+    ExportTurntable,
+    /// For the host: a turntable finished; take its frames from `Editor::turned`.
+    Turned,
     /// Move, rotate, flip or loop the selection, or the whole model when nothing is selected.
     Transform(Transform),
     SelectAll,
@@ -295,6 +323,23 @@ pub enum Action {
     DeleteSelection,
     /// Paint the selection with the current colour.
     FillSelection,
+    /// Give every voxel of slot `from` the slot `to`: in the selection while voxels are
+    /// selected, else in the whole model.
+    ReplaceColor {
+        from: u8,
+        to: u8,
+    },
+    /// Erase every voxel of the slot, in the selection or the whole model as above.
+    RemoveColor(u8),
+    /// Show the palette's selected slots shifted by this from their colours before the group
+    /// edit (`Hybrid::group_base`), inside the open colour edit.
+    ShiftColors(Shift),
+    /// Select, in the palette, the slots the selected voxels use (the whole model's while
+    /// nothing is selected).
+    SelectUsedColors,
+    /// Sort the palette's selected slots, or every slot while none is selected, by this:
+    /// the voxels follow their colours, so only the palette order changes.
+    SortPalette(SortKey),
     /// Keep only the voxels seen from outside the selection, or the whole model.
     Hollow,
     /// Fill the space the selection, or the whole model, encloses with the current colour.
@@ -314,12 +359,26 @@ pub enum Action {
     },
     /// A scene tree row was clicked: pick that object in world mode, or edit its model.
     PickNode(usize),
+    /// A scene tree row was Cmd-clicked in world mode: add it to the picked rows, or take it
+    /// out, so Cmd-G, Backspace and H act on all of them.
+    PickAlso(usize),
     /// Hide or show a tree node in world mode (the row's eye).
     SetHidden(usize, bool),
     /// Hide or show the picked object (H).
     ToggleHidden,
     /// Put the picked object or group into a new group of its own (Cmd-G).
     Group,
+    /// A scene tree row was dragged to another place: under group `parent` (0 is the top),
+    /// in front of its child `before` or at the end.
+    PlaceNode {
+        node: usize,
+        parent: usize,
+        before: Option<usize>,
+    },
+    /// Move the picked object or group one place up or down among its group (Cmd-K).
+    ShiftNode {
+        down: bool,
+    },
     /// Put the picked object or group on this layer (a layer row click in world mode).
     SetLayer(i32),
     /// Hide or show a layer (its row's eye).
@@ -559,6 +618,44 @@ pub struct TreeRow {
     pub layer: i32,
 }
 
+/// Where a dragged scene tree row lands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TreeDrop {
+    /// The group it goes under (node 0 is the top) and the child it goes in front of (None:
+    /// the end).
+    pub parent: usize,
+    pub before: Option<usize>,
+    /// What shows it: a line in the gap above row `.0` at depth `.1`, or (None) the group
+    /// row the pointer is on.
+    line: Option<(usize, usize)>,
+    row: usize,
+}
+
+/// Where the row of `node` lands when it is dropped with the pointer on row `over`, `frac`
+/// of the way down it (0 to 1) and `depth` indents in from the left. The middle half of a
+/// group row puts it in that group, at the end. Anywhere else it goes in the gap above or
+/// below the row; where a gap is the end of one or more groups, the pointer's depth says
+/// which of them it stays in. None for a place in the node itself or under it.
+pub fn tree_drop(rows: &[TreeRow], node: usize, over: usize, frac: f32, depth: usize) -> Option<TreeDrop> {
+    let from = rows.iter().position(|r| r.node == node)?;
+    let end = rows[from + 1..].iter().position(|r| r.depth <= rows[from].depth).map_or(rows.len(), |k| from + 1 + k);
+    let on = rows.get(over)?;
+    let (parent, before, line) = if on.group && (0.25..0.75).contains(&frac) {
+        (Some(over), None, None)
+    } else {
+        let gap = if frac < 0.5 { over } else { over + 1 };
+        let lo = rows.get(gap).map_or(0, |r| r.depth);
+        let hi = if gap == 0 { 0 } else { rows[gap - 1].depth + rows[gap - 1].group as usize };
+        let d = depth.clamp(lo, hi);
+        let parent = if d == 0 { None } else { rows[..gap].iter().rposition(|r| r.depth == d - 1) };
+        (parent, rows.get(gap).filter(|r| r.depth == d).map(|r| r.node), Some((gap, d)))
+    };
+    if parent.is_some_and(|p| (from..end).contains(&p)) {
+        return None;
+    }
+    Some(TreeDrop { parent: parent.map_or(0, |p| rows[p].node), before, line, row: over })
+}
+
 /// One row of the scene tree's LAYERS list, in world mode (set by the editor).
 #[derive(Clone, Debug, PartialEq)]
 pub struct LayerRow {
@@ -580,13 +677,15 @@ pub enum Named {
 const TREE_W: f32 = 212.0;
 const TREE_ROWS: usize = 14;
 /// The selection flyout's height, in points.
-const SELECTION_H: f32 = 344.0;
+const SELECTION_H: f32 = 378.0;
 
 /// What the next swatch click does, armed from the colour editor or Cmd-K.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SlotOp {
     Swap,
     Copy,
+    /// Give the current colour's voxels the clicked slot.
+    Replace,
 }
 
 /// The colour editor's two tabs.
@@ -617,6 +716,10 @@ const SWATCH_ROWS: f32 = 8.0;
 /// Swatches to a row.
 const PALETTE_COLS: usize = 8;
 
+/// A render export in progress: its size, samples per pixel so far and the target, and a
+/// turntable's frame (from 1) and count of frames.
+pub type Exporting = ((u32, u32), f32, u32, Option<(u32, u32)>);
+
 /// Readouts for the stats corner.
 #[derive(Clone, Debug, Default)]
 pub struct Stats {
@@ -631,8 +734,8 @@ pub struct Stats {
     pub selected: usize,
     /// The render corner's samples per pixel and whether it is still sampling, if shown.
     pub render: Option<(f32, bool)>,
-    /// A render export in progress: its size, samples per pixel so far and the target.
-    pub export: Option<((u32, u32), f32, u32)>,
+    /// A render export in progress.
+    pub export: Option<Exporting>,
     /// Export sizes this GPU can render (by `EXPORT_SIZES` index).
     pub export_fits: [bool; 4],
 }
@@ -647,6 +750,9 @@ pub struct Hybrid {
     pub lock: Option<usize>,
     /// The voxel brush's size, 1 to [`MAX_SIZE`] (- and = step it).
     pub size: u8,
+    /// The region option: while voxels are selected, erase and paint change only those
+    /// ([`vxr_core::tools::Brush::inside`]).
+    pub inside: bool,
     /// What a select click on a voxel takes: its colour, its face or its volume.
     pub region: Region,
     /// The size flyout beside the voxel brush button is open (V again, or a click on the
@@ -669,6 +775,14 @@ pub struct Hybrid {
     pub can_redo: bool,
     pub color_edit: Option<ColorEdit>,
     pub slot_op: Option<SlotOp>,
+    /// The palette's selected slots while more than one is (Shift-click a swatch), in the
+    /// order picked, the current slot among them; else empty. The colour editor then edits
+    /// them as a group.
+    pub colors: Vec<u8>,
+    /// The selected slots' colours before the group edit, which the sliders shift.
+    pub group_base: Vec<(u8, [u8; 4])>,
+    /// Where the group edit's sliders stand.
+    pub group_shift: Shift,
     /// Show the live path-traced render corner.
     pub show_render: bool,
     /// Where the render corner's image goes this frame, in points: the corner, or the whole
@@ -680,6 +794,9 @@ pub struct Hybrid {
     render_dock: Option<Rect>,
     /// The Render panel is open, and what it edits.
     pub render_panel: bool,
+    /// The next click on the scene sets the Render panel's focus (its crosshair button, or
+    /// Cmd-K Focus on a point) instead of using the tool.
+    pub focus_pick: bool,
     pub render: RenderSettings,
     /// Text of the Render panel's sun colour field.
     sun_hex: String,
@@ -691,6 +808,11 @@ pub struct Hybrid {
     pub view: Option<View>,
     /// The View flyout beside the camera bar is open.
     pub view_panel: bool,
+    /// Which of the ten saved view slots hold a view (set by the editor).
+    pub saved_views: [bool; vxr_core::views::SLOTS as usize],
+    /// The next click on a saved view slot saves the view into it (the flyout's Save, or
+    /// Cmd-K Save view to a slot) instead of going to it.
+    pub save_view_pick: bool,
     /// Show the camera moves in the hint bar: Space is held or the camera is being dragged
     /// (set by the editor).
     pub camera_hints: bool,
@@ -702,6 +824,9 @@ pub struct Hybrid {
     pub tour: Tour,
     /// The file menu under the scene name (New, Open, Save, Export) is open.
     pub file_menu: bool,
+    /// The Export menu's "Only the selection": the OBJ, slices and sprite exports take the
+    /// selected voxels alone while some are selected.
+    pub export_selection: bool,
     /// The picked theme (System follows the system's light or dark setting), and the Theme
     /// menu under the top bar's theme button.
     pub theme: ThemeChoice,
@@ -784,11 +909,15 @@ pub struct Hybrid {
     pub tree: Vec<TreeRow>,
     pub tree_on: Option<usize>,
     pub picked_node: Option<usize>,
+    /// Every picked node in world mode (more than one after a Cmd-click in the tree).
+    pub picks: Vec<usize>,
     /// The layers listed under the tree in world mode, and the picked node's layer.
     pub layers: Vec<LayerRow>,
     pub layer_on: Option<i32>,
     /// The first tree row shown, when there are more than fit.
     tree_scroll: usize,
+    /// The node whose tree row is being dragged to another place, and where it would land.
+    tree_drag: Option<(usize, Option<TreeDrop>)>,
     /// The node or layer being renamed and its field's text, and whether the field still
     /// needs focus.
     renaming: Option<(Named, String)>,
@@ -928,6 +1057,7 @@ const COMMANDS: &[Command] = &[
     Command { label: "Line brush", keys: &["L"], run: |h| h.shape = Shape::Line },
     Command { label: "Center brush: circle", keys: &["C"], run: |h| h.shape = Shape::Circle },
     Command { label: "Center brush: sphere", keys: &["C", "C"], run: |h| h.shape = Shape::Sphere },
+    Command { label: "Pattern brush", keys: &["T"], run: |h| h.shape = Shape::Pattern },
     Command { label: "Mirror", keys: &["M"], run: |h| h.mirror = !h.mirror },
     Command { label: "Mirror X", keys: &[], run: |h| h.toggle_mirror_axis(0) },
     Command { label: "Mirror Y", keys: &[], run: |h| h.toggle_mirror_axis(1) },
@@ -936,6 +1066,7 @@ const COMMANDS: &[Command] = &[
     Command { label: "Lock axis Y", keys: &[], run: |h| h.toggle_lock(1) },
     Command { label: "Lock axis Z", keys: &[], run: |h| h.toggle_lock(2) },
     Command { label: "Cycle axis lock", keys: &["K"], run: |h| h.cycle_lock() },
+    Command { label: "Brush only inside the selection", keys: &[], run: |h| h.actions.push(Action::BrushInside) },
     Command { label: "World mode / edit model", keys: &["Tab"], run: |h| h.actions.push(Action::ToggleWorld) },
     Command {
         label: "Duplicate object",
@@ -952,6 +1083,8 @@ const COMMANDS: &[Command] = &[
     Command { label: "Rename object", keys: &[], run: |h| h.start_rename(h.picked_node) },
     Command { label: "Group object", keys: &["⌘", "G"], run: |h| h.actions.push(Action::Group) },
     Command { label: "Ungroup", keys: &["⌘", "⇧", "G"], run: |h| h.actions.push(Action::Ungroup) },
+    Command { label: "Move up in scene tree", keys: &[], run: |h| h.actions.push(Action::ShiftNode { down: false }) },
+    Command { label: "Move down in scene tree", keys: &[], run: |h| h.actions.push(Action::ShiftNode { down: true }) },
     Command { label: "New layer", keys: &[], run: |h| h.actions.push(Action::AddLayer) },
     Command { label: "Hide or show layer", keys: &[], run: |h| h.actions.push(Action::ToggleLayer) },
     Command { label: "Rename layer", keys: &[], run: |h| h.start_layer_rename(h.layer_on) },
@@ -994,6 +1127,20 @@ const COMMANDS: &[Command] = &[
     Command { label: "Edit material", keys: &[], run: |h| h.open_material_edit() },
     Command { label: "Swap color with…", keys: &[], run: |h| h.arm_slot_op(SlotOp::Swap) },
     Command { label: "Copy color to…", keys: &[], run: |h| h.arm_slot_op(SlotOp::Copy) },
+    Command { label: "Replace color with…", keys: &[], run: |h| h.arm_slot_op(SlotOp::Replace) },
+    Command { label: "Remove color", keys: &[], run: |h| h.actions.push(Action::RemoveColor(h.slot)) },
+    Command { label: "Select used colors", keys: &[], run: |h| h.actions.push(Action::SelectUsedColors) },
+    Command { label: "Sort palette by hue", keys: &[], run: |h| h.actions.push(Action::SortPalette(SortKey::Hue)) },
+    Command {
+        label: "Sort palette by saturation",
+        keys: &[],
+        run: |h| h.actions.push(Action::SortPalette(SortKey::Saturation)),
+    },
+    Command {
+        label: "Sort palette by brightness",
+        keys: &[],
+        run: |h| h.actions.push(Action::SortPalette(SortKey::Value)),
+    },
     Command {
         label: "Toggle render preview",
         keys: &[],
@@ -1004,9 +1151,19 @@ const COMMANDS: &[Command] = &[
     },
     Command { label: "Render settings", keys: &["R"], run: |h| h.toggle_render_panel() },
     Command { label: "Full render view", keys: &[], run: |h| h.toggle_full_render() },
+    Command { label: "Focus on a point…", keys: &[], run: |h| h.arm_focus_pick() },
+    Command { label: "Saved views", keys: &[], run: |h| h.view_panel = true },
+    Command { label: "Save view to a slot…", keys: &[], run: |h| h.arm_save_view() },
     Command { label: "Export PNG", keys: &[], run: |h| h.actions.push(Action::ExportPng) },
+    Command { label: "Export turntable", keys: &[], run: |h| h.actions.push(Action::ExportTurntable) },
     Command { label: "Export OBJ", keys: &[], run: |h| h.actions.push(Action::ExportObj) },
     Command { label: "Export PNG slices", keys: &[], run: |h| h.actions.push(Action::ExportSlices) },
+    Command { label: "Export isometric sprite", keys: &[], run: |h| h.actions.push(Action::ExportSprite) },
+    Command { label: "Export only the selection", keys: &[], run: |h| h.actions.push(Action::ExportSelection) },
+    Command { label: "Export palette as PNG", keys: &[], run: |h| h.actions.push(Action::ExportPalette(false)) },
+    Command { label: "Export palette as text", keys: &[], run: |h| h.actions.push(Action::ExportPalette(true)) },
+    Command { label: "Import palette…", keys: &[], run: |h| h.actions.push(Action::ImportPalette) },
+    Command { label: "Import image…", keys: &[], run: |h| h.actions.push(Action::ImportImage) },
     Command { label: "Ask AI…", keys: &["Tab"], run: |h| h.open_ask_bar("") },
     Command { label: "Organize into objects (AI)", keys: &[], run: |h| h.organize() },
     Command { label: "Assistant panel", keys: &["⌘", "J"], run: |h| h.toggle_ai() },
@@ -1031,6 +1188,7 @@ impl Hybrid {
             mirror: false,
             mirror_on: [true, false, false],
             lock: None,
+            inside: false,
             size: 1,
             region: Region::Color,
             size_panel: false,
@@ -1046,11 +1204,17 @@ impl Hybrid {
             can_redo: false,
             color_edit: None,
             slot_op: None,
+            colors: Vec::new(),
+            group_base: Vec::new(),
+            group_shift: Shift::default(),
             show_render: true,
             render_rect: None,
             full_render: false,
             render_dock: None,
             render_panel: false,
+            focus_pick: false,
+            saved_views: [false; vxr_core::views::SLOTS as usize],
+            save_view_pick: false,
             render: RenderSettings::default(),
             sun_hex: String::new(),
             bounds: [0; 3],
@@ -1063,6 +1227,7 @@ impl Hybrid {
             help: Help::default(),
             tour: Tour::default(),
             file_menu: false,
+            export_selection: false,
             theme: ThemeChoice::default(),
             theme_menu: false,
             styled: None,
@@ -1106,7 +1271,9 @@ impl Hybrid {
             tree: Vec::new(),
             tree_on: None,
             picked_node: None,
+            picks: Vec::new(),
             tree_scroll: 0,
+            tree_drag: None,
             layers: Vec::new(),
             layer_on: None,
             renaming: None,
@@ -1299,6 +1466,18 @@ impl Hybrid {
         }
     }
 
+    /// Wait for a click on the scene to set the focus there (the render corner shows, to see it).
+    pub fn arm_focus_pick(&mut self) {
+        self.focus_pick = true;
+        self.show_render = true;
+    }
+
+    /// Open the View flyout with its saved view slots waiting for the slot to save into.
+    pub fn arm_save_view(&mut self) {
+        self.view_panel = true;
+        self.save_view_pick = true;
+    }
+
     /// Swap the path-traced image between the corner and the whole view (it shows the corner).
     pub fn toggle_full_render(&mut self) {
         self.full_render = !self.full_render;
@@ -1380,7 +1559,12 @@ impl Hybrid {
         if self.ask_bar.take().is_some() || std::mem::take(&mut self.ai.menu) {
             return;
         }
-        if self.slot_op.take().is_some() || self.color_edit.take().is_some() || self.bounds_panel.take().is_some() {
+        if self.slot_op.take().is_some()
+            || std::mem::take(&mut self.focus_pick)
+            || std::mem::take(&mut self.save_view_pick)
+            || self.color_edit.take().is_some()
+            || self.bounds_panel.take().is_some()
+        {
             return;
         }
         if std::mem::take(&mut self.agents_panel) {
@@ -1420,9 +1604,64 @@ impl Hybrid {
             Some(SlotOp::Copy) if slot != self.slot => {
                 self.actions.push(Action::CopyColor { from: self.slot, to: slot })
             }
+            Some(SlotOp::Replace) if slot != self.slot => {
+                self.actions.push(Action::ReplaceColor { from: self.slot, to: slot })
+            }
             _ => {}
         }
         self.slot = slot;
+        self.colors.clear();
+    }
+
+    /// Shift-click a swatch: add it to the palette's selected slots, or take it out. The
+    /// colour editor opens on them as a group once there are two.
+    fn toggle_color(&mut self, slot: u8) {
+        let mut colors = std::mem::take(&mut self.colors);
+        if colors.is_empty() {
+            colors.push(self.slot);
+        }
+        match colors.iter().position(|&c| c == slot) {
+            Some(i) => {
+                colors.remove(i);
+            }
+            None => colors.push(slot),
+        }
+        self.select_colors(colors);
+    }
+
+    /// Make `slots` the palette's selected slots (the last is the current one) and open the
+    /// colour editor on them; one slot or none ends the selection.
+    pub fn select_colors(&mut self, slots: Vec<u8>) {
+        self.slot_op = None;
+        if let Some(&last) = slots.last() {
+            self.slot = last;
+        }
+        self.colors = if slots.len() > 1 { slots } else { Vec::new() };
+        self.rebase_colors();
+        if !self.colors.is_empty() {
+            self.open_color_edit();
+        }
+    }
+
+    /// Start the group edit again from the colours as they are, the sliders at zero.
+    fn rebase_colors(&mut self) {
+        self.group_base = self.colors.iter().map(|&s| (s, self.palette[s as usize])).collect();
+        self.group_shift = Shift::default();
+    }
+
+    /// Keep the palette's selection true to the scene: it ends when the current slot leaves
+    /// it (a pick, the [ and ] keys), and its sliders return to zero when the colours are no
+    /// longer what they set (an undo, an agent's edit).
+    fn sync_colors(&mut self) {
+        if self.colors.is_empty() {
+            return;
+        }
+        if !self.colors.contains(&self.slot) {
+            self.colors.clear();
+            self.rebase_colors();
+        } else if self.group_base.iter().any(|&(s, c)| self.palette[s as usize] != self.group_shift.apply(c)) {
+            self.rebase_colors();
+        }
     }
 
     fn color(&self, slot: u8) -> Color32 {
@@ -1579,6 +1818,11 @@ impl Hybrid {
             // (cancel) is handled here, ahead of the keys Escape would otherwise reach.
             if self.renaming.is_some() && i.consume_key(Modifiers::NONE, Key::Escape) {
                 self.renaming = None;
+                return;
+            }
+            // Escape drops a tree row being dragged where it came from.
+            if self.tree_drag.is_some() && i.consume_key(Modifiers::NONE, Key::Escape) {
+                self.tree_drag = None;
                 return;
             }
             // The same for the review card's ask field: Escape leaves the field, it does not
@@ -1747,6 +1991,7 @@ impl Hybrid {
                 (Key::F, |h| h.shape = Shape::Face),
                 (Key::L, |h| h.shape = Shape::Line),
                 (Key::C, |h| h.center_brush()),
+                (Key::T, |h| h.shape = Shape::Pattern),
                 (Key::M, |h| h.mirror = !h.mirror),
                 (Key::K, |h| h.cycle_lock()),
                 (Key::R, |h| h.toggle_render_panel()),
@@ -2265,6 +2510,13 @@ impl Hybrid {
             if r.clicked() {
                 self.center_brush();
             }
+            y += TOOL_STEP;
+            // The pattern brush stamps the copied selection.
+            let r = tool_button(ui, pos2(x, y), icon::STAMP, "T", shape == Shape::Pattern);
+            self.hits.insert("pattern".into(), r.rect);
+            if r.clicked() {
+                self.shape = Shape::Pattern;
+            }
             let Pos2 { x, mut y } = start(2);
             if at[2].y > at[1].y {
                 rail_sep(ui, x, &mut y);
@@ -2351,9 +2603,9 @@ impl Hybrid {
         let step = DOCK_BTN + 2.0;
         let bar = |n: f32, seps: f32| 5.0 + n * step - 2.0 + seps * sep_w() + 5.0;
         let widths: &[f32] = if view.width() < bar(8.0, 2.0) + 24.0 {
-            &[bar(5.0, 0.0), bar(5.0, 0.0), bar(5.0, 2.0)]
+            &[bar(5.0, 0.0), bar(6.0, 0.0), bar(5.0, 2.0)]
         } else {
-            &[bar(8.0, 2.0), bar(7.0, 1.0)]
+            &[bar(8.0, 2.0), bar(8.0, 1.0)]
         };
         let mut top = view.bottom() - 12.0;
         widths
@@ -2493,6 +2745,12 @@ impl Hybrid {
             self.center_brush();
         }
         *x += DOCK_BTN + 2.0;
+        let r = dock_button(ui, pos2(*x, y), icon::STAMP, "pattern", shape == Shape::Pattern, true);
+        hits.push(("pattern", r.rect));
+        if r.clicked() {
+            self.shape = Shape::Pattern;
+        }
+        *x += DOCK_BTN + 2.0;
     }
 
     fn dock_axes(&mut self, ui: &mut Ui, x: &mut f32, y: f32, hits: &mut Vec<(&'static str, Rect)>) {
@@ -2575,8 +2833,12 @@ impl Hybrid {
     // The scene tree (Diorama's .tree, kept for Hybrid): beside the rail once a second object
     // exists. A row per object and group in tree order, indented under its groups, with the
     // model's size and an eye. A click picks the object in world mode or edits its model;
-    // in world mode the eye hides and shows, and a double-click renames.
+    // in world mode the eye hides and shows, a double-click renames, and a drag moves the
+    // row to another place in the tree (a line shows the gap, a group row lights).
     fn tree_panel(&mut self, ctx: &Context) {
+        if self.tree.is_empty() || !self.world {
+            self.tree_drag = None;
+        }
         if self.tree.is_empty() {
             self.renaming = None;
             return;
@@ -2595,7 +2857,9 @@ impl Hybrid {
         self.hits.insert("tree".into(), rect);
         let objects = self.tree.iter().filter(|r| !r.group).count();
         let (on, scroll, layer_on) = (self.tree_on, self.tree_scroll, self.layer_on);
+        let picks = self.picks.clone();
         let mut renaming = self.renaming.take();
+        let mut drag = self.tree_drag.take();
         let mut focus = std::mem::take(&mut self.rename_focus);
         let mut run = Vec::new();
         let mut hits = Vec::new();
@@ -2627,19 +2891,24 @@ impl Hybrid {
                 let r =
                     Rect::from_min_size(pos2(body.left(), body.top() + k as f32 * row_h), vec2(body.width(), row_h));
                 let id = format!("tree-{}", row.node);
-                let resp = ui.interact(r, Id::unique(&id), Sense::click());
+                let sense = if world { Sense::click_and_drag() } else { Sense::click() };
+                let resp = ui.interact(r, Id::unique(&id), sense);
                 hits.push((id, r));
+                if resp.drag_started() && renaming.is_none() {
+                    drag = Some((row.node, None));
+                }
+                let dragged = drag.is_some_and(|(n, _)| n == row.node);
                 let eye = Rect::from_center_size(pos2(r.right() - 15.0, r.center().y), vec2(22.0, 22.0));
                 let eye_resp = world.then(|| ui.interact(eye, Id::unique(("tree-eye", row.node)), Sense::click()));
                 if world {
                     hits.push((format!("tree-eye-{}", row.node), eye));
                 }
                 let hover = resp.hovered() || eye_resp.as_ref().is_some_and(|e| e.hovered());
-                let is_on = on == Some(row.node);
+                let is_on = on == Some(row.node) || world && picks.contains(&row.node);
                 let p = ui.painter();
                 if is_on {
                     p.rect_filled(r, CornerRadius::same(7), th().accent_bg);
-                } else if hover {
+                } else if hover || dragged {
                     p.rect_filled(r, CornerRadius::same(7), th().hover);
                 }
                 let color = match (is_on, row.shown) {
@@ -2682,8 +2951,52 @@ impl Hybrid {
                     run.push(Action::SetHidden(row.node, !row.hidden));
                 } else if resp.double_clicked() {
                     start_rename = Some(named);
+                } else if resp.clicked() && world && ui.input(|i| i.modifiers.command) {
+                    run.push(Action::PickAlso(row.node));
                 } else if resp.clicked() {
                     run.push(Action::PickNode(row.node));
+                }
+            }
+            // A row being dragged: where it would land shows as a line in the gap, or as a
+            // ring on the group row it goes into; the release puts it there.
+            if let Some((node, at)) = &mut drag {
+                let (pos, down, released) =
+                    ui.input(|i| (i.pointer.interact_pos(), i.pointer.any_down(), i.pointer.any_released()));
+                if let Some(p) = pos.filter(|_| down || released) {
+                    *at = body.expand2(vec2(0.0, row_h / 2.0)).contains(p).then_some(()).and_then(|()| {
+                        let y = ((p.y - body.top()) / row_h).clamp(0.0, rows as f32 - 0.001);
+                        let depth = ((p.x - body.left() - 8.0) / 14.0).floor().max(0.0) as usize;
+                        tree_drop(&self.tree, *node, scroll + y as usize, y.fract(), depth)
+                    });
+                }
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                let row_y = |k: usize| body.top() + (k as f32 - scroll as f32) * row_h;
+                match *at {
+                    Some(TreeDrop { line: Some((gap, d)), .. }) => {
+                        let (x, y) = (body.left() + 8.0 + d as f32 * 14.0, row_y(gap));
+                        let stroke = Stroke::new(2.0, th().accent);
+                        ui.painter().circle_stroke(pos2(x + 3.0, y), 3.0, stroke);
+                        ui.painter().hline(x + 6.0..=body.right() - 8.0, y, stroke);
+                        let mark = Rect::from_min_max(pos2(x, y - 3.0), pos2(body.right() - 8.0, y + 3.0));
+                        hits.push(("tree-drop".to_string(), mark));
+                    }
+                    Some(TreeDrop { line: None, row, .. }) => {
+                        let r = Rect::from_min_size(pos2(body.left(), row_y(row)), vec2(body.width(), row_h));
+                        ui.painter().rect_stroke(
+                            r.shrink(1.0),
+                            CornerRadius::same(7),
+                            Stroke::new(2.0, th().accent),
+                            StrokeKind::Inside,
+                        );
+                        hits.push(("tree-drop".to_string(), r));
+                    }
+                    None => {}
+                }
+                if released && let Some(to) = *at {
+                    run.push(Action::PlaceNode { node: *node, parent: to.parent, before: to.before });
+                }
+                if released || !down {
+                    drag = None;
                 }
             }
             if !world {
@@ -2761,6 +3074,7 @@ impl Hybrid {
             self.tree_scroll = self.tree_scroll.saturating_add_signed(steps).min(self.tree.len() - rows);
         }
         self.renaming = renaming;
+        self.tree_drag = drag;
         self.rename_focus = focus;
         self.renamed = renamed.or(self.renamed.take());
         self.hits.extend(hits);
@@ -2837,6 +3151,8 @@ impl Hybrid {
             Head(&'static str),
             Sep,
             Row(&'static str, char, &'static str, &'static str),
+            /// A switch: its row stays open when clicked and shows a tick while on.
+            Check(&'static str, &'static str, bool, String),
         }
         let key = Id::unique("file-menu-grow");
         if !self.file_menu {
@@ -2852,13 +3168,25 @@ impl Hybrid {
             Entry::Sep,
             Entry::Head("EXPORT"),
             Entry::Row("export-render", icon::IMAGE_DOWN, "Render PNG", "R"),
+            Entry::Row("export-turntable", icon::REFRESH_CW, "Turntable", "PNG frames, animation"),
+            Entry::Row("export-embed", icon::CODE, "Embed for a web page", "<voxel-scene>"),
+            Entry::Sep,
             Entry::Row("export-obj", icon::BOX, "OBJ with palette texture", ".obj .mtl .png"),
             Entry::Row("export-slices", icon::LAYERS, "PNG slices", ".png"),
+            Entry::Row("export-sprite", icon::AXIS_3D, "Isometric sprite", "pixel art .png"),
+            Entry::Check("export-selection", "Only the selection", self.export_selection, self.selection_hint()),
+            Entry::Sep,
+            Entry::Row("export-palette-png", icon::PALETTE, "Palette image", "256×1 .png"),
+            Entry::Row("export-palette-hex", icon::PALETTE, "Palette colors", ".hex"),
+            Entry::Sep,
+            Entry::Head("IMPORT"),
+            Entry::Row("import-palette", icon::PALETTE, "Palette…", ".png .hex .gpl"),
+            Entry::Row("import-image", icon::IMAGE_UP, "Image as voxels…", ".png"),
         ];
         let height = |e: &Entry| match e {
             Entry::Head(_) => 26.0,
             Entry::Sep => 9.0,
-            Entry::Row(..) => 32.0,
+            Entry::Row(..) | Entry::Check(..) => 32.0,
         };
         let screen = ctx.content_rect();
         let button = self.hits.get("scene-select").copied().unwrap_or(Rect::NOTHING);
@@ -2868,6 +3196,7 @@ impl Hybrid {
         let rect = Rect::from_min_size(pos2(x, 12.0 + 44.0 + 6.0), vec2(w, h));
         self.hits.insert("file-menu".into(), rect);
         let mut run = None;
+        let mut flip = false;
         let mut hits = Vec::new();
         Self::panel_filled(ctx, "file-menu", rect, Order::Foreground, th().panel_solid, |ui, rect| {
             ui.allocate_rect(rect, Sense::click());
@@ -2900,12 +3229,44 @@ impl Hybrid {
                         };
                         let cy = r.center().y;
                         p.text(pos2(r.left() + 16.0, cy), Align2::CENTER_CENTER, *glyph, icon_font(15.0), color);
-                        p.text(pos2(r.left() + 34.0, cy), Align2::LEFT_CENTER, *label, sans(13.0), th().text);
-                        let font = if hint.starts_with('.') { mono(10.5) } else { sans(12.0) };
-                        p.text(pos2(r.right() - 10.0, cy), Align2::RIGHT_CENTER, *hint, font, th().faint);
+                        let name =
+                            p.text(pos2(r.left() + 34.0, cy), Align2::LEFT_CENTER, *label, sans(13.0), th().text);
+                        // File types and the tag in mono; a hint the label leaves no room
+                        // for (a narrow phone) is left out rather than drawn over it.
+                        let font = if hint.starts_with(['.', '<']) { mono(10.5) } else { sans(12.0) };
+                        let g = p.layout_no_wrap(hint.to_string(), font, th().faint);
+                        if r.right() - 10.0 - g.size().x >= name.right() + 8.0 {
+                            p.galley(pos2(r.right() - 10.0 - g.size().x, cy - g.size().y / 2.0), g, th().faint);
+                        }
                         if resp.clicked() {
                             run = Some(*id);
                         }
+                    }
+                    Entry::Check(id, label, on, hint) => {
+                        let r = Rect::from_min_size(pos2(rect.left() + 6.0, y), vec2(rect.width() - 12.0, 32.0));
+                        let resp = ui.interact(r, Id::unique(*id), Sense::click());
+                        hits.push((id.to_string(), r));
+                        let plate = pressed(r, &resp);
+                        let p = ui.painter();
+                        if resp.hovered() {
+                            p.rect_filled(plate, CornerRadius::same(7), th().hover);
+                        }
+                        let cy = r.center().y;
+                        // The tick's box sits where the other rows have their icon.
+                        let b = Rect::from_center_size(pos2(r.left() + 16.0, cy), vec2(14.0, 14.0));
+                        if *on {
+                            p.rect_filled(b, CornerRadius::same(4), th().accent);
+                            p.text(b.center(), Align2::CENTER_CENTER, icon::CHECK, icon_font(11.0), th().on_accent);
+                        } else {
+                            p.rect_stroke(b, CornerRadius::same(4), Stroke::new(1.0, th().faint), StrokeKind::Inside);
+                        }
+                        let name =
+                            p.text(pos2(r.left() + 34.0, cy), Align2::LEFT_CENTER, *label, sans(13.0), th().text);
+                        let g = p.layout_no_wrap(hint.clone(), sans(12.0), th().faint);
+                        if r.right() - 10.0 - g.size().x >= name.right() + 8.0 {
+                            p.galley(pos2(r.right() - 10.0 - g.size().x, cy - g.size().y / 2.0), g, th().faint);
+                        }
+                        flip |= resp.clicked();
                     }
                 }
                 y += eh;
@@ -2927,9 +3288,19 @@ impl Hybrid {
                     self.toggle_render_panel();
                 }
             }
+            Some("export-turntable") => self.actions.push(Action::ExportTurntable),
             Some("export-obj") => self.actions.push(Action::ExportObj),
             Some("export-slices") => self.actions.push(Action::ExportSlices),
+            Some("export-sprite") => self.actions.push(Action::ExportSprite),
+            Some("export-embed") => self.actions.push(Action::Embed),
+            Some("export-palette-png") => self.actions.push(Action::ExportPalette(false)),
+            Some("export-palette-hex") => self.actions.push(Action::ExportPalette(true)),
+            Some("import-palette") => self.actions.push(Action::ImportPalette),
+            Some("import-image") => self.actions.push(Action::ImportImage),
             _ => {}
+        }
+        if flip {
+            self.export_selection = !self.export_selection;
         }
         if run.is_some() || outside {
             self.file_menu = false;
@@ -2958,7 +3329,7 @@ impl Hybrid {
         if !self.view_panel {
             return;
         }
-        let size = vec2(204.0, 176.0);
+        let size = vec2(204.0, 272.0);
         let floor = screen.bottom() - 12.0;
         let nav = self.hits.get("nav").copied().unwrap_or(Rect::from_min_size(screen.right_bottom(), egui::Vec2::ZERO));
         let right = nav.right().min(screen.right() - 12.0);
@@ -2983,6 +3354,8 @@ impl Hybrid {
         self.hits.insert("view-flyout".into(), rect);
         let (ortho, view) = (self.ortho, self.view);
         let mut guides = [self.grid, self.ground, self.frame];
+        let (saved, mut pick) = (self.saved_views, self.save_view_pick);
+        let mut tip = None;
         let mut run = Vec::new();
         let mut hits = Vec::new();
         let mut close = false;
@@ -3053,7 +3426,46 @@ impl Hybrid {
                 }
                 hits.push((id.to_string(), c));
             }
+            // Saved views: the file's ten camera slots. A full slot goes to its view and an
+            // empty one saves the view into it; with Save on, any slot saves.
+            ui.painter().line_segment(
+                [pos2(rect.left() + 10.0, hy + 165.5), pos2(rect.right() - 10.0, hy + 165.5)],
+                Stroke::new(1.0, th().line),
+            );
+            let save = Rect::from_min_size(pos2(rect.right() - 12.0 - 52.0, hy + 172.0), vec2(52.0, 20.0));
+            if view_chip(ui, save, "view-save", "Save", "", pick) {
+                pick = !pick;
+            }
+            hits.push(("view-save".to_string(), save));
+            let sw = (rect.width() - 24.0 - 4.0 * 4.0) / 5.0;
+            for (k, &full) in saved.iter().enumerate() {
+                let c = Rect::from_min_size(
+                    pos2(rect.left() + 12.0 + (k % 5) as f32 * (sw + 4.0), hy + 200.0 + (k / 5) as f32 * 28.0),
+                    vec2(sw, 24.0),
+                );
+                let id = format!("view-slot-{}", k + 1);
+                let resp = slot_chip(ui, c, &id, k + 1, full, pick);
+                if resp.clicked() {
+                    run.push(if pick || !full { Action::SaveView(k as i32) } else { Action::GoToView(k as i32) });
+                    pick = false;
+                } else if resp.hovered() {
+                    tip = Some(match (pick, full) {
+                        (true, true) => format!("Save over view {}", k + 1),
+                        (_, false) => format!("Save as view {}", k + 1),
+                        (false, true) => format!("Go to view {}", k + 1),
+                    });
+                }
+                hits.push((id, c));
+            }
+            // The section's heading says what a click on the hovered slot does: a tooltip
+            // would cover the heading and Save, the flyout sitting low on the screen.
+            let g = match &tip {
+                Some(t) => ui.painter().layout_no_wrap(t.clone(), sans(11.0), th().muted),
+                None => ui.painter().layout_job(spaced("SAVED VIEWS", sans(9.0), th().faint, 0.72)),
+            };
+            ui.painter().galley(pos2(rect.left() + 12.0, hy + 182.0 - g.size().y / 2.0), g, th().faint);
         });
+        self.save_view_pick = pick;
         [self.grid, self.ground, self.frame] = guides;
         self.hits.extend(hits);
         self.actions.extend(run);
@@ -3217,6 +3629,16 @@ impl Hybrid {
         !self.world && (self.tool == Tool::Select || self.selected > 0) && !self.tour_sheet()
     }
 
+    /// Flip the region option. Returns what erase and paint reach now, to say it.
+    pub fn toggle_inside(&mut self) -> String {
+        self.inside = !self.inside;
+        match (self.inside, self.selected) {
+            (false, _) => "Erase and paint reach every voxel".to_string(),
+            (true, 0) => "Erase and paint will stay inside the selection, once voxels are selected".to_string(),
+            (true, _) => format!("Erase and paint stay inside the selection ({})", self.selection_hint()),
+        }
+    }
+
     /// Choose what a select click takes, and switch to the select tool.
     pub fn set_region(&mut self, region: Region) {
         self.region = region;
@@ -3235,6 +3657,7 @@ impl Hybrid {
         let rect = self.selection_rect(ctx);
         self.hits.insert("selection".into(), rect);
         let (selected, has_clip, can_split) = (self.selected, self.has_clip, self.can_split);
+        let inside = self.inside;
         let mut region = self.region;
         let bounds_open = self.bounds_panel.is_some();
         let mut toggle_bounds = false;
@@ -3359,8 +3782,30 @@ impl Hybrid {
                 p.rect_stroke(c, CornerRadius::same(7), Stroke::new(1.0, th().line), StrokeKind::Inside);
                 p.text(c.center(), Align2::CENTER_CENTER, "To new object", sans(11.0), th().faint);
             }
+            // The region option: erase and paint stay inside the selection. It shows on like
+            // Resize while the Bounds panel is open.
+            let c = Rect::from_min_size(pos2(rect.left() + 12.0, hy + 30.0 + 7.0 * 34.0 - 13.0), vec2(138.0, 26.0));
+            let resp = ui.interact(c, Id::unique("brush-inside"), Sense::click());
+            hits.push(("brush-inside".to_string(), c));
+            let p = ui.painter();
+            if inside {
+                p.rect_filled(c, CornerRadius::same(7), th().accent_tint);
+            }
+            let border = if inside {
+                th().ring
+            } else if resp.hovered() {
+                th().tint(64)
+            } else {
+                th().line2
+            };
+            p.rect_stroke(c, CornerRadius::same(7), Stroke::new(1.0, border), StrokeKind::Inside);
+            let color = if resp.hovered() || inside { th().text } else { th().muted };
+            p.text(c.center(), Align2::CENTER_CENTER, "Brush inside only", sans(11.0), color);
+            if resp.clicked() {
+                run.push(Action::BrushInside);
+            }
             // What a click on a voxel selects.
-            let row = Rect::from_min_size(pos2(rect.left() + 12.0, hy + 30.0 + 7.0 * 34.0 - 13.0), vec2(138.0, 26.0));
+            let row = Rect::from_min_size(pos2(rect.left() + 12.0, hy + 30.0 + 8.0 * 34.0 - 13.0), vec2(138.0, 26.0));
             let mut seg = Vec::new();
             let labels = ["Color", "Face", "Volume"].map(String::from);
             let names = ["click-color", "click-face", "click-volume"];
@@ -3370,7 +3815,7 @@ impl Hybrid {
                 region = regions[k];
             }
             hits.extend(seg.into_iter().map(|(n, r)| (n.to_string(), r)));
-            let cy = hy + 30.0 + 8.0 * 34.0 + 4.0;
+            let cy = hy + 30.0 + 9.0 * 34.0 + 4.0;
             ui.painter().line_segment(
                 [pos2(rect.left() + 10.0, cy - 20.5), pos2(rect.right() - 10.0, cy - 20.5)],
                 Stroke::new(1.0, th().line),
@@ -3868,6 +4313,26 @@ impl Hybrid {
     }
 
     /// Open or close the file menu (the scene name).
+    /// What the Export menu's "Only the selection" row says about the selection.
+    fn selection_hint(&self) -> String {
+        match self.selected {
+            0 => "nothing selected".into(),
+            1 => "1 voxel".into(),
+            n => format!("{} voxels", group_thousands(n as u64)),
+        }
+    }
+
+    /// Cmd-K "Export only the selection": flip the Export menu's switch. Returns what the
+    /// exports take now, to say it, since no menu is open to show it.
+    pub fn toggle_export_selection(&mut self) -> String {
+        self.export_selection = !self.export_selection;
+        match (self.export_selection, self.selected) {
+            (false, _) => "OBJ, slices and sprite exports take the whole scene".to_string(),
+            (true, 0) => "OBJ, slices and sprite exports take only the selection, once voxels are selected".to_string(),
+            (true, _) => format!("OBJ, slices and sprite exports take only the selection ({})", self.selection_hint()),
+        }
+    }
+
     pub fn toggle_file_menu(&mut self) {
         self.menu_instant = false;
         self.cmdk = None;
@@ -4502,7 +4967,9 @@ impl Hybrid {
     fn palette_slots(&self) -> (Vec<u8>, bool, usize) {
         let used_count = self.used.iter().skip(1).filter(|u| **u).count();
         let all = self.palette_all || self.slot_op.is_some() || used_count == 0;
-        let slots = (1..=255u8).filter(|&i| all || self.used[i as usize] || i == self.slot).collect();
+        let slots = (1..=255u8)
+            .filter(|&i| all || self.used[i as usize] || i == self.slot || self.colors.contains(&i))
+            .collect();
         (slots, all, used_count)
     }
 
@@ -4531,6 +4998,7 @@ impl Hybrid {
 
     // The palette: a flyout beside the rail from its colour, or over the dock from the dock's.
     fn palette_panel(&mut self, ctx: &Context, screen: Rect) {
+        self.sync_colors();
         if self.palette_for_edit && self.color_edit.is_none() && self.slot_op.is_none() {
             (self.palette_open, self.palette_for_edit) = (false, false);
         }
@@ -4698,6 +5166,10 @@ impl Hybrid {
             if on {
                 p.rect_filled(r.expand(3.0), CornerRadius::same(7), th().text);
                 p.rect_filled(r.expand(1.5), CornerRadius::same(5), th().panel_solid);
+            } else if self.colors.contains(&slot) {
+                // Selected with the current slot: the same ring, thinner, in the accent.
+                p.rect_filled(r.expand(2.5), CornerRadius::same(6), th().accent);
+                p.rect_filled(r.expand(1.0), CornerRadius::same(5), th().panel_solid);
             }
             p.rect(r, CornerRadius::same(4), self.color(slot), Stroke::new(1.0, th().tint(20)), StrokeKind::Inside);
             if self.materials[slot as usize].kind != Kind::Diffuse {
@@ -4724,6 +5196,8 @@ impl Hybrid {
             if resp.double_clicked() {
                 self.slot = slot;
                 self.open_color_edit();
+            } else if resp.clicked() && shift && !cmd && self.slot_op.is_none() {
+                self.toggle_color(slot);
             } else if resp.clicked() {
                 self.click_slot(slot);
             }
@@ -4752,9 +5226,130 @@ impl Hybrid {
         }
     }
 
+    /// Where the colour editor goes: over the dock beside the palette on whichever side
+    /// fits, level with its bottom; beside the rail right of it, level with its top, kept on
+    /// screen.
+    fn color_edit_rect(&self, screen: Rect, w: f32, h: f32) -> Rect {
+        match self.hits.get("palette").copied().filter(|_| self.palette_open) {
+            Some(pal) if self.touch => {
+                let x =
+                    if pal.left() - 8.0 - w >= screen.left() + 12.0 { pal.left() - 8.0 - w } else { pal.right() + 8.0 };
+                Rect::from_min_size(pos2(x, (pal.bottom() - h).max(TOP)), vec2(w, h))
+            }
+            Some(pal) => {
+                let top = pal.top().min(screen.bottom() - 12.0 - h);
+                Rect::from_min_size(pos2(pal.right() + 8.0, top.max(TOP)), vec2(w, h))
+            }
+            None => Rect::from_min_size(pos2(self.aside_right(screen) - w, TOP), vec2(w, h)),
+        }
+    }
+
+    // The colour editor while several slots are selected: three sliders that shift them all.
+    fn group_editor(&mut self, ctx: &Context, screen: Rect) {
+        let w = 232.0;
+        let inner_w = w - 24.0;
+        let n = self.colors.len();
+        let mut job = LayoutJob::default();
+        let fmt = |color| TextFormat { font_id: sans(11.0), color, line_height: Some(15.95), ..Default::default() };
+        job.append(
+            "Shifts every selected color, and the voxels that use them. Shift-click a swatch to add or take one out. Click one to edit it alone.",
+            0.0,
+            fmt(th().faint),
+        );
+        job.wrap.max_width = inner_w;
+        let note = ctx.fonts_mut(|f| f.layout_job(job));
+        // Chips of the selected colours, 9 to a row.
+        const CHIP: f32 = 18.0;
+        const CHIP_STEP: f32 = 23.0;
+        let per_row = ((inner_w + CHIP_STEP - CHIP) / CHIP_STEP).floor() as usize;
+        let chip_rows = n.div_ceil(per_row).min(3);
+        let chips_h = chip_rows as f32 * CHIP_STEP - (CHIP_STEP - CHIP);
+        let h = 12.0 + 15.0 + 12.0 + chips_h + 12.0 + 3.0 * 34.0 + 8.0 + note.size().y + 12.0;
+        let rect = self.color_edit_rect(screen, w, h);
+        self.hits.insert("color-edit".into(), rect);
+        let mut close = false;
+        let mut shift = self.group_shift;
+        let (mut changed, mut done) = (false, false);
+        let mut hits = Vec::new();
+        Self::panel(ctx, "color-edit", rect, Order::Middle, |ui, rect| {
+            let inner = rect.shrink(12.0);
+            let p = ui.painter().clone();
+            let hy = inner.top() + 7.5;
+            let g = p.layout_job(spaced("EDIT COLORS", sans_semibold(11.0), th().muted, 0.88));
+            p.galley(pos2(inner.left(), hy - g.size().y / 2.0), g, th().muted);
+            let x = Rect::from_center_size(pos2(inner.right() - 6.0, hy), vec2(16.0, 22.0));
+            let xr = ui.interact(x, Id::unique("color-edit-x"), Sense::click());
+            hits.push(("color-edit-x", x));
+            p.text(
+                x.center(),
+                Align2::CENTER_CENTER,
+                "×",
+                sans(18.0),
+                if xr.hovered() { th().text } else { th().faint },
+            );
+            close |= xr.clicked();
+            p.text(pos2(x.left() - 6.0, hy), Align2::RIGHT_CENTER, format!("{n} slots"), mono(11.0), th().faint);
+            let top = inner.top() + 15.0 + 12.0;
+            let shown = chip_rows * per_row;
+            for (i, &slot) in self.colors.iter().take(shown).enumerate() {
+                let at = pos2(inner.left() + (i % per_row) as f32 * CHIP_STEP, top + (i / per_row) as f32 * CHIP_STEP);
+                let r = Rect::from_min_size(at, vec2(CHIP, CHIP));
+                if i + 1 == shown && n > shown {
+                    // More than fit: the last chip counts the rest.
+                    p.rect(r, CornerRadius::same(4), th().tint(9), Stroke::new(1.0, th().line), StrokeKind::Inside);
+                    p.text(r.center(), Align2::CENTER_CENTER, format!("+{}", n - shown + 1), mono(9.0), th().muted);
+                } else {
+                    p.rect(
+                        r,
+                        CornerRadius::same(4),
+                        self.color(slot),
+                        Stroke::new(1.0, th().tint(38)),
+                        StrokeKind::Inside,
+                    );
+                }
+            }
+            let mut y = top + chips_h + 12.0;
+            let (mut sat, mut val) = (shift.sat * 100.0, shift.val * 100.0);
+            let signed: fn(f32) -> String = |v| format!("{v:+.0}%");
+            let rows: [SliderRow; 3] = [
+                ("group-hue", "Hue", &mut shift.hue, -180.0, 180.0, |v| format!("{v:+.0}°")),
+                ("group-sat", "Saturation", &mut sat, -100.0, 100.0, signed),
+                ("group-val", "Value", &mut val, -100.0, 100.0, signed),
+            ];
+            for (id, label, v, lo, hi, f) in rows {
+                let r = Rect::from_min_size(pos2(inner.left(), y), vec2(inner.width(), 34.0));
+                hits.push((id, r));
+                let (c, d) = slider(ui, r, id, label, v, lo, hi, f);
+                // Whole degrees and percents, so the number shown is the number set.
+                *v = v.round();
+                (changed, done) = (changed | c, done | d);
+                y += 34.0;
+            }
+            (shift.sat, shift.val) = (sat / 100.0, val / 100.0);
+            p.galley(pos2(inner.left(), y + 8.0), note, th().faint);
+        });
+        for (k, r) in hits {
+            self.hits.insert(k.into(), r);
+        }
+        if changed && shift != self.group_shift {
+            self.group_shift = shift;
+            self.actions.push(Action::ShiftColors(shift));
+        }
+        if done {
+            self.actions.push(Action::CommitColor);
+        }
+        if close {
+            self.color_edit = None;
+        }
+    }
+
     // The colour editor: not in the mockups. A .panel beside #palette, built from its parts
     // (.ph header, #current-style fields, #edit-color buttons, .note).
     fn color_editor(&mut self, ctx: &Context, screen: Rect) {
+        self.sync_colors();
+        if self.color_edit.is_some() && !self.colors.is_empty() {
+            return self.group_editor(ctx, screen);
+        }
         let Some(mut ed) = self.color_edit.take() else { return };
         let slot = self.slot;
         let c = self.palette[slot as usize];
@@ -4771,12 +5366,13 @@ impl Hybrid {
                 let what = match op {
                     SlotOp::Swap => format!("Click a slot to swap with slot {slot}. "),
                     SlotOp::Copy => "Click a slot to give it this color. ".to_string(),
+                    SlotOp::Replace => "Click the slot this color's voxels take. ".to_string(),
                 };
                 job.append(&what, 0.0, fmt(th().text));
                 job.append("Esc cancels.", 0.0, fmt(th().muted));
             }
             None => job.append(
-                "Swap trades places with the next slot you click and keeps the scene's look. Copy gives that slot this color.",
+                "Swap trades places with the next slot you click and keeps the scene's look. Copy gives that slot this color. Replace gives this color's voxels that slot and Remove erases them, inside the selection when there is one.",
                 0.0,
                 fmt(th().faint),
             ),
@@ -4815,7 +5411,8 @@ impl Hybrid {
             + 3.0 * 28.0
             + 2.0 * 6.0
             + 12.0
-            + 28.0
+            + 2.0 * 28.0
+            + 6.0
             + 10.0
             + note.size().y
             + 12.0;
@@ -4838,20 +5435,7 @@ impl Hybrid {
         } else {
             h
         };
-        let rect = match self.hits.get("palette").copied().filter(|_| self.palette_open) {
-            // Over the dock beside the palette on whichever side fits, level with its bottom;
-            // beside the rail right of it, level with its top, kept on screen.
-            Some(pal) if self.touch => {
-                let x =
-                    if pal.left() - 8.0 - w >= screen.left() + 12.0 { pal.left() - 8.0 - w } else { pal.right() + 8.0 };
-                Rect::from_min_size(pos2(x, (pal.bottom() - h).max(TOP)), vec2(w, h))
-            }
-            Some(pal) => {
-                let top = pal.top().min(screen.bottom() - 12.0 - h);
-                Rect::from_min_size(pos2(pal.right() + 8.0, top.max(TOP)), vec2(w, h))
-            }
-            None => Rect::from_min_size(pos2(self.aside_right(screen) - w, TOP), vec2(w, h)),
-        };
+        let rect = self.color_edit_rect(screen, w, h);
         let (mut close, mut commit, mut live) = (false, false, false);
         let mut new_mat = None;
         let mut op = None;
@@ -5046,6 +5630,19 @@ impl Hybrid {
                     op = Some(if self.slot_op == Some(o) { None } else { Some(o) });
                 }
             }
+            // Replace and remove: the colour's voxels, not its slot.
+            let by = by + 28.0 + 6.0;
+            let br = Rect::from_min_size(pos2(inner.left(), by), vec2(half, 28.0));
+            hits.push(("replace", br));
+            let on = self.slot_op == Some(SlotOp::Replace);
+            if small_button(ui, br, icon::PAINT_BUCKET, "Replace…", "replace", on).clicked() {
+                op = Some(if on { None } else { Some(SlotOp::Replace) });
+            }
+            let br = Rect::from_min_size(pos2(inner.left() + half + 6.0, by), vec2(half, 28.0));
+            hits.push(("remove-color", br));
+            if small_button(ui, br, icon::ERASER, "Remove", "remove-color", false).clicked() {
+                self.actions.push(Action::RemoveColor(slot));
+            }
             p.galley(pos2(inner.left(), by + 28.0 + 10.0), note, th().faint);
         });
         for (k, r) in hits {
@@ -5160,7 +5757,10 @@ impl Hybrid {
         self.render_dock = Some(corner);
         self.hits.insert("render".into(), rect);
         let label = match s.export {
-            Some(((w, h), done, of)) => format!("Exporting {w}×{h} · {:.0}/{of} spp", done.floor()),
+            Some(((w, h), done, of, None)) => format!("Exporting {w}×{h} · {:.0}/{of} spp", done.floor()),
+            Some((_, done, of, Some((frame, frames)))) => {
+                format!("Turntable {frame}/{frames} · {:.0}/{of} spp", done.floor())
+            }
             None => format!("{:.0} spp{}", spp.floor(), if live { " · live" } else { "" }),
         };
         let g = ctx.fonts_mut(|f| f.layout_no_wrap(label, sans_medium(10.5), th().text));
@@ -5242,14 +5842,15 @@ impl Hybrid {
         }
         let w = 232.0;
         let row = 34.0;
-        let h = 12.0 + 15.0 + 10.0 + 9.0 * row + 28.0 + 8.0 + 28.0 + 12.0 + 2.0 * (14.0 + 28.0 + 10.0) + 32.0 + 12.0;
+        let h = 12.0 + 15.0 + 10.0 + 9.0 * row + 28.0 + 8.0 + 28.0 + 12.0 + 3.0 * (14.0 + 28.0 + 10.0) + 32.0 + 12.0;
         let right = self.render_dock.map_or(self.aside_right(screen) + 8.0, |r| r.left()) - 8.0;
         let bottom = self.render_dock.map_or(screen.bottom() - 62.0, |r| r.bottom());
         let rect = Rect::from_min_size(pos2(right - w, (bottom - h).max(TOP)), vec2(w, h));
         self.hits.insert("render-panel".into(), rect);
         let mut rs = self.render.clone();
         let mut hits = Vec::new();
-        let (mut close, mut export) = (false, false);
+        let (mut close, mut export, mut turntable) = (false, false, false);
+        let mut pick = None;
         let mut hex_text = std::mem::take(&mut self.sun_hex);
         Self::panel(ctx, "render-panel", rect, Order::Middle, |ui, rect| {
             let inner = rect.shrink(12.0);
@@ -5288,10 +5889,23 @@ impl Hybrid {
                 ("rs-blur", "Depth of field", &mut rs.blur, 0.0, 1.0, |v| {
                     if v <= 0.0 { "off".into() } else { format!("{:.0}%", v * 100.0) }
                 }),
-                ("rs-focus", "Focus", &mut rs.focus, 0.25, 2.0, |v| format!("{v:.2}× target")),
+                ("rs-focus", "Focus", &mut rs.focus, FOCUS_RANGE.0, FOCUS_RANGE.1, |v| format!("{v:.2}× target")),
             ];
             for (id, label, v, lo, hi, fmt) in sliders {
-                let r = next(row);
+                let mut r = next(row);
+                if id == "rs-focus" {
+                    // The crosshair beside it: the next click on the scene sets the focus.
+                    let b = Rect::from_min_size(pos2(r.right() - 28.0, r.top() + 3.0), vec2(28.0, 28.0));
+                    r.max.x = b.left() - 10.0;
+                    hits.push(("rs-focus-pick", b));
+                    let resp = small_button(ui, b, icon::FOCUS, "", "rs-focus-pick", self.focus_pick);
+                    if resp.hovered() {
+                        tooltip(ui.ctx(), b, "Focus on a point", &[], None);
+                    }
+                    if resp.clicked() {
+                        pick = Some(!self.focus_pick);
+                    }
+                }
                 hits.push((id, r));
                 slider(ui, r, id, label, v, lo, hi, fmt);
             }
@@ -5334,9 +5948,11 @@ impl Hybrid {
                 rs.physical_sky = !rs.physical_sky;
             }
             next(12.0);
-            // Samples (where the corner stops, and what an export traces) and export size.
+            // Samples (where the corner stops, and what an export traces), export size and
+            // the turntable's count of frames.
             let spp_labels = SPP_CHOICES.map(|n| if n >= 1024 { format!("{}K", n / 1024) } else { n.to_string() });
             let size_labels = EXPORT_SIZES.map(|(_, h)| if h >= 2160 { "4K".to_string() } else { format!("{h}p") });
+            let frame_labels = TURNTABLE_FRAMES.map(|n| n.to_string());
             let n = s.export.map_or(String::new(), |_| " (exporting)".into());
             for (name, names, label, labels, sel, ok) in [
                 (
@@ -5355,6 +5971,14 @@ impl Hybrid {
                     &mut rs.size,
                     s.export_fits,
                 ),
+                (
+                    "rs-frames",
+                    ["rs-frames0", "rs-frames1", "rs-frames2", "rs-frames3"],
+                    "Turntable frames".to_string(),
+                    &frame_labels,
+                    &mut rs.frames,
+                    [true; 4],
+                ),
             ] {
                 let lr = next(14.0);
                 p.text(lr.left_center(), Align2::LEFT_CENTER, label, sans(12.0), th().muted);
@@ -5362,22 +5986,35 @@ impl Hybrid {
                     let (w, h) = EXPORT_SIZES[*sel];
                     p.text(lr.right_center(), Align2::RIGHT_CENTER, format!("{w}×{h}"), mono(11.0), th().faint);
                 }
+                if name == "rs-frames" {
+                    let step = 360.0 / TURNTABLE_FRAMES[*sel] as f32;
+                    p.text(lr.right_center(), Align2::RIGHT_CENTER, format!("{step}° a frame"), mono(11.0), th().faint);
+                }
                 let r = next(28.0);
                 if let Some(k) = segmented(ui, r, &names, labels, *sel, &ok, mono(11.5), &mut hits) {
                     *sel = k;
                 }
                 next(10.0);
             }
-            // Export PNG, the panel's one primary action (the Embed button's look).
-            let r = next(32.0);
+            // Export PNG, the panel's one primary action (the Embed button's look), with the
+            // turntable beside it; a running export takes the whole row to show how far it is.
+            let mut r = next(32.0);
+            if s.export.is_none() {
+                let t = Rect::from_min_max(pos2(r.right() - 92.0, r.top()), r.max);
+                r.set_right(t.left() - 6.0);
+                hits.push(("rs-turntable", t));
+                turntable = small_button(ui, t, icon::REFRESH_CW, "Turntable", "rs-turntable", false).clicked();
+            }
             hits.push(("rs-export", r));
             let resp = ui.interact(r, Id::unique("rs-export"), Sense::click());
             let ink = th().on_accent;
             let p = ui.painter();
             let label = match s.export {
-                Some((_, done, of)) => {
+                Some((_, done, of, frame)) => {
                     p.rect(r, CornerRadius::same(8), th().accent_bg, Stroke::new(1.0, th().line2), StrokeKind::Inside);
+                    // A turntable's share is its finished frames plus this frame's samples.
                     let k = (done / of as f32).clamp(0.0, 1.0);
+                    let k = frame.map_or(k, |(frame, frames)| ((frame - 1) as f32 + k) / frames as f32);
                     let fill = Rect::from_min_size(r.min, vec2(r.width() * k, r.height()));
                     p.rect_filled(fill, CornerRadius::same(8), th().accent.gamma_multiply(0.45));
                     format!("Cancel export · {:.0}%", k * 100.0)
@@ -5413,6 +6050,12 @@ impl Hybrid {
         if export {
             self.actions.push(if s.export.is_some() { Action::CancelExport } else { Action::ExportPng });
         }
+        if turntable {
+            self.actions.push(Action::ExportTurntable);
+        }
+        if let Some(on) = pick {
+            self.focus_pick = on;
+        }
         if close {
             self.render_panel = false;
         }
@@ -5427,8 +6070,17 @@ impl Hybrid {
                 armed = match op {
                     SlotOp::Swap => format!("a slot to swap with slot {}", self.slot),
                     SlotOp::Copy => format!("a slot to copy slot {} to", self.slot),
+                    SlotOp::Replace => format!("the slot that slot {}'s voxels take", self.slot),
                 };
                 vec![("Click", armed.as_str()), ("Esc", "cancel")]
+            }
+            (None, _, _) if self.save_view_pick && self.view_panel => {
+                let v = [("Click", "the slot to save the view into"), ("Esc", "cancel")];
+                return self.hint_panel(ctx, screen, &v);
+            }
+            (None, _, _) if self.focus_pick => {
+                let v = [("Click", "the point to focus on"), ("Esc", "cancel"), ("Right-drag", "orbit")];
+                return self.hint_panel(ctx, screen, &v);
             }
             (None, _, _) if self.review.is_some() => {
                 let v = [("↵", "apply"), ("Esc", "discard"), ("Right-drag", "orbit"), ("Scroll", "zoom")];
@@ -5452,6 +6104,16 @@ impl Hybrid {
             }
             (None, _, _) if self.world => {
                 let mut v = vec![("Click", "pick an object"), ("Drag", "move it")];
+                if self.picks.len() > 1 {
+                    let v = [
+                        ("⌘-click a row", "pick more"),
+                        ("⌘G", "group"),
+                        ("H", "hide"),
+                        ("⌫", "delete"),
+                        ("Esc", "pick nothing"),
+                    ];
+                    return self.hint_panel(ctx, screen, &v);
+                }
                 if self.picked.is_some() {
                     v.extend([("Arrows", "nudge"), ("⌘D", "duplicate"), ("⌘⇧D", "linked copy"), ("⌫", "delete")]);
                 }
@@ -5496,6 +6158,12 @@ impl Hybrid {
             (Tool::Add, Shape::Sphere) => vec![("Drag", "grow a sphere from its center"), ("C", "circle")],
             (Tool::Erase, Shape::Sphere) => vec![("Drag", "carve a sphere"), ("C", "circle")],
             (Tool::Paint, Shape::Sphere) => vec![("Drag", "paint a sphere"), ("C", "circle")],
+            (_, Shape::Pattern) if !self.has_clip && t != Tool::Pick && t != Tool::Select => {
+                vec![("⌘C", "copy a selection to stamp")]
+            }
+            (Tool::Add, Shape::Pattern) => vec![("Click", "stamp the copy"), ("Drag", "move it, release to place")],
+            (Tool::Erase, Shape::Pattern) => vec![("Click", "carve the copy's shape"), ("Drag", "move it")],
+            (Tool::Paint, Shape::Pattern) => vec![("Click", "paint the copy's colors"), ("Drag", "move it")],
             (Tool::Pick, _) => vec![("Click", "take that color")],
             (Tool::Select, _) if self.selected > 0 => {
                 vec![("Drag", "box select"), ("Drag selection", "move it"), ("Arrows", "nudge"), ("⌫", "delete")]
@@ -5967,7 +6635,7 @@ fn rail_layout(max_h: f32) -> ([egui::Vec2; 3], egui::Vec2) {
     let (pad, sep, col) = (6.0, 9.0, TOOL + 6.0);
     let mut at = [egui::Vec2::ZERO; 3];
     let (mut x, mut y, mut h) = (pad, pad, 0.0_f32);
-    for (i, n) in [5.0, 5.0, 3.0].into_iter().enumerate() {
+    for (i, n) in [5.0, 6.0, 3.0].into_iter().enumerate() {
         let tall = n * TOOL_STEP - (TOOL_STEP - TOOL);
         if i > 0 && y + sep + tall + pad > max_h {
             (x, y) = (x + col, pad);
@@ -6004,6 +6672,29 @@ fn view_chip(ui: &mut Ui, c: Rect, id: &str, label: &str, key: &str, on: bool) -
     let kc = if on { th().accent.gamma_multiply(0.8) } else { th().faint };
     p.text(pos2(c.right() - 4.0, c.bottom() - 2.0), Align2::RIGHT_BOTTOM, key, mono_medium(8.5), kc);
     resp.clicked()
+}
+
+/// A saved view slot of the View flyout: its number, bright when it holds a view and faint
+/// when empty, with a ring on every slot while a save waits for one.
+fn slot_chip(ui: &mut Ui, c: Rect, id: &str, n: usize, full: bool, armed: bool) -> egui::Response {
+    let resp = ui.interact(c, Id::unique(id), Sense::click());
+    let hover = resp.hovered();
+    let p = ui.painter();
+    let border = if armed {
+        th().ring
+    } else if hover {
+        th().tint(64)
+    } else {
+        th().line2
+    };
+    if full {
+        p.rect(c, CornerRadius::same(7), th().hover, Stroke::new(1.0, border), StrokeKind::Inside);
+    } else {
+        p.rect_stroke(c, CornerRadius::same(7), Stroke::new(1.0, border), StrokeKind::Inside);
+    }
+    let color = if hover || full { th().text } else { th().faint };
+    p.text(c.center(), Align2::CENTER_CENTER, n.to_string(), mono_medium(11.0), color);
+    resp
 }
 
 /// A separator's width in the dock.
@@ -6413,10 +7104,11 @@ fn small_button(ui: &mut Ui, r: Rect, glyph: char, label: &str, id: &str, on: bo
     let g = p.layout_no_wrap(label.into(), sans(SIZE), color);
     let icon = label_icon(glyph, SIZE);
     let iw = icon.size;
-    let total = iw + 6.0 + g.size().x;
+    let gap = if label.is_empty() { 0.0 } else { 6.0 };
+    let total = iw + gap + g.size().x;
     let x = r.center().x - total / 2.0;
     p.text(pos2(x + iw / 2.0, r.center().y), Align2::CENTER_CENTER, glyph, icon, color);
-    p.galley(pos2(x + iw + 6.0, r.center().y - g.size().y / 2.0), g, color);
+    p.galley(pos2(x + iw + gap, r.center().y - g.size().y / 2.0), g, color);
     resp
 }
 
@@ -6459,6 +7151,63 @@ mod tests {
         assert_eq!(super::group_thousands(145064), "145,064");
         assert_eq!(super::group_thousands(999), "999");
         assert_eq!(super::group_thousands(1_000_000), "1,000,000");
+    }
+
+    /// Where a dragged tree row lands, for a tree of
+    /// a, G { b, H { c } }, d, E {} (nodes 10 to 16 in that order).
+    #[test]
+    fn a_dragged_tree_row_lands_in_the_gap_or_the_group_under_the_pointer() {
+        let rows: Vec<super::TreeRow> =
+            [(0, false), (0, true), (1, false), (1, true), (2, false), (0, false), (0, true)]
+                .into_iter()
+                .enumerate()
+                .map(|(k, (depth, group))| super::TreeRow {
+                    node: 10 + k,
+                    depth,
+                    name: String::new(),
+                    group,
+                    linked: 1,
+                    size: [1; 3],
+                    hidden: false,
+                    shown: true,
+                    layer: 0,
+                })
+                .collect();
+        let (a, g, b, h, d, e) = (10, 11, 12, 13, 15, 16);
+        // (the node dragged, the row under the pointer, how far down it, the pointer's indent)
+        // lands under (parent, in front of).
+        let table = [
+            ((d, 0, 0.1, 5), Some((0, Some(a)))),
+            ((b, 0, 0.6, 3), Some((0, Some(g)))),
+            ((a, 1, 0.5, 0), Some((g, None))),
+            ((d, 1, 0.1, 0), Some((0, Some(g)))),
+            // Under a group row with children is its first place.
+            ((a, 1, 0.9, 0), Some((g, Some(b)))),
+            // The gap after c ends H and G: the indent says which it stays in.
+            ((a, 4, 0.9, 5), Some((h, None))),
+            ((a, 4, 0.9, 1), Some((g, None))),
+            ((a, 4, 0.9, 0), Some((0, Some(d)))),
+            ((a, 5, 0.2, 2), Some((h, None))),
+            // An empty group takes a row in its middle and just under it; further left is after it.
+            ((a, 6, 0.5, 0), Some((e, None))),
+            ((a, 6, 0.9, 9), Some((e, None))),
+            ((a, 6, 0.9, 0), Some((0, None))),
+            // Never into itself or under itself.
+            ((g, 1, 0.5, 0), None),
+            ((g, 2, 0.1, 1), None),
+            ((g, 3, 0.5, 2), None),
+            ((g, 4, 0.9, 2), None),
+            ((g, 4, 0.9, 1), None),
+            ((g, 4, 0.9, 0), Some((0, Some(d)))),
+            ((h, 4, 0.9, 1), Some((g, None))),
+            // No such row, no such node.
+            ((a, 7, 0.5, 0), None),
+            ((99, 0, 0.5, 0), None),
+        ];
+        for ((node, over, frac, depth), want) in table {
+            let got = super::tree_drop(&rows, node, over, frac, depth).map(|t| (t.parent, t.before));
+            assert_eq!(got, want, "node {node} over row {over} at {frac}, indent {depth}");
+        }
     }
 
     #[test]
@@ -6531,6 +7280,7 @@ mod tests {
             "brush-face",
             "brush-line",
             "center",
+            "pattern",
             "mirror",
             "lock",
             "library",

@@ -378,6 +378,39 @@ fn a_save_keeps_every_chunk_the_edit_did_not_touch() {
             .starts_with(&format!("moved object {node} by [0, 0, 2]"))
     );
     c.ok("undo", json!({}));
+    // A turn is saved in the file (the slab stands on its side there) and undo takes it back.
+    assert!(
+        c.ok("transform_object", json!({"node": node, "kind": "rotate", "axis": "x"}))
+            .starts_with(&format!("rotated object {node} 90 degrees about X, now from "))
+    );
+    c.ok("save", json!({}));
+    let flat = vxr_core::Scene::from_vox(&original).unwrap().world_voxels(false);
+    let saved = std::fs::read(dir.0.join("world.vox")).unwrap();
+    let turned = vxr_core::Scene::from_vox(&saved).unwrap().world_voxels(false);
+    let tall = |v: &std::collections::BTreeMap<[i32; 3], u8>| {
+        let ys = v.iter().filter(|(_, k)| **k == GREY).map(|(p, _)| p[1]);
+        ys.clone().max().unwrap() - ys.min().unwrap() + 1
+    };
+    assert_eq!((tall(&flat), tall(&turned)), (1, 8));
+    c.ok("undo", json!({}));
+    // A move in the tree is saved as the file's order of objects (the slab goes last, with
+    // every voxel where it was) and undo takes it back.
+    let last = |bytes: &[u8]| {
+        let s = vxr_core::Scene::from_vox(bytes).unwrap();
+        let w = s.world().unwrap();
+        let end = *w.tree.children(0).last().unwrap();
+        w.tree.nodes[end].name.clone().map(|n| String::from_utf8_lossy(&n).into_owned())
+    };
+    assert_ne!(last(&original).as_deref(), Some("slab"));
+    assert!(
+        c.ok("reorder", json!({"node": node}))
+            .starts_with(&format!("moved object {node} into the top of the world, which now holds nodes ["))
+    );
+    c.ok("save", json!({}));
+    let saved = std::fs::read(dir.0.join("world.vox")).unwrap();
+    assert_eq!(last(&saved).as_deref(), Some("slab"));
+    assert_eq!(vxr_core::Scene::from_vox(&saved).unwrap().world_voxels(false), flat);
+    c.ok("undo", json!({}));
     c.ok("edit_object", json!({"node": node}));
 
     // Unedited, a save is the file's own bytes.
@@ -637,8 +670,27 @@ fn the_ui_s_other_actions_have_tools() {
     c.ok("hide_layer", json!({"layer": 0}));
     c.ok("delete_object", json!({"node": 7}));
     c.ok("palette_copy", json!({"from": 1, "to": 200}));
+    let e = c.err("palette_adjust", json!({"selection": true, "hue": 30}));
+    assert!(e.contains("selection works on one model"), "{e}");
+    let t = c.ok("palette_adjust", json!({"slots": [201, 202], "hue": 120, "value": -50}));
+    assert!(t.starts_with("shifted 2 slots ("), "{t}");
+    let t = c.ok("palette_sort", json!({"by": "value", "slots": [202, 201]}));
+    assert_eq!(
+        t,
+        "sorted 2 slots by value: 2 slots moved and 0 voxels follow their colours, so the scene looks the same; now slot 201 #330033, slot 202 #4d0033"
+    );
+    // A palette imported from text, in the world: the colours go to the first slots.
+    let t = c.ok("palette_import", json!({"text": "#102030\n405060\n"}));
+    assert_eq!(
+        t,
+        "imported 2 colours into slots 1 to 2: 2 changed colour, and 0 voxels use those slots; now slot 1 #102030, slot 2 #405060"
+    );
     c.ok("edit_object", json!({"node": 1}));
     c.ok("resize", json!({"size": [8, 3, 8]}));
+    // A PNG of a red pixel and a clear one: one voxel, then undone.
+    let t = c.ok("image_import", json!({"png": "iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAAD0lEQVR4nGP4z8AARAwMAAz8Af9c/RSVAAAAAElFTkSuQmCC", "at": [0, 2, 0]}));
+    assert!(t.starts_with("imported a 2x1 image at [0, 2, 0] (its bottom-left pixel; it spans x 0 to 1, y 2 to 2): 1 cells changed in 1 slot; "), "{t}");
+    c.ok("undo", json!({}));
     let t = c.ok("face", json!({"cell": [0, 0, 0], "slot": 9}));
     assert!(t.starts_with("64 cells changed"), "the slab's top: {t}");
     let t = c.ok("select", json!({"volume": [0, 1, 0]}));
@@ -646,24 +698,40 @@ fn the_ui_s_other_actions_have_tools() {
     assert!(c.ok("select", json!({"invert": true})).starts_with("0 voxels selected"));
     let t = c.ok("circle", json!({"center": [0, 2, 0], "radius": 2, "slot": 9}));
     assert!(t.starts_with("21 cells changed"), "{t}");
+    // The pattern brush: two cells of the disc copied, then painted onto the slab twice.
+    c.ok("select", json!({"from": [0, 2, 0], "to": [1, 2, 0]}));
+    assert_eq!(c.ok("copy", json!({})), "copied 2 voxels, a 2 x 1 x 1 box from [0, 2, 0]");
+    let t = c.ok("stamp", json!({"at": [[2, 0, 2], [-2, 0, -2]], "mode": "paint"}));
+    assert!(t.starts_with("stamped 2 times; 4 cells changed"), "{t}");
     let t = c.ok("palette_swap", json!({"a": 9, "b": 200}));
     assert!(
-        t.starts_with("swapped slots 9 and 200: slot 9 is now #ffffff (0 voxels), slot 200 is now #fa8c1e (85 voxels)"),
+        t.starts_with("swapped slots 9 and 200: slot 9 is now #ffffff (0 voxels), slot 200 is now #fa8c1e (89 voxels)"),
         "{t}"
     );
     c.ok("show_world", json!({}));
+    // A saved view, in the world: the file has no cameras, so it is saved as a new rCAM.
+    let t = c.ok("save_view", json!({"slot": 2, "target": [0.5, 1, 0.5], "yaw": 90, "pitch": 30, "distance": 20}));
+    assert_eq!(t, "saved view 2: looking at [0.5, 1.0, 0.5] from yaw 90 pitch 30, 20 voxels away, perspective");
     c.ok("save", json!({}));
     let mut d = Client::new(&dir.0);
     d.ok("open", json!({"path": "world.vox"}));
+    let views = summary(&mut d)["saved_views"].clone();
+    assert!(
+        views
+            .as_array()
+            .unwrap()
+            .contains(&json!("view 2: target [0.5, 1.0, 0.5], yaw 90, pitch 30, distance 20.0, perspective")),
+        "{views}"
+    );
     let w = summary(&mut d)["world"].clone();
     assert_eq!(w["nodes"].as_array().unwrap().len(), 7, "the gem is gone: {w}");
     assert!(w["layers"].as_array().unwrap().iter().any(|l| l["id"] == 0 && l["hidden"] == true), "{w}");
-    // Ten edits, ten undo steps, and the selections none.
+    // Fifteen edits, fifteen undo steps, and the selections none.
     let mut steps = 0;
     while !c.tool("undo", json!({})).1 {
         steps += 1;
     }
-    assert_eq!(steps, 10);
+    assert_eq!(steps, 15);
     c.ok("save", json!({"path": "undone.vox"}));
     assert_eq!(std::fs::read(dir.0.join("undone.vox")).unwrap(), bytes);
 }
@@ -751,17 +819,61 @@ fn export_writes_the_obj_and_the_slices_under_the_root() {
     let t: Value = serde_json::from_str(&c.ok("export", json!({"kind": "slices"}))).unwrap();
     assert_eq!(t["exported"], json!(["art/rock-slices.png"]));
     assert_eq!(t["what"], "8 layers side by side, 64 x 8 pixels");
+    // A 3x3x3 box: 2 * (3 + 3) pixels wide, 3 + 3 + 2 * 3 - 1 tall.
+    let t: Value = serde_json::from_str(&c.ok("export", json!({"kind": "sprite"}))).unwrap();
+    assert_eq!(t["exported"], json!(["art/rock-sprite.png"]));
+    assert_eq!(t["what"], "the isometric sprite, 12 x 11 pixels on a transparent background");
+    assert_eq!(&std::fs::read(d.0.join("art/rock-sprite.png")).unwrap()[1..4], b"PNG");
+    // The palette, as an image and as text beside it: slot 2 is the second line.
+    c.ok("palette_set", json!({"slot": 2, "hex": "#0a141e"}));
+    let t: Value = serde_json::from_str(&c.ok("export", json!({"kind": "palette"}))).unwrap();
+    assert_eq!(t["exported"], json!(["art/rock-palette.png", "art/rock-palette.hex"]));
+    assert_eq!(t["what"], "the palette: a 256 x 1 PNG (pixel x is slot x + 1) and 255 rrggbb lines, slot 1 first");
+    assert_eq!(&std::fs::read(d.0.join("art/rock-palette.png")).unwrap()[1..4], b"PNG");
+    let text = std::fs::read_to_string(d.0.join("art/rock-palette.hex")).unwrap();
+    assert_eq!((text.lines().count(), text.lines().nth(1)), (255, Some("0a141e")));
+    let t: Value = serde_json::from_str(&c.ok("export", json!({"kind": "palette", "path": "out/pal.png"}))).unwrap();
+    assert_eq!(t["exported"], json!(["out/pal.png", "out/pal.hex"]));
+    assert_eq!(std::fs::read_to_string(d.0.join("out/pal.hex")).unwrap(), text);
     let t: Value = serde_json::from_str(&c.ok("export", json!({"kind": "obj", "path": "out/big.obj"}))).unwrap();
     assert_eq!(t["exported"][0], "out/big.obj");
     assert!(std::fs::read_to_string(d.0.join("out/big.obj")).unwrap().contains("mtllib big.mtl"));
     c.ok("export", json!({"kind": "slices", "path": "s.png"}));
     assert!(d.0.join("s.png").is_file());
+    // Only the selection: refused with nothing selected, then the top layer alone (3x1x3),
+    // in its own box and under names of its own, beside the whole scene's files.
+    let whole = std::fs::read(d.0.join("art/rock-sprite.png")).unwrap();
+    let e = c.err("export", json!({"kind": "slices", "selection": true}));
+    assert!(e.contains("nothing is selected: select voxels first"), "{e}");
+    assert!(!d.0.join("art/rock-selection-slices.png").exists());
+    c.ok("select", json!({"from": [-1, 2, -1], "to": [1, 2, 1]}));
+    let t: Value = serde_json::from_str(&c.ok("export", json!({"kind": "slices", "selection": true}))).unwrap();
+    assert_eq!(t["exported"], json!(["art/rock-selection-slices.png"]));
+    assert_eq!(t["what"], "the selection: 1 layers side by side, 3 x 3 pixels");
+    let t: Value = serde_json::from_str(&c.ok("export", json!({"kind": "sprite", "selection": true}))).unwrap();
+    assert_eq!(t["exported"], json!(["art/rock-selection-sprite.png"]));
+    assert_eq!(t["what"], "the selection: the isometric sprite, 12 x 7 pixels on a transparent background");
+    let t: Value = serde_json::from_str(&c.ok("export", json!({"kind": "obj", "selection": true}))).unwrap();
+    assert_eq!(t["exported"], json!(["art/rock-selection.obj", "art/rock-selection.mtl", "art/rock-selection.png"]));
+    assert_eq!(t["what"], "the selection: 6 quads");
+    // A model of its own: one voxel tall, centred and on the ground as every OBJ is.
+    let part = std::fs::read_to_string(d.0.join("art/rock-selection.obj")).unwrap();
+    let mut ys: Vec<&str> = part.lines().filter_map(|l| l.strip_prefix("v ")?.split(' ').nth(1)).collect();
+    ys.sort_unstable();
+    ys.dedup();
+    assert_eq!(ys, ["0", "1"], "{part}");
+    assert_eq!(std::fs::read(d.0.join("art/rock-sprite.png")).unwrap(), whole, "the whole scene's sprite is untouched");
+    c.ok("select", json!({"none": true}));
     for (args, says) in [
-        (json!({"kind": "render"}), "vxr mcp --live"),
+        (json!({"kind": "render", "selection": true}), "selection: only for kind obj, slices and sprite"),
+        (json!({"kind": "obj", "selection": "yes"}), "selection: true or false"),
+        (json!({"kind": "render"}), "kind render is the path-traced picture"),
+        (json!({"kind": "turntable"}), "kind turntable is a path-traced picture per frame"),
+        (json!({"kind": "embed"}), "kind embed is the folder for a web page"),
         (json!({"kind": "obj", "path": "../x.obj"}), "without .."),
         (json!({"kind": "obj", "path": "x.vox"}), "not a .obj file"),
         (json!({"kind": "slices", "path": "x.obj"}), "not a .png file"),
-        (json!({"kind": "gltf"}), "obj, slices or render"),
+        (json!({"kind": "gltf"}), "obj, slices, sprite, palette, render, turntable or embed"),
     ] {
         let e = c.err("export", args.clone());
         assert!(e.contains(says), "{args}: {e}");

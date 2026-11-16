@@ -5,6 +5,8 @@
 # the assistant, Open, Save, resize, the projects list and drafts), check the landing page and
 # the boot skeleton (check-landing.js: first visit with progress and an early click, /about, the
 # returning-visit skip, ?open= ?project= ?embed, which also leave the first-run tour out), check
+# the embed folder the editor exported as its own page (check-embed.js: the exported viewer and
+# scene go live, and the poster frames the scene as the first live frame does), check
 # the first-run tour (check-tour.js: each step done for real, the replays, Skip and the seen
 # flag, the touch card and words), check that a draft and a
 # key remembered in the browser come back in a new page (check-restore.js for the draft), check that a tablet-sized touch screen starts in the touch layout, pair the
@@ -66,7 +68,7 @@ axi() { chrome-devtools-axi "$@"; }
 forget() { axi eval "async () => { window.vxr?.forget_projects(); await window.vxrProjects?.clear(); return 'ok' }" >/dev/null || true; }
 # The landing page and the boot skeleton (check-landing.js): this profile's first visit, then
 # its returning and deep-link visits, before anything else opens the page. The first visit holds
-# the wasm back for 6 s, so the progress and an early click can be seen.
+# the wasm back for 6 s from its request, so the progress and an early click can be seen.
 landing() { axi eval --full "async () => ($(cat "$here/check-landing.js"))('$1')" | unwrap; }
 curl -sf "http://127.0.0.1:$port/__hold/6000" >/dev/null
 axi open "$url" >/dev/null
@@ -251,7 +253,9 @@ else
   # A session `vxr claude` started connects with no call: step 3 turns green with an idle row.
   ./dev node "$here/check-agent.js" "$vxr" "[\"wait $fixtures/idle-done\"]" --connect-at-start >/dev/null &
   idler=$!
-  idle="$(axi eval "async () => { for (let i = 0; i < 400 && !JSON.parse(window.vxr.state()).agents.clients.length; i++) await window.__frames(3); await window.__frames(4); const a = JSON.parse(window.vxr.state()).agents; return JSON.stringify([a.clients.map(c => c[1]), a.calls.length, a.chip.replace(/ · idle .*/, ' · idle'), window.vxr.hit('agents-dot-' + (a.clients[0] || [0])[0]).length]) }" | unwrap)"
+  # Waits by the clock, not by frames: the session starts through ./dev and a debug vxr, which on a
+  # busy machine took longer than the 400 x 3 frames this once counted.
+  idle="$(axi eval "async () => { for (const end = Date.now() + 45000; Date.now() < end && !JSON.parse(window.vxr.state()).agents.clients.length; ) await window.__frames(3); await window.__frames(4); const a = JSON.parse(window.vxr.state()).agents; return JSON.stringify([a.clients.map(c => c[1]), a.calls.length, a.chip.replace(/ · idle .*/, ' · idle'), window.vxr.hit('agents-dot-' + (a.clients[0] || [0])[0]).length]) }" | unwrap)"
   expect "an open agent session shows as connected and idle before any call" "$idle" '[["Claude Code"],0,"Claude Code connected · idle",2]'
   axi screenshot "$shots/web-agent-idle.png" >/dev/null
   touch "$fixtures/idle-done"
@@ -345,22 +349,30 @@ else
   }" | unwrap)"
   expect "Discard, then review off again in the panel" "$reopened" '[null,4,true,false]'
   # A real agent's look, render settings and exports through the bridge: the picture comes
-  # back as MCP image content, the settings reach the Render panel, and the PNG slices and a
-  # render download in the page under the scene's name.
+  # back as MCP image content, the settings reach the Render panel, and the PNG slices, a
+  # render and the embed folder (one zip, the viewer fetched from the site) download in the
+  # page under the scene's name, the embed's answer carrying the tag to paste.
   axi eval "() => { window.__downloads = []; HTMLAnchorElement.prototype.click = function () { window.__downloads.push(this.download); }; return 'ok' }" >/dev/null
-  ./dev node "$here/check-agent.js" "$vxr" '[["look", {"view": "front", "size": 128}], ["render_settings", {"gamma": 1.8, "samples": 64, "export_size": "720p"}], ["export", {"kind": "slices"}], ["export", {"kind": "render"}]]' >"$fixtures/look.log"
+  ./dev node "$here/check-agent.js" "$vxr" '[["look", {"view": "front", "size": 128}], ["render_settings", {"gamma": 1.8, "samples": 64, "export_size": "720p", "focus_on": [0, 0, 0]}], ["export", {"kind": "slices"}], ["export", {"kind": "render"}], ["export", {"kind": "embed"}], ["save_view", {"slot": 7, "target": [0, 4, 0], "yaw": 45, "pitch": 30, "distance": 90}]]' >"$fixtures/look.log"
   looked="$(sed -n 1p "$fixtures/look.log" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const r=JSON.parse(s);console.log(JSON.stringify([r.isError, JSON.parse(r.text).view, r.image]))})")"
   expect "look answers a real agent with a PNG picture through the bridge" "$looked" '[false,"front",{"mimeType":"image/png","png":"PNG"}]'
-  set_gamma="$(sed -n 2p "$fixtures/look.log" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const r=JSON.parse(s);const v=JSON.parse(r.text);console.log(JSON.stringify([r.isError, v.gamma, v.samples]))})")"
-  expect "render_settings answers with every setting" "$set_gamma" '[false,1.8,64]'
-  exported="$(sed -n '3,4p' "$fixtures/look.log" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{console.log(JSON.stringify(s.trim().split('\n').map(l=>{const r=JSON.parse(l);return r.isError?r.text:JSON.parse(r.text).exported[0]})))})")"
-  expect "export downloads the PNG slices and, once traced, the render" "$exported" '["island-slices.png","island-render.png"]'
-  downloads="$(axi eval "async () => { await window.__frames(5); const s = JSON.parse(window.vxr.state()); return JSON.stringify([window.__downloads, s.render.gamma, s.render.maxSpp, s.voxels - $before]) }" | unwrap)"
-  expect "the page downloads them, the Render panel has the settings, and no voxel changed" "$downloads" '[["island-slices.png","island-render.png"],1.8,64,4]'
+  set_gamma="$(sed -n 2p "$fixtures/look.log" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const r=JSON.parse(s);const v=JSON.parse(r.text);console.log(JSON.stringify([r.isError, v.gamma, v.samples, v.focus !== 1]))})")"
+  expect "render_settings answers with every setting, the focus put on cell 0, 0, 0" "$set_gamma" '[false,1.8,64,true]'
+  exported="$(sed -n '3,5p' "$fixtures/look.log" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{console.log(JSON.stringify(s.trim().split('\n').map(l=>{const r=JSON.parse(l);return r.isError?r.text:JSON.parse(r.text).exported[0]})))})")"
+  expect "export downloads the PNG slices and, once traced, the render and the embed folder" "$exported" '["island-slices.png","island-render.png","island-embed.zip"]'
+  tagged="$(sed -n 5p "$fixtures/look.log" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const r=JSON.parse(s);console.log(!r.isError&&JSON.parse(r.text).what.includes('<voxel-scene src=\"island.vxrb\" alt=\"island\">'))})")"
+  expect "the embed's answer carries the tag to paste" "$tagged" 'true'
+  downloads="$(axi eval "async () => { await window.__frames(5); const s = JSON.parse(window.vxr.state()); return JSON.stringify([window.__downloads, s.render.gamma, s.render.maxSpp, s.render.focus !== 1, s.voxels - $before]) }" | unwrap)"
+  expect "the page downloads them, the Render panel has the settings, and no voxel changed" "$downloads" '[["island-slices.png","island-render.png","island-embed.zip"],1.8,64,true,4]'
+  saved="$(sed -n 6p "$fixtures/look.log" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const r=JSON.parse(s);console.log(JSON.stringify([r.isError, r.text.split(':')[0]]))})")"
+  views="$(axi eval "async () => { await window.__frames(3); return JSON.stringify(JSON.parse(window.vxr.state()).savedViews) }" | unwrap)"
+  expect "save_view through the bridge fills the View flyout's slot 7" "$saved $views" '[false,"saved view 7"] [7]'
   # Regenerate writes a new token; the switch unpairs the page and the socket goes.
   token="$(cat "$VXR_LIVE_DIR/live.token")"
-  axi eval "async () => { await window.__click(await window.__reveal('agents-regenerate')); await window.__frames(20); return 'ok' }" >/dev/null
-  [ "$token" != "$(cat "$VXR_LIVE_DIR/live.token")" ] && pass "Regenerate in the panel writes a new token" || fail "Regenerate in the panel writes a new token" "same token"
+  regen="$(axi eval "async () => { const h = await window.__reveal('agents-regenerate'); await window.__click(h); await window.__frames(20); const a = JSON.parse(window.vxr.state()).agents; return JSON.stringify([h, innerWidth, innerHeight, a.error, a.allowed, a.panel]) }" | unwrap)"
+  # The bridge writes the file after the page asks over the socket: give it up to 5 s.
+  for _ in $(seq 1 50); do [ "$token" != "$(cat "$VXR_LIVE_DIR/live.token")" ] && break; sleep 0.1; done
+  [ "$token" != "$(cat "$VXR_LIVE_DIR/live.token")" ] && pass "Regenerate in the panel writes a new token" || fail "Regenerate in the panel writes a new token" "same token: $regen"
   off="$(axi eval "async () => { await window.__click(await window.__reveal('agents-disconnect')); for (let i = 0; i < 100 && JSON.parse(window.vxr.state()).agents.allowed; i++) await window.__frames(3); await new Promise(r => setTimeout(r, 300)); return JSON.stringify(JSON.parse(window.vxr.state()).agents.allowed) }" | unwrap)"
   [ "$off" = false ] && [ ! -e "$VXR_LIVE_DIR/live.sock" ] && pass "Disconnect unpairs the page and the socket closes" || fail "Disconnect unpairs the page and the socket closes" "$off"
   for line in "Paired with the page: terminal agents can edit its scene now" "Claude Code connected" "The page left: agents can no longer edit it"; do
@@ -453,6 +465,16 @@ else
   worker=""
 fi
 axi emulate --viewport "1280x800x1" >/dev/null
+
+# The embed folder check.js exported and handed to the server, as its own page on a plain host
+# (check-embed.js): the viewer and the scene that were really exported go live, and the poster
+# frames the scene as the first live frame does. The folder is kept in shots/ to look at.
+axi open "${url}__embed/island-embed/" >/dev/null
+results+=$'\n'"$(axi eval --full "async () => ($(cat "$here/check-embed.js"))()" | unwrap)"
+axi screenshot "$shots/web-embed-page.png" >/dev/null
+rm -rf "$shots/island-embed"
+[ ! -d "$fixtures/embed/island-embed" ] || cp -R "$fixtures/embed/island-embed" "$shots/island-embed"
+[ "$(grep -c '^ok embed page ' <<<"$results")" -eq 5 ] || results+=$'\nFAIL the exported embed page ran its 5 steps'
 
 export CHROME_DEVTOOLS_AXI_SESSION=$nogpu
 export CHROME_DEVTOOLS_AXI_CHROME_ARGS='--disable-gpu --disable-webgpu'

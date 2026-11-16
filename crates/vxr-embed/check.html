@@ -1,0 +1,32 @@
+<!doctype html>
+<!-- The page crates/vxr-embed/check opens: one tag on screen, two far below it. -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>voxel-scene check</title>
+    <style>
+      body { margin: 24px; font: 15px/1.5 system-ui, sans-serif; background: #fafaf7; color: #222; }
+      voxel-scene { width: 640px; max-width: 100%; margin-bottom: 16px; }
+      .gap { height: 2400px; }
+    </style>
+    <script src="voxel-scene.js" async></script>
+  </head>
+  <body>
+    <p>A brick scene file, with an image child as its poster.</p>
+    <voxel-scene id="bricks" src="world.vxrb" alt="A small voxel world">
+      <img alt="" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 10'%3E%3Crect width='16' height='10' fill='%23c9d6e8'/%3E%3C/svg%3E" />
+    </voxel-scene>
+    <div class="gap"></div>
+    <p>The same scene as a .vox file, turning.</p>
+    <voxel-scene id="vox" src="world.vox" alt="The same world from a .vox file" autorotate></voxel-scene>
+    <div class="gap"></div>
+    <p>A damaged file: the poster stays.</p>
+    <voxel-scene
+      id="cut"
+      src="cut.vxrb"
+      alt="A damaged scene"
+      poster="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 10'%3E%3Crect width='16' height='10' fill='%23e8d6c9'/%3E%3C/svg%3E"
+    ></voxel-scene>
+  </body>
+</html>

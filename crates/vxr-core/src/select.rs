@@ -30,6 +30,20 @@ pub enum Region {
     Volume,
 }
 
+/// The region option, for brushes and for the agent tools' `selection: true`: whether an
+/// erase or a paint limited to the selection may change cell `p`. With nothing selected
+/// there is no limit.
+pub fn inside(selection: &HashSet<[i32; 3]>, p: [i32; 3]) -> bool {
+    selection.is_empty() || selection.contains(&p)
+}
+
+/// Whether a replace or a remove of colour `from` changes the voxel `v` at map cell `p`: it
+/// has that colour and, with a selection to stay inside (`only`), it is selected. The one rule
+/// for [`Scene::replace_color`] and the agent's `paint` and `erase` with `from_slot`.
+pub fn of_color(only: Option<&HashSet<[i32; 3]>>, p: [i32; 3], v: u8, from: u8) -> bool {
+    v == from && only.is_none_or(|s| s.contains(&p))
+}
+
 /// Every cell connected to `p` through faces for which `filled` holds, `p` first; empty when
 /// `p` is not filled ([`Scene::volume`]).
 pub fn connected(filled: impl Fn([i32; 3]) -> bool, p: [i32; 3]) -> Vec<[i32; 3]> {
@@ -92,6 +106,17 @@ impl Clip {
             Some(p) => [p[0] - self.size[0] / 2, p[1], p[2] - self.size[2] / 2],
             None => [self.from[0] + self.size[0], self.from[1], self.from[2]],
         }
+    }
+
+    /// Where the pattern brush puts the low corner: the box starts in cell `at` and grows
+    /// along the unit vector `grow` (out of a face, or into it), centred on `at` across it.
+    /// Growing up, it is where Paste puts it ([`Clip::corner`]).
+    pub fn against(&self, at: [i32; 3], grow: [i32; 3]) -> [i32; 3] {
+        std::array::from_fn(|a| match grow[a] {
+            0 => at[a] - self.size[a] / 2,
+            g if g > 0 => at[a],
+            _ => at[a] - self.size[a] + 1,
+        })
     }
 }
 
@@ -306,6 +331,24 @@ impl Scene {
         self.commit();
         let cells: Vec<_> = self.selection().collect();
         self.edit(cells.into_iter().map(|p| (p, v)))
+    }
+
+    /// Give every voxel of palette index `from` the index `to`, or erase them when `to` is 0
+    /// (MagicaVoxel's replace colour and remove colour), as one undo step. While voxels are
+    /// selected only the selected ones change ([`of_color`]). Returns how many changed.
+    pub fn replace_color(&mut self, from: u8, to: u8) -> usize {
+        self.commit();
+        if from == 0 || self.map.counts[from as usize] == 0 {
+            return 0;
+        }
+        let only = (self.selected_count() > 0).then_some(&self.selection);
+        let mut cells = Vec::new();
+        self.for_each_voxel(|p, v| {
+            if of_color(only, p, v, from) {
+                cells.push((p, to));
+            }
+        });
+        self.edit(cells)
     }
 
     /// Copy the selected voxels to the clipboard. Returns how many were copied.

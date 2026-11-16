@@ -2,14 +2,15 @@
 
 Every MagicaVoxel 0.99.6 / 0.99.7 feature we could find in public sources, with vxr's status and a priority. Desk research only: MagicaVoxel was not launched. Keep the table current as each feature lands.
 
-Status as of 2026-10-25 (Phase 3, after the browser build was checked end to end).
+Status as of 2026-11-16 (Monday; Phase 3, after the web embed and the exports for sharing landed). Every row was checked against the code on that day: the Cmd-K command list in `crates/vxr-app/src/ui.rs`, the agent tools in `crates/vxr-ops/src/args.rs` and `docs/controls.md`.
 
 ## How to read it
 
 - **Status**: done (works natively and in the browser build, with tests and `--shot` steps), partial (some of it, or native only), missing.
 - **Priority**: P1 is needed before a MagicaVoxel user could switch, P2 is expected soon after, P3 is nice to have or out of scope for now.
 - **Why**: which reason people love MagicaVoxel it serves (see `docs/market-research.md`, "Why it is loved"): **minutes** (results in minutes), **sculpt** (the hand-sculpting feel), **palette** (palette-first work), **render** (a beautiful built-in renderer), **lossless** (lossless `.vox`). A dash means it serves none of them directly.
-- **Build order**: the numbers in brackets, such as [1], are the Part 3 order in the current run (1 lossless save, 2 palette editing, 3 preview, render and materials, 4 line and center brushes, 5 selection and transform, 6 model tools, 7 camera and view, 8 world editor, 9 export).
+- **Build order**: the numbers in brackets, such as [1], are the Part 3 order in which the done rows were built (1 lossless save, 2 palette editing, 3 preview, render and materials, 4 line and center brushes, 5 selection and transform, 6 model tools, 7 camera and view, 8 world editor, 9 export).
+- **Next, in order**: the P2 rows the launch list names are all in; scene tree multi-select came last. Fitting several picked objects at once and drag-select across swatches remain partial. Sort palette, image import (done) and saved views are P3 rows pulled forward because a switching user meets them early.
 
 MagicaVoxel versions: 0.99.7.2 (July 2025) is the current build and is Windows-only. The Mac build stopped at 0.99.6.2 (September 2020) [S1]. A user switching from the Mac build expects the 0.99.6 set; a Windows user expects 0.99.7's palette groups, layer sorting and animation timeline.
 
@@ -34,16 +35,16 @@ Feature names below follow the update log [S1] unless another source is given.
 | Box brush (B) | Drag a rectangle, resizable with a gizmo, Enter commits [S1 0.99.5.1] | done (drag a rectangle, then the pointer sets its height until a click or Enter places it, Escape drops it; no gizmo) | P1 | minutes |
 | Line brush (L) | Line, square and circle in one geometry mode since 0.99.6.2 [S1 0.99.6.2] | done (L: drag a line on the drag plane, shown live) | P1 | sculpt |
 | Center brush (C) | Square or circle from a center point, even diameters [S1 0.97, 0.97.1] | done (C: circle on the drag plane from its center, C again for a sphere; no square or even diameters) | P1 | sculpt |
-| Pattern brush (P) | Stamp a pattern made from a selection, rotate and offset it [S1 0.98.1] | missing | P2 | minutes |
+| Pattern brush (P) | Stamp a pattern made from a selection, rotate and offset it [S1 0.98.1] | done (T: stamps the copied selection against the face under the pointer, shown at the press, moved by the drag, placed at the release; add, erase and paint; mirror and Brush inside only apply; the agent's `stamp`; no rotate or offset option: rotate the selection before copying it) | P2 | minutes |
 | Mirror X, Y, Z | Per-axis mirror on every brush [S1 0.97] | done (M toggles; X, Y, Z chips in the axis flyout; planes in `docs/decisions.md`) | P1 | sculpt |
 | Axis lock | Brush option "axis" [S1 0.97, 0.99.5.1] | done (K cycles X, Y, Z, off: drags stay on the plane across that axis) | P1 | sculpt |
 | Diagonal symmetry | Command `dia [axis]` [S1 0.98.1] | missing | P3 | - |
-| Region options | Brushes act on selected or unselected voxels only [S1 0.98.1, 0.99.5.1] | missing (selection is in [5]; brushes ignore it so far) | P2 | sculpt |
-| Replace colour and remove colour brushes | Act on every voxel of one colour [S1 0.98.1] | missing (paint face covers part) | P2 | palette |
+| Region options | Brushes act on selected or unselected voxels only [S1 0.98.1, 0.99.5.1] | done (the select flyout's Brush inside only, or Cmd-K Brush only inside the selection: while voxels are selected, erase and paint with any brush change only those; Invert first for the unselected ones; add is never limited; agents pass `selection: true` to `box`, `line`, `sphere`, `circle`, `face` and `erase`) | P2 | sculpt |
+| Replace colour and remove colour brushes | Act on every voxel of one colour [S1 0.98.1] | done (the colour editor's Replace… then a swatch click, or Cmd-K Replace color with…, gives every voxel of the current colour another slot; Remove, or Cmd-K Remove color, erases them; both stay inside the selection while voxels are selected; commands on the current colour, not brushes; agents pass `from_slot` to `paint` and `erase`, with `selection: true` for the selection) | P2 | palette |
 | Sculpt brushes | Applied to selected or unselected regions [S1 0.99.5.1] | missing | P3 | sculpt |
 | SDF brush | Box brush plus a voxel shader [S1 0.99.5.1] | missing (see Shaders) | P3 | - |
 | Scale and wrap transform brushes | Live point-sampled scale; live wrap and crop with mirroring [S1 0.99.6.2] | missing | P3 | - |
-| Rotate transform brush | Axis, screen and sphere rotate with 5 and 15 degree snaps [S1 0.99.6.2] | missing (90 degree rotate is [5]) | P3 | - |
+| Rotate transform brush | Axis, screen and sphere rotate with 5 and 15 degree snaps [S1 0.99.6.2] | missing (the selection rotates in 90 degree steps [5]) | P3 | - |
 | Undo and redo | Up to 100 compressed steps [S1 0.99.5] | done (unlimited, one step per stroke) | P1 | minutes |
 
 ## Selection and transform
@@ -60,7 +61,7 @@ Feature names below follow the update log [S1] unless another source is given.
 | Scale and repeat | Console commands `scale`, `repeat` [S1 0.98] | missing | P3 | - |
 | Shear | Command `shear z 0.2 0.2` [S1 0.99.6.2] | missing | P3 | - |
 | Mask and texture with a pattern model | Modify->Mask/Texture [S1 0.99.6.2] | missing | P3 | - |
-| Export only the selection | [S1 0.98.1] | missing | P2 | - |
+| Export only the selection | [S1 0.98.1] | done: the Export menu's Only the selection switch (Cmd-K Export only the selection) makes OBJ, PNG slices and Isometric sprite take the selected voxels alone, as a model of their own under `<scene>-selection` names, while some are selected; the agent's `export` takes `selection: true` for those kinds in files mode and live mode (its own selection). Render, turntable and embed always take the scene | P2 | - |
 
 ## Model tools
 
@@ -68,7 +69,7 @@ Feature names below follow the update log [S1] unless another source is given.
 |---|---|---|---|---|
 | Model size up to 256^3 | Canvas size per object [S1 0.99.5] | done, and past it: one sparse map up to 2048 voxels per axis, split into 256^3 models on save | P1 | - |
 | Resize model bounds | Crop tool resizes the canvas live [S1 0.99.5.1] | done [6] (Resize… in the selection flyout opens a Bounds panel with X, Y and Z fields; keeps the bottom and the centre; one undo step; saved as the object's model size [8]) | P2 | - |
-| Crop to content and fit | Fit sizes several objects [S1 0.99.5.1] | partial [6] (Crop in the selection flyout and Cmd-K fits the bounds to the voxels; saved as the object's model size [8]; fitting several objects at once waits for the world UI) | P2 | - |
+| Crop to content and fit | Fit sizes several objects [S1 0.99.5.1] | partial [6] (Crop in the selection flyout and Cmd-K fits the bounds to the voxels; saved as the object's model size [8]; fitting several picked objects at once is not built yet) | P2 | - |
 | Hollow and fill | Edit tools (also in vengi [S4]) | done [6] (selection flyout and Cmd-K: Hollow keeps the voxels seen from outside, Fill inside fills enclosed space; the selection or the whole model) | P2 | sculpt |
 | Boolean operations | Groups and objects [S1 0.99.6.2] | missing | P3 | - |
 | Statistics | `log`: model count, scene size, voxels per colour [S1 0.99.6.2] | partial (voxel count in the header; per-colour count kept in the brick map, not shown) | P3 | - |
@@ -82,13 +83,13 @@ Feature names below follow the update log [S1] unless another source is given.
 | Colour picker: HSV, RGB, hex | [S1 0.99.4.2] | done (saturation/value square, hue bar, hex, RGB and HSV fields) [2] | P1 | palette |
 | Swap colours | Ctrl+drag swaps; Alt+drag swapped without changing the model in 0.97.2 [S1 0.99.2, 0.97.2] | done (Swap with… button, Cmd-K, or Cmd/Ctrl-drag; voxels move with the colour so the scene keeps its look) [2] | P1 | palette |
 | Duplicate (copy) a colour | Ctrl+Shift+drag [S1 0.99.2] | done (Copy to… button, Cmd-K, or Cmd/Ctrl+Shift-drag) [2] | P1 | palette |
-| Multi-select colours, group HSV/RGB edits | Drag selects; group edits since 0.99.7.1 [S1 0.99.5, 0.99.7.1] | missing | P2 | palette |
+| Multi-select colours, group HSV/RGB edits | Drag selects; group edits since 0.99.7.1 [S1 0.99.5, 0.99.7.1] | partial [2] (Shift-click a swatch adds it to the selected slots or takes it out; the colour editor then shifts hue, saturation and value of all of them with three sliders, one undo step per drag; agents use `palette_adjust`; drag-select and group RGB edits missing) | P2 | palette |
 | Copy and paste colours between palettes | [S1 0.99.7.1] | missing | P2 | palette |
-| Sort palette | `pal sort [+-hsvrgb]` [S1 0.99.2] | missing | P3 | palette |
+| Sort palette | `pal sort [+-hsvrgb]` [S1 0.99.2] | done [2] (Cmd-K Sort palette by hue, by saturation and by brightness: the palette's selected slots among themselves, or all 255; colours and materials trade slots and every voxel of the file follows its colour, in every object, so the scene looks the same; one undo step; agents use `palette_sort`; ascending only, no sort by red, green or blue) | P3 | palette |
 | Mask unused colours | `pal mask` [S1 0.97.1]; vxr shows dots on used colours | partial (used dots) | P3 | palette |
-| Select voxels by colour and colours by voxels | Palette menu [S1 0.99.5] | partial [5] (voxels by colour; colours by voxels waits for multi-select colours, the P2 row above: until the palette can hold more than one colour there is nothing to select them into; see `docs/decisions.md`) | P1 | palette |
+| Select voxels by colour and colours by voxels | Palette menu [S1 0.99.5] | done [5] (voxels by colour: Cmd-K Select color; colours by voxels: Cmd-K Select used colors selects, in the palette, the slots the selected voxels use, or the model's while nothing is selected) | P1 | palette |
 | Palette notes | A note per palette row, saved in NOTE [S1 0.99.5.1, S2] | missing (kept by lossless save [1]) | P3 | lossless |
-| Import and export palettes | IO panel, text and image [S1 0.99.5.1] | missing | P2 | palette |
+| Import and export palettes | IO panel, text and image [S1 0.99.5.1] | done [9] (export: the Export menu's Palette image, a 256x1 `.png` with slot 1 first as MagicaVoxel loads it, and Palette colors, a `.hex` text file with one `rrggbb` line per slot; Cmd-K Export palette as PNG and as text; agents use `export` kind `palette`. Import: the file menu's Import Palette… and Cmd-K Import palette… read a PNG of up to 256 pixels, a `.hex` or a GIMP `.gpl` into slots 1 up as one undo step; agents use `palette_import` with the file's text) | P2 | palette |
 
 ## Materials
 
@@ -107,15 +108,15 @@ Feature names below follow the update log [S1] unless another source is given.
 | Interactive path tracer | Progressive GPU path tracing [S1] | done [3]: the live corner runs in the app and the browser (640x360, A-trous denoise, 3 ms per frame while editing, 12 ms idle); a click on it, its maximize chip or Cmd-K swaps it into the whole view at one pixel per point, and Escape swaps it back | P1 | render |
 | Sun direction and colour, sky | Atmospheric sky with Rayleigh and Mie, sun disk [S1 0.99.1, 0.99.2] | done [3]: Render panel sun direction, height, colour and strength, sky light, a Show sky toggle and a Physical sky toggle (single Rayleigh and Mie scattering that follows the sun's height, reddening at sunset, with the sun disk behind the scene) over the default gradient sky | P1 | render |
 | Exposure, gamma, tone mapping, vignette | Post->E, Camera->G, ACES [S1 0.97.3, 0.98.1] | done [3]: exposure in stops, gamma and vignette in the Render panel (none restarts the trace) and ACES tone mapping | P1 | render |
-| Depth of field, bokeh | Click to set focus; bladed bokeh [S1 0.98.1, 0.99.1] | partial [3]: thin-lens depth of field with blur and focus sliders (round bokeh); no click to focus or bladed bokeh | P2 | render |
+| Depth of field, bokeh | Click to set focus; bladed bokeh [S1 0.98.1, 0.99.1] | partial [3]: thin-lens depth of field with blur and focus sliders (round bokeh), and click to focus (the crosshair beside Focus, Cmd-K Focus on a point…, and `render_settings` `focus_on` for live agents); no bladed bokeh | P2 | render |
 | Bloom | [S1 0.98.2, 0.99.1] | missing | P3 | render |
 | Fog and volumetrics | [S1 0.97.5, 0.99.4.1] | missing | P3 | render |
 | Image-based lighting (`.hdr`) | Sky->IBL [S1 0.99.4.1] | missing | P3 | render |
 | Denoiser | Intel OIDN plugin [S1 0.99.4.2] | done [3]: A-trous in the live corner | P1 | render |
 | Export PNG at a chosen size | Photo mode up to 12000x12000 [S1 0.99.3] | done [3]: 720p to 4K (as the GPU allows) at 64 to 4,096 spp, traced in the background while editing; download in the browser | P1 | render, minutes |
-| Turntable and animation render | [S1 0.99.3, 0.99.7.0] | missing | P3 | - |
+| Turntable and animation render | [S1 0.99.3, 0.99.7.0] | partial: turntable done (one full turn of the view as 8 to 64 path-traced PNG frames, with the same frames as one looping animated PNG, a folder or one zip in the browser, also the agent's `export` kind turntable); no animation render | P3 | render, minutes |
 | Voxel shapes (Lego, marching cubes, clay) | [S1 0.96, 0.99.2] | missing | P3 | - |
-| Editor display modes | AO and constant shading, background fading, grid/edge colours [S1 0.99.5.1] | partial (one lit shading with the mockup background) | P3 | - |
+| Editor display modes | AO and constant shading, background fading, grid/edge colours [S1 0.99.5.1] | partial (one lit shading; a dark and a light theme; Grid, Ground and Bounds toggles; no AO or constant shading and no colour settings) | P3 | - |
 
 ## Camera and view
 
@@ -128,7 +129,7 @@ Feature names below follow the update log [S1] unless another source is given.
 | View cube and axis snap views | 26 standard views, hotkey 5 for face views [S1 0.99] | partial [7] (six side views and isometric on 0 to 6 and the View flyout; no 26-view cube) | P2 | - |
 | Grid and ground | Frame grids with spacing, infinite ground [S1 0.98.1, 0.97.5] | done [7] (a voxel grid on the ground inside the bounds and a ground that fades into the background; View flyout, G, Cmd-K; no grid spacing setting) | P2 | minutes |
 | Bounding box display | Select on any of the six bounding box faces [S1 0.98.1] | partial [7] (the bounds frame is drawn, faint where voxels hide it; View flyout, Cmd-K; no face selection on it) | P2 | - |
-| Save and load views | 7/8, F5/F7, camera slots [S1 0.99, 0.99.6.2] | missing (cameras kept by lossless save [1], and read and edited with undo in `vxr_core::Scene`, not shown in the editor yet) | P3 | - |
+| Save and load views | 7/8, F5/F7, camera slots [S1 0.99, 0.99.6.2] | done (launch item 3, a P3 pulled forward: the View flyout's ten SAVED VIEWS slots go to a view or save the view into a slot, Cmd-K Saved views and Save view to a slot…, the file's `rCAM` slots as MagicaVoxel keeps them, one undo step per save; agents get `save_view`; no 7/8 or F5/F7 keys, as the number keys snap to side views) | P3 | - |
 | Camera control panel | FOV, position, pitch/yaw/roll [S1 0.99.6.2, 0.99.6.4] | missing | P3 | - |
 | Free (fly) camera | Pers/Free modes [S1 0.97.5, 0.99.6.4] | missing | P3 | - |
 
@@ -137,11 +138,11 @@ Feature names below follow the update log [S1] unless another source is given.
 | Feature | MagicaVoxel | vxr | Priority | Why |
 |---|---|---|---|---|
 | Multiple objects per scene | Tab switches model and world editors [S1 0.99] | done: files open as separate objects (world mode with several, model mode with one); Tab and Cmd-K switch between editing one model (edits reach every linked copy) and the world, undo follows edits across modes, and saving writes models, nodes and layers losslessly; in world mode a click picks an object, a drag or the arrows move it, Cmd-D duplicates it, Cmd-Shift-D makes a linked copy and Backspace deletes it; a scene tree beside the rail lists every object and group from the second object; groups are picked from the tree, moved, copied, made (Cmd-G) and taken apart (Cmd-Shift-G); layers are listed under the tree, shown, hidden, named, added and assigned; Selection to new object (select flyout, Cmd-K) turns the selected voxels into an object of their own in place, one undo step, so a scene built as one model can be split into objects, and Cmd-K Organize into objects (AI) asks the assistant to split it into named objects for review [8] | P1 | lossless |
-| Move, rotate, flip objects | Gizmo, explicit position, 90 degree rotate gizmo [S1 0.99, 0.99.7.0, 0.99.7.2] | partial [8] (move objects and groups: drag on the face plane, arrows and Shift-Up/Down, one undo step each; rotate and flip objects missing) | P2 | - |
-| Groups | Enter and leave with Tab or double-click [S1 0.99, 0.99.5.1] | done [8] (a group row picks the group; a drag on one of its objects, the arrows, Cmd-D, Cmd-Shift-D, Backspace, H and rename act on the whole group; Cmd-G wraps the picked node in a new group, Cmd-Shift-G ungroups in place; Tab edits its first object; one undo step each, saved losslessly; grouping several objects at once waits for multi-select) | P2 | - |
+| Move, rotate, flip objects | Gizmo, explicit position, 90 degree rotate gizmo [S1 0.99, 0.99.7.0, 0.99.7.2] | done [8] (move objects and groups: drag on the face plane, arrows and Shift-Up/Down; rotate and flip them in place in 90 degree steps with Cmd-K Rotate X/Y/Z and Flip X/Y/Z on the picked object or group, saved in the `nTRN`; one undo step each; agents use `move_object` and `transform_object`; no gizmo and no typed position) | P2 | - |
+| Groups | Enter and leave with Tab or double-click [S1 0.99, 0.99.5.1] | done [8] (a group row picks the group; a drag on one of its objects, the arrows, Cmd-D, Cmd-Shift-D, Backspace, H and rename act on the whole group; Cmd-G wraps the picked node in a new group, Cmd-Shift-G ungroups in place; Tab edits its first object; one undo step each, saved losslessly; Cmd-click in the tree picks several rows and Cmd-G groups them at once) | P2 | - |
 | References (instances) and duplicates | Shift+drag; Ref-R converts [S1 0.99, 0.99.5.1] | done [8] (Cmd-D duplicate with its own model, Cmd-Shift-D linked copy sharing it, placed beside the original; Cmd-K; saved losslessly) | P2 | - |
 | Layers: show, hide, name, colour, sort | Layer panel [S1 0.99.6.4, 0.99.7.1] | partial [8] (a LAYERS list under the scene tree in world mode: every layer with its object count; the eye shows and hides it, a double-click or Cmd-K renames, + or Cmd-K adds one, a click puts the picked object or group on it, Cmd-K hides the picked object's layer; one undo step each, saved as `LAYR` and nTRN layer ids. Layer colour is kept losslessly but not editable, and sort is a Windows-only 0.99.7 feature: both wait for a user asking) | P2 | - |
-| Scene outline panel | Rename, hide, reorder, multi-select [S1 0.99.6.4] | partial [8] (beside the rail from the second object: objects and groups indented, model sizes, linked copies marked; a row click picks an object or group or edits an object, the eye and H hide and show, a double-click or Cmd-K renames, one undo step each; reorder and multi-select missing) | P2 | - |
+| Scene outline panel | Rename, hide, reorder, multi-select [S1 0.99.6.4] | done [8] (beside the rail from the second object: objects and groups indented, model sizes, linked copies marked; a row click picks an object or group or edits an object, the eye and H hide and show, a double-click or Cmd-K renames, one undo step each; a drag of a row moves it in the tree, into and out of groups, in place, and Cmd-K moves the picked row up and down; agents use `reorder`; Cmd-click picks several rows, which Cmd-G groups, H hides and Backspace deletes together, one undo step each; agents name several nodes in `group`) | P2 | - |
 | Pattern library | Drag assets in, match palettes [S1 0.99.6.4] | missing | P3 | minutes |
 | Copy and paste transforms | [S1 0.99.7.0] | missing | P3 | - |
 
@@ -157,13 +158,13 @@ Feature names below follow the update log [S1] unless another source is given.
 | PLY (marching cubes) | [S1 0.97.1] | missing | P3 | - |
 | Qubicle `.qb` | [S1 0.97.2] | missing | P3 | - |
 | Slices, cubes, point clouds | [S1 0.99.3]; `o slice` exports a volume as one image [S1 0.98.1] | partial [9]: PNG slices done (the Export menu or Cmd-K: every layer of what the view shows as one PNG, side by side from the bottom, a download in the browser); cubes and point clouds missing | P2 | - |
-| Isometric sprites | Export->iso [S1 0.96.1] | missing | P3 | - |
+| Isometric sprites | Export->iso [S1 0.96.1] | done: Isometric sprite (the Export menu or Cmd-K, and the agent's `export` kind sprite in files mode and live mode): what the view shows as one pixel-art PNG on a transparent background, from the front-right-top corner, each voxel exactly 4 pixels wide (2 pixels across for 1 down), the top, right and left faces in three shades | P3 | - |
 | Baked AO mesh | Export->bake [S1 0.97.2] | missing | P3 | - |
-| Import images | JPEG import, drag in sprites [S1 0.99.5, 0.99.7.2] | missing | P3 | - |
-| Web embed | none | partial: the `<voxel-scene>` embed is proven in `spikes/embed`; the app's Embed command shows "not built yet" | P2 | - |
-| Runs in a browser, on Apple Silicon and Linux | Windows and Intel Mac only [S5] | done (native wgpu app plus the WebGPU browser build) | P1 | - |
+| Import images | JPEG import, drag in sprites [S1 0.99.5, 0.99.7.2] | done (the file menu's Image as voxels… and Cmd-K Import image… put a PNG of up to 1024 on a side into the model as voxels one cell thick, upright in front of it, each pixel given its nearest palette slot, as one undo step; agents use `image_import` with the PNG as base64; JPEG and drag-in are not built) | P3 | minutes |
+| Web embed | none | done: the `<voxel-scene>` viewer (`crates/vxr-embed`) and its brick scene file are built and checked; the app's Embed command writes the embed folder (page, brick scene file, path-traced poster, viewer) and copies the tag, natively and in the browser; agents make the same folder with `export` kind embed in live mode (files mode has no GPU for the poster and says so); the browser check opens the folder the editor exported as its own page and sees the exported viewer take the scene live, framed as the poster is. Open, for the owner: hosted share links and a WebGL2 fallback | P2 | - |
+| Runs in a browser, on Apple Silicon and Linux | Windows and Intel Mac only [S5] | partial: the macOS download is one universal binary (Apple Silicon and Intel) and the browser build runs where WebGPU does; on Linux the app builds and passes its tests and the headless check in CI, but no Linux download ships yet, and Windows is not built | P1 | - |
 
-## Shaders (out of scope tonight)
+## Shaders (out of scope for launch)
 
 | Feature | MagicaVoxel | vxr | Priority | Why |
 |---|---|---|---|---|
@@ -173,7 +174,7 @@ Feature names below follow the update log [S1] unless another source is given.
 
 Design note: the community shaders are GLSL fragments that read `voxel(pos)` and `palette()` and return a palette index per voxel [S3]. vxr could run them as WGSL compute passes over the brick map's dense bricks (one dispatch per touched brick, results written back as one undo step). A small GLSL-to-WGSL shim (naga reads GLSL) would let the existing library run unchanged. Arguments map to sliders in a Shader panel, and a "shader brush" runs one inside the box brush's bounds. The same edit API the AI work needs (Part 4) is a better first target than a GPU shader runtime, so this waits for that design.
 
-## Animation (out of scope tonight)
+## Animation (out of scope for launch)
 
 | Feature | MagicaVoxel | vxr | Priority | Why |
 |---|---|---|---|---|
@@ -185,13 +186,19 @@ Design note: `.vox` animation is a list of `nSHP` models with `_f` frame indices
 
 ## What vxr has that MagicaVoxel does not
 
-- Native Apple Silicon, Linux and the browser from one build [S5].
+- Native Apple Silicon and the browser from one code base, and Linux from the same code (built and tested in CI; no download yet) [S5].
 - One sparse map well past 256^3 per model (2048 per axis today).
 - Unlimited undo; a command palette (Cmd-K) listing every command; a hint bar that explains the current tool.
-- Open source, and a web embed in progress.
+- Open source, and a one-tag web embed: the Embed command writes a folder a page shows with one `<voxel-scene>` tag.
+- Exports made for sharing: a path-traced turntable as PNG frames and one looping animated PNG, in one command.
+- Agents edit the same scene through the same tools: an assistant in the app, `vxr mcp` on `.vox` files, and `vxr mcp --live` in the open window, each change one undo step, with a review card to apply or discard.
+- A library of every scene opened on the device with drafts restored after a crash, and an optional account that syncs it.
 
 ## Takeaways
 
 1. Lossless save [1] was the one blocking gap for anyone with existing files. It is done: saving an opened MagicaVoxel scene keeps its materials, layers, cameras and names.
-2. The palette [2] and the renderer [3] were the two loved features vxr lacked most visibly. Palette editing is done (picker, live recolour, swap and copy); multi-select, sorting and palette import/export remain. The live path-traced corner, the Render panel (sun, sky, exposure, depth of field, samples), PNG export and per-slot materials (diffuse, metal, glass, emissive, saved as MATL) are in; refraction, plastic and the newer blend and cloud types remain.
-3. Brushes [4] and selection [5] are in (line, center circle and sphere, mirror on X, Y and Z, axis lock; box and colour select, move, copy, paste, delete, fill, rotate, flip and loop), which closes the sculpting gap apart from region options and face or volume select. Next, the world editor [8] matters most for MagicaVoxel scenes with many objects.
+2. The palette [2] and the renderer [3] were the two loved features vxr lacked most visibly. Palette editing is done (picker, live recolour, swap and copy, multi-select with group hue, saturation and value edits, sorting, and export as a PNG strip and as text, and import from a PNG, `.hex` or `.gpl`). The live path-traced corner, the Render panel (sun, sky, exposure, depth of field, samples), PNG export and per-slot materials (diffuse, metal, plastic, glass, emissive, saved as MATL) are in; click to focus is in too; refraction (glass does not bend light), bladed bokeh and the newer blend and cloud types remain.
+3. Brushes [4] and selection [5] are in (line, center circle and sphere, mirror on X, Y and Z, axis lock; box and colour select, move, copy, paste, delete, fill, rotate, flip and loop), which closes the sculpting gap (the pattern brush, region options and the one-step replace and remove colour are in).
+4. The world editor [8] is in for scenes with many objects (objects, groups, linked copies, layers, the scene tree, all saved losslessly). Objects and groups rotate and flip in 90 degree steps. Rows reorder by drag, into and out of groups, and Cmd-click picks several rows to group, hide or delete at once.
+5. Export [9] is in: OBJ, PNG slices, the isometric sprite, each also for the selection alone, the palette, the turntable and the web embed. Palette and image import are in too.
+6. No row marked P1 is missing. One P1 row is partial: the platform row (a Linux download and a Windows build).

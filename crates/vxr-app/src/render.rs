@@ -1,6 +1,7 @@
 //! The Render panel's settings and the PNG render export: the same path tracer as the corner,
 //! at the export size, traced a slice per frame so editing never blocks, then read back
-//! without waiting and encoded as PNG.
+//! without waiting and encoded as PNG. A turntable is the same export once per frame of one
+//! full turn of the camera around its target.
 
 use glam::Vec3;
 use serde_json::{Value, json};
@@ -16,6 +17,18 @@ pub const SPP_CHOICES: [u32; 4] = [64, 256, 1024, 4096];
 pub const EXPORT_SIZES: [(u32, u32); 4] = [(1280, 720), (1920, 1080), (2560, 1440), (3840, 2160)];
 /// The export sizes as an agent names them.
 pub const EXPORT_SIZE_NAMES: [&str; 4] = ["720p", "1080p", "1440p", "4k"];
+/// Frames in a turntable: one full turn in that many equal steps (8 and 16 are the usual
+/// sprite directions, 32 and 64 make a smooth spin).
+pub const TURNTABLE_FRAMES: [u32; 4] = [8, 16, 32, 64];
+/// The most pixels a turntable may hold, frames times size. A browser tab keeps every frame
+/// and then their zip in memory, and the zip's offsets are 32 bits: 4K stops at 16 frames
+/// there. A desktop holds any choice in the panel.
+#[cfg(target_arch = "wasm32")]
+const TURNTABLE_PIXELS: u64 = 250_000_000;
+#[cfg(not(target_arch = "wasm32"))]
+const TURNTABLE_PIXELS: u64 = 1_000_000_000;
+/// The Render panel's focus range, as a multiple of the orbit distance.
+pub const FOCUS_RANGE: (f32, f32) = (0.25, 2.0);
 /// GPU time per frame an export may use.
 const EXPORT_BUDGET_MS: f64 = 12.0;
 
@@ -46,6 +59,8 @@ pub struct RenderSettings {
     /// Index into `SPP_CHOICES` and `EXPORT_SIZES`.
     pub spp: usize,
     pub size: usize,
+    /// Index into `TURNTABLE_FRAMES`.
+    pub frames: usize,
 }
 
 impl Default for RenderSettings {
@@ -66,6 +81,7 @@ impl Default for RenderSettings {
             focus: 1.0,
             spp: 2,
             size: 1,
+            frames: 2,
         }
     }
 }
@@ -115,7 +131,7 @@ impl RenderSettings {
                 "gamma" => next.gamma = num(1.0, 3.0)?,
                 "vignette" => next.vignette = num(0.0, 1.0)?,
                 "depth_of_field" => next.blur = num(0.0, 1.0)?,
-                "focus" => next.focus = num(0.25, 2.0)?,
+                "focus" => next.focus = num(FOCUS_RANGE.0, FOCUS_RANGE.1)?,
                 "samples" => {
                     let n = v.as_u64().unwrap_or(0);
                     next.spp = SPP_CHOICES
@@ -129,6 +145,13 @@ impl RenderSettings {
                         .iter()
                         .position(|&c| c.eq_ignore_ascii_case(n))
                         .ok_or_else(|| format!("export_size {v}: one of {EXPORT_SIZE_NAMES:?}"))?;
+                }
+                "turntable_frames" => {
+                    let n = v.as_u64().unwrap_or(0);
+                    next.frames = TURNTABLE_FRAMES
+                        .iter()
+                        .position(|&c| c as u64 == n)
+                        .ok_or_else(|| format!("turntable_frames {v}: one of {TURNTABLE_FRAMES:?}"))?;
                 }
                 other => return Err(format!("{}: not a render setting", vxr_ops::clean(other.as_bytes()))),
             }
@@ -157,6 +180,7 @@ impl RenderSettings {
             "samples": self.samples(),
             "export_size": EXPORT_SIZE_NAMES[self.size.min(EXPORT_SIZES.len() - 1)],
             "export_pixels": [w, h],
+            "turntable_frames": self.turntable_frames(),
         })
     }
 
@@ -167,6 +191,19 @@ impl RenderSettings {
     pub fn export_size(&self) -> (u32, u32) {
         EXPORT_SIZES[self.size.min(EXPORT_SIZES.len() - 1)]
     }
+
+    pub fn turntable_frames(&self) -> u32 {
+        TURNTABLE_FRAMES[self.frames.min(TURNTABLE_FRAMES.len() - 1)]
+    }
+}
+
+/// The focus (a multiple of the orbit distance, in [`FOCUS_RANGE`]) that puts map cell
+/// `cell`'s centre on the plane in focus as `cam` sees it: the path tracer measures focus from
+/// the orbit eye along the view direction. `None` when the cell is not in front of the eye.
+pub fn focus_on(cam: &OrbitCamera, cell: [i32; 3]) -> Option<f32> {
+    let point = Vec3::from(cell.map(|c| c as f32 + 0.5));
+    let along = (point - cam.eye()).dot(cam.basis().0);
+    (along > 0.0).then(|| (along / cam.distance).clamp(FOCUS_RANGE.0, FOCUS_RANGE.1))
 }
 
 /// A render export in progress.
@@ -175,6 +212,11 @@ pub struct Export {
     /// The camera when the export started (orbiting meanwhile does not restart it).
     cam: OrbitCamera,
     readback: Option<Readback>,
+    /// The picture is an embed's poster rather than a PNG to save.
+    pub embed: bool,
+    /// The export is a turntable: the yaw it started at, its frame count and the frames
+    /// traced so far.
+    turn: Option<(f32, u32, Vec<Vec<u8>>)>,
 }
 
 impl Export {
@@ -187,7 +229,21 @@ impl Export {
         settings: &RenderSettings,
         backdrop: [[u8; 3]; 2],
     ) -> Result<Self, String> {
-        let (w, h) = settings.export_size();
+        Self::start_sized(gpu, layout, palette, materials, cam, settings, backdrop, settings.export_size())
+    }
+
+    /// As [`Export::start`], at `size` pixels rather than the panel's export size.
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_sized(
+        gpu: &Gpu,
+        layout: &wgpu::BindGroupLayout,
+        palette: &[[u8; 4]; 256],
+        materials: &[Material; 256],
+        cam: OrbitCamera,
+        settings: &RenderSettings,
+        backdrop: [[u8; 3]; 2],
+        (w, h): (u32, u32),
+    ) -> Result<Self, String> {
         if !Preview::fits(&gpu.device, w, h) {
             return Err(format!("{w}×{h} is too large for this GPU"));
         }
@@ -198,7 +254,39 @@ impl Export {
         // Only the finished image is shown, so no coarse first frame.
         preview.follow = false;
         preview.set_backdrop(backdrop);
-        Ok(Self { preview, cam, readback: None })
+        Ok(Self { preview, cam, readback: None, embed: false, turn: None })
+    }
+
+    /// As [`Export::start`], for a turntable: the panel's count of frames, the first from
+    /// `cam` and each next one a step further around the camera's target, one full turn in
+    /// all (the last frame is one step before the first, so the frames loop).
+    pub fn turntable(
+        gpu: &Gpu,
+        layout: &wgpu::BindGroupLayout,
+        palette: &[[u8; 4]; 256],
+        materials: &[Material; 256],
+        cam: OrbitCamera,
+        settings: &RenderSettings,
+        backdrop: [[u8; 3]; 2],
+    ) -> Result<Self, String> {
+        let (frames, (w, h)) = (settings.turntable_frames(), settings.export_size());
+        if frames as u64 * w as u64 * h as u64 > TURNTABLE_PIXELS {
+            let most = TURNTABLE_FRAMES.iter().rev().find(|&&n| n as u64 * w as u64 * h as u64 <= TURNTABLE_PIXELS);
+            return Err(match most {
+                Some(n) => format!(
+                    "{frames} frames of {w}×{h} are too much to hold here: pick {n} frames or fewer, or a smaller size"
+                ),
+                None => format!("{frames} frames of {w}×{h} are too much to hold here: pick a smaller size"),
+            });
+        }
+        let mut x = Self::start(gpu, layout, palette, materials, cam, settings, backdrop)?;
+        x.turn = Some((cam.yaw, frames, Vec::new()));
+        Ok(x)
+    }
+
+    /// A turntable's frame being traced (from 1) and its count of frames.
+    pub fn frame(&self) -> Option<(u32, u32)> {
+        self.turn.as_ref().map(|(_, of, done)| ((done.len() as u32 + 1).min(*of), *of))
     }
 
     pub fn size(&self) -> (u32, u32) {
@@ -230,8 +318,9 @@ impl Export {
         }
     }
 
-    /// After the frame's submit: start reading back once traced, and return the PNG once read.
-    pub fn after_submit(&mut self, gpu: &Gpu) -> Option<Result<Vec<u8>, String>> {
+    /// After the frame's submit: start reading back once traced, and return the PNG once read
+    /// (a turntable's frames, in order, once the last is read).
+    pub fn after_submit(&mut self, gpu: &Gpu) -> Option<Result<Vec<Vec<u8>>, String>> {
         match &self.readback {
             None => {
                 self.preview.after_submit(&gpu.device);
@@ -242,7 +331,19 @@ impl Export {
             }
             Some(r) => {
                 let (w, h) = self.size();
-                r.poll(&gpu.device).map(|rows| rows.and_then(|rgba| png(w, h, &rgba)))
+                let png = match r.poll(&gpu.device)?.and_then(|rgba| png(w, h, &rgba)) {
+                    Ok(png) => png,
+                    Err(e) => return Some(Err(e)),
+                };
+                let Some((start, of, frames)) = &mut self.turn else { return Some(Ok(vec![png])) };
+                frames.push(png);
+                if frames.len() as u32 >= *of {
+                    return Some(Ok(std::mem::take(frames)));
+                }
+                // The next frame: the new view restarts the trace on the next encode.
+                self.cam.yaw = *start + std::f32::consts::TAU * frames.len() as f32 / *of as f32;
+                self.readback = None;
+                None
             }
         }
     }
@@ -274,6 +375,7 @@ mod tests {
             "sun_direction": 90, "sun_height": 30, "sun_color": "#ff8000", "sun_strength": 5,
             "sky_light": 2, "show_sky": true, "physical_sky": true, "exposure": -1.5, "gamma": 1.8,
             "vignette": 0.5, "depth_of_field": 0.25, "focus": 1.5, "samples": 1024, "export_size": "4K",
+            "turntable_frames": 64,
         });
         r.set_from(&all).unwrap();
         let want = RenderSettings {
@@ -291,6 +393,7 @@ mod tests {
             focus: 1.5,
             spp: 2,
             size: 3,
+            frames: 3,
         };
         assert_eq!(r, want);
         let back = r.to_json();
@@ -321,6 +424,37 @@ mod tests {
             assert!(r.set_from(&bad).is_err(), "{bad}");
             assert_eq!(r, want, "{bad} changed nothing");
         }
+    }
+
+    /// Focus is the depth along the view direction, not the distance from the eye: a cell
+    /// beside or above the target is as much in focus as the target.
+    #[test]
+    fn focus_on_puts_the_cell_on_the_focus_plane() {
+        let level = OrbitCamera {
+            target: Vec3::new(10.5, 5.5, 10.5),
+            yaw: 0.0,
+            pitch: 0.0,
+            distance: 20.0,
+            fov_y: 0.8,
+            ortho: false,
+        };
+        let tilted = OrbitCamera { yaw: 0.7, pitch: 0.5, ..level };
+        let up = tilted.target + tilted.basis().2 * 8.0;
+        let above = up.floor().as_ivec3().to_array();
+        let r = |v: Option<f32>| v.map(|f| (f * 1000.0).round() / 1000.0);
+        for (cam, cell, want) in [
+            (&level, [10, 5, 10], Some(1.0)),
+            (&level, [10, 5, 20], Some(0.5)),
+            (&level, [25, 5, 10], Some(1.0)),
+            (&level, [10, 5, -40], Some(2.0)),
+            (&level, [10, 5, 40], None),
+            (&tilted, [10, 5, 10], Some(1.0)),
+        ] {
+            assert_eq!(r(focus_on(cam, cell)), want, "{cell:?}");
+        }
+        // A cell up the screen from the target, off its centre by under a voxel.
+        let f = focus_on(&tilted, above).unwrap();
+        assert!((f - 1.0).abs() < 0.05, "{above:?} {f}");
     }
 
     #[test]

@@ -70,6 +70,9 @@ pub struct Scene {
     at: At,
     /// The object picked in world mode, whose voxels show selected there.
     picked: Option<usize>,
+    /// Other objects or groups picked beside it with Cmd-click in the scene tree, in the
+    /// order they were picked.
+    also: Vec<usize>,
     /// The world edit in progress (a drag, or an AI change's new objects).
     world_stroke: Option<WorldStroke>,
 }
@@ -95,6 +98,11 @@ impl WorldStroke {
     fn changed(&self, w: &World) -> bool {
         w.tree != self.tree || w.models.len() != self.models || !self.replaced.is_empty() || self.made.is_some()
     }
+}
+
+/// Whether `table` gives another slot to any voxel counted in `counts`.
+fn moves(table: &[u8; 256], counts: &[u32; 256]) -> bool {
+    (1..256).any(|s| table[s] != s as u8 && counts[s] > 0)
 }
 
 /// Why Selection to new object cannot run.
@@ -172,6 +180,7 @@ impl Scene {
             world: None,
             at: At::Map,
             picked: None,
+            also: Vec::new(),
             world_stroke: None,
         }
     }
@@ -439,9 +448,33 @@ impl Scene {
         let ok = self.at == At::World && i.is_none_or(|i| self.world.as_ref().is_some_and(|w| w.in_tree(i)));
         if ok {
             self.picked = i;
+            self.also.clear();
             self.show_picked();
         }
         ok
+    }
+
+    /// Every picked object or group, in the order picked, ending with [`Scene::picked`].
+    pub fn picks(&self) -> Vec<usize> {
+        self.also.iter().copied().chain(self.picked).collect()
+    }
+
+    /// Add object or group `i` to the picks, or take it out if it is one (the one picked
+    /// before it becomes [`Scene::picked`]), as Cmd-click in the scene tree does. Not an undo
+    /// step. False outside world mode or if `i` is not a node under the root.
+    pub fn pick_also(&mut self, i: usize) -> bool {
+        if self.at != At::World || !self.world.as_ref().is_some_and(|w| w.in_tree(i)) {
+            return false;
+        }
+        if self.picked == Some(i) {
+            self.picked = self.also.pop();
+        } else if let Some(k) = self.also.iter().position(|&n| n == i) {
+            self.also.remove(k);
+        } else {
+            self.also.extend(self.picked.replace(i));
+        }
+        self.show_picked();
+        true
     }
 
     /// The object whose voxel shows at map cell `p`, in world mode.
@@ -449,11 +482,11 @@ impl Scene {
         self.world.as_ref().filter(|_| self.at == At::World)?.object_at(self.to_world(p))
     }
 
-    /// Select the picked object's voxels in the world map, or nothing.
+    /// Select the picked objects' voxels in the world map, or nothing.
     fn show_picked(&mut self) {
         let mut cells = HashSet::new();
-        if let (Some(i), Some(w)) = (self.picked, &self.world) {
-            if w.in_tree(i) {
+        if let Some(w) = &self.world {
+            for i in self.also.iter().copied().chain(self.picked).filter(|&i| w.in_tree(i)) {
                 for o in w.objects_under(i) {
                     w.for_each_object_voxel(o, |q, _| {
                         let p = self.to_map(q);
@@ -462,9 +495,9 @@ impl Scene {
                         }
                     });
                 }
-            } else {
-                self.picked = None;
             }
+        } else {
+            (self.picked, self.also) = (None, Vec::new());
         }
         self.selection = cells;
         self.selection_version += 1;
@@ -490,29 +523,12 @@ impl Scene {
         let w = self.world.as_ref().ok_or("no world")?;
         let (mut map, lo) = match at {
             At::Object(i) => w.object_map(i).ok_or("not an object")?,
-            At::World => {
-                let (lo, hi) = w.shown_box();
-                let mut size = [0u32; 3];
-                for a in 0..3 {
-                    let extent = hi[a] as i64 - lo[a] as i64 + 1;
-                    if extent > MAX_EXTENT as i64 {
-                        return Err(format!("the world would be over {MAX_EXTENT} voxels on an axis ({extent})"));
-                    }
-                    size[a] = extent as u32;
-                }
-                let mut map = BrickMap::new(size);
-                w.for_each_voxel(true, |_, p, c| {
-                    let m: [i32; 3] = std::array::from_fn(|a| p[a] - lo[a]);
-                    if map.get(m[0], m[1], m[2]) == 0 {
-                        map.set(m[0], m[1], m[2], c);
-                    }
-                });
-                (map, lo)
-            }
+            At::World => w.shown_map()?,
             At::Map => return Err("no world".into()),
         };
+        self.also.retain(|&i| w.in_tree(i));
         if self.picked.is_some_and(|i| !w.in_tree(i)) {
-            self.picked = None;
+            self.picked = self.also.pop();
         }
         map.track_dirty(self.map.tracking());
         let size = map.size_voxels();
@@ -624,22 +640,45 @@ impl Scene {
     /// dragged through many steps becomes one undo step at [`Scene::commit`]. Returns false
     /// if the scene has no camera `c.id` or `c` holds a value that is not finite.
     pub fn put_camera(&mut self, c: Camera) -> bool {
+        self.cameras.iter().any(|o| o.id == c.id) && self.put_camera_or_add(c)
+    }
+
+    /// [`Scene::put_camera`], adding camera `c.id` after the others if the scene has none.
+    pub(crate) fn put_camera_or_add(&mut self, c: Camera) -> bool {
         let finite = [c.radius, c.frustum, c.fov].into_iter().chain(c.focus).chain(c.angle).all(f32::is_finite);
         if !finite {
             return false;
         }
-        let Some(k) = self.cameras.iter().position(|o| o.id == c.id) else { return false };
-        let old = self.cameras[k];
-        if old == c {
+        let old = match self.cameras.iter().position(|o| o.id == c.id) {
+            Some(k) => Some(std::mem::replace(&mut self.cameras[k], c)),
+            None => {
+                self.cameras.push(c);
+                None
+            }
+        };
+        if old == Some(c) {
             return true;
         }
-        self.cameras[k] = c;
         let s = self.stroke.get_or_insert_default();
         match s.cameras.iter_mut().find(|x| x.new.id == c.id) {
             Some(x) => x.new = c,
             None => s.cameras.push(CameraChange { old, new: c }),
         }
         true
+    }
+
+    /// Put back every saved camera the open edit changed or added, keeping the edit open.
+    pub fn revert_cameras(&mut self) {
+        let Some(s) = &mut self.stroke else { return };
+        for c in std::mem::take(&mut s.cameras) {
+            let k = self.cameras.iter().position(|k| k.id == c.new.id);
+            match (k, c.old) {
+                (Some(k), Some(old)) => self.cameras[k] = old,
+                (Some(k), None) => _ = self.cameras.remove(k),
+                (None, Some(old)) => self.cameras.push(old),
+                (None, None) => {}
+            }
+        }
     }
 
     /// Set one saved camera as an undoable step. Returns false if the scene has no camera `c.id` or `c` is not finite.
@@ -675,6 +714,7 @@ impl Scene {
             if s.made.take().is_some() {
                 // Back to a new scene: the map is its one model again, as it was.
                 (self.world, self.source, self.at, self.picked) = (None, None, At::Map, None);
+                self.also.clear();
             } else if self.at == At::World {
                 // It fitted when the edit began, so it fits again.
                 let _ = self.load(At::World);
@@ -731,7 +771,7 @@ impl Scene {
             voxels: s.changes.into_iter().filter(|c| c.old != c.new).collect(),
             colors: s.colors.into_iter().filter(|c| c.old != c.new).collect(),
             materials: s.materials.into_iter().filter(|c| c.old != c.new).collect(),
-            cameras: s.cameras.into_iter().filter(|c| c.old != c.new).collect(),
+            cameras: s.cameras.into_iter().filter(|c| c.old != Some(c.new)).collect(),
             selection,
             bounds: s.bounds.filter(|b| b.old != b.new),
             world,
@@ -787,6 +827,63 @@ impl Scene {
             self.put(p, v);
         }
         self.commit()
+    }
+
+    /// Move every voxel of slot `s` to slot `table[s]` inside the open edit (opening one if
+    /// needed): in the map and in every other model of the file, so no object changes its
+    /// look when slots trade colours ([`Scene::move_slots`]). `table` is a permutation of
+    /// the slots that keeps slot 0. Returns how many voxels took another slot (a model
+    /// shared by linked copies counts once).
+    pub fn remap_slots(&mut self, table: &[u8; 256]) -> usize {
+        let mut n = 0;
+        if self.at != At::World && moves(table, &self.map.counts) {
+            let mut cells = Vec::new();
+            self.map.for_each(|p, v| {
+                if table[v as usize] != v {
+                    cells.push((p, table[v as usize]));
+                }
+            });
+            n = cells.len();
+            for (p, v) in cells {
+                self.put(p, v);
+            }
+        }
+        n + self.remap_models(table)
+    }
+
+    /// [`Scene::remap_slots`] for the models the map does not hold: every model of the file
+    /// but the one being edited, or all of them while the world shows (shown again after).
+    pub fn remap_models(&mut self, table: &[u8; 256]) -> usize {
+        let Some(w) = self.world.as_mut() else { return 0 };
+        let current = match self.at {
+            At::Object(i) => w.model_of(i),
+            _ => None,
+        };
+        let mut n = 0;
+        for m in 0..w.models.len() {
+            if Some(m) == current || !moves(table, &w.models[m].counts) {
+                continue;
+            }
+            let s = self.world_stroke.get_or_insert_with(|| WorldStroke::of(w, self.at));
+            if s.replaced.iter().all(|r| r.0 != m) {
+                s.replaced.push((m, w.models[m].clone()));
+            }
+            let mut cells = Vec::new();
+            w.models[m].for_each(|p, v| {
+                if table[v as usize] != v {
+                    cells.push((p, table[v as usize]));
+                }
+            });
+            n += cells.len();
+            for (p, v) in cells {
+                w.models[m].set(p[0], p[1], p[2], v);
+            }
+        }
+        if n > 0 && self.at == At::World {
+            // It fitted before, and no voxel moved, so it fits again.
+            let _ = self.load(At::World);
+        }
+        n
     }
 
     pub fn undo(&mut self) -> bool {
@@ -851,8 +948,12 @@ impl Scene {
             self.materials[c.index as usize] = if revert { c.old } else { c.new };
         }
         for c in &step.cameras {
-            if let Some(k) = self.cameras.iter_mut().find(|k| k.id == c.new.id) {
-                *k = if revert { c.old } else { c.new };
+            let k = self.cameras.iter().position(|k| k.id == c.new.id);
+            match (k, if revert { c.old } else { Some(c.new) }) {
+                (Some(k), Some(now)) => self.cameras[k] = now,
+                (Some(k), None) => _ = self.cameras.remove(k),
+                (None, Some(now)) => self.cameras.push(now),
+                (None, None) => {}
             }
         }
         if let Some(c) = &step.selection {
@@ -880,6 +981,12 @@ impl Scene {
             self.source = Some(m.source.clone());
         }
         let Some(w) = &mut self.world else { return };
+        // Models changed in place that the map does not hold (a palette sort's) leave the
+        // map as it is: its selection and ground stay.
+        let current = match self.at {
+            At::Object(i) if w.in_tree(i) => w.model_of(i),
+            _ => None,
+        };
         if revert {
             w.tree = c.old.clone();
             w.models.truncate(c.models);
@@ -891,14 +998,16 @@ impl Scene {
             w.models[*m] = if revert { before } else { after }.clone();
         }
         let at = c.at[!revert as usize];
+        let elsewhere = at != At::World && c.replaced.iter().all(|r| Some(r.0) != current);
         if revert && let Some(m) = &c.made {
             // Back to a new scene without a world: its one object's model is the map again.
             let (mut map, lo) = w.object_map(w.objects()[0]).expect("the made world has one object");
             map.track_dirty(self.map.tracking());
             (self.map, self.origin, self.pivot, self.floor) = (map, lo, m.pivot, m.floor);
             (self.world, self.source, self.at, self.picked) = (None, None, At::Map, None);
+            self.also.clear();
             self.reshapes += 1;
-        } else if !(c.added.is_empty() && c.replaced.is_empty() && c.at[0] == c.at[1] && at == self.at)
+        } else if !(c.added.is_empty() && (c.replaced.is_empty() || elsewhere) && c.at[0] == c.at[1] && at == self.at)
             || at == At::World
         {
             // It fitted when it was made, so it fits again.

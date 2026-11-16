@@ -2,10 +2,14 @@
 //!
 //! - [`brickmap`]: the sparse brick map (8^3 bricks with occupancy masks), edits,
 //!   dirty tracking for partial GPU uploads, and a CPU ray cast for picking.
+//! - [`bricks`]: the brick scene file the embed loads, a brick map and its colours.
 //! - [`export`]: OBJ export, greedy quads textured by a 256x1 palette image, and PNG slices.
 //! - [`files`]: those exports as files (OBJ with `.mtl` and texture, the slices PNG), a
 //!   stored zip of several, and the `.vox` save (checked to read back, written atomically).
 //! - [`history`]: undo and redo steps.
+//! - [`image`]: image import, a PNG as voxels one cell thick, colours matched to the palette.
+//! - [`palette`]: HSV, the group edit of several palette slots (hue, saturation, value),
+//!   sorting the palette, and the palette as a PNG strip and as text.
 //! - [`scene`]: a brick map with its palette and history, and `.vox` open and save.
 //! - [`model`]: hollow and fill, of the selection or the whole model, and resize and crop
 //!   of the model bounds.
@@ -15,15 +19,20 @@
 //!   from and saved losslessly into `.vox`.
 //! - [`tools`]: the editing tools (add, erase, paint, pick with the voxel, box, face, line
 //!   and center brushes, mirror on three axes and axis lock), as presses, drags and releases.
+//! - [`views`]: saved views, the file's camera slots as the editor's orbit camera.
 
 pub mod brickmap;
+pub mod bricks;
 pub mod export;
 pub mod files;
 pub mod history;
+pub mod image;
 pub mod model;
+pub mod palette;
 pub mod scene;
 pub mod select;
 pub mod tools;
+pub mod views;
 pub mod world;
 
 pub use brickmap::BrickMap;

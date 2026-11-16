@@ -25,12 +25,18 @@ extern "C" {
     /// The page's side of [`Browser`]: `window.vxrHost` in `www/app.js`.
     #[wasm_bindgen(js_namespace = vxrHost, js_name = pickOpen)]
     fn page_pick_open();
+    #[wasm_bindgen(js_namespace = vxrHost, js_name = pickPalette)]
+    fn page_pick_palette();
+    #[wasm_bindgen(js_namespace = vxrHost, js_name = pickImage)]
+    fn page_pick_image();
     #[wasm_bindgen(js_namespace = vxrHost, js_name = download)]
     fn page_download(bytes: &[u8], name: &str, mime: &str);
     #[wasm_bindgen(js_namespace = vxrHost, js_name = keepTheme)]
     fn page_keep_theme(id: &str);
     #[wasm_bindgen(js_namespace = vxrHost, js_name = keepToured)]
     fn page_keep_toured();
+    #[wasm_bindgen(js_namespace = vxrHost, js_name = fetchEmbed)]
+    fn page_fetch_embed();
     #[wasm_bindgen(js_namespace = vxrHost, js_name = hasHandles)]
     fn page_has_handles() -> bool;
     #[wasm_bindgen(js_namespace = vxrHost, js_name = saveVox)]
@@ -57,6 +63,40 @@ extern "C" {
     fn page_store_hold(id: &str);
     #[wasm_bindgen(js_namespace = vxrHost, js_name = storeHeld)]
     fn page_store_held(id: &str) -> bool;
+}
+
+/// The embed viewer's files, which the page fetches from the site's `embed/` folder the
+/// first time Embed is used (they are not in the editor's wasm: most visits never embed).
+#[derive(Default)]
+enum Viewer {
+    #[default]
+    Unasked,
+    Fetching,
+    Here(Vec<File>),
+    Failed(String),
+}
+
+thread_local! {
+    static VIEWER: RefCell<Viewer> = const { RefCell::new(Viewer::Unasked) };
+}
+
+/// The viewer's files for the editor (`Editor::embed_viewer`): fetched on the first ask,
+/// None until they land ([`App::embed_fetched`]).
+fn embed_viewer() -> Result<Option<Vec<File>>, String> {
+    VIEWER.with_borrow_mut(|v| match v {
+        Viewer::Unasked => {
+            *v = Viewer::Fetching;
+            page_fetch_embed();
+            Ok(None)
+        }
+        Viewer::Fetching => Ok(None),
+        Viewer::Here(files) => Ok(Some(files.clone())),
+        // Said once; the next Embed fetches again.
+        Viewer::Failed(_) => {
+            let Viewer::Failed(why) = std::mem::take(v) else { unreachable!() };
+            Err(format!("the viewer did not download ({why}). Check the connection and choose Embed again"))
+        }
+    })
 }
 
 /// What a browser does for [`run_action`]: Open is the page's file picker, which calls
@@ -155,6 +195,16 @@ impl Platform for Browser {
         Ok(Some(Saved { name: name.into(), copy: bytes.len() as u64, ..Default::default() }))
     }
 
+    fn pick_palette(&mut self) -> Result<Option<(String, Vec<u8>)>, String> {
+        page_pick_palette();
+        Ok(None)
+    }
+
+    fn pick_image(&mut self) -> Result<Option<(String, Vec<u8>)>, String> {
+        page_pick_image();
+        Ok(None)
+    }
+
     fn open_project(&mut self, project: &Project) -> Result<Option<Opened>, String> {
         page_open_project(&project.id, &project.name);
         Ok(None)
@@ -162,6 +212,11 @@ impl Platform for Browser {
 
     fn save_png(&mut self, name: &str, bytes: &[u8]) -> Result<Option<String>, String> {
         page_download(bytes, name, "image/png");
+        Ok(Some(name.into()))
+    }
+
+    fn save_text(&mut self, name: &str, text: &str) -> Result<Option<String>, String> {
+        page_download(text.as_bytes(), name, "text/plain");
         Ok(Some(name.into()))
     }
 
@@ -183,6 +238,14 @@ impl Platform for Browser {
     fn persist_tour_seen(&mut self) -> Result<(), String> {
         page_keep_toured();
         Ok(())
+    }
+
+    fn save_folder(&mut self, name: &str, files: &[File]) -> Result<Option<String>, String> {
+        // Inside a folder, so unpacking the zip gives the folder the desktop app writes.
+        let inside: Vec<File> = files.iter().map(|(f, bytes)| (format!("{name}/{f}"), bytes.clone())).collect();
+        let name = format!("{name}.zip");
+        page_download(&zip(&inside), &name, "application/zip");
+        Ok(Some(name))
     }
 
     fn challenge(&mut self) -> Option<String> {
@@ -274,6 +337,7 @@ pub async fn start(
     let mut host = Host::new(gpu, surface, (width, height), wgpu::PresentMode::Fifo, scene, &name, ppp, fonts)?;
     let editor = &mut host.editor;
     editor.wall_clock = || js_sys::Date::now() / 1000.0;
+    editor.embed_viewer = Some(Box::new(embed_viewer));
     // The assistant calls its provider straight from this page, with keys in this tab.
     let keys = Rc::new(RefCell::new(KeyStore::default()));
     editor.assistant = Assistant::new(Box::new(Fetch), Box::new(WebKeys(keys.clone())), true);
@@ -685,11 +749,42 @@ impl App {
         vxr_app::host::open(&mut self.host.editor, &mut Browser::default(), file);
     }
 
+    /// The palette file the user picked for Import palette: a PNG or text.
+    pub fn import_palette(&mut self, bytes: &[u8], name: &str) {
+        self.woken = true;
+        self.host.editor.import_palette(name, bytes);
+    }
+
+    /// The PNG the user picked for Import image.
+    pub fn import_image(&mut self, bytes: &[u8], name: &str) {
+        self.woken = true;
+        self.host.editor.import_image(name, bytes);
+    }
+
     /// The page could not open project `name`'s file: `why`.
     pub fn open_failed(&mut self, name: &str, why: &str) {
         self.woken = true;
         let ctx = self.host.editor.ctx.clone();
         self.host.editor.ui.toast(&ctx, format!("Could not open {name}: {why}"));
+    }
+
+    /// The embed viewer's files the page fetched for Embed (`loader`, `glue` and `module`, in
+    /// the order of `vxr_app::files::EMBED_VIEWER`), or with `error` why it could not. An
+    /// embed whose picture is already traced is written now. (No argument may be named
+    /// `wasm`: in the generated glue it would hide the module every call goes through.)
+    pub fn embed_fetched(&mut self, loader: Vec<u8>, glue: Vec<u8>, module: Vec<u8>, error: &str) {
+        self.woken = true;
+        VIEWER.with_borrow_mut(|v| {
+            *v = if error.is_empty() {
+                let names = vxr_app::files::EMBED_VIEWER;
+                Viewer::Here(names.iter().map(|n| n.to_string()).zip([loader, glue, module]).collect())
+            } else {
+                Viewer::Failed(error.into())
+            }
+        });
+        if self.host.editor.embedded.is_some() {
+            run_action(&mut self.host.editor, &mut Browser::default(), vxr_app::ui::Action::Embedded);
+        }
     }
 
     /// A Save the page took finished: written through a handle to the file `name`. Nothing
@@ -845,7 +940,7 @@ impl App {
         let e = &self.host.editor;
         let (c, h) = (&e.cam, e.scene.history());
         format!(
-            r#"{{"voxels":{},"tool":"{:?}","shape":"{:?}","mirror":{},"mirrorAxes":[{},{},{}],"lock":{},"brushSize":{},"sizePanel":{},"lifting":{},"span":{},"selected":{},"region":"{:?}","hasClip":{},"bounds":[{},{},{}],"boundsPanel":{},"slot":{},"colorEdit":{},"slotOp":"{:?}","undo":{},"redo":{},"cmdk":{},"name":{:?},"size":[{},{}],"ppp":{},"cam":[{},{},{},{},{},{}],"ortho":{},"inView":[{},{}],"cameraHints":{},"view":{},"viewPanel":{},"fileMenu":{},"confirmNew":{},"theme":"{}","themeMenu":{},"touch":{},"paletteOpen":{},"themeShown":{:?},"guides":[{},{},{}],"mode":"{}","objects":{},"models":{},"picked":{},"tree":[{}],"treeOn":{},"renaming":{},"layers":[{}],"layerOn":{},"render":{{"shown":{},"spp":{},"rows":{},"current":{},"restarts":{},"timestamps":{},"panel":{},"full":{},"size":[{},{}],"maxSpp":{},"exposure":{},"gamma":{},"vignette":{},"aperture":{},"sky":{},"physicalSky":{},"export":{}}},"review":{},"undoLabel":{},"asks":{:?},"unsaved":{},"projectsMenu":{},"projects":[{}],"current":{},"restore":{},"confirmClose":{},"storage":[{},{}],"account":{},"signIn":{{"shown":{},"error":{},"checking":{},"challenge":{}}},"toast":{},"agents":{{"panel":{},"available":{},"web":{},"allowed":{},"review":{},"connecting":{},"error":{},"fail":{},"code":{:?},"clients":[{}],"edits":[{}],"chip":{:?},"live":[{}],"calls":[{}]}},"help":{},"tour":{}}}"#,
+            r#"{{"voxels":{},"tool":"{:?}","shape":"{:?}","mirror":{},"mirrorAxes":[{},{},{}],"lock":{},"brushSize":{},"sizePanel":{},"lifting":{},"span":{},"selected":{},"region":"{:?}","brushInside":{},"hasClip":{},"bounds":[{},{},{}],"boundsPanel":{},"slot":{},"colorEdit":{},"slotOp":"{:?}","colors":{:?},"undo":{},"redo":{},"cmdk":{},"name":{:?},"size":[{},{}],"ppp":{},"cam":[{},{},{},{},{},{}],"ortho":{},"inView":[{},{}],"cameraHints":{},"view":{},"viewPanel":{},"savedViews":[{}],"saveViewPick":{},"fileMenu":{},"confirmNew":{},"theme":"{}","themeMenu":{},"touch":{},"paletteOpen":{},"themeShown":{:?},"guides":[{},{},{}],"mode":"{}","objects":{},"models":{},"picked":{},"tree":[{}],"treeOn":{},"picks":[{}],"renaming":{},"layers":[{}],"layerOn":{},"render":{{"shown":{},"spp":{},"rows":{},"current":{},"restarts":{},"timestamps":{},"panel":{},"full":{},"size":[{},{}],"maxSpp":{},"exposure":{},"gamma":{},"vignette":{},"aperture":{},"focus":{},"focusPick":{},"sky":{},"physicalSky":{},"export":{},"frame":{}}},"review":{},"undoLabel":{},"asks":{:?},"unsaved":{},"projectsMenu":{},"projects":[{}],"current":{},"restore":{},"confirmClose":{},"storage":[{},{}],"account":{},"signIn":{{"shown":{},"error":{},"checking":{},"challenge":{}}},"toast":{},"agents":{{"panel":{},"available":{},"web":{},"allowed":{},"review":{},"connecting":{},"error":{},"fail":{},"code":{:?},"clients":[{}],"edits":[{}],"chip":{:?},"live":[{}],"calls":[{}]}},"help":{},"tour":{}}}"#,
             e.scene.map.voxels,
             e.ui.tool,
             e.ui.shape,
@@ -860,6 +955,7 @@ impl App {
             e.span().map_or("null".into(), |(l, v)| format!("[\"{l}\",\"{v}\"]")),
             e.scene.selected_count(),
             e.ui.region,
+            e.ui.inside,
             e.scene.clipboard.is_some(),
             e.scene.bounds().size[0],
             e.scene.bounds().size[1],
@@ -868,6 +964,7 @@ impl App {
             e.ui.slot,
             e.ui.color_edit.is_some(),
             e.ui.slot_op,
+            e.ui.colors,
             h.can_undo(),
             h.can_redo(),
             e.ui.cmdk.is_some(),
@@ -887,6 +984,8 @@ impl App {
             e.ui.camera_hints,
             c.view().map_or("null".into(), |v| format!("\"{}\"", v.name())),
             e.ui.view_panel,
+            (0..10).filter(|&k| e.ui.saved_views[k]).map(|k| (k + 1).to_string()).collect::<Vec<_>>().join(","),
+            e.ui.save_view_pick,
             e.ui.file_menu,
             e.ui.confirm_new,
             e.ui.theme.id(),
@@ -917,6 +1016,7 @@ impl App {
                 .collect::<Vec<_>>()
                 .join(","),
             e.ui.tree_on.map_or("null".into(), |n| n.to_string()),
+            e.ui.picks.iter().map(usize::to_string).collect::<Vec<_>>().join(","),
             e.ui.renaming_node().map_or("null".into(), |n| n.to_string()),
             e.ui.layers
                 .iter()
@@ -942,9 +1042,12 @@ impl App {
             e.preview.lighting.gamma,
             e.preview.lighting.vignette,
             e.preview.lighting.aperture,
+            e.ui.render.focus,
+            e.ui.focus_pick,
             e.preview.lighting.sky_backdrop,
             e.preview.lighting.physical_sky,
             e.export.as_ref().map_or("null".into(), |x| format!("{:?}", x.progress().0)),
+            e.export.as_ref().and_then(|x| x.frame()).map_or("null".into(), |(i, n)| format!("[{i},{n}]")),
             e.ui.review.as_ref().map_or("null".into(), |c| format!(
                 r#"{{"prompt":{:?},"agents":{},"summary":{},"counts":[{},{},{}],"objects":{},"world":[{}],"slots":[{}],"steps":[{}],"held":{},"before":{}}}"#,
                 c.prompt,

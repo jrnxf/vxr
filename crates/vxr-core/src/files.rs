@@ -1,4 +1,5 @@
-//! Model exports as files: OBJ with its `.mtl` and palette texture, PNG slices, and a
+//! Model exports as files: OBJ with its `.mtl` and palette texture, PNG slices, the embed
+//! folder (a page with the `<voxel-scene>` tag and everything it loads), and a
 //! stored (not compressed) zip to hand several files to a browser as one download. And the
 //! `.vox` save: bytes checked to read back as the scene, written so a failure mid-write
 //! never leaves a part-written file.
@@ -9,24 +10,46 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::Scene;
-use crate::export::{TEXTURE_W, obj, slices};
+use crate::export::{TEXTURE_W, obj, slices, sprite, sprite_of, sprite_size};
 
 /// A file to write or download: its name and bytes.
 pub type File = (String, Vec<u8>);
 
+/// The selected cells an export takes instead of everything the view shows: map cells, of
+/// which those holding a voxel count. The user's selection ([`Scene::selection`]) or an
+/// agent's own.
+pub type Only<'a> = Option<&'a [[i32; 3]]>;
+
+/// What an export without a selection could not find, with what to do next.
+const NO_SELECTION: &str = "nothing is selected: select voxels first";
+
+/// The voxels of `only` and their inclusive bounds, or why there are none.
+type Picked = (BTreeMap<[i32; 3], u8>, [i32; 3], [i32; 3]);
+fn picked(scene: &Scene, only: &[[i32; 3]]) -> Result<Picked, String> {
+    let voxels: BTreeMap<[i32; 3], u8> =
+        only.iter().map(|&p| (p, scene.map.get(p[0], p[1], p[2]))).filter(|v| v.1 != 0).collect();
+    let (lo, hi) = crate::select::bounds(voxels.keys().copied()).ok_or(NO_SELECTION)?;
+    Ok((voxels, lo, hi))
+}
+
 /// The OBJ export of what the view shows (the edited model, or every shown object in the
-/// world), named `<stem>.obj`, `<stem>.mtl` and `<stem>.png`, and its quad count. The OBJ
-/// names its `.mtl` and the `.mtl` its texture, and both split names at whitespace and end
-/// them at `#`, so each run of those in `stem` becomes `-`.
-pub fn obj_files(scene: &Scene, stem: &str) -> Result<(Vec<File>, usize), String> {
+/// world), or of the voxels of `only` alone, named `<stem>.obj`, `<stem>.mtl` and
+/// `<stem>.png`, and its quad count. A selection is exported as a model of its own: its
+/// faces against voxels left out are part of it. The OBJ names its `.mtl` and the `.mtl`
+/// its texture, and both split names at whitespace and end them at `#`, so each run of
+/// those in `stem` becomes `-`.
+pub fn obj_files(scene: &Scene, stem: &str, only: Only) -> Result<(Vec<File>, usize), String> {
     let parts: Vec<&str> =
         stem.split(|c: char| c.is_whitespace() || c.is_control() || c == '#').filter(|p| !p.is_empty()).collect();
     let stem = if parts.is_empty() { "vxr".to_string() } else { parts.join("-") };
     let stem = stem.as_str();
     let mut voxels = BTreeMap::new();
-    scene.for_each_voxel(|p, c| {
-        voxels.insert(scene.to_world(p), c);
-    });
+    match only {
+        Some(cells) => voxels.extend(picked(scene, cells)?.0.into_iter().map(|(p, c)| (scene.to_world(p), c))),
+        None => scene.for_each_voxel(|p, c| {
+            voxels.insert(scene.to_world(p), c);
+        }),
+    }
     if voxels.is_empty() {
         return Err("the scene is empty".into());
     }
@@ -43,10 +66,18 @@ pub fn obj_files(scene: &Scene, stem: &str) -> Result<(Vec<File>, usize), String
 const SLICES_MAX: u64 = 1 << 26;
 
 /// The PNG slices of what the view shows (the edited model's bounds, or the world's), as
-/// one PNG: every layer from the bottom up, side by side. Returns the PNG, its size and the
-/// number of layers.
-pub fn slices_png(scene: &Scene) -> Result<(Vec<u8>, [u32; 2], u32), String> {
-    let size = scene.bounds().size;
+/// one PNG: every layer from the bottom up, side by side. With `only`, the slices of those
+/// voxels alone, in their own box. Returns the PNG, its size and the number of layers.
+pub fn slices_png(scene: &Scene, only: Only) -> Result<(Vec<u8>, [u32; 2], u32), String> {
+    let mut cells = Vec::new();
+    let size = match only {
+        Some(sel) => {
+            let (voxels, lo, hi) = picked(scene, sel)?;
+            cells.extend(voxels.into_iter().map(|(p, c)| ([0, 1, 2].map(|a| p[a] - lo[a]), c)));
+            [0, 1, 2].map(|a| (hi[a] - lo[a] + 1) as u32)
+        }
+        None => scene.bounds().size,
+    };
     if scene.map.counts[1..].iter().all(|&n| n == 0) {
         return Err("the scene is empty".into());
     }
@@ -54,11 +85,271 @@ pub fn slices_png(scene: &Scene) -> Result<(Vec<u8>, [u32; 2], u32), String> {
     if pixels > SLICES_MAX {
         return Err(format!("{}×{}×{} is too large for one image", size[0], size[1], size[2]));
     }
-    let mut cells = Vec::new();
-    scene.for_each_voxel(|p, c| cells.push((p, c)));
+    if only.is_none() {
+        scene.for_each_voxel(|p, c| cells.push((p, c)));
+    }
     let s = slices(size, cells, &scene.palette);
     Ok((png(s.width, s.height, &s.rgba)?, [s.width, s.height], s.layers))
 }
+
+/// Pixels per voxel step of the isometric sprite export: one voxel is 4 pixels wide and 3
+/// tall, the smallest pixel-art cube. A larger sprite is this one scaled by whole numbers.
+pub const SPRITE_SCALE: u32 = 1;
+
+/// The isometric sprite of what the view shows (the edited model, or every shown object in
+/// the world) as one PNG with a transparent background ([`sprite`]). With `only`, the
+/// sprite of those voxels alone, as a model of their own. Returns the PNG and its size.
+pub fn sprite_png(scene: &Scene, only: Only) -> Result<(Vec<u8>, [u32; 2]), String> {
+    let part = only.map(|sel| picked(scene, sel)).transpose()?;
+    let size = match &part {
+        Some((_, lo, hi)) => [0, 1, 2].map(|a| (hi[a] - lo[a] + 1) as u32),
+        None => scene.bounds().size,
+    };
+    // The voxels' own box is never larger than the bounds, so this refuses before any work.
+    let [w, h] = sprite_size(size, SPRITE_SCALE);
+    if w * h > SLICES_MAX {
+        return Err(format!("{}×{}×{} is too large for one image", size[0], size[1], size[2]));
+    }
+    let s = match &part {
+        Some((voxels, ..)) => sprite_of(&scene.map, &scene.palette, SPRITE_SCALE, &|p| voxels.contains_key(&p)),
+        None => sprite(&scene.map, &scene.palette, SPRITE_SCALE),
+    };
+    let s = s.ok_or("the scene is empty")?;
+    Ok((png(s.width, s.height, &s.rgba)?, [s.width, s.height]))
+}
+
+/// The embed viewer's files, which a page with a `<voxel-scene>` tag loads from one folder:
+/// the loader the page includes, then the glue and the wasm it fetches
+/// (`crates/vxr-embed/build` makes them).
+pub const EMBED_VIEWER: [&str; 3] = ["voxel-scene.js", "vxr_embed.js", "vxr_embed_bg.wasm"];
+
+/// The poster's size in pixels: the tag's 16:10 shape, sharp at 640 CSS pixels wide on a
+/// screen with two pixels per point.
+pub const EMBED_POSTER: (u32, u32) = (1280, 800);
+
+/// The name an embed's scene file and poster share, from the scene's name: letters, digits,
+/// `-` and `_` stay, every run of anything else becomes one `-`, so the name needs no
+/// escaping in a URL, in HTML or in a shell.
+pub fn embed_stem(name: &str) -> String {
+    let name = name.strip_suffix(".vox").or_else(|| name.strip_suffix(".VOX")).unwrap_or(name);
+    let parts: Vec<&str> =
+        name.split(|c: char| !(c.is_alphanumeric() || c == '-' || c == '_')).filter(|p| !p.is_empty()).collect();
+    if parts.is_empty() { "scene".into() } else { parts.join("-") }
+}
+
+/// Text as HTML text or a quoted attribute's value.
+fn html(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            c if c.is_control() => out.push(' '),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// What a page needs to show the scene named `name` from an embed folder beside it: the
+/// loader's script and the tag, with the poster as its image so it paints before any script.
+pub fn embed_snippet(name: &str) -> String {
+    let stem = embed_stem(name);
+    let alt = name.strip_suffix(".vox").or_else(|| name.strip_suffix(".VOX")).unwrap_or(name).trim();
+    let alt = if alt.is_empty() { "A voxel scene".to_string() } else { html(alt) };
+    format!(
+        "<script src=\"{}\" async></script>\n<voxel-scene src=\"{stem}.vxrb\" alt=\"{alt}\">\n  <img src=\"{stem}.png\" alt=\"\">\n</voxel-scene>",
+        EMBED_VIEWER[0]
+    )
+}
+
+/// The embed folder of what the view shows (the edited model, or every shown object in the
+/// world): `index.html` showing the tag, the scene as a brick scene file, `poster` (a PNG)
+/// and the viewer's files (`viewer`, named as [`EMBED_VIEWER`]). The page and the scene are
+/// first, so a reader of the list finds them there.
+pub fn embed_files(scene: &Scene, name: &str, poster: Vec<u8>, viewer: Vec<File>) -> Result<Vec<File>, String> {
+    if scene.map.counts[1..].iter().all(|&n| n == 0) {
+        return Err("the scene is empty".into());
+    }
+    if let Some(missing) = EMBED_VIEWER.iter().find(|n| !viewer.iter().any(|f| f.0 == **n)) {
+        return Err(format!("the viewer file {missing} is missing"));
+    }
+    let stem = embed_stem(name);
+    let snippet = embed_snippet(name);
+    let title = html(name.strip_suffix(".vox").or_else(|| name.strip_suffix(".VOX")).unwrap_or(name).trim());
+    let title = if title.is_empty() { "A voxel scene".to_string() } else { title };
+    let page = format!(
+        r#"<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{title}</title>
+    <style>
+      body {{ margin: 0 auto; padding: 24px; max-width: 800px; font: 15px/1.5 system-ui, sans-serif; background: #fafaf7; color: #222; }}
+      pre {{ padding: 12px; border-radius: 8px; background: #efede6; overflow-x: auto; font: 13px/1.5 ui-monospace, monospace; }}
+      #file {{ padding: 12px; border-radius: 8px; background: #fde8c8; }}
+      @media (prefers-color-scheme: dark) {{
+        body {{ background: #161616; color: #e8e6e0; }}
+        pre {{ background: #242424; }}
+        #file {{ background: #4a3410; }}
+      }}
+    </style>
+    <script src="{loader}" async></script>
+  </head>
+  <body>
+    <h1>{title}</h1>
+    <p id="file" hidden>
+      Browsers do not run the viewer from a page opened as a file, so only the picture shows. Serve this
+      folder over HTTP: for example run <code>python3 -m http.server</code> in it and open
+      <code>http://localhost:8000</code>.
+    </p>
+    {tag}
+    <p>To put this scene on a page, copy every file of this folder but <code>index.html</code> beside the page and paste this into it:</p>
+    <pre>{shown}</pre>
+    <p>The scene needs WebGPU. A browser without it shows the picture.</p>
+    <script>
+      if (location.protocol === 'file:') document.getElementById('file').hidden = false;
+    </script>
+  </body>
+</html>
+"#,
+        loader = EMBED_VIEWER[0],
+        tag = snippet.split_once('\n').map_or("", |s| s.1).replace('\n', "\n    "),
+        // Line by line: `html` turns a line end, like any control character, into a space.
+        shown = snippet.lines().map(html).collect::<Vec<_>>().join("\n"),
+    );
+    let mut files = vec![
+        ("index.html".to_string(), page.into_bytes()),
+        (format!("{stem}.vxrb"), crate::bricks::encode(&scene.map, &scene.palette)),
+        (format!("{stem}.png"), poster),
+    ];
+    files.extend(viewer.into_iter().filter(|f| EMBED_VIEWER.contains(&f.0.as_str())));
+    Ok(files)
+}
+
+/// Seconds a turntable's animated file takes for one full turn, whatever its count of frames.
+pub const TURN_SECONDS: u16 = 4;
+
+/// A turntable's frames as the files of its folder, and the folder's name: `<stem>-turntable`
+/// holding `<stem>-01.png` and so on, the stem as [`embed_stem`] makes it, then `<stem>.png`,
+/// the same frames as one animated PNG that loops ([`apng`], one turn in [`TURN_SECONDS`]).
+/// The numbers start at 1 and are padded to one width (at least two digits), so the frames
+/// sort by name and `ffmpeg -i <stem>-%02d.png` reads them.
+pub fn turntable_files(name: &str, frames: Vec<Vec<u8>>) -> Result<(String, Vec<File>), String> {
+    let stem = embed_stem(name);
+    let width = frames.len().to_string().len().max(2);
+    let turn = apng(&frames, TURN_SECONDS, frames.len().min(u16::MAX as usize) as u16)?;
+    let mut files: Vec<File> =
+        frames.into_iter().enumerate().map(|(i, png)| (format!("{stem}-{:0width$}.png", i + 1), png)).collect();
+    files.push((format!("{stem}.png"), turn));
+    Ok((format!("{stem}-turntable"), files))
+}
+
+/// PNG files of one size and pixel format as one animated PNG (APNG) that loops for ever,
+/// each frame shown for `num / den` seconds. Nothing is compressed again: every frame's
+/// `IDAT` data is carried over as it is, so the cost is a copy. The first frame is also the
+/// still picture a viewer without APNG shows.
+pub fn apng(frames: &[Vec<u8>], num: u16, den: u16) -> Result<Vec<u8>, String> {
+    const SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+    fn chunk(out: &mut Vec<u8>, kind: &[u8], data: &[&[u8]]) {
+        let len: usize = data.iter().map(|d| d.len()).sum();
+        out.extend((len as u32).to_be_bytes());
+        let from = out.len();
+        out.extend(kind);
+        data.iter().for_each(|d| out.extend(*d));
+        let crc = crc32(&out[from..]);
+        out.extend(crc.to_be_bytes());
+    }
+    /// A PNG chunk: its type and its data.
+    type Chunk<'a> = (&'a [u8], &'a [u8]);
+    /// The chunks of a PNG file, up to `IEND`.
+    fn chunks(png: &[u8]) -> Result<Vec<Chunk<'_>>, String> {
+        let mut rest = png.strip_prefix(SIGNATURE).ok_or("a frame is not a PNG file")?;
+        let mut out = Vec::new();
+        loop {
+            let cut = "a frame's PNG file is cut short";
+            let (head, body) = rest.split_at_checked(8).ok_or(cut)?;
+            let len = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as usize;
+            // The data and its CRC.
+            let (data, after) = body.split_at_checked(len).ok_or(cut)?;
+            rest = after.get(4..).ok_or(cut)?;
+            if &head[4..] == b"IEND" {
+                return Ok(out);
+            }
+            out.push((&head[4..], data));
+        }
+    }
+    if frames.is_empty() {
+        return Err("no frames to animate".into());
+    }
+    let mut out = SIGNATURE.to_vec();
+    let (mut header, mut seq) = (None, 0u32);
+    for (i, frame) in frames.iter().enumerate() {
+        let chunks = chunks(frame)?;
+        let ihdr =
+            chunks.iter().find(|c| c.0 == b"IHDR").filter(|c| c.1.len() == 13).ok_or("a frame has no PNG header")?.1;
+        match header {
+            None => {
+                // Everything before the pixels (the header and, for a file not made here,
+                // its palette or colour space) comes from the first frame.
+                for (kind, data) in chunks.iter().take_while(|c| c.0 != b"IDAT") {
+                    chunk(&mut out, kind, &[data]);
+                    if *kind == b"IHDR" {
+                        chunk(&mut out, b"acTL", &[&(frames.len() as u32).to_be_bytes(), &0u32.to_be_bytes()]);
+                    }
+                }
+                header = Some(ihdr);
+            }
+            Some(first) if first != ihdr => return Err("the frames differ in size or pixel format".into()),
+            Some(_) => {}
+        }
+        // Frame control: the whole picture, replaced each time (no dispose, no blend).
+        let mut control = seq.to_be_bytes().to_vec();
+        control.extend(&ihdr[..8]);
+        control.extend([0; 8]);
+        control.extend(num.to_be_bytes());
+        control.extend(den.to_be_bytes());
+        control.extend([0, 0]);
+        chunk(&mut out, b"fcTL", &[&control]);
+        seq += 1;
+        let before = seq;
+        for (_, data) in chunks.iter().filter(|c| c.0 == b"IDAT") {
+            if i == 0 {
+                chunk(&mut out, b"IDAT", &[data]);
+            } else {
+                chunk(&mut out, b"fdAT", &[&seq.to_be_bytes(), data]);
+                seq += 1;
+            }
+        }
+        if i == 0 && !chunks.iter().any(|c| c.0 == b"IDAT") || i > 0 && seq == before {
+            return Err("a frame has no pixels".into());
+        }
+    }
+    chunk(&mut out, b"IEND", &[]);
+    Ok(out)
+}
+
+/// The palette as a 256 x 1 PNG ([`crate::palette::strip`]): the image MagicaVoxel and
+/// most voxel tools load as a palette, and the texture of the OBJ export.
+pub fn palette_png(scene: &Scene) -> Result<Vec<u8>, String> {
+    png(TEXTURE_W, 1, &crate::palette::strip(&scene.palette))
+}
+
+/// The palette export an agent asks for: `<stem>.png` ([`palette_png`]) and `<stem>.hex`
+/// ([`crate::palette::hex`]).
+pub fn palette_files(scene: &Scene, stem: &str) -> Result<Vec<File>, String> {
+    Ok(vec![
+        (format!("{stem}.png"), palette_png(scene)?),
+        (format!("{stem}.hex"), crate::palette::hex(&scene.palette).into_bytes()),
+    ])
+}
+
+/// What [`palette_files`] made, for the agent.
+pub const PALETTE_WHAT: &str = "the palette: a 256 x 1 PNG (pixel x is slot x + 1) and 255 rrggbb lines, slot 1 first";
 
 /// RGBA8 rows as a PNG file.
 pub fn png(w: u32, h: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
@@ -375,6 +666,113 @@ mod tests {
     }
 
     #[test]
+    fn turntable_frames_sort_by_name_in_frame_order() {
+        for n in [1, 8, 64, 100, 1000] {
+            let frames: Vec<Vec<u8>> =
+                (0..n as u32).map(|i| png(1, 1, &[i as u8, (i >> 8) as u8, 0, 255]).unwrap()).collect();
+            let (folder, mut files) = turntable_files("my house #2.vox", frames.clone()).unwrap();
+            assert_eq!(folder, "my-house-2-turntable");
+            // The animated file is last, by order and by name, and holds every frame.
+            let turn = files.pop().unwrap();
+            assert_eq!(turn.0, "my-house-2.png");
+            assert_eq!(animation(&turn.1).0.len(), n);
+            let mut sorted = files.clone();
+            sorted.push(turn.clone());
+            sorted.sort();
+            assert_eq!(sorted.pop(), Some(turn));
+            assert_eq!(sorted, files, "{n} frames");
+            assert_eq!(files.iter().map(|f| f.1.clone()).collect::<Vec<_>>(), frames);
+            let last = if n < 100 { format!("{n:02}") } else { n.to_string() };
+            assert_eq!(files[n - 1].0, format!("my-house-2-{last}.png"));
+        }
+    }
+
+    /// An animated PNG read back by the `png` crate (which checks every CRC and sequence
+    /// number): each frame's pixels, its delay as a fraction, and the count of plays.
+    fn animation(bytes: &[u8]) -> (Vec<Vec<u8>>, Vec<(u16, u16)>, u32) {
+        let mut r = png::Decoder::new(std::io::Cursor::new(bytes)).read_info().unwrap();
+        let control = *r.info().animation_control().expect("an animation");
+        let mut buf = vec![0; r.output_buffer_size().unwrap()];
+        let (mut frames, mut delays) = (Vec::new(), Vec::new());
+        for _ in 0..control.num_frames {
+            let n = r.next_frame(&mut buf).unwrap().buffer_size();
+            let f = r.info().frame_control().unwrap();
+            assert_eq!((f.width, f.height, f.x_offset, f.y_offset), (r.info().width, r.info().height, 0, 0));
+            assert_eq!((f.dispose_op, f.blend_op), (png::DisposeOp::None, png::BlendOp::Source));
+            frames.push(buf[..n].to_vec());
+            delays.push((f.delay_num, f.delay_den));
+        }
+        (frames, delays, control.num_plays)
+    }
+
+    /// `png` with its pixel data cut into `parts` `IDAT` chunks, as other encoders write it.
+    fn split_idat(png: &[u8], parts: usize) -> Vec<u8> {
+        let mut out = png[..8].to_vec();
+        let mut at = 8;
+        while at < png.len() {
+            let len = u32::from_be_bytes(png[at..at + 4].try_into().unwrap()) as usize;
+            let (kind, data) = (&png[at + 4..at + 8], &png[at + 8..at + 8 + len]);
+            let pieces: Vec<&[u8]> =
+                if kind == b"IDAT" { data.chunks(len.div_ceil(parts).max(1)).collect() } else { vec![data] };
+            for piece in pieces {
+                out.extend((piece.len() as u32).to_be_bytes());
+                let from = out.len();
+                out.extend(kind);
+                out.extend(piece);
+                out.extend(crc32(&out[from..]).to_be_bytes());
+            }
+            at += 12 + len;
+        }
+        out
+    }
+
+    proptest::proptest! {
+        /// Every frame of the animated file is the frame that went in, in order, however an
+        /// encoder cut its pixel data into chunks, and the file loops with the given delay.
+        #[test]
+        fn apng_holds_every_frame_in_order(
+            (w, h) in (1u32..12, 1u32..12),
+            seeds in proptest::collection::vec((proptest::prelude::any::<u64>(), 1usize..4), 1..7),
+            (num, den) in (1u16..9, 1u16..70),
+        ) {
+            let pixels: Vec<Vec<u8>> = seeds
+                .iter()
+                .map(|&(seed, _)| {
+                    (0..w * h * 4).map(|i| (seed.wrapping_mul(i as u64 * 2 + 1).wrapping_add(seed >> 7) >> 24) as u8).collect()
+                })
+                .collect();
+            let frames: Vec<Vec<u8>> =
+                pixels.iter().zip(&seeds).map(|(px, &(_, parts))| split_idat(&png(w, h, px).unwrap(), parts)).collect();
+            let file = apng(&frames, num, den).unwrap();
+            let (read, delays, plays) = animation(&file);
+            proptest::prop_assert_eq!(&read, &pixels);
+            proptest::prop_assert_eq!(delays, vec![(num, den); frames.len()]);
+            proptest::prop_assert_eq!(plays, 0);
+            // A viewer without APNG reads the first frame from the same file.
+            let mut still = png::Decoder::new(std::io::Cursor::new(&file)).read_info().unwrap();
+            let mut buf = vec![0; still.output_buffer_size().unwrap()];
+            let n = still.next_frame(&mut buf).unwrap().buffer_size();
+            proptest::prop_assert_eq!(&buf[..n], &pixels[0][..]);
+        }
+    }
+
+    #[test]
+    fn apng_refuses_frames_it_cannot_join() {
+        let (a, b) = (png(2, 2, &[9; 16]).unwrap(), png(2, 1, &[9; 8]).unwrap());
+        let no_pixels = [&a[..33], &a[a.len() - 12..]].concat();
+        for (frames, want) in [
+            (vec![], "no frames to animate"),
+            (vec![a.clone(), b], "the frames differ in size or pixel format"),
+            (vec![a.clone(), b"GIF89a".to_vec()], "a frame is not a PNG file"),
+            (vec![a.clone(), a[..a.len() - 13].to_vec()], "a frame's PNG file is cut short"),
+            (vec![a.clone(), no_pixels.clone()], "a frame has no pixels"),
+            (vec![no_pixels], "a frame has no pixels"),
+        ] {
+            assert_eq!(apng(&frames, 1, 10).unwrap_err(), want);
+        }
+    }
+
+    #[test]
     fn zip_round_trips() {
         let files = vec![("a.obj".to_string(), b"v 0 0 0\n".to_vec()), ("a.png".to_string(), vec![0, 1, 2, 255])];
         assert_eq!(unzip(&zip(&files)), files);
@@ -391,9 +789,9 @@ mod tests {
     #[test]
     fn obj_files_name_each_other_and_skip_an_empty_scene() {
         let mut s = Scene::new([4, 4, 4]);
-        assert!(obj_files(&s, "x").is_err());
+        assert!(obj_files(&s, "x", None).is_err());
         s.edit([([1, 1, 1], 3)]);
-        let (files, quads) = obj_files(&s, "rock").unwrap();
+        let (files, quads) = obj_files(&s, "rock", None).unwrap();
         let names: Vec<&str> = files.iter().map(|f| f.0.as_str()).collect();
         assert_eq!(names, ["rock.obj", "rock.mtl", "rock.png"]);
         assert_eq!(quads, 6);
@@ -407,7 +805,7 @@ mod tests {
         let mut s = Scene::new([4, 4, 4]);
         s.edit([([1, 1, 1], 3)]);
         for (stem, want) in [(" my  house\t#2 ", "my-house-2"), ("#", "vxr")] {
-            let (files, _) = obj_files(&s, stem).unwrap();
+            let (files, _) = obj_files(&s, stem, None).unwrap();
             let names: Vec<&str> = files.iter().map(|f| f.0.as_str()).collect();
             assert_eq!(names, [format!("{want}.obj"), format!("{want}.mtl"), format!("{want}.png")]);
             let line = |i: usize, key: &str| {
@@ -420,10 +818,33 @@ mod tests {
     #[test]
     fn slices_png_is_one_strip_of_layers_and_skips_an_empty_scene() {
         let mut s = Scene::new([4, 3, 5]);
-        assert!(slices_png(&s).is_err());
+        assert!(slices_png(&s, None).is_err());
         s.edit([([1, 1, 1], 3)]);
-        let (bytes, size, layers) = slices_png(&s).unwrap();
+        let (bytes, size, layers) = slices_png(&s, None).unwrap();
         assert_eq!((size, layers), ([12, 5], 3));
         assert_eq!(&bytes[1..4], b"PNG");
+    }
+
+    #[test]
+    fn sprite_png_is_the_voxels_on_a_transparent_background_and_skips_an_empty_scene() {
+        let mut s = Scene::new([4, 3, 5]);
+        assert_eq!(sprite_png(&s, None).unwrap_err(), "the scene is empty");
+        s.palette[3] = [200, 100, 50, 255];
+        s.edit([([1, 1, 1], 3), ([1, 2, 1], 3), ([2, 1, 1], 3)]);
+        let (bytes, size) = sprite_png(&s, None).unwrap();
+        // Two voxels along x and two up, one deep: 2 * 3 wide, 3 + 2 * 2 - 1 tall.
+        assert_eq!(size, [6, 6]);
+        let mut reader = png::Decoder::new(std::io::Cursor::new(&bytes)).read_info().unwrap();
+        let mut px = vec![0; reader.output_buffer_size().unwrap()];
+        let info = reader.next_frame(&mut px).unwrap();
+        assert_eq!((info.width, info.height, info.color_type), (6, 6, png::ColorType::Rgba));
+        let rows: Vec<&[u8]> = px[..info.buffer_size()].chunks(24).collect();
+        // The top row: the upper voxel's top face, then nothing over the lower voxel.
+        assert_eq!(rows[0], [[200, 100, 50, 255]; 4].concat().iter().chain(&[0; 8]).copied().collect::<Vec<u8>>());
+        assert_eq!(rows[5][..8], [0; 8]);
+        assert_eq!(rows[5][16..], [160, 80, 40, 255, 160, 80, 40, 255]);
+        // A scene whose sprite would pass the limit is refused before it is drawn.
+        let big = Scene::new([4000, 4000, 4000]);
+        assert!(sprite_png(&big, None).unwrap_err().contains("too large"));
     }
 }

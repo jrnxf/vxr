@@ -3,6 +3,10 @@
 # - Contents/MacOS/vxr: the vxr binary, which also serves `vxr mcp` and runs `vxr setup`.
 # - Contents/Resources/fonts: the UI fonts and their licences (crates/vxr-app/fetch-fonts), which
 #   the binary finds beside itself (src/fonts.rs).
+# - Contents/Resources/embed: the embed viewer's three files, which the Embed command copies into
+#   each embed folder (src/embed.rs). They come from crates/vxr-embed/dist: run
+#   crates/vxr-embed/build first. Without them the bundle is still made, with a warning, and its
+#   Embed command says the viewer is missing.
 # - Contents/Resources/vxr.icns: the icon, drawn by examples/icon.rs.
 # The bundle is signed ad hoc, which is all macOS needs to run a download that is not quarantined,
 # such as a Homebrew formula's.
@@ -51,6 +55,13 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/fonts"
 lipo -create -output "$app/Contents/MacOS/vxr" "${bins[@]}"
 iconutil -c icns "$tmp/vxr.iconset" -o "$app/Contents/Resources/vxr.icns"
 (cd "$here/fonts" && cp $(awk '{print $2}' "$here/fonts.sha256") "$app/Contents/Resources/fonts/")
+embed="$root/crates/vxr-embed/dist"
+if [ -f "$embed/voxel-scene.js" ] && [ -f "$embed/vxr_embed.js" ] && [ -f "$embed/vxr_embed_bg.wasm" ]; then
+  mkdir -p "$app/Contents/Resources/embed"
+  cp "$embed/voxel-scene.js" "$embed/vxr_embed.js" "$embed/vxr_embed_bg.wasm" "$app/Contents/Resources/embed/"
+else
+  echo "bundle: warning: no embed viewer in crates/vxr-embed/dist (run crates/vxr-embed/build); this app's Embed command will say so" >&2
+fi
 
 # The version the binary reports, which a release stamps from its tag (0.1.0 or 0.1.0-pre.3).
 version="$("$app/Contents/MacOS/vxr" --version)"

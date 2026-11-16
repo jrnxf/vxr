@@ -540,6 +540,9 @@ fn the_edit_tools_change_the_window_and_undo_gives_the_file_back() {
     assert_eq!(call("copy", json!({})), "copied 3 voxels, a 1 x 3 x 1 box from [1, 1, 1]");
     let t = call("paste", json!({"at": [5, 0, 5]}));
     assert!(t.starts_with("pasted at [5, 0, 5] (low corner); 3 cells changed"), "{t}");
+    // The same clipboard as a pattern brush: two stamps in one call, one undo step.
+    let t = call("stamp", json!({"at": [[3, 1, -3], [-3, 1, 3]]}));
+    assert!(t.starts_with("stamped 2 times; 6 cells changed"), "{t}");
     // Taller bounds, then a post above the old top.
     let t = call("resize", json!({"size": [32, 40, 32]}));
     assert!(t.starts_with("bounds x -16..15, y 0..39, z -16..15 (32 x 40 x 32); 0 cells changed"), "{t}");
@@ -551,9 +554,9 @@ fn the_edit_tools_change_the_window_and_undo_gives_the_file_back() {
     assert!(t.ends_with("; warning: nothing changed"), "{t}");
     let t = call("crop", json!({}));
     assert!(t.starts_with("bounds x -5..5, y 0..35, z -5..5 (11 x 36 x 11); 0 cells changed"), "{t}");
-    // Seven edits, seven undo steps: undone, the save is the file's bytes.
-    assert_eq!(w.scene.history().position(), 7);
-    for _ in 0..7 {
+    // Eight edits, eight undo steps: undone, the save is the file's bytes.
+    assert_eq!(w.scene.history().position(), 8);
+    for _ in 0..8 {
         assert!(w.scene.undo());
     }
     assert!(!w.scene.undo());
@@ -600,6 +603,16 @@ fn the_world_tools_change_the_window_and_undo_gives_the_file_back() {
     let t = call(&mut w, &mut a, "set_layer", json!({"node": 7, "layer": 0}));
     assert!(t.starts_with("put object 7 on layer 0; 1 node changed"), "{t}");
     assert_eq!(shown(&w), 2 * 39 + 1);
+    // A quarter turn stands a tree another way, the same count showing.
+    let before = w.scene.world_voxels(true);
+    let t = call(&mut w, &mut a, "transform_object", json!({"node": 3, "kind": "rotate", "axis": "x"}));
+    assert!(t.starts_with("rotated object 3 90 degrees about X, now from "), "{t}");
+    let after = w.scene.world_voxels(true);
+    assert!(after.len() == before.len() && after != before);
+    // A move in the tree puts the gem in front of the slab's group, in the window's world.
+    let t = call(&mut w, &mut a, "reorder", json!({"node": 7, "before": 15}));
+    assert!(t.starts_with("moved object 7 into the top of the world, which now holds nodes [7, 15, 2, "), "{t}");
+    assert_eq!(w.scene.world().unwrap().tree.children(0)[..2], [7, 15]);
     // A move that does nothing says so and makes no step.
     let t = call(&mut w, &mut a, "move_object", json!({"node": 3, "offset": [0, 0, 0]}));
     assert!(t.ends_with("; warning: nothing changed"), "{t}");
@@ -608,9 +621,9 @@ fn the_world_tools_change_the_window_and_undo_gives_the_file_back() {
     let (t, e) = edit(&host, &mut w, &mut a, "hide", json!({"node": 3}));
     assert!(e && t.contains("show_world"), "{t}");
     call(&mut w, &mut a, "show_world", json!({}));
-    // Seven edits, seven undo steps: undone, the save is the file's bytes.
-    assert_eq!(w.scene.history().position(), 7);
-    for _ in 0..7 {
+    // Nine edits, nine undo steps: undone, the save is the file's bytes.
+    assert_eq!(w.scene.history().position(), 9);
+    for _ in 0..9 {
         assert!(w.scene.undo());
     }
     assert!(!w.scene.undo());
@@ -725,14 +738,58 @@ fn the_housekeeping_select_and_palette_tools_change_the_window_and_undo_gives_th
     );
     assert_eq!(w.scene.history().position(), position + 1);
     assert_eq!((w.scene.palette[12], w.scene.palette[13]), ([0x2a, 0x6f, 0xb0, 255], [0x3a, 0x7b, 0xd9, 255]));
+    // The group edit, on the slots of the selected voxels (the grey slab keeps its grey at
+    // any hue): one undo step in the window.
+    assert!(call(&mut w, &mut a, "select", json!({"all": true})).starts_with("123 voxels selected"));
+    let t = call(&mut w, &mut a, "palette_adjust", json!({"selection": true, "hue": 120}));
+    assert_eq!(t, "shifted 2 slots (123 voxels use them): slot 8: #808080 -> #808080; slot 13: #3a7bd9 -> #d93a7b");
+    assert_eq!(w.scene.history().position(), position + 2);
+    assert_eq!(w.scene.palette[13], [0xd9, 0x3a, 0x7b, 255]);
+    // The sort, by saturation: the pink is a little greyer than the blue, so they trade places.
+    let t = call(&mut w, &mut a, "palette_sort", json!({"by": "saturation", "slots": [12, 13]}));
+    assert_eq!(
+        t,
+        "sorted 2 slots by saturation: 2 slots moved and 59 voxels follow their colours, so the scene looks the same; now slot 12 #d93a7b, slot 13 #2a6fb0"
+    );
+    assert_eq!(w.scene.history().position(), position + 3);
+    // A palette imported from text: one undo step in the window.
+    let t = call(&mut w, &mut a, "palette_import", json!({"text": "#102030\n405060\n"}));
+    assert_eq!(
+        t,
+        "imported 2 colours into slots 1 to 2: 2 changed colour, and 0 voxels use those slots; now slot 1 #102030, slot 2 #405060"
+    );
+    assert_eq!(w.scene.history().position(), position + 4);
+    assert_eq!((w.scene.palette[1], w.scene.palette[2]), ([0x10, 0x20, 0x30, 255], [0x40, 0x50, 0x60, 255]));
+    // A PNG of a red pixel and a clear one, above the model: the bounds grow and the voxel
+    // lands in one undo step in the window.
+    let voxels = w.scene.map.voxels;
+    let t = call(
+        &mut w,
+        &mut a,
+        "image_import",
+        json!({"png": "iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAAD0lEQVR4nGP4z8AARAwMAAz8Af9c/RSVAAAAAElFTkSuQmCC", "at": [0, 40, 0]}),
+    );
+    assert!(t.starts_with("imported a 2x1 image at [0, 40, 0] (its bottom-left pixel; it spans x 0 to 1, y 40 to 40): 1 cells changed in 1 slot; "), "{t}");
+    assert_eq!((w.scene.history().position(), w.scene.map.voxels), (position + 5, voxels + 1));
     call(&mut w, &mut a, "show_world", json!({}));
-    // Eleven edits applied, one undo step each (the delete was undone): undone, the save is
+    // A saved view: one undo step in the window, read back as the same view.
+    let t = call(
+        &mut w,
+        &mut a,
+        "save_view",
+        json!({"slot": 7, "target": [1, 2, 3], "yaw": 180, "pitch": -10, "distance": 15, "orthographic": true}),
+    );
+    assert_eq!(t, "saved view 7: looking at [1.0, 2.0, 3.0] from yaw 180 pitch -10, 15 voxels away, orthographic");
+    assert_eq!(w.scene.history().position(), position + 6);
+    let v = w.scene.saved_view(6).unwrap();
+    assert_eq!((v.target, v.distance, v.ortho), ([1.0, 2.0, 3.0], 15.0, true));
+    // Sixteen edits applied, one undo step each (the delete was undone): undone, the save is
     // the file's bytes.
     let mut steps = 0;
     while w.scene.undo() {
         steps += 1;
     }
-    assert_eq!(steps, 11);
+    assert_eq!(steps, 16);
     assert_eq!(w.scene.to_vox().unwrap(), bytes);
 }
 

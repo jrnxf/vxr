@@ -312,6 +312,22 @@ async () => {
   await key('v', cmd);
   step('Cmd-C, Cmd-V pastes a copy at the pointer, selected', st().hasClip && !same(bytes(), original) && st().selected > 0, JSON.stringify([st().hasClip, st().selected, st().voxels - s0.voxels]));
   await key('z', cmd);
+  // The pattern brush (T) stamps that copy: shown at the press, moved by the drag, one undo step.
+  await key('a');
+  await key('t');
+  const stampKept = st().selected;
+  ptr('pointermove', mx - 150, my + 60); await frames();
+  ptr('pointerdown', mx - 150, my + 60); await frames();
+  const stamped = st();
+  for (let i = 1; i <= 6; i++) { ptr('pointermove', mx - 150 + i * 6, my + 60); await frames(1); }
+  ptr('pointerup', mx - 114, my + 60); await frames();
+  s = st();
+  step('T pattern brush stamps the copy: live at the press, placed at the release', stamped.shape === 'Pattern' && stamped.span?.[0] === 'PATTERN' && stamped.voxels > s0.voxels && s.voxels > s0.voxels && s.span === null && s.selected === stampKept && window.vxr.hit('pattern').length === 2,
+    JSON.stringify([stamped.shape, stamped.span, s0.voxels, stamped.voxels, s.voxels, s.selected, stampKept]));
+  await key('z', cmd);
+  step('the stamp is one undo step', same(bytes(), original));
+  await key('v');
+  await key('s');
   await click(mx, my);
   const v0 = st().voxels;
   await key('Backspace');
@@ -344,6 +360,23 @@ async () => {
   await chip('click-color');
   await click(mx, my);
   step('a click selects the face, the volume (Cmd-K) or the colour, with no edit', face[0] === 'Face' && face[1] > 0 && face[1] <= byColor && volume[0] === 'Volume' && volume[1] >= face[1] && st().region === 'Color' && st().selected === byColor && same(bytes(), original), JSON.stringify([face, volume, st().selected, byColor]));
+  // The region option: with "Brush inside only" on, an erase click on a voxel outside the
+  // selection (the clicked colour, once the selection is inverted) changes nothing, and
+  // on a selected voxel it takes it.
+  const limited = await chip('brush-inside') && st().brushInside;
+  const limitToast = st().toast || '';
+  await key('I', { metaKey: true, shiftKey: true });
+  await key('e');
+  await click(mx, my);
+  const outside = same(bytes(), original);
+  await key('I', { metaKey: true, shiftKey: true });
+  const whole = st().voxels;
+  await click(mx, my);
+  const tookInside = whole - st().voxels;
+  await key('z', cmd);
+  await chip('brush-inside');
+  await key('s');
+  step('Brush inside only: erase leaves a voxel outside the selection and takes one inside it', limited && /^Erase and paint stay inside the selection \(/.test(limitToast) && outside && tookInside === 1 && !st().brushInside && same(bytes(), original) && st().selected === byColor, JSON.stringify([limited, limitToast, outside, tookInside, st().brushInside, st().selected, byColor]));
   await key('Escape');
   // Model tools on the whole island: hollow, fill inside, one undo step each.
   const solid = st().voxels;
@@ -418,6 +451,35 @@ async () => {
   step('0 snaps to isometric', st().view === 'Isometric' && st().ortho);
   await chip('view-persp');
   step('Persp: back to perspective', !st().ortho && st().view === null);
+  // Saved views: a click on an empty slot saves the view there as one undo step, a click on
+  // it after the view moved brings the view back, Save then the slot saves over it, and undo
+  // takes the saves back to the opened island.
+  // cam is the target, yaw, pitch and distance: the yaw compared by its turn, as a slot keeps
+  // it from 0 to a full turn.
+  const turn = (d) => Math.abs(d - 2 * Math.PI * Math.round(d / (2 * Math.PI)));
+  const sameCam = (a, b) => a.every((v, i) => (i === 3 ? turn(v - b[i]) : Math.abs(v - b[i])) < 1e-3 * (1 + Math.abs(v)));
+  const camInSlot = st().cam;
+  await chip('view-slot-2');
+  const slotTwoFull = st().savedViews.join() === '2' && (st().toast || '').startsWith('Saved the view as view 2');
+  await key('1');
+  const viewLeftSlot = !sameCam(st().cam, camInSlot);
+  await chip('view-slot-2');
+  step('a click on empty slot 2 saves the view, and after a side view it brings the view back', slotTwoFull && viewLeftSlot && sameCam(st().cam, camInSlot) && st().view === null, `${st().savedViews} ${st().cam} ${camInSlot}`);
+  await key('3');
+  const camFromLeft = st().cam;
+  await chip('view-save');
+  const saveViewArmed = st().saveViewPick;
+  await chip('view-slot-2');
+  await key('0');
+  await chip('view-slot-2');
+  step('Save then slot 2 saves the view over it', saveViewArmed && !st().saveViewPick && sameCam(st().cam, camFromLeft) && st().savedViews.join() === '2', `${st().cam} ${camFromLeft}`);
+  // Undo gives slot 2 its first view back, which puts the camera back for the steps after.
+  await key('z', cmd);
+  await chip('view-slot-2');
+  const firstBack = sameCam(st().cam, camInSlot) && st().savedViews.join() === '2';
+  await key('z', cmd);
+  step('undo takes both saves back: no saved view, the island as opened, and the first view back on the way', firstBack && st().savedViews.length === 0 && same(bytes(), original), `${st().savedViews}`);
+  await chip('view-persp');
   // Guides: grid, ground and bounds on by default; the flyout, G and Cmd-K toggle them.
   step('the grid, ground and bounds show by default', st().guides.join() === 'true,true,true', JSON.stringify(st().guides));
   const guideFlips = [];
@@ -755,6 +817,72 @@ async () => {
   await key('z', cmd);
   while (st().slot > used) await key('[');
   while (st().slot < used) await key(']');
+  await clickAt('replace');
+  const replaceArmed = st().slotOp;
+  await clickAt(`sw${free}`);
+  const replaceToast = st().toast;
+  const replaced = col(free)[4] === c0[4] && col(used)[4] === 0 && col(used).slice(0, 3).join() === c0.slice(0, 3).join() && col(free).slice(0, 3).join() === f0.slice(0, 3).join();
+  await key('z', cmd);
+  step('Replace… gives the color\'s voxels the clicked slot, no color changes, one undo', replaceArmed.includes('Replace') && replaced && replaceToast === `Replaced slot ${used} with slot ${free}: ${c0[4]} voxels` && col(used).join() === c0.join(), JSON.stringify([replaceArmed, replaceToast, col(used), col(free)]));
+  while (st().slot > used) await key('[');
+  while (st().slot < used) await key(']');
+  const beforeRemove = st().voxels;
+  await clickAt('remove-color');
+  const removeToast = st().toast;
+  const removed = col(used)[4] === 0 && st().voxels === beforeRemove - c0[4];
+  await key('z', cmd);
+  step('Remove erases every voxel of the color, one undo', removed && removeToast === `Removed slot ${used}: ${c0[4]} voxels` && st().voxels === beforeRemove, JSON.stringify([removeToast, col(used), st().voxels, st().selected]));
+  {
+    // The group edit: Shift-click a second swatch, then the Hue slider turns both colours.
+    while (st().slot > used) await key('[');
+    while (st().slot < used) await key(']');
+    let other = 1;
+    while (other === used || col(other)[4] === 0 || !at(`sw${other}`)) other++;
+    const o0 = col(other);
+    const sw = at(`sw${other}`);
+    ptr('pointermove', sw[0], sw[1], 0, { shiftKey: true }); await frames();
+    ptr('pointerdown', sw[0], sw[1], 0, { shiftKey: true }); await frames();
+    ptr('pointerup', sw[0], sw[1], 0, { shiftKey: true }); await frames(3);
+    const picked = st().colors;
+    const hr = window.vxr.hit_rect('group-hue');
+    step('Shift-click a swatch selects it with the current one and the editor edits both', JSON.stringify(picked) === JSON.stringify([used, other]) && hr.length === 4 && !at('sv'), JSON.stringify([picked, hr]));
+    const y = (hr[1] + hr[3]) / 2;
+    await drag((hr[0] + hr[2]) / 2, y, hr[0] + 1 + ((hr[2] - hr[0] - 2) * 5) / 6, y);
+    const turn = (c) => [c[2], c[0], c[1], c[3], c[4]].join();
+    const turned = col(used).join() === turn(c0) && col(other).join() === turn(o0);
+    const mid = [col(used), col(other)];
+    await key('z', cmd);
+    await frames(2);
+    step('the Hue slider at +120 turns both colors, no voxel changes, one undo', turned && col(used).join() === c0.join() && col(other).join() === o0.join(), JSON.stringify([c0, o0, mid]));
+    await clickAt(`sw${used}`);
+    step('a plain click on a swatch ends the selection', st().colors.length === 0 && st().slot === used && !!at('sv'), JSON.stringify(st().colors));
+    await key('k', cmd);
+    for (const ch of 'select used colors') await key(ch);
+    await key('Enter');
+    await frames(2);
+    const all = st().colors;
+    let inUse = 0;
+    for (let i = 1; i < 256; i++) if (col(i)[4] > 0) inUse++;
+    step('Cmd-K Select used colors selects every color in the model', all.length === inUse && inUse > 1 && st().toast === `Selected the ${inUse} colors in the model`, JSON.stringify([all, inUse, st().toast]));
+    await clickAt(`sw${used}`);
+    // Sort palette: the slots trade colors, every color keeps its voxels, the current color stays current.
+    const pal = () => { const p = []; for (let i = 1; i < 256; i++) p.push(col(i).join()); return p; };
+    const [pal0, voxels0] = [pal(), st().voxels];
+    await key('k', cmd);
+    for (const ch of 'sort palette by hue') await key(ch);
+    await key('Enter');
+    await frames(2);
+    const pal1 = pal();
+    const movedSlots = pal1.filter((c, i) => c !== pal0[i]).length;
+    step('Cmd-K Sort palette by hue reorders the slots: every color keeps its voxels and the current color stays current',
+      movedSlots > 0 && pal1.slice().sort().join('|') === pal0.slice().sort().join('|') && st().voxels === voxels0
+        && col(st().slot).join() === c0.join() && /^Sorted the palette by hue \(\d+ slots moved\)$/.test(st().toast || ''),
+      JSON.stringify([movedSlots, st().slot, st().toast]));
+    await key('z', cmd);
+    await frames(2);
+    step('one undo gives the palette its order back', pal().join('|') === pal0.join('|'));
+    await clickAt(`sw${used}`);
+  }
   step('the palette shows the colors in use, not an unused slot', !!at(`sw${used}`) && !at(`sw${free}`));
   await clickAt('palette-all');
   step('its All button shows every slot', !!at(`sw${free}`));
@@ -900,6 +1028,21 @@ async () => {
     const phys = st().render;
     await click(...hit('rs-physical-sky'));
     step('the physical sky toggles and restarts the corner', phys.physicalSky && phys.restarts > skyRestarts && !st().render.physicalSky, JSON.stringify(phys));
+    // Click to focus: the crosshair arms it, Escape cancels it, and a click on the island's
+    // middle puts that voxel in focus with no edit.
+    {
+      await click(...hit('rs-focus-pick'));
+      const armed = st().render.focusPick;
+      await key('Escape');
+      const cancelled = !st().render.focusPick && st().render.panel;
+      await click(...hit('rs-focus-pick'));
+      const voxels = st().voxels;
+      await click(mx, my);
+      await frames(2);
+      const f = st().render;
+      const toast = st().toast || '';
+      step('the crosshair arms click to focus, Escape cancels it, a click on the island sets the focus with no edit', armed && cancelled && !f.focusPick && toast.startsWith(`Focus set to ${f.focus.toFixed(2)}× target`) && st().voxels === voxels, `${JSON.stringify(f)} ${toast}`);
+    }
     const realUrl = URL.createObjectURL;
     const realA = HTMLAnchorElement.prototype.click;
     let png = null, pngName = null;
@@ -917,6 +1060,66 @@ async () => {
     } finally {
       URL.createObjectURL = realUrl;
       HTMLAnchorElement.prototype.click = realA;
+    }
+    // The turntable: 8 frames beside Export PNG download as one zip of numbered PNGs, and a
+    // tab refuses a turntable too large to hold before it traces anything.
+    {
+      let blob = null, name = null;
+      URL.createObjectURL = (b) => { blob = b; return realUrl.call(URL, b); };
+      HTMLAnchorElement.prototype.click = function () { name = this.download; };
+      try {
+        await click(...hit('rs-frames0'));
+        await click(...hit('rs-turntable'));
+        await frames(2);
+        const first = st().render.frame;
+        const row = !hit('rs-turntable');
+        for (let i = 0; i < 30000 && !name; i++) await frames(1);
+        const files = blob ? unzip(new Uint8Array(await blob.arrayBuffer())) : {};
+        // The animated file is last. The browser's own decoder reads it: 8 frames, half a
+        // second each (a turn in 4 seconds), for ever, and its last frame is the last file.
+        const turn = files['island-turntable/island.png'];
+        delete files['island-turntable/island.png'];
+        const names = Object.keys(files);
+        let anim = 'no file';
+        if (turn && names.length === 8) {
+          const d = new ImageDecoder({ data: turn, type: 'image/png' });
+          await d.tracks.ready;
+          const t = d.tracks.selectedTrack;
+          const px = async (dec, i) => {
+            const { image } = await dec.decode({ frameIndex: i });
+            const c = new OffscreenCanvas(image.displayWidth, image.displayHeight).getContext('2d');
+            c.drawImage(image, 0, 0);
+            const out = [image.duration, c.getImageData(0, 0, image.displayWidth, image.displayHeight).data];
+            image.close();
+            return out;
+          };
+          const [ms, last] = await px(d, 7);
+          const [, file] = await px(new ImageDecoder({ data: files[names[7]], type: 'image/png' }), 0);
+          anim = `${t.animated} ${t.frameCount} ${t.repetitionCount} ${ms} ${same(last, file)}`;
+        }
+        const want = [1, 2, 3, 4, 5, 6, 7, 8].map((i) => `island-turntable/island-0${i}.png`);
+        const sized = names.every((n) => { const v = new DataView(files[n].buffer, files[n].byteOffset); return v.getUint32(0) === 0x89504e47 && v.getUint32(16) === 1280 && v.getUint32(20) === 720; });
+        const differ = names.every((n, i) => names.every((m, j) => i === j || !same(files[n], files[m])));
+        step('Turntable renders 8 frames and downloads island-turntable.zip: one folder of numbered 1280x720 PNGs and island.png, which the browser plays as those frames in a loop',
+          first && first[0] === 1 && first[1] === 8 && row && name === 'island-turntable.zip' && names.join(',') === want.join(',') && sized && differ && anim === 'true 8 Infinity 500000 true'
+            && st().toast === 'Downloaded island-turntable.zip (8 frames and the animation)' && st().render.export === null && !!hit('rs-turntable'),
+          `${name} ${names} ${JSON.stringify(first)} ${st().toast} (animation: ${anim})`);
+        name = null;
+        const big = hit('rs-size3');
+        await click(...big);
+        await click(...hit('rs-frames3'));
+        await click(...hit('rs-turntable'));
+        await frames(2);
+        const refused = st().toast;
+        const idle = st().render.export === null;
+        if (!idle) await click(...hit('rs-export'));
+        step('64 frames of 4K are refused before any is traced, with what to pick', idle && refused === 'Could not export: 64 frames of 3840×2160 are too much to hold here: pick 16 frames or fewer, or a smaller size' && !name, refused);
+        await click(...hit('rs-size0'));
+        await click(...hit('rs-frames2'));
+      } finally {
+        URL.createObjectURL = realUrl;
+        HTMLAnchorElement.prototype.click = realA;
+      }
     }
     await click(...hit('rs-spp2'));
     await key('Escape');
@@ -985,6 +1188,243 @@ async () => {
       await key('Enter');
       await frames();
       step('Cmd-K Export PNG slices downloads it too', zipName === 'island-slices.png', `${zipName}`);
+      // Isometric sprite: one PNG of pixel art on a clear background, from the row and Cmd-K.
+      zipBlob = null; zipName = null;
+      await click(...hit('scene-select'));
+      await frames(14);
+      await click(...hit('export-sprite'));
+      await frames();
+      const sp = zipBlob ? await slicePixels(zipBlob) : null;
+      step('its Isometric sprite row downloads island-sprite.png: pixel art the size of its box seen from the corner, on a clear background',
+        zipName === 'island-sprite.png' && !st().fileMenu && sp && sp.w === 2 * (b[0] + b[2]) && sp.h === b[0] + b[2] + 2 * b[1] - 1
+          && sp.filled > st().voxels / 100 && sp.filled < sp.w * sp.h * 0.9 && /sprite\.png \(\d+×\d+, transparent\)/.test(st().toast || ''),
+        `${zipName} ${sp && `${sp.w}x${sp.h} ${sp.filled} pixels`} ${b} ${st().toast}`);
+      zipName = null;
+      await key('k', cmd);
+      for (const ch of 'export isometric sprite') await key(ch);
+      await key('Enter');
+      await frames();
+      step('Cmd-K Export isometric sprite downloads it too', zipName === 'island-sprite.png', `${zipName}`);
+      // The palette, as a 256 by 1 image and as one rrggbb line per slot.
+      zipBlob = null; zipName = null;
+      await click(...hit('scene-select'));
+      await frames(14);
+      await click(...hit('export-palette-png'));
+      await frames();
+      const palettePng = zipBlob;
+      const pp = zipBlob ? await slicePixels(zipBlob) : null;
+      step('its Palette image row downloads island-palette.png, 256 by 1',
+        zipName === 'island-palette.png' && !st().fileMenu && pp && pp.w === 256 && pp.h === 1 && /palette\.png \(256×1, slot 1 first\)$/.test(st().toast || ''),
+        `${zipName} ${pp && `${pp.w}x${pp.h}`} ${st().toast}`);
+      zipBlob = null; zipName = null;
+      await click(...hit('scene-select'));
+      await frames(14);
+      await click(...hit('export-palette-hex'));
+      await frames();
+      const hexLines = zipBlob ? (await zipBlob.text()).split('\n') : [];
+      const hexOf = (i) => Array.from(window.vxr.color(i)).slice(0, 3).map((v) => v.toString(16).padStart(2, '0')).join('');
+      let onLine = 0;
+      for (let i = 1; i < 256; i++) onLine += hexLines[i - 1] === hexOf(i);
+      step('its Palette colors row downloads island-palette.hex: 255 lines, every slot on its line',
+        zipName === 'island-palette.hex' && !st().fileMenu && hexLines.length === 256 && hexLines[255] === '' && onLine === 255,
+        `${zipName} ${hexLines.length} lines, ${onLine} right, ${st().toast}`);
+      zipName = null;
+      await key('k', cmd);
+      for (const ch of 'export palette as text') await key(ch);
+      await key('Enter');
+      await frames();
+      step('Cmd-K Export palette as text downloads it too', zipName === 'island-palette.hex', `${zipName}`);
+      // Import palette: the row opens the page's file picker, a text palette sets its slots,
+      // the PNG exported above brings them back, and an image that is not a palette is refused.
+      {
+        let picker = null;
+        const inputClick = HTMLInputElement.prototype.click;
+        HTMLInputElement.prototype.click = function () { if (this.type === 'file') picker = this; else inputClick.call(this); };
+        const give = async (name, body) => {
+          const dt = new DataTransfer();
+          dt.items.add(new File([body], name));
+          picker.files = dt.files;
+          picker.dispatchEvent(new Event('change'));
+          await new Promise((r) => setTimeout(r, 50));
+          await frames(3);
+        };
+        const first = () => [1, 2, 3].map((i) => hexOf(i)).join();
+        const was = first();
+        await click(...hit('scene-select'));
+        await frames(14);
+        await click(...hit('import-palette'));
+        await frames();
+        step('its Import Palette… row opens a file picker for .png, .hex and .gpl files',
+          !!picker && picker.accept === '.png,.hex,.gpl,.txt' && !st().fileMenu, `${picker && picker.accept}`);
+        if (picker) {
+          await give('ramp.hex', '#FF0000\r\n00ff00\n0000ff\n');
+          step('a .hex file of three colors sets slots 1 to 3',
+            first() === 'ff0000,00ff00,0000ff' && st().toast === 'Imported 3 colors from ramp.hex into slots 1 to 3', `${first()} ${st().toast}`);
+          const wide = document.createElement('canvas');
+          wide.width = 300; wide.height = 1;
+          wide.getContext('2d').fillRect(0, 0, 300, 1);
+          await give('photo.png', await new Promise((r) => wide.toBlob(r, 'image/png')));
+          step('an image of more than 256 pixels is refused and changes nothing',
+            first() === 'ff0000,00ff00,0000ff' && (st().toast || '').startsWith('Could not import photo.png: the image is 300×1 pixels: a palette image has at most 256'), `${first()} ${st().toast}`);
+          picker = null;
+          await key('k', cmd);
+          for (const ch of 'import palette') await key(ch);
+          await key('Enter');
+          await frames();
+          const again = !!picker;
+          if (picker && palettePng) await give('island-palette.png', palettePng);
+          step('Cmd-K Import palette… asks too, and the exported palette PNG brings the colors back',
+            again && first() === was && st().toast === 'Imported 255 colors from island-palette.png into slots 1 to 255', `${again} ${first()} ${st().toast}`);
+          await key('z', cmd);
+          await key('z', cmd);
+          await frames();
+          step('undo takes both imports back', first() === was, first());
+        }
+        HTMLInputElement.prototype.click = inputClick;
+      }
+      // Import image: the row opens a picker for PNGs, a small sign drawn on a canvas becomes
+      // voxels with a toast, a file that is not a PNG is refused, Cmd-K asks too, undo takes it back.
+      {
+        let picker = null;
+        const inputClick = HTMLInputElement.prototype.click;
+        HTMLInputElement.prototype.click = function () { if (this.type === 'file') picker = this; else inputClick.call(this); };
+        const hand = async (name, body) => {
+          const dt = new DataTransfer();
+          dt.items.add(new File([body], name));
+          picker.files = dt.files;
+          picker.dispatchEvent(new Event('change'));
+          await new Promise((r) => setTimeout(r, 50));
+          await frames(3);
+        };
+        const voxelsWas = st().voxels;
+        await click(...hit('scene-select'));
+        await frames(14);
+        await click(...hit('import-image'));
+        await frames();
+        step('its Image as voxels… row opens a file picker for PNG images',
+          !!picker && picker.accept === '.png,image/png' && !st().fileMenu, `${picker && picker.accept}`);
+        if (picker) {
+          await hand('photo.jpg', 'not a picture');
+          step('a file that is not a PNG is refused and changes nothing',
+            st().voxels === voxelsWas && (st().toast || '').startsWith('Could not import photo.jpg: it is not a PNG image'), `${st().voxels} ${st().toast}`);
+          const sign = document.createElement('canvas');
+          sign.width = 6; sign.height = 4;
+          const g = sign.getContext('2d');
+          g.fillStyle = '#c03020';
+          g.fillRect(0, 0, 6, 4);
+          g.clearRect(2, 1, 2, 2);
+          picker = null;
+          await key('k', cmd);
+          for (const ch of 'import image') await key(ch);
+          await key('Enter');
+          await frames();
+          const asked = !!picker;
+          if (picker) await hand('sign.png', await new Promise((r) => sign.toBlob(r, 'image/png')));
+          step('Cmd-K Import image… asks too, and a 6×4 sign with a 2×2 hole becomes 20 voxels in one color',
+            asked && st().voxels === voxelsWas + 20 && (st().toast || '').startsWith('Imported sign.png (6×4) as 20 voxels in 1 color'), `${asked} ${st().voxels - voxelsWas} ${st().toast}`);
+          await key('z', cmd);
+          await frames();
+          step('undo takes the image back', st().voxels === voxelsWas, `${st().voxels}`);
+        }
+        HTMLInputElement.prototype.click = inputClick;
+      }
+      // Only the selection: with one colour selected and the switch on, the slices and the
+      // OBJ hold those voxels alone, under names of their own; switched off, the whole scene.
+      const toolWas = st().tool;
+      await key('s');
+      await click(mx, my);
+      await frames();
+      const picked = st().selected;
+      await click(...hit('scene-select'));
+      await frames(14);
+      await click(...hit('export-selection'));
+      await frames(3);
+      const stayed = st().fileMenu;
+      zipBlob = null; zipName = null;
+      await click(...hit('export-slices'));
+      await frames();
+      const part = zipBlob ? await slicePixels(zipBlob) : null;
+      step('with a colour selected and Only the selection on, PNG slices downloads island-selection-slices.png: the selected voxels alone in their own box',
+        stayed && picked > 0 && picked < st().voxels && zipName === 'island-selection-slices.png' && part && part.filled === picked
+          && part.w * part.h <= b[0] * b[1] * b[2] && /selection-slices\.png \(the selection, \d+ layers/.test(st().toast || ''),
+        `${zipName} ${part && `${part.w}x${part.h} ${part.filled} pixels`} ${picked} selected, ${st().toast}`);
+      zipBlob = null; zipName = null;
+      await click(...hit('scene-select'));
+      await frames(14);
+      await click(...hit('export-obj'));
+      await frames();
+      const partFiles = zipBlob ? unzip(new Uint8Array(await zipBlob.arrayBuffer())) : {};
+      const partObj = partFiles['island-selection.obj'] ? new TextDecoder().decode(partFiles['island-selection.obj']) : '';
+      const partHeader = partObj.match(/^# vxr OBJ export: (\d+) voxels, (\d+) quads/);
+      step('and OBJ downloads island-selection-obj.zip holding only the selected voxels',
+        zipName === 'island-selection-obj.zip' && Object.keys(partFiles).join(',') === 'island-selection.obj,island-selection.mtl,island-selection.png'
+          && partHeader && +partHeader[1] === picked && partObj.includes('mtllib island-selection.mtl'),
+        `${zipName} ${Object.keys(partFiles)} ${partHeader && partHeader[0]} ${picked} selected`);
+      await click(...hit('scene-select'));
+      await frames(14);
+      await click(...hit('export-selection'));
+      await frames(3);
+      zipBlob = null; zipName = null;
+      await click(...hit('export-slices'));
+      await frames();
+      const whole = zipBlob ? await slicePixels(zipBlob) : null;
+      step('switched off, PNG slices is the whole scene again with the colour still selected',
+        zipName === 'island-slices.png' && whole && whole.filled === st().voxels && picked > 0 && st().selected === picked,
+        `${zipName} ${whole && whole.filled} ${st().selected}`);
+      await key('Escape');
+      const toolKey = { Add: 'a', Erase: 'e', Paint: 'p', Pick: 'i', Select: 's' }[toolWas];
+      if (toolKey) await key(toolKey);
+      await frames();
+      step('Escape deselects and the tool is back', st().selected === 0 && st().tool === toolWas, `${st().selected} ${st().tool} ${toolWas}`);
+      // Embed: the row puts the tag on the clipboard inside the click, traces the poster and
+      // downloads island-embed.zip: a folder with the page, the scene as a brick scene file,
+      // the 1280x800 poster and the viewer's three files as the site serves them.
+      zipBlob = null; zipName = null;
+      const tags = [];
+      const realWrite = navigator.clipboard?.writeText;
+      if (navigator.clipboard) navigator.clipboard.writeText = (t) => (tags.push(t), Promise.resolve());
+      try {
+        await click(...hit('scene-select'));
+        await frames(14);
+        const row = !!hit('export-embed');
+        await click(...hit('export-embed'));
+        const tag = '<script src="voxel-scene.js" async></script>\n<voxel-scene src="island.vxrb" alt="island">\n  <img src="island.png" alt="">\n</voxel-scene>';
+        step('its Embed row puts the tag on the clipboard inside the click', row && !st().fileMenu && tags.length === 1 && tags[0] === tag, JSON.stringify(tags));
+        await frames(2);
+        const tracing = st().render.export !== null;
+        for (let i = 0; i < 6000 && !zipName; i++) await frames(1);
+        const files = zipBlob ? unzip(new Uint8Array(await zipBlob.arrayBuffer())) : {};
+        const at = (n) => files['island-embed/' + n];
+        const names = Object.keys(files).join(',');
+        const want = ['index.html', 'island.vxrb', 'island.png', 'voxel-scene.js', 'vxr_embed.js', 'vxr_embed_bg.wasm'].map((n) => 'island-embed/' + n).join(',');
+        step('Embed traces the poster and downloads island-embed.zip, one folder of six files', tracing && zipName === 'island-embed.zip' && names === want, `${zipName} ${names} ${st().toast}`);
+        const served = await Promise.all(['voxel-scene.js', 'vxr_embed.js', 'vxr_embed_bg.wasm'].map(async (n) => new Uint8Array(await (await fetch('embed/' + n)).arrayBuffer())));
+        const viewer = ['voxel-scene.js', 'vxr_embed.js', 'vxr_embed_bg.wasm'].every((n, i) => at(n) && same(at(n), served[i]));
+        const wasm = at('vxr_embed_bg.wasm');
+        step('the zip carries the viewer as the site serves it', viewer && wasm && wasm.length > 100000 && wasm[1] === 0x61 && wasm[2] === 0x73 && wasm[3] === 0x6d, `${wasm && wasm.length} bytes of wasm`);
+        const page = at('index.html') ? new TextDecoder().decode(at('index.html')) : '';
+        const scene = at('island.vxrb');
+        const poster = at('island.png');
+        const pv = poster && new DataView(poster.buffer, poster.byteOffset);
+        step('with a page showing the tag, the scene as a brick scene file and a 1280x800 poster',
+          page.includes('<voxel-scene src="island.vxrb" alt="island">') && page.includes('<img src="island.png" alt="">')
+            && scene && String.fromCharCode(...scene.slice(0, 4)) === 'VXRB' && scene.length > 10000
+            && pv && pv.getUint32(16) === 1280 && pv.getUint32(20) === 800,
+          `${scene && scene.length} bytes of scene, poster ${pv && pv.getUint32(16)}x${pv && pv.getUint32(20)}`);
+        // Hand the folder to the check's server, which serves it back as a plain host would:
+        // crates/vxr-web/check opens its index.html next (check-embed.js).
+        const kept = await Promise.all(Object.keys(files).map(async (n) => (await fetch('/__embed/' + n, { method: 'PUT', body: files[n] })).status));
+        step('the check keeps the folder to open its page', kept.length === 6 && kept.every((k) => k === 204), JSON.stringify(kept));
+        zipName = null;
+        tags.length = 0;
+        await key('k', cmd);
+        for (const ch of 'embed') await key(ch);
+        await key('Enter');
+        for (let i = 0; i < 6000 && !zipName; i++) await frames(1);
+        step('Cmd-K Embed copies the tag and downloads it too', zipName === 'island-embed.zip' && tags.length === 1 && tags[0] === tag, `${zipName} ${JSON.stringify(tags)}`);
+      } finally {
+        if (navigator.clipboard && realWrite) navigator.clipboard.writeText = realWrite;
+      }
     } finally {
       URL.createObjectURL = realUrl;
       HTMLAnchorElement.prototype.click = realA;
@@ -1386,6 +1826,18 @@ async () => {
       step('redo moves it again', same(bytes(), moved));
       await key('ArrowRight');
       step('an arrow nudges the picked object', !same(bytes(), moved) && st().voxels === w0.voxels);
+      // Rotate from Cmd-K turns the picked object in place; four quarter turns are the same file.
+      const nudged = bytes();
+      const turn = async () => {
+        await key('k', cmd);
+        for (const ch of 'rotate y') await key(ch);
+        await key('Enter');
+      };
+      await turn();
+      s = st();
+      step("Cmd-K 'Rotate Y' turns the picked object and says so", !same(bytes(), nudged) && s.objects === 6 && s.models === w0.models && s.picked === name && s.toast === `Rotated ${name} about Y`, JSON.stringify([s.picked, s.toast, s.objects]));
+      for (let i = 0; i < 3; i++) await turn();
+      step('four quarter turns give back the same file', same(bytes(), nudged) && st().picked === name);
       await key('d', cmd);
       s = st();
       step('Cmd-D duplicates it with its own model and picks the copy', s.objects === 7 && s.models === w0.models + 1 && !!s.picked, JSON.stringify(s));
@@ -1509,6 +1961,49 @@ async () => {
     await key('Enter');
     step("Cmd-K 'Ungroup' takes it out again", st().tree.length === 8 && st().picked === 'slab', JSON.stringify(st()));
     for (let i = 0; i < 2; i++) await key('z', cmd);
+    // Cmd-click on a second row picks both; Cmd-G groups them as one undo step, and
+    // Backspace deletes them both as one undo step.
+    await pause();
+    await chip(`tree-${slab}`);
+    const treesRow = window.vxr.hit(`tree-${trees}`);
+    await click(treesRow[0], treesRow[1], cmd);
+    s = st();
+    const pickedSelected = s.selected;
+    step('Cmd-click on a second tree row picks both', JSON.stringify(s.picks) === JSON.stringify([slab, trees]) && s.treeOn === trees && s.selected > 0, JSON.stringify(s.picks));
+    await key('g', cmd);
+    s = st();
+    const pairRow = s.tree.find((r) => r.name === 'group 1');
+    step('Cmd-G groups both picked rows in one new group', s.tree.length === 9 && s.picked === 'group 1' && pairRow && pairRow.depth === 0 && s.tree.filter((r) => r.depth === 1 && (r.node === slab || r.node === trees)).length === 2 && s.selected === pickedSelected, JSON.stringify(s.tree));
+    await key('z', cmd);
+    step('grouping both picked rows is one undo step', st().tree.length === 8 && same(bytes(), worldFile));
+    await pause();
+    await chip(`tree-${slab}`);
+    await click(treesRow[0], treesRow[1], cmd);
+    await key('Backspace');
+    s = st();
+    step('Backspace deletes both picked rows', s.tree.length === 2 && s.picks.length === 0, JSON.stringify(s.tree));
+    await key('z', cmd);
+    step('deleting both picked rows is one undo step', st().tree.length === 8 && same(bytes(), worldFile));
+    await key('Escape');
+    // A drag of a tree row moves it in the tree (onto a group row: into the group), and
+    // Cmd-K steps the picked row down among its group, one undo step each.
+    const treeOrder = () => st().tree.map((r) => `${r.name}:${r.depth}`).join(',');
+    const treeOrder0 = treeOrder();
+    await pause();
+    const rowFrom = window.vxr.hit(`tree-${slab}`);
+    const rowTo = window.vxr.hit(`tree-${trees}`);
+    await drag(rowFrom[0], rowFrom[1], rowTo[0], rowTo[1]);
+    s = st();
+    step('a tree row dragged onto a group row goes into the group, in place', treeOrder() === 'trees:0,tree a:1,tree b:1,grove:1,tree c:2,slab:1,gem:0,lost gem:0' && s.picked === 'slab' && s.objects === 6 && !same(bytes(), worldFile) && window.vxr.hit('tree-drop').length === 0, treeOrder());
+    await key('z', cmd);
+    step('the row drag is one undo step', treeOrder() === treeOrder0 && same(bytes(), worldFile), treeOrder());
+    await pause();
+    await chip(`tree-${slab}`);
+    await key('k', cmd);
+    for (const ch of 'move down in scene') await key(ch);
+    await key('Enter');
+    step("Cmd-K 'Move down in scene tree' steps the picked row", treeOrder() === 'trees:0,tree a:1,tree b:1,grove:1,tree c:2,slab:0,gem:0,lost gem:0' && st().picked === 'slab', treeOrder());
+    await key('z', cmd);
     step('every group edit undone gives back the file', same(bytes(), worldFile), JSON.stringify(st()));
 
     // Layers: the LAYERS list, a layer's eye, a layer row click moving the picked object onto

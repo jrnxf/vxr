@@ -17,15 +17,37 @@ fn tool(a: &Action) -> Option<&'static str> {
         Action::Save => Some("save"),
         Action::Undo => Some("undo"),
         Action::Redo => Some("redo"),
-        Action::ExportObj | Action::ExportSlices | Action::ExportPng => Some("export"),
+        Action::ExportObj
+        | Action::ExportSlices
+        | Action::ExportSprite
+        | Action::ExportPalette(_)
+        | Action::ExportSelection
+        | Action::ExportPng
+        | Action::ExportTurntable
+        | Action::Embed => Some("export"),
         Action::Recolor { .. } => Some("palette_set"),
         Action::SetMaterial { .. } => Some("material_set"),
         Action::SwapColors(..) => Some("palette_swap"),
         Action::CopyColor { .. } => Some("palette_copy"),
+        // The palette's selection is `slots`, or `selection: true` for the used colours.
+        Action::ShiftColors(_) | Action::SelectUsedColors => Some("palette_adjust"),
+        Action::SortPalette(_) => Some("palette_sort"),
+        // The tool takes the file's text; the UI's file picker reads PNG too.
+        Action::ImportPalette => Some("palette_import"),
+        // The tool takes the PNG as base64; the UI's file picker reads the file.
+        Action::ImportImage => Some("image_import"),
+        // The tool takes the view's target, yaw, pitch and distance; the UI saves the camera's.
+        Action::SaveView(_) => Some("save_view"),
+        // In world mode rotate and flip turn the picked object: `transform_object`.
         Action::Transform(_) => Some("transform"),
         Action::SelectAll | Action::InvertSelection | Action::SelectColor | Action::Deselect => Some("select"),
+        // `selection: true` on box, line, sphere, circle, face and erase.
+        Action::BrushInside => Some("box"),
         Action::DeleteSelection => Some("delete"),
         Action::FillSelection => Some("fill"),
+        // `from_slot` on paint and on erase, with `selection: true` for the selection.
+        Action::ReplaceColor { .. } => Some("paint"),
+        Action::RemoveColor(_) => Some("erase"),
         Action::Hollow => Some("hollow"),
         Action::FillInterior => Some("fill_inside"),
         Action::Resize(_) => Some("resize"),
@@ -34,8 +56,11 @@ fn tool(a: &Action) -> Option<&'static str> {
         Action::ToggleWorld => Some("show_world"),
         Action::Duplicate { .. } => Some("duplicate"),
         Action::PickNode(_) => Some("edit_object"),
+        // Picking several rows is how the UI groups them at once; agents name them in `group`.
+        Action::PickAlso(_) => Some("group"),
         Action::SetHidden(..) | Action::ToggleHidden => Some("hide"),
         Action::Group => Some("group"),
+        Action::PlaceNode { .. } | Action::ShiftNode { .. } => Some("reorder"),
         Action::Ungroup => Some("ungroup"),
         Action::SetLayer(_) => Some("set_layer"),
         Action::SetLayerHidden(..) | Action::ToggleLayer => Some("hide_layer"),
@@ -50,11 +75,13 @@ fn tool(a: &Action) -> Option<&'static str> {
         | Action::Zoom(_)
         | Action::Snap(_)
         | Action::Ortho(_)
-        | Action::Embed
+        | Action::GoToView(_)
         // Closes the colour edit that `Recolor` and `SetMaterial` opened: tools are one step.
         | Action::CommitColor
         | Action::CancelExport
         | Action::Exported
+        | Action::Embedded
+        | Action::Turned
         | Action::PlaceBox
         | Action::CancelBox
         | Action::ApplyReview
@@ -103,18 +130,30 @@ fn with_tools() -> Vec<Action> {
         Action::Redo,
         Action::ExportObj,
         Action::ExportSlices,
+        Action::ExportSprite,
+        Action::ExportSelection,
         Action::ExportPng,
+        Action::ExportTurntable,
         Action::Recolor { slot: 1, rgba: [0; 4] },
         Action::SetMaterial { slot: 1, material: Material::default() },
         Action::SwapColors(1, 2),
         Action::CopyColor { from: 1, to: 2 },
+        Action::ShiftColors(vxr_core::palette::Shift::default()),
+        Action::SelectUsedColors,
+        Action::SortPalette(vxr_core::palette::SortKey::Hue),
+        Action::ExportPalette(false),
+        Action::ImportPalette,
+        Action::ImportImage,
         Action::Transform(Transform::Rotate(0)),
         Action::SelectAll,
         Action::InvertSelection,
         Action::SelectColor,
+        Action::BrushInside,
         Action::Deselect,
         Action::DeleteSelection,
         Action::FillSelection,
+        Action::ReplaceColor { from: 1, to: 2 },
+        Action::RemoveColor(1),
         Action::Hollow,
         Action::FillInterior,
         Action::Resize([1, 1, 1]),
@@ -123,9 +162,12 @@ fn with_tools() -> Vec<Action> {
         Action::ToggleWorld,
         Action::Duplicate { linked: false },
         Action::PickNode(1),
+        Action::PickAlso(1),
         Action::SetHidden(1, true),
         Action::ToggleHidden,
         Action::Group,
+        Action::PlaceNode { node: 1, parent: 0, before: None },
+        Action::ShiftNode { down: true },
         Action::Ungroup,
         Action::SetLayer(0),
         Action::SetLayerHidden(0, true),

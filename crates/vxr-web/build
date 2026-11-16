@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build the browser editor as a static site in crates/vxr-web/dist/ (git-ignored):
 # the wasm (profile wasm, wasm-opt -Oz), the page and its icons, the UI fonts with their licences, the
+# embed viewer (crates/vxr-embed/build, its three files in embed/, which the Embed command packs), the
 # prototype's island as scene.vox, the landing page and the account page (site/, Preact pre-rendered with Vite from the npm
 # packages in package.json). Serve dist/ from any static host (the account page needs the Worker,
 # see wrangler.jsonc); deploy with ./deploy. TURNSTILE_SITE_KEY sets the Turnstile site key of the
@@ -31,6 +32,10 @@ VITE_CONFIG_NATIVE_IGNORE_WARNING=true "$here/node_modules/.bin/vite" build "$he
 # /about is the same page with the landing forced on (www/gate.js reads the path).
 cp "$dist/index.html" "$dist/about.html"
 cp "$fonts"/*.ttf "$fonts"/*.txt "$dist/fonts/"
+# The embed viewer, which Embed fetches and packs into its zip.
+"$root/crates/vxr-embed/build"
+mkdir -p "$dist/embed"
+cp "$root/crates/vxr-embed/dist"/voxel-scene.js "$root/crates/vxr-embed/dist"/vxr_embed.js "$root/crates/vxr-embed/dist"/vxr_embed_bg.wasm "$dist/embed/"
 site_key="${TURNSTILE_SITE_KEY:-1x00000000000000000000AA}"
 [[ "$site_key" =~ ^[0-9A-Za-z_-]+$ ]] || { echo "build: TURNSTILE_SITE_KEY has unexpected characters" >&2; exit 1; }
 node -e "

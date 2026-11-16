@@ -1,10 +1,12 @@
 //! The editing tools: each brush on a small scene, mirror, and one undo step per gesture.
 
+use proptest::prelude::*;
 use vxr_core::Scene;
+use vxr_core::select::Mode;
 use vxr_core::tools::{Brush, Press, Shape, Target, Tool, plane_cell};
 
 fn brush(tool: Tool, shape: Shape) -> Brush {
-    Brush { tool, shape, mirror: [false; 3], lock: None, color: 7, size: 1 }
+    Brush { tool, shape, mirror: [false; 3], lock: None, color: 7, size: 1, inside: false }
 }
 
 /// A 4x1x4 slab of colour 3 at y = 0, with a 1x1 bump of colour 5 on top at (0, 1, 0).
@@ -395,4 +397,219 @@ fn a_stroke_or_line_dragged_far_off_the_map_changes_only_the_map_and_stays_fast(
     let far = run(stroke, [100_000, 0, 100_000]);
     assert_eq!(far, run(stroke, [40, 0, 40]), "past 40 no 16-cube reaches the map");
     assert!(far.len() > 32 * 16);
+}
+
+/// Catches: a mirrored paint coloured the mirror image of a voxel even where that cell was
+/// empty, so painting one side of a lopsided model grew voxels on the other.
+#[test]
+fn a_mirrored_paint_or_erase_never_fills_an_empty_mirror_cell() {
+    let mut s = slab();
+    // The slab spans x 0..4, so the mirror of x 0 across the pivot is outside it.
+    let image = s.mirror_x([0, 0, 2]);
+    assert_eq!(s.map.get(image[0], image[1], image[2]), 0);
+    let before = s.map.voxels;
+    let b = Brush { mirror: [true, false, false], ..brush(Tool::Paint, Shape::Voxel) };
+    assert_eq!(drag(&mut s, b, top([0, 0, 2], 3), &[]), 1);
+    assert_eq!((s.map.get(0, 0, 2), s.map.get(image[0], image[1], image[2])), (7, 0));
+    assert_eq!(s.map.voxels, before);
+}
+
+/// The face brush with the region option: erase takes only the selected part of the face,
+/// add still builds on the whole face, and the erased voxels leave the selection.
+#[test]
+fn the_face_brush_erases_only_selected_voxels_and_adds_everywhere() {
+    let mut s = slab();
+    s.select([[1, 0, 1], [2, 0, 1]], Mode::Replace);
+    let inside = |tool| Brush { inside: true, ..brush(tool, Shape::Face) };
+    let Press::Done(n) = s.press(inside(Tool::Add), top([3, 0, 3], 3)) else { panic!() };
+    assert_eq!(n, 15, "add covers the face's 15 open cells, selected or not");
+    assert!(s.undo());
+    let Press::Done(n) = s.press(inside(Tool::Erase), top([3, 0, 3], 3)) else { panic!() };
+    assert_eq!(n, 2);
+    assert_eq!((s.map.get(1, 0, 1), s.map.get(2, 0, 1), s.map.get(3, 0, 3)), (0, 0, 3));
+    assert_eq!(s.selected_count(), 0);
+    assert!(s.undo());
+    assert_eq!((s.map.voxels, s.selected_count()), (17, 2), "one undo step gives back voxels and selection");
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: std::env::var("PROPTEST_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(256),
+        ..ProptestConfig::default()
+    })]
+
+    /// The region option on any erase or paint drag (every shape, any mirror, any brush
+    /// size): each selected cell ends as the same drag without the option leaves it and
+    /// each other cell is untouched. With nothing selected, and for add, the option
+    /// changes nothing.
+    #[test]
+    fn a_limited_brush_changes_selected_cells_as_the_free_brush_does_and_no_others(
+        // Cells on both sides of the mirror planes and a brick edge (8); the flag is "selected".
+        model in prop::collection::btree_map((4i32..12, 4i32..12, 4i32..12), (1u8..=6, any::<bool>()), 1..160),
+        none_selected in prop::bool::weighted(0.15),
+        tool in prop::sample::select(vec![Tool::Erase, Tool::Paint, Tool::Add]),
+        shape in prop::sample::select(vec![Shape::Voxel, Shape::Box, Shape::Line, Shape::Circle, Shape::Sphere]),
+        mirror in any::<[bool; 3]>(),
+        size in 1u8..=3,
+        from in (4i32..12, 4i32..12, 4i32..12),
+        moves in prop::collection::vec((2i32..14, 2i32..14, 2i32..14), 0..4),
+    ) {
+        let run = |inside: bool| {
+            let mut s = Scene::new([16, 16, 16]);
+            // Every axis mirrors q to 15 - q.
+            (s.origin, s.pivot) = ([0; 3], [16; 3]);
+            s.edit(model.iter().map(|(&(x, y, z), &(v, _))| ([x, y, z], v)));
+            if !none_selected {
+                s.select(model.iter().filter(|c| c.1.1).map(|(&(x, y, z), _)| [x, y, z]), Mode::Replace);
+            }
+            let selected: Vec<[i32; 3]> = s.selection().collect();
+            let before = cells(&s);
+            let b = Brush { mirror, size, inside, ..brush(tool, shape) };
+            let from = [from.0, from.1, from.2];
+            let t = Target { voxel: from, normal: [0, 1, 0], value: s.map.get(from[0], from[1], from[2]), ground: false };
+            let moves: Vec<[i32; 3]> = moves.iter().map(|&(x, y, z)| [x, y, z]).collect();
+            drag(&mut s, b, t, &moves);
+            let after = (0..16).flat_map(|x| (0..16).flat_map(move |y| (0..16).map(move |z| [x, y, z])));
+            let after: Vec<u8> = after.map(|p| s.map.get(p[0], p[1], p[2])).collect();
+            (selected, before, after, s)
+        };
+        let (_, _, free, _) = run(false);
+        let (selected, before, limited, mut s) = run(true);
+        let all = (0..16).flat_map(|x| (0..16).flat_map(move |y| (0..16).map(move |z| [x, y, z])));
+        for (k, p) in all.enumerate() {
+            let was = before.iter().find(|c| c.0 == p).map_or(0, |c| c.1);
+            let want = if tool == Tool::Add || selected.is_empty() || selected.contains(&p) { free[k] } else { was };
+            prop_assert_eq!(limited[k], want, "cell {:?}", p);
+        }
+        // The limited drag is still one undo step.
+        if cells(&s) != before {
+            prop_assert!(s.undo());
+        }
+        prop_assert_eq!(cells(&s), before);
+    }
+}
+
+/// A 4x4x4 block of colour 3 at 10..14 on every axis, with an L of three voxels on the
+/// clipboard: 8 at its low corner, 9 beside it on +x and 6 above it (a 2x2x1 box).
+fn block_with_an_l_copied() -> Scene {
+    let mut s = Scene::new([32, 32, 32]);
+    s.edit([([20, 0, 20], 8), ([21, 0, 20], 9), ([20, 1, 20], 6)]);
+    s.select_all();
+    assert_eq!(s.copy_selection(), 3);
+    s.delete_selection();
+    let block = (10..14).flat_map(|x| (10..14).flat_map(move |y| (10..14).map(move |z| ([x, y, z], 3))));
+    s.edit(block);
+    s
+}
+
+/// What differs from the 4x4x4 block: each changed cell with its slot now.
+fn off_block(s: &Scene) -> Vec<([i32; 3], u8)> {
+    let mut out = Vec::new();
+    for x in 0..32 {
+        for y in 0..32 {
+            for z in 0..32 {
+                let block = [x, y, z].iter().all(|k| (10..14).contains(k));
+                let v = s.map.get(x, y, z);
+                if v != if block { 3 } else { 0 } {
+                    out.push(([x, y, z], v));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Catches: the stamp set on the wrong side of the face (inside the wall for add, in the
+/// air for erase), not centred, or keyed to one colour instead of the copy's own.
+#[test]
+fn pattern_brush_stamps_the_copy_against_the_pressed_face() {
+    let face = |voxel, normal| Target { voxel, normal, value: 3, ground: false };
+    let rows = [
+        // Add stands the copy on a top face, where Paste would put it.
+        (Tool::Add, face([12, 13, 12], [0, 1, 0]), vec![([11, 14, 12], 8), ([11, 15, 12], 6), ([12, 14, 12], 9)]),
+        // On a side face it grows out of the wall, not turned, centred on the pressed cell.
+        (Tool::Add, face([10, 11, 12], [-1, 0, 0]), vec![([8, 10, 12], 8), ([8, 11, 12], 6), ([9, 10, 12], 9)]),
+        (Tool::Add, face([12, 11, 13], [0, 0, 1]), vec![([11, 10, 14], 8), ([11, 11, 14], 6), ([12, 10, 14], 9)]),
+        // Erase and paint go into the face.
+        (Tool::Erase, face([12, 13, 12], [0, 1, 0]), vec![([11, 12, 12], 0), ([11, 13, 12], 0), ([12, 12, 12], 0)]),
+        (Tool::Paint, face([12, 13, 12], [0, 1, 0]), vec![([11, 12, 12], 8), ([11, 13, 12], 6), ([12, 12, 12], 9)]),
+        // At an edge, erase and paint leave the empty cells the copy covers empty.
+        (Tool::Paint, face([10, 13, 12], [0, 1, 0]), vec![([10, 12, 12], 9)]),
+        (Tool::Erase, face([10, 13, 12], [0, 1, 0]), vec![([10, 12, 12], 0)]),
+    ];
+    for (tool, t, want) in rows {
+        let mut s = block_with_an_l_copied();
+        let n = drag(&mut s, brush(tool, Shape::Pattern), t, &[]);
+        assert_eq!((off_block(&s), n), (want.clone(), want.len()), "{tool:?} at {t:?}");
+        assert!(s.undo());
+        assert_eq!(off_block(&s), [], "{tool:?}: one undo step");
+    }
+}
+
+#[test]
+fn pattern_brush_moves_with_the_drag_and_needs_a_copy() {
+    // Catches: a drag leaving a stamp at every cell it crossed (it is one stamp, moved).
+    let mut s = block_with_an_l_copied();
+    let t = Target { voxel: [12, 13, 12], normal: [0, 1, 0], value: 3, ground: false };
+    let Press::Drag(mut g) = s.press(brush(Tool::Add, Shape::Pattern), t) else { panic!("expected a drag") };
+    assert_eq!(g.extent(), ([11, 14, 12], [12, 15, 12]));
+    g.move_to(&mut s, [11, 14, 11]);
+    g.move_to(&mut s, [20, 14, 10]);
+    assert_eq!(g.extent(), ([19, 14, 10], [20, 15, 10]));
+    assert_eq!(g.release(&mut s), 3);
+    assert_eq!(off_block(&s), [([19, 14, 10], 8), ([19, 15, 10], 6), ([20, 14, 10], 9)]);
+    // The region option limits an erase to the selected voxels.
+    s.undo();
+    s.select([[11, 12, 12]], Mode::Replace);
+    let inside = Brush { inside: true, ..brush(Tool::Erase, Shape::Pattern) };
+    assert_eq!(drag(&mut s, inside, t, &[]), 1);
+    assert_eq!(off_block(&s), [([11, 12, 12], 0)]);
+    // With an empty clipboard the press says so and changes nothing.
+    let mut s = slab();
+    let before = cells(&s);
+    assert!(matches!(s.press(brush(Tool::Add, Shape::Pattern), top([1, 0, 1], 3)), Press::NoPattern));
+    assert_eq!(cells(&s), before);
+}
+
+proptest! {
+    /// Any copy stamped on any face of an empty scene: the stamp is the copy, voxel for
+    /// voxel, it lies wholly in front of the face and touches it, and the pressed cell is
+    /// at its middle across the face (within the one cell an even size leaves).
+    #[test]
+    fn a_stamp_is_the_copy_set_in_front_of_the_face(
+        copy in prop::collection::btree_map((0i32..5, 0i32..5, 0i32..5), 1u8..=6, 1..40),
+        voxel in (10i32..20, 10i32..20, 10i32..20),
+        axis in 0usize..3,
+        positive in any::<bool>(),
+    ) {
+        let mut s = Scene::new([32, 32, 32]);
+        s.edit(copy.iter().map(|(&(x, y, z), &v)| ([x, y, z], v)));
+        s.select_all();
+        s.copy_selection();
+        s.delete_selection();
+        let low = |cells: Vec<([i32; 3], u8)>| {
+            let lo: [i32; 3] = std::array::from_fn(|a| cells.iter().map(|c| c.0[a]).min().unwrap());
+            let hi: [i32; 3] = std::array::from_fn(|a| cells.iter().map(|c| c.0[a]).max().unwrap());
+            let rel: Vec<_> = cells.iter().map(|&(p, v)| (std::array::from_fn::<i32, 3, _>(|a| p[a] - lo[a]), v)).collect();
+            (rel, lo, hi)
+        };
+        let (want, _, _) = low(copy.iter().map(|(&(x, y, z), &v)| ([x, y, z], v)).collect());
+        let voxel = [voxel.0, voxel.1, voxel.2];
+        let mut normal = [0; 3];
+        normal[axis] = if positive { 1 } else { -1 };
+        let t = Target { voxel, normal, value: 0, ground: false };
+        prop_assert_eq!(drag(&mut s, brush(Tool::Add, Shape::Pattern), t, &[]), copy.len());
+        let (got, lo, hi) = low(cells(&s));
+        prop_assert_eq!(got, want);
+        for a in 0..3 {
+            if a == axis {
+                let (near, far) = if positive { (lo[a], hi[a]) } else { (hi[a], lo[a]) };
+                prop_assert_eq!(near, voxel[a] + normal[a], "touches the face");
+                prop_assert!((far - voxel[a]) * normal[a] >= 1, "in front of the face");
+            } else {
+                let (below, above) = (voxel[a] - lo[a], hi[a] - voxel[a]);
+                prop_assert!(below >= 0 && above >= 0 && (below - above).abs() <= 1, "centred on axis {}: {} {}", a, below, above);
+            }
+        }
+    }
 }

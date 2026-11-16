@@ -27,10 +27,11 @@ pub struct MaterialChange {
     pub new: Material,
 }
 
-/// One saved camera that an edit changed (the id is the same in both).
+/// One saved camera that an edit changed (the id is the same in both). `old` is None for a
+/// camera the edit added.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CameraChange {
-    pub old: Camera,
+    pub old: Option<Camera>,
     pub new: Camera,
 }
 

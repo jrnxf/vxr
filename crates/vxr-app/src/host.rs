@@ -30,7 +30,7 @@ use vxr_render::Gpu;
 
 use crate::Editor;
 use crate::editor::Button;
-use crate::files::{File, obj_files, slices_png, vox_bytes};
+use crate::files::{File, obj_files, palette_png, slices_png, sprite_png, vox_bytes};
 use crate::projects::{Project, Read, THUMB, content_hash};
 use crate::sync::{Auth, Event, Reply};
 use crate::ui::{Action, FontBytes};
@@ -97,6 +97,9 @@ pub trait Platform {
     /// Write one PNG, suggesting `name`; returns the name it was given.
     fn save_png(&mut self, name: &str, bytes: &[u8]) -> Result<Option<String>, String>;
 
+    /// Write one text file, suggesting `name`; returns the name it was given.
+    fn save_text(&mut self, name: &str, text: &str) -> Result<Option<String>, String>;
+
     /// Write several files built from a name stem (suggesting `stem`): `make` builds them
     /// for the stem the user ended up choosing. Returns the main file's name.
     fn save_all(
@@ -122,6 +125,18 @@ pub trait Platform {
     /// Keep the desktop app's session token for the next start (Some), or delete it (None).
     fn keep_session(&mut self, _token: Option<&str>) {}
 
+    /// Ask for a palette file to import (a PNG or text): its name and bytes. A browser
+    /// answers later, as [`Platform::pick_open`] does, and the page hands the file to [`Editor::import_palette`].
+    fn pick_palette(&mut self) -> Result<Option<(String, Vec<u8>)>, String> {
+        Err("there is no file picker here".into())
+    }
+
+    /// Ask for a PNG image to import as voxels: its name and bytes. A browser answers later,
+    /// as [`Platform::pick_palette`] does, and the page hands the file to [`Editor::import_image`].
+    fn pick_image(&mut self) -> Result<Option<(String, Vec<u8>)>, String> {
+        Err("there is no file picker here".into())
+    }
+
     /// Write the scene's `.vox` bytes as a copy named `name` (a download in the browser, a save
     /// dialog on the desktop); returns the name it was given.
     fn export_vox(&mut self, _name: &str, _bytes: &[u8]) -> Result<Option<String>, String> {
@@ -131,6 +146,13 @@ pub trait Platform {
     /// Save the library's export, a zip of its `.vox` files, as `name` (a download, or a
     /// file the user picks); returns the name it was given, or None when the user cancelled.
     fn save_zip(&mut self, _name: &str, _bytes: &[u8]) -> Result<Option<String>, String> {
+        Err("there is no download here".into())
+    }
+
+    /// Write an export's files (an embed, a turntable's frames) as a new folder named `name`
+    /// where the user picks (one zip named `name` in the browser); returns the name it was
+    /// given, or None when the user cancelled.
+    fn save_folder(&mut self, _name: &str, _files: &[File]) -> Result<Option<String>, String> {
         Err("there is no download here".into())
     }
 
@@ -266,31 +288,113 @@ pub fn run_action(ed: &mut Editor, p: &mut dyn Platform, action: Action) {
                 Err(e) => toast(ed, format!("Could not download: {e}")),
             }
         }
-        Action::Embed => toast(ed, "The embed export is not built yet".into()),
+        Action::Embed => {
+            // Asked before the picture is traced: a build without the viewer says so at
+            // once, and a browser starts fetching it now.
+            match ed.viewer() {
+                Ok(_) => {
+                    let _ = ed.start_embed();
+                }
+                Err(e) => toast(ed, format!("Could not embed: {e}")),
+            }
+        }
+        Action::Embedded => {
+            let Some(poster) = ed.embedded.take() else { return };
+            let viewer = match ed.viewer() {
+                Ok(Some(viewer)) => viewer,
+                Ok(None) => {
+                    // Still on their way: the page asks again when they land.
+                    ed.embedded = Some(poster);
+                    return;
+                }
+                Err(e) => return toast(ed, format!("Could not embed: {e}")),
+            };
+            let name = &ed.ui.scene_name;
+            let folder = format!("{}-embed", crate::files::embed_stem(name));
+            let written = crate::files::embed_files(&ed.scene, name, poster, viewer)
+                .and_then(|files| Ok((p.save_folder(&folder, &files)?, files.len())));
+            match written {
+                Ok((Some(name), files)) => {
+                    toast(ed, format!("{} {name} ({files} files). Its index.html shows the tag to paste.", p.verb()))
+                }
+                Ok((None, _)) => {}
+                Err(e) => toast(ed, format!("Could not embed: {e}")),
+            }
+        }
+        Action::ExportSelection => {
+            let now = ed.ui.toggle_export_selection();
+            toast(ed, now);
+        }
         Action::ExportObj => {
             let mut quads = 0;
             let scene = &ed.scene;
-            let made = p.save_all(&ed.export_stem(), &mut |stem| {
-                obj_files(scene, stem).map(|(files, q)| {
+            let (only, part) = (ed.exports_selection(), ed.export_part());
+            let made = p.save_all(&ed.part_stem(only.is_some()), &mut |stem| {
+                obj_files(scene, stem, only.as_deref()).map(|(files, q)| {
                     quads = q;
                     files
                 })
             });
             match made {
-                Ok(Some(name)) => toast(ed, format!("{} {name} ({quads} quads)", p.verb())),
+                Ok(Some(name)) => toast(ed, format!("{} {name} ({part}{quads} quads)", p.verb())),
                 Ok(None) => {}
                 Err(e) => toast(ed, format!("Could not export: {e}")),
             }
         }
         Action::ExportSlices => {
-            let written = slices_png(&ed.scene)
+            let part = ed.export_part();
+            let written = slices_png(&ed.scene, ed.exports_selection().as_deref())
                 .and_then(|(png, size, layers)| Ok((p.save_png(&ed.slices_name(), &png)?, size, layers)));
             match written {
                 Ok((Some(name), [w, h], layers)) => {
-                    toast(ed, format!("{} {name} ({layers} layers, {w}×{h})", p.verb()))
+                    toast(ed, format!("{} {name} ({part}{layers} layers, {w}×{h})", p.verb()))
                 }
                 Ok((None, ..)) => {}
                 Err(e) => toast(ed, format!("Could not export: {e}")),
+            }
+        }
+        Action::ExportSprite => {
+            let part = ed.export_part();
+            let written = sprite_png(&ed.scene, ed.exports_selection().as_deref())
+                .and_then(|(png, size)| Ok((p.save_png(&ed.sprite_name(), &png)?, size)));
+            match written {
+                Ok((Some(name), [w, h])) => toast(ed, format!("{} {name} ({part}{w}×{h}, transparent)", p.verb())),
+                Ok((None, _)) => {}
+                Err(e) => toast(ed, format!("Could not export: {e}")),
+            }
+        }
+        Action::ImportPalette => match p.pick_palette() {
+            Ok(Some((name, bytes))) => ed.import_palette(&name, &bytes),
+            Ok(None) => {}
+            Err(e) => toast(ed, format!("Could not import a palette: {e}. Try Import palette again")),
+        },
+        Action::ImportImage => match p.pick_image() {
+            Ok(Some((name, bytes))) => ed.import_image(&name, &bytes),
+            Ok(None) => {}
+            Err(e) => toast(ed, format!("Could not import an image: {e}. Try Import image again")),
+        },
+        Action::ExportPalette(text) => {
+            let written = if text {
+                p.save_text(&ed.palette_name("hex"), &vxr_core::palette::hex(&ed.scene.palette))
+            } else {
+                palette_png(&ed.scene).and_then(|png| p.save_png(&ed.palette_name("png"), &png))
+            };
+            match written {
+                Ok(Some(name)) if text => toast(ed, format!("{} {name} (255 colors, one per line)", p.verb())),
+                Ok(Some(name)) => toast(ed, format!("{} {name} (256×1, slot 1 first)", p.verb())),
+                Ok(None) => {}
+                Err(e) => toast(ed, format!("Could not export the palette: {e}. Try the export again")),
+            }
+        }
+        Action::Turned => {
+            let Some(frames) = ed.turned.take() else { return };
+            let n = frames.len();
+            let saved = crate::files::turntable_files(&ed.ui.scene_name, frames)
+                .and_then(|(folder, files)| p.save_folder(&folder, &files));
+            match saved {
+                Ok(Some(name)) => toast(ed, format!("{} {name} ({n} frames and the animation)", p.verb())),
+                Ok(None) => {}
+                Err(e) => toast(ed, format!("Could not save the turntable: {e}. Try the export again")),
             }
         }
         Action::Exported => {

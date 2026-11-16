@@ -6,6 +6,7 @@ use glam::Vec3;
 use vxr_core::Scene;
 use vxr_core::history::At;
 use vxr_core::material::Material;
+use vxr_core::palette::SortKey;
 use vxr_core::scene::SplitError;
 use vxr_core::select::{Mode, MoveDrag, Transform};
 use vxr_core::tools::{Brush, Gesture, Press, Shape, Target, Tool, plane_cell};
@@ -86,6 +87,9 @@ enum CamDrag {
     Pan,
 }
 
+/// Where a host finds the embed viewer's files (see [`Editor::viewer`]).
+pub type ViewerSource = Box<dyn FnMut() -> Result<Option<Vec<crate::files::File>>, String>>;
+
 pub struct Editor {
     pub gpu: Gpu,
     pub scene: Scene,
@@ -161,6 +165,10 @@ pub struct Editor {
     pub export: Option<Export>,
     /// The last finished export's PNG and size, for the host to save or download.
     pub exported: Option<(Vec<u8>, (u32, u32))>,
+    /// The last finished embed poster (a PNG), for the host to write with the embed folder.
+    pub embedded: Option<Vec<u8>>,
+    /// The last finished turntable's frames (PNGs, in order), for the host to write as a folder.
+    pub turned: Option<Vec<Vec<u8>>>,
     /// Files a terminal agent's `export` made, for the host to hand over with its answer (the
     /// desktop app writes them into Downloads, the browser downloads them).
     pub agent_files: Vec<crate::files::File>,
@@ -169,6 +177,17 @@ pub struct Editor {
     agent_render: Option<u64>,
     /// How that export ended, once it did.
     agent_rendered: Option<Result<String, String>>,
+    /// The traced poster of an agent's embed (`export` with kind embed), until the viewer's
+    /// files are here and the folder is made ([`Editor::take_agent_render`]).
+    agent_poster: Option<Vec<u8>>,
+    /// The folder [`Editor::agent_files`] go into as one (an agent's embed) instead of as
+    /// loose files.
+    pub agent_folder: Option<String>,
+    /// The cells [`Editor::agent_files`] were made from, when they are an export of the
+    /// agent's selection only.
+    pub agent_selection: Option<Vec<[i32; 3]>>,
+    /// Where the embed viewer's files come from, set by the host ([`Editor::viewer`]).
+    pub embed_viewer: Option<ViewerSource>,
     /// Export sizes this GPU can render.
     export_fits: [bool; 4],
     /// The scene's map replacements and origin the GPU map was built at (see `Scene::reshapes`).
@@ -229,6 +248,7 @@ fn review_allows(a: &Action) -> bool {
             | Action::Zoom(_)
             | Action::Snap(_)
             | Action::Ortho(_)
+            | Action::GoToView(_)
             | Action::CancelExport
             | Action::ApplyReview
             | Action::DiscardReview
@@ -320,9 +340,15 @@ impl Editor {
             frame_at: (0.0, 0.0),
             export: None,
             exported: None,
+            embedded: None,
+            turned: None,
             agent_files: Vec::new(),
             agent_render: None,
             agent_rendered: None,
+            agent_poster: None,
+            agent_folder: None,
+            agent_selection: None,
+            embed_viewer: None,
             export_fits: [false; 4],
             shape: (0, [0; 3]),
             last_object: None,
@@ -374,6 +400,9 @@ impl Editor {
         self.preview.set_materials(&self.gpu.queue, &self.materials);
         self.preview.restart();
         self.export = None;
+        self.embedded = None;
+        self.turned = None;
+        self.agent_poster = None;
         self.shape = (scene.reshapes(), scene.origin);
         self.scene = scene;
         self.last_object = None;
@@ -771,6 +800,24 @@ impl Editor {
         self.cam.pitch = (back.y / self.cam.distance).clamp(-1.0, 1.0).asin();
     }
 
+    /// The armed focus pick: put the voxel (or ground) under pixel `p` in focus, as the Render
+    /// panel's focus. A click on nothing keeps it armed for another try.
+    pub fn focus_at(&mut self, p: [f32; 2]) {
+        let (o, d) = self.ray(p);
+        let Some(f) = self.scene.target(o, d).and_then(|t| crate::render::focus_on(&self.cam, t.voxel)) else {
+            self.ui.toast(&self.ctx, "Nothing there to focus on: click a voxel or the ground, or press Esc");
+            return;
+        };
+        self.ui.focus_pick = false;
+        self.ui.render.focus = f;
+        let off = if self.ui.render.blur <= 0.0 {
+            ". Depth of field is off: raise it in the Render panel to see the blur"
+        } else {
+            ""
+        };
+        self.ui.toast(&self.ctx, format!("Focus set to {f:.2}× target{off}"));
+    }
+
     /// How much of the scene's box the view shows: the share of its projected rectangle on
     /// screen, and its height as a share of the view's (for the checks).
     pub fn scene_in_view(&self) -> (f32, f32) {
@@ -817,6 +864,30 @@ impl Editor {
         (if area > 0.0 { shown / area } else { 0.0 }, (y1.min(1.0) - y0.max(-1.0)).max(0.0) / 2.0)
     }
 
+    /// Move the camera to the view saved in slot `slot` (0 to 9). False, leaving the camera,
+    /// when the slot is empty.
+    pub fn go_to_view(&mut self, slot: i32) -> bool {
+        let Some(v) = self.scene.saved_view(slot) else { return false };
+        let o = self.scene.origin.map(|a| a as f32);
+        self.cam.target = Vec3::from(v.target) - Vec3::from(o);
+        (self.cam.yaw, self.cam.pitch, self.cam.distance, self.cam.ortho) = (v.yaw, v.pitch, v.distance, v.ortho);
+        true
+    }
+
+    /// Save the camera's view into slot `slot` (0 to 9) as one undo step.
+    pub fn save_view(&mut self, slot: i32) -> bool {
+        let o = self.scene.origin.map(|a| a as f32);
+        let c = &self.cam;
+        let v = vxr_core::views::SavedView {
+            target: (c.target + Vec3::from(o)).into(),
+            yaw: c.yaw,
+            pitch: c.pitch,
+            distance: c.distance,
+            ortho: c.ortho,
+        };
+        self.scene.save_view(slot, v, c.fov_y.to_degrees())
+    }
+
     /// Back to the starting view: the home angle in perspective, framing the scene.
     pub fn reset_camera(&mut self) {
         let (lo, hi) = self.scene_box();
@@ -854,6 +925,7 @@ impl Editor {
             lock: self.ui.lock,
             color: self.ui.slot,
             size: self.ui.size,
+            inside: self.ui.inside,
         }
     }
 
@@ -967,6 +1039,12 @@ impl Editor {
         {
             return;
         }
+        if b == Button::Left && self.ui.focus_pick {
+            if let Some(p) = self.pointer {
+                self.focus_at(p);
+            }
+            return;
+        }
         // As MagicaVoxel: X-click orbits around the voxel clicked from then on.
         if b == Button::Left && self.ctx.input(|i| i.key_down(egui::Key::X)) {
             if let Some(p) = self.pointer {
@@ -1010,6 +1088,7 @@ impl Editor {
             }
             Press::Drag(g) => self.gesture = Some(g),
             Press::Done(_) => self.tour_drew(),
+            Press::NoPattern => self.ui.toast(&self.ctx, "Copy a selection first: the pattern brush stamps it"),
             Press::Nothing => {}
         }
     }
@@ -1084,6 +1163,10 @@ impl Editor {
     /// say to Tab into an object first.
     fn world_action(&mut self, a: Action) {
         let picked = self.scene.picked();
+        let picks = self.scene.picks();
+        if picks.len() > 1 {
+            return self.world_action_on_picks(a, picks);
+        }
         let s = &mut self.scene;
         match (a, picked) {
             (Action::Deselect, _) => {
@@ -1093,6 +1176,18 @@ impl Editor {
                 if s.edit_world(|w| w.move_by(i, d)).is_err() {
                     self.ui.toast(&self.ctx, "No room in the scene for that");
                 }
+            }
+            (Action::Transform(t @ (Transform::Rotate(axis) | Transform::Flip(axis))), Some(i)) => {
+                let name = node_name(s.world().unwrap(), i);
+                let turn = matches!(t, Transform::Rotate(_));
+                let axis = ["X", "Y", "Z"][axis.min(2)];
+                let msg = match s.edit_world(|w| w.transform(i, t)) {
+                    Ok(true) if turn => format!("Rotated {name} about {axis}"),
+                    Ok(true) => format!("Flipped {name} on {axis}"),
+                    Ok(false) => format!("{name} holds no object to turn"),
+                    Err(_) => "No room in the scene for that".to_string(),
+                };
+                self.ui.toast(&self.ctx, msg);
             }
             (Action::DeleteSelection, Some(i)) => {
                 let name = node_name(s.world().unwrap(), i);
@@ -1130,13 +1225,65 @@ impl Editor {
             }
             (
                 Action::Duplicate { .. }
-                | Action::Transform(Transform::Move(_))
+                | Action::Transform(Transform::Move(_) | Transform::Rotate(_) | Transform::Flip(_))
                 | Action::DeleteSelection
                 | Action::Group
                 | Action::Ungroup,
                 None,
             ) => self.ui.toast(&self.ctx, "Click an object to pick it first"),
             _ => self.ui.toast(&self.ctx, "Tab into an object to edit its voxels"),
+        }
+    }
+
+    /// A selection action in world mode with several rows picked (Cmd-click in the tree):
+    /// Group puts them in one new group, Delete removes them all and Deselect picks nothing,
+    /// each one undo step. Other actions say to pick one row.
+    fn world_action_on_picks(&mut self, a: Action, picks: Vec<usize>) {
+        let s = &mut self.scene;
+        let n = picks.len();
+        let msg = match a {
+            Action::Deselect => {
+                s.pick(None);
+                return;
+            }
+            Action::Group => match s.edit_world(|w| w.group(&picks)) {
+                Ok(Some(g)) => {
+                    s.pick(Some(g));
+                    format!("Grouped {n} as {}", node_name(s.world().unwrap(), g))
+                }
+                _ => "Pick rows of one group to group them: drag a row in first to move it".to_string(),
+            },
+            Action::DeleteSelection => {
+                // A picked row under another picked row goes with it.
+                let gone = s.edit_world(|w| {
+                    let mut gone = 0;
+                    for &i in &picks {
+                        gone += usize::from(w.in_tree(i) && w.remove(i));
+                    }
+                    gone
+                });
+                match gone {
+                    Ok(k) if k > 0 => format!("Deleted {n} objects and groups"),
+                    _ => return,
+                }
+            }
+            _ => "Click one row to pick only it: ⌘G, ⌫ and H act on all picked rows".to_string(),
+        };
+        self.ui.toast(&self.ctx, msg);
+    }
+
+    /// Hide every picked row, or show them all when the last picked one is hidden (H with
+    /// several rows picked), as one undo step.
+    fn hide_picks(&mut self) {
+        let (picks, Some(w)) = (self.scene.picks(), self.scene.world()) else { return };
+        let Some(&last) = picks.last() else { return };
+        let hidden = !w.tree.nodes[last].hidden;
+        let n = picks.len();
+        let hide = |w: &mut vxr_core::world::World| picks.iter().for_each(|&i| w.set_hidden(i, hidden));
+        if self.scene.edit_world(hide).is_ok() {
+            let msg =
+                if hidden { format!("Hid {n} objects and groups") } else { format!("Showing {n} objects and groups") };
+            self.ui.toast(&self.ctx, msg);
         }
     }
 
@@ -1247,6 +1394,22 @@ impl Editor {
             }
             Action::FillSelection => {
                 s.fill_selection(self.ui.slot);
+            }
+            Action::ReplaceColor { from, to } => {
+                let within = if s.selected_count() > 0 { " in the selection" } else { "" };
+                let msg = match s.replace_color(from, to) {
+                    0 => format!("No voxels of slot {from}{within}"),
+                    n => format!("Replaced slot {from} with slot {to}{within}: {n} voxels"),
+                };
+                self.ui.toast(&self.ctx, msg);
+            }
+            Action::RemoveColor(from) => {
+                let within = if s.selected_count() > 0 { " in the selection" } else { "" };
+                let msg = match s.replace_color(from, 0) {
+                    0 => format!("No voxels of slot {from}{within}"),
+                    n => format!("Removed slot {from}{within}: {n} voxels"),
+                };
+                self.ui.toast(&self.ctx, msg);
             }
             Action::Hollow => {
                 let n = s.hollow();
@@ -1601,6 +1764,7 @@ impl Editor {
                 Shape::Box => Some(("BOX", format!("{}×{}×{}", d[0], d[1], d[2]))),
                 Shape::Line => Some(("LINE", format!("{}", d.into_iter().max().unwrap_or(1)))),
                 Shape::Circle | Shape::Sphere => Some(("RADIUS", format!("{}", g.radius()))),
+                Shape::Pattern => Some(("PATTERN", format!("{}×{}×{}", d[0], d[1], d[2]))),
                 Shape::Voxel | Shape::Face => None,
             }
         })
@@ -1619,7 +1783,7 @@ impl Editor {
         let render = self.ui.show_render.then(|| (self.preview.samples(), self.preview.last_rows > 0));
         let export = self.export.as_ref().map(|x| {
             let (done, of) = x.progress();
-            (x.size(), done, of)
+            (x.size(), done, of, x.frame())
         });
         Stats {
             voxels: self.scene.map.voxels,
@@ -1676,6 +1840,7 @@ impl Editor {
         self.ui.camera_hints = self.space || self.cam_drag.is_some();
         self.ui.picked = self.scene.picked().map(|i| node_name(self.scene.world().unwrap(), i));
         self.ui.picked_node = self.scene.picked();
+        self.ui.picks = self.scene.picks();
         self.ui.tree = tree_rows(&self.scene);
         self.ui.layers = layer_rows(&self.scene);
         self.ui.layer_on = self.scene.picked().zip(self.scene.world()).map(|(i, w)| w.tree.nodes[i].layer);
@@ -1684,6 +1849,7 @@ impl Editor {
             _ => self.scene.picked(),
         };
         (self.ui.ortho, self.ui.view) = (self.cam.ortho, self.cam.view());
+        self.ui.saved_views = std::array::from_fn(|k| self.scene.saved_view(k as i32).is_some());
         self.ui.marquee = self.marquee.map(|m| {
             let (a, b) = (m.start, m.end);
             egui::Rect::from_two_pos(egui::pos2(a[0], a[1]), egui::pos2(b[0], b[1])) / self.ppp
@@ -1766,6 +1932,7 @@ impl Editor {
             self.ai_dock = dock;
         }
         let mut host = std::mem::take(&mut self.agent_host);
+        let mut copy = None;
         actions.extend(std::iter::repeat_n(Action::ToggleWorld, tabs));
         if let Some(text) = self.ui.asked.take() {
             self.asks.push(text.clone());
@@ -1806,8 +1973,53 @@ impl Editor {
                 Action::Zoom(zoom_in) => self.zoom_step(zoom_in),
                 Action::Snap(v) => self.cam.snap(v),
                 Action::Ortho(on) => self.cam.ortho = on,
+                Action::GoToView(slot) => {
+                    if !self.go_to_view(slot) {
+                        self.ui
+                            .toast(&self.ctx, format!("View {} is empty: click it to save the view there", slot + 1));
+                    }
+                }
+                Action::SaveView(slot) => {
+                    let msg = if self.save_view(slot) {
+                        format!("Saved the view as view {}", slot + 1)
+                    } else {
+                        "Could not save this view: frame the scene and try again".to_string()
+                    };
+                    self.ui.toast(&self.ctx, msg);
+                }
                 Action::Recolor { slot, rgba } => self.scene.put_color(slot, rgba),
                 Action::SetMaterial { slot, material } => self.scene.put_material(slot, material),
+                Action::ShiftColors(shift) => self.scene.shift_colors(&self.ui.group_base, shift),
+                Action::SelectUsedColors => {
+                    let slots = self.scene.colors_used();
+                    let of = if self.scene.selected_count() > 0 { "the selection" } else { "the model" };
+                    let msg = match slots.len() {
+                        0 => "No colors in use yet".to_string(),
+                        1 => format!("Slot {} is the only color in {of}", slots[0]),
+                        n => format!("Selected the {n} colors in {of}"),
+                    };
+                    self.ui.select_colors(slots);
+                    self.ui.toast(&self.ctx, msg);
+                }
+                Action::SortPalette(key) => {
+                    self.gesture = None;
+                    let chosen = self.ui.colors.clone();
+                    let slots: Vec<u8> = if chosen.is_empty() { (1..=255).collect() } else { chosen };
+                    let (table, _) = self.scene.sort_colors(&slots, key);
+                    let moved = (1..=255u8).filter(|&s| table[s as usize] != s).count();
+                    // The current colour stays the current colour, in its new slot.
+                    self.ui.slot = table[self.ui.slot as usize];
+                    let by = if key == SortKey::Value { "brightness" } else { key.name() };
+                    let what = match self.ui.colors.len() {
+                        0 => "the palette".to_string(),
+                        n => format!("the {n} selected colors"),
+                    };
+                    let msg = match moved {
+                        0 => format!("Already in order by {by}: {what}"),
+                        _ => format!("Sorted {what} by {by} ({moved} slots moved)"),
+                    };
+                    self.ui.toast(&self.ctx, msg);
+                }
                 Action::CommitColor => {
                     self.scene.commit();
                 }
@@ -1828,6 +2040,8 @@ impl Editor {
                 | Action::Deselect
                 | Action::DeleteSelection
                 | Action::FillSelection
+                | Action::ReplaceColor { .. }
+                | Action::RemoveColor(_)
                 | Action::Hollow
                 | Action::FillInterior
                 | Action::Resize(_)
@@ -1839,9 +2053,19 @@ impl Editor {
                 | Action::Duplicate { .. }
                 | Action::Group
                 | Action::Ungroup => self.selection_action(a),
+                Action::BrushInside => {
+                    let now = self.ui.toggle_inside();
+                    self.ui.toast(&self.ctx, now);
+                }
                 Action::ToggleWorld => self.toggle_world(),
                 Action::PickNode(i) => self.pick_node(i),
+                Action::PickAlso(i) => {
+                    self.scene.pick_also(i);
+                }
                 Action::SetHidden(i, hidden) => self.set_hidden(i, hidden),
+                Action::PlaceNode { node, parent, before } => self.place_node(node, parent, before),
+                Action::ShiftNode { down } => self.shift_node(down),
+                Action::ToggleHidden if self.scene.picks().len() > 1 => self.hide_picks(),
                 Action::ToggleHidden => match (self.scene.picked(), self.scene.world()) {
                     (Some(i), Some(w)) => self.set_hidden(i, !w.tree.nodes[i].hidden),
                     _ => self.ui.toast(&self.ctx, "Pick an object in the world to hide it"),
@@ -1870,9 +2094,23 @@ impl Editor {
                     }
                     let _ = self.start_export();
                 }
+                Action::ExportTurntable => {
+                    if self.agent_render.is_some() {
+                        self.agent_rendered = Some(Err("the user started a render export of their own in vxr".into()));
+                    }
+                    let _ = self.start_turntable();
+                }
                 Action::CancelExport => {
                     self.export = None;
                     self.ui.toast(&self.ctx, "Export cancelled");
+                }
+                Action::Embed => {
+                    // The tag goes on the clipboard with this frame's output, so a browser
+                    // takes it inside the click that asked (a later write can be refused).
+                    if self.scene.map.voxels > 0 {
+                        copy = Some(crate::files::embed_snippet(&self.ui.scene_name));
+                    }
+                    host.push(Action::Embed);
                 }
                 other => host.push(other),
             }
@@ -1901,7 +2139,9 @@ impl Editor {
             host.push(done);
         }
         self.autosave();
-        (host, out.platform_output)
+        let mut platform = out.platform_output;
+        platform.commands.extend(copy.map(egui::OutputCommand::CopyText));
+        (host, platform)
     }
 
     /// Help's demos: move the ones that showed last frame on to this frame's time, and give
@@ -2225,31 +2465,78 @@ impl Editor {
     /// them (no undo step), and every setting after.
     fn agent_render_settings(&mut self, client: &str, args: &serde_json::Value) -> Result<String, String> {
         let before = self.ui.render.clone();
-        self.ui.render.set_from(args)?;
+        // `focus_on` is a world cell, put in focus from the user's view as a click with the
+        // Render panel's crosshair does it.
+        let mut rest = args.clone();
+        let cell = rest.as_object_mut().and_then(|o| o.remove("focus_on"));
+        let mut next = before.clone();
+        next.set_from(&rest)?;
+        if let Some(c) = cell {
+            if rest.get("focus").is_some() {
+                return Err("focus_on: give focus or focus_on, not both".into());
+            }
+            let n: Vec<i32> = c
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_i64().and_then(|n| i32::try_from(n).ok())).collect())
+                .unwrap_or_default();
+            let cell: [i32; 3] = n.try_into().map_err(|_| "focus_on: a world cell [x, y, z] of whole numbers")?;
+            let map = self.scene.to_map(cell);
+            next.focus = crate::render::focus_on(&self.cam, map).ok_or_else(|| {
+                format!("focus_on {cell:?}: behind the user's view, so nothing there can be in focus; pick a cell in front of it")
+            })?;
+        }
+        self.ui.render = next;
         if self.ui.render != before {
             self.ui.toast(&self.ctx, format!("{client} changed the render settings"));
         }
         Ok(self.ui.render.to_json().to_string())
     }
 
-    /// A terminal agent's `export`, as the Export menu does it: the OBJ files or the PNG
-    /// slices into [`Editor::agent_files`] for the host, or a render export started whose
+    /// A terminal agent's `export`, as the Export menu does it: the OBJ files, the PNG
+    /// slices or the isometric sprite into [`Editor::agent_files`] for the host, or a render export started whose
     /// answer waits for it ([`Editor::agent_waits`]). Returns what it made.
     fn agent_export(&mut self, conn: u64, args: &serde_json::Value) -> Result<String, String> {
         if self.review.is_some() {
             return Err("a change waits for the user's review in vxr: export once they apply or discard it".into());
         }
         self.agent_files.clear();
-        match args.get("kind").and_then(serde_json::Value::as_str) {
+        self.agent_folder = None;
+        // The agent says which part it wants: the user's "Only the selection" switch is not
+        // its to read, the selection is its own (the one its `select` made), and a call
+        // with nothing selected is refused rather than widened.
+        let kind = args.get("kind").and_then(serde_json::Value::as_str);
+        let only = match args.get("selection") {
+            None | Some(serde_json::Value::Null) => false,
+            Some(v) => v.as_bool().ok_or("selection: true or false")?,
+        };
+        if only && !matches!(kind, Some("obj" | "slices" | "sprite")) {
+            return Err("selection: only for kind obj, slices and sprite".into());
+        }
+        self.agent_selection = only.then(|| self.agents.selection(conn, &self.scene));
+        let stem = self.part_stem(only);
+        let part = if only { "the selection: " } else { "" };
+        let only = self.agent_selection.clone();
+        let only = only.as_deref();
+        match kind {
             Some("obj") => {
-                let (files, quads) = crate::files::obj_files(&self.scene, &self.export_stem())?;
+                let (files, quads) = crate::files::obj_files(&self.scene, &stem, only)?;
                 self.agent_files = files;
-                Ok(format!("{quads} quads"))
+                Ok(format!("{part}{quads} quads"))
             }
             Some("slices") => {
-                let (png, [w, h], layers) = crate::files::slices_png(&self.scene)?;
-                self.agent_files = vec![(self.slices_name(), png)];
-                Ok(format!("{layers} layers side by side, {w} x {h} pixels"))
+                let (png, [w, h], layers) = crate::files::slices_png(&self.scene, only)?;
+                self.agent_files = vec![(format!("{stem}-slices.png"), png)];
+                Ok(format!("{part}{layers} layers side by side, {w} x {h} pixels"))
+            }
+            Some("sprite") => {
+                let (png, [w, h]) = crate::files::sprite_png(&self.scene, only)?;
+                self.agent_files = vec![(format!("{stem}-sprite.png"), png)];
+                Ok(format!("{part}the isometric sprite, {w} x {h} pixels on a transparent background"))
+            }
+            Some("palette") => {
+                let stem = format!("{}-palette", self.export_stem());
+                self.agent_files = crate::files::palette_files(&self.scene, &stem)?;
+                Ok(crate::files::PALETTE_WHAT.into())
             }
             Some("render") => {
                 if self.export.is_some() {
@@ -2260,8 +2547,55 @@ impl Editor {
                 self.agent_rendered = None;
                 Ok("rendering".into())
             }
-            _ => Err("kind: obj, slices or render".into()),
+            Some("embed") => {
+                if self.export.is_some() {
+                    return Err("a render is already running in vxr: call again once it is done".into());
+                }
+                // Asked before the poster is traced: a build without the viewer says so at
+                // once, and a browser starts fetching it now.
+                self.viewer().map_err(|e| format!("could not embed: {e}"))?;
+                self.start_embed_poster().map_err(|e| format!("could not embed: {e}"))?;
+                self.agent_render = Some(conn);
+                self.agent_rendered = None;
+                Ok("rendering".into())
+            }
+            Some("turntable") => {
+                if self.export.is_some() {
+                    return Err("a render export is already running in vxr: call again once it is done".into());
+                }
+                self.start_turntable()?;
+                self.agent_render = Some(conn);
+                self.agent_rendered = None;
+                Ok("rendering".into())
+            }
+            _ => Err("kind: obj, slices, sprite, palette, render, turntable or embed".into()),
         }
+    }
+
+    /// The embed viewer's files, named as [`crate::files::EMBED_VIEWER`], which an embed
+    /// folder carries: at once, or None while they are on their way (a browser fetches them
+    /// from the site the first time). An error says why this build or page has none.
+    pub fn viewer(&mut self) -> Result<Option<Vec<crate::files::File>>, String> {
+        match &mut self.embed_viewer {
+            Some(source) => source(),
+            None => Err("there is no embed viewer here".into()),
+        }
+    }
+
+    /// An agent's embed folder into [`Editor::agent_files`], and what it is.
+    fn agent_embed(&mut self, poster: Vec<u8>, viewer: Vec<crate::files::File>) -> Result<String, String> {
+        let name = self.ui.scene_name.clone();
+        self.agent_files = crate::files::embed_files(&self.scene, &name, poster, viewer)
+            .map_err(|e| format!("could not embed: {e}"))?;
+        self.agent_folder = Some(format!("{}-embed", crate::files::embed_stem(&name)));
+        let (w, h) = crate::files::EMBED_POSTER;
+        Ok(format!(
+            "an embed folder: its index.html, served over HTTP, shows the scene live. A page shows it with \
+             the folder's other files beside it and this tag:\n{}\nThe poster is {w} x {h} pixels, path-traced \
+             at {} samples per pixel",
+            crate::files::embed_snippet(&name),
+            self.ui.render.samples()
+        ))
     }
 
     /// Whether `conn`'s answer waits for its render export to end.
@@ -2273,6 +2607,17 @@ impl Editor {
     /// PNG is then in [`Editor::agent_files`].
     pub fn take_agent_render(&mut self) -> Option<Result<String, String>> {
         self.agent_render?;
+        if let Some(poster) = self.agent_poster.take() {
+            match self.viewer() {
+                Ok(Some(viewer)) => self.agent_rendered = Some(self.agent_embed(poster, viewer)),
+                // Still on their way: the answer waits for them.
+                Ok(None) => {
+                    self.agent_poster = Some(poster);
+                    return None;
+                }
+                Err(e) => self.agent_rendered = Some(Err(format!("could not embed: {e}"))),
+            }
+        }
         let r = self.agent_rendered.take().or_else(|| {
             self.export.is_none().then(|| {
                 Err("the render export was cancelled in vxr (the user cancelled it or the scene changed)".to_string())
@@ -2287,6 +2632,8 @@ impl Editor {
         if self.agent_render.take().is_some() {
             self.export = None;
             self.agent_rendered = None;
+            self.agent_poster = None;
+            self.agent_folder = None;
             self.agent_files.clear();
         }
     }
@@ -2453,6 +2800,46 @@ impl Editor {
         self.ui.toast(&self.ctx, msg);
     }
 
+    /// Move tree node `i` under group `parent` (0 is the top) in front of its child `before`,
+    /// or to the end: the drop of a dragged tree row, one undo step, in world mode. It stays
+    /// where it is in the world and stays picked.
+    pub fn place_node(&mut self, i: usize, parent: usize, before: Option<usize>) {
+        let Some(w) = self.scene.world().filter(|w| w.in_tree(i)) else { return };
+        let (name, old) = (node_name(w, i), w.tree.parents()[i]);
+        match self.scene.edit_world(|w| w.place(i, parent, before)) {
+            Ok(true) => {
+                self.scene.pick(Some(i));
+                let msg = match parent {
+                    _ if old == Some(parent) => format!("Moved {name} in the tree"),
+                    0 => format!("Moved {name} out of its group"),
+                    _ => format!("Moved {name} into {}", node_name(self.scene.world().unwrap(), parent)),
+                };
+                self.ui.toast(&self.ctx, msg);
+            }
+            Ok(false) => {}
+            Err(_) => self.ui.toast(&self.ctx, "Tab to the world to move objects in the tree"),
+        }
+    }
+
+    /// Move the picked object or group one place up or down among its group, as one undo
+    /// step, in world mode.
+    pub fn shift_node(&mut self, down: bool) {
+        let msg = match (self.scene.at(), self.scene.picked()) {
+            (At::World, Some(i)) => {
+                let name = node_name(self.scene.world().unwrap(), i);
+                match (self.scene.edit_world(|w| w.shift(i, down)), down) {
+                    (Ok(true), false) => format!("Moved {name} up"),
+                    (Ok(true), true) => format!("Moved {name} down"),
+                    (_, false) => format!("{name} is already first in its group"),
+                    (_, true) => format!("{name} is already last in its group"),
+                }
+            }
+            (At::World, None) => "Click an object to pick it first".to_string(),
+            _ => "Tab to the world to move objects in the tree".to_string(),
+        };
+        self.ui.toast(&self.ctx, msg);
+    }
+
     /// Name tree node `i` (an empty name clears it), as one undo step, in world mode.
     pub fn rename(&mut self, i: usize, name: &str) {
         let name = name.trim();
@@ -2527,14 +2914,144 @@ impl Editor {
         if n.is_empty() { "vxr" } else { n }.to_string()
     }
 
+    /// The name stem of an OBJ, slices or sprite export: [`Editor::export_stem`], with
+    /// `-selection` for an export of the selection, so it never takes the place of the
+    /// whole scene's export.
+    pub fn part_stem(&self, selection: bool) -> String {
+        format!("{}{}", self.export_stem(), if selection { "-selection" } else { "" })
+    }
+
+    /// The selected voxels, when the OBJ, slices and sprite exports take only those now: the
+    /// Export menu's "Only the selection" is on and some are selected. With nothing
+    /// selected the switch changes nothing, so it is safe to leave on.
+    pub fn exports_selection(&self) -> Option<Vec<[i32; 3]>> {
+        (self.ui.export_selection && self.scene.selected_count() > 0).then(|| self.scene.selection().collect())
+    }
+
+    /// What an export's toast says first when it took only the selection.
+    pub fn export_part(&self) -> &'static str {
+        if self.exports_selection().is_some() { "the selection, " } else { "" }
+    }
+
     /// The file name for the PNG slices export: the scene's name with `-slices.png`.
     pub fn slices_name(&self) -> String {
-        format!("{}-slices.png", self.export_stem())
+        format!("{}-slices.png", self.part_stem(self.exports_selection().is_some()))
+    }
+
+    /// The file name for the isometric sprite export: the scene's name with `-sprite.png`.
+    pub fn sprite_name(&self) -> String {
+        format!("{}-sprite.png", self.part_stem(self.exports_selection().is_some()))
+    }
+
+    /// Give slots 1 up the colours of the palette file `name` (a PNG or text the user picked
+    /// for Import palette), as one undo step, and say what happened. A file that is not a
+    /// palette changes nothing.
+    pub fn import_palette(&mut self, name: &str, bytes: &[u8]) {
+        let colors = match vxr_core::palette::parse(bytes) {
+            Ok(colors) => colors,
+            // The reason says what a palette file holds; it stays long enough to read.
+            Err(e) => return self.ui.alert(&self.ctx, format!("Could not import {name}: {e}")),
+        };
+        self.gesture = None;
+        let n = colors.len();
+        let to = if n == 1 { "slot 1".to_string() } else { format!("slots 1 to {n}") };
+        let msg = match self.scene.import_colors(&colors) {
+            0 => format!("{name} has the colors {to} already have"),
+            _ => format!("Imported {n} color{} from {name} into {to}", if n == 1 { "" } else { "s" }),
+        };
+        self.ui.toast(&self.ctx, msg);
+    }
+
+    /// Put the image file `name` (a PNG the user picked for Import image) into the model as
+    /// voxels one cell thick, upright on the ground in front of the model, colours matched
+    /// to the palette, as one undo step, and say what happened. A file that does not import changes
+    /// nothing.
+    pub fn import_image(&mut self, name: &str, bytes: &[u8]) {
+        let done = vxr_core::image::decode(bytes).and_then(|img| {
+            self.gesture = None;
+            let done = self.scene.import_image(&img, None)?;
+            Ok((img.width, img.height, done))
+        });
+        let (w, h, done) = match done {
+            Ok(done) => done,
+            // The reason says what an image to import must be; it stays long enough to read.
+            Err(e) => return self.ui.alert(&self.ctx, format!("Could not import {name}: {e}")),
+        };
+        let plural = |n: usize| if n == 1 { "" } else { "s" };
+        let grew = if done.grew { ", and the model grew to hold it" } else { "" };
+        let msg = format!(
+            "Imported {name} ({w}×{h}) as {} voxel{} in {} color{}{grew}",
+            done.voxels,
+            plural(done.voxels),
+            done.slots,
+            plural(done.slots)
+        );
+        self.ui.toast(&self.ctx, msg);
+    }
+
+    /// The file name for a palette export: the scene's name with `-palette` and `ext`.
+    pub fn palette_name(&self, ext: &str) -> String {
+        format!("{}-palette.{ext}", self.export_stem())
     }
 
     /// The file name for a render export: the scene's name with `-render.png`.
     pub fn export_name(&self) -> String {
         format!("{}-render.png", self.export_stem())
+    }
+
+    /// Start tracing an embed's poster: what the `<voxel-scene>` tag draws first (the whole
+    /// scene from the viewer's first view, in the tag's shape) with the Render panel's
+    /// light and samples, so the live scene takes over from the picture in place. The host
+    /// gets [`Action::Embedded`] when it is traced.
+    pub fn start_embed(&mut self) -> Result<(), String> {
+        match self.start_embed_poster() {
+            Ok(()) => {
+                let spp = self.ui.render.samples();
+                self.ui.toast(
+                    &self.ctx,
+                    format!("Rendering the embed's picture at {spp} spp. The tag is on the clipboard."),
+                );
+                Ok(())
+            }
+            Err(e) => {
+                self.ui.toast(&self.ctx, format!("Could not embed: {e}"));
+                Err(format!("could not embed: {e}"))
+            }
+        }
+    }
+
+    /// Start tracing the poster of an embed (see [`Editor::start_embed`]), with no toast.
+    fn start_embed_poster(&mut self) -> Result<(), String> {
+        let r = (|| {
+            if self.export.is_some() {
+                return Err("a render is running: wait for it or cancel it in the Render panel".to_string());
+            }
+            let (centre, radius) = vxr_core::bricks::framing(&self.scene.map).ok_or("the scene is empty")?;
+            let (w, h) = crate::files::EMBED_POSTER;
+            let cam = vxr_render::OrbitCamera {
+                target: centre.into(),
+                yaw: vxr_core::bricks::VIEW_YAW,
+                pitch: vxr_core::bricks::VIEW_PITCH,
+                distance: vxr_core::bricks::view_distance(radius, w as f32 / h as f32),
+                fov_y: vxr_core::bricks::VIEW_HALF_FOV * 2.0,
+                ortho: false,
+            };
+            let mut x = Export::start_sized(
+                &self.gpu,
+                &self.layout,
+                &self.scene.palette,
+                &self.scene.materials,
+                cam,
+                &self.ui.render,
+                vxr_render::ViewColors::NEUTRAL.sky,
+                (w, h),
+            )?;
+            x.embed = true;
+            Ok(x)
+        })();
+        self.export = Some(r?);
+        self.embedded = None;
+        Ok(())
     }
 
     /// Start a PNG export of the corner's view with the Render panel's settings.
@@ -2554,6 +3071,35 @@ impl Editor {
                 self.export = Some(x);
                 self.ui.show_render = true;
                 self.ui.toast(&self.ctx, format!("Rendering {w}×{h} at {} spp", self.ui.render.samples()));
+                Ok(())
+            }
+            Err(e) => {
+                self.ui.toast(&self.ctx, format!("Could not export: {e}"));
+                Err(format!("could not export: {e}"))
+            }
+        }
+    }
+
+    /// Start a turntable export: the corner's view turned once around its target, a PNG per
+    /// frame, with the Render panel's settings.
+    pub fn start_turntable(&mut self) -> Result<(), String> {
+        let r = Export::turntable(
+            &self.gpu,
+            &self.layout,
+            &self.scene.palette,
+            &self.scene.materials,
+            self.cam,
+            &self.ui.render,
+            vxr_render::ViewColors::NEUTRAL.sky,
+        );
+        match r {
+            Ok(x) => {
+                let ((w, h), frames) = (x.size(), self.ui.render.turntable_frames());
+                self.export = Some(x);
+                self.turned = None;
+                self.ui.show_render = true;
+                let spp = self.ui.render.samples();
+                self.ui.toast(&self.ctx, format!("Rendering a turntable: {frames} frames of {w}×{h} at {spp} spp"));
                 Ok(())
             }
             Err(e) => {
@@ -2767,23 +3313,74 @@ impl Editor {
         if corner.is_some() {
             self.preview.after_submit(dev);
         }
+        let embed = self.export.as_ref().is_some_and(|x| x.embed);
         let done = self.export.as_mut().and_then(|x| x.after_submit(&self.gpu).map(|r| (r, x.size())));
+        // The export is an agent's, whose answer waits for it.
+        let agent = self.agent_render.is_some() && self.agent_rendered.is_none();
+        // One picture, or a turntable's frames.
+        let turn = self.export.as_ref().is_some_and(|x| x.frame().is_some());
+        let done = done.map(|(r, size)| (r.map(|mut pngs| (pngs.pop().unwrap_or_default(), pngs)), size));
         match done {
-            Some((Ok(png), (w, h))) if self.agent_render.is_some() && self.agent_rendered.is_none() => {
+            Some((Ok((last, mut frames)), (w, h))) if turn => {
+                self.export = None;
+                frames.push(last);
+                let (n, spp) = (frames.len(), self.ui.render.samples());
+                if agent {
+                    match crate::files::turntable_files(&self.ui.scene_name, frames) {
+                        Ok((folder, files)) => {
+                            let turn = files.last().map_or("", |f| f.0.as_str());
+                            self.agent_rendered = Some(Ok(format!(
+                                "a turntable: {n} frames of {w} x {h} at {spp} samples per pixel, one full turn of the \
+                                 user's view around its target, numbered in order so they loop, and {turn}, the same \
+                                 frames as one animated PNG that loops (a turn in {} seconds)",
+                                crate::files::TURN_SECONDS
+                            )));
+                            self.agent_files = files;
+                            self.agent_folder = Some(folder);
+                        }
+                        Err(e) => {
+                            self.agent_rendered = Some(Err(format!("the turntable could not be put together: {e}")))
+                        }
+                    }
+                    None
+                } else {
+                    self.turned = Some(frames);
+                    Some(Action::Turned)
+                }
+            }
+            Some((Ok((png, _)), _)) if embed && agent => {
+                self.export = None;
+                self.agent_poster = Some(png);
+                None
+            }
+            Some((Ok((png, _)), _)) if embed => {
+                self.export = None;
+                self.embedded = Some(png);
+                Some(Action::Embedded)
+            }
+            Some((Err(e), _)) if embed => {
+                self.export = None;
+                if agent {
+                    self.agent_rendered = Some(Err(format!("could not embed: {e}")));
+                }
+                self.ui.toast(&self.ctx, format!("Could not embed: {e}"));
+                None
+            }
+            Some((Ok((png, _)), (w, h))) if agent => {
                 self.export = None;
                 self.agent_files = vec![(self.export_name(), png)];
                 self.agent_rendered =
                     Some(Ok(format!("rendered {w} x {h} at {} samples per pixel", self.ui.render.samples())));
                 None
             }
-            Some((Ok(png), size)) => {
+            Some((Ok((png, _)), size)) => {
                 self.export = None;
                 self.exported = Some((png, size));
                 Some(Action::Exported)
             }
             Some((Err(e), _)) => {
                 self.export = None;
-                if self.agent_render.is_some() && self.agent_rendered.is_none() {
+                if agent {
                     self.agent_rendered = Some(Err(format!("could not export: {e}")));
                 }
                 self.ui.toast(&self.ctx, format!("Could not export: {e}"));

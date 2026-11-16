@@ -85,6 +85,7 @@ fn tool_schemas() {
             "copy",
             "cut",
             "paste",
+            "stamp",
             "delete",
             "hollow",
             "fill_inside",
@@ -93,12 +94,19 @@ fn tool_schemas() {
             "palette_set",
             "palette_swap",
             "palette_copy",
+            "palette_adjust",
+            "palette_sort",
+            "palette_import",
+            "image_import",
             "material_set",
+            "save_view",
             "make_object",
             "move_object",
+            "transform_object",
             "duplicate",
             "group",
             "ungroup",
+            "reorder",
             "hide",
             "set_layer",
             "delete_object",
@@ -652,7 +660,7 @@ fn parts_by_id_and_name() {
     let (_, m) = err(&mut o, &mut s, "paint", json!({"slot": 8, "part": "boat"}));
     assert_eq!(m, "no part matches \"boat\"; find_parts lists them");
     let (_, m) = err(&mut o, &mut s, "erase", json!({"part": "p1", "cells": [[0, 0, 0]]}));
-    assert!(m.contains("not both"));
+    assert!(m.contains("only one of cells, parts and from_slot"));
     // Several parts in one call.
     let mut s3 = small();
     let mut o3 = Session::new(&s3, None);
@@ -790,10 +798,11 @@ fn far_corners_are_refused() {
     let (_, m) = err(&mut o, &mut s, "get_voxels", json!({"cells": [[0, i32::MIN, 0]]}));
     assert!(m.contains("out of range"), "{m}");
     // The limits hold for any corners, given straight to run.
-    let shape = BoxShape { from: lo, to: hi, slot: Some(1), mode: Mode::Add, hollow: false, name: None };
+    let shape =
+        BoxShape { from: lo, to: hi, slot: Some(1), mode: Mode::Add, hollow: false, selection: false, name: None };
     let m = o.run(&mut s, Op::Box(shape)).unwrap_err().message;
     assert_eq!(m, format!("the box spans {} cells; at most 2000000", i64::MAX));
-    let line = Line { from: lo, to: hi, slot: Some(1), mode: Mode::Add, name: None };
+    let line = Line { from: lo, to: hi, slot: Some(1), mode: Mode::Add, selection: false, name: None };
     assert!(o.run(&mut s, Op::Line(line)).unwrap_err().message.contains("over 4096"));
     let read = GetVoxels { from: Some(lo), to: Some([i32::MAX, i32::MIN, i32::MIN]), ..GetVoxels::default() };
     assert!(o.run(&mut s, Op::GetVoxels(read)).unwrap_err().message.contains("the box spans 4294967296 cells"));
@@ -1319,17 +1328,21 @@ fn scoped_calls() -> Vec<(&'static str, Value)> {
         ("copy", json!({})),
         ("cut", json!({})),
         ("paste", json!({"at": [0, 5, 0]})),
+        ("stamp", json!({"at": [[0, 5, 0]]})),
         ("delete", json!({})),
         ("hollow", json!({})),
         ("fill_inside", json!({"slot": 1})),
         ("resize", json!({"size": [40, 40, 40]})),
         ("crop", json!({})),
         ("palette_swap", json!({"a": 1, "b": 2})),
+        ("image_import", json!({"png": "iVBORw0KGgo="})),
         ("make_object", json!({"from_slot": 10})),
         ("move_object", json!({"node": 1, "offset": [1, 0, 0]})),
+        ("transform_object", json!({"node": 1, "kind": "rotate", "axis": "y"})),
         ("duplicate", json!({"node": 1})),
         ("group", json!({"nodes": [1]})),
         ("ungroup", json!({"node": 2})),
+        ("reorder", json!({"node": 1})),
         ("hide", json!({"node": 1})),
         ("set_layer", json!({"node": 1, "layer": 0})),
         ("delete_object", json!({"node": 1})),
@@ -1376,6 +1389,95 @@ fn each_scope_is_refused_elsewhere() {
     }
 }
 
+/// `transform_object` is `World::transform` on the node: the same voxels as the core call
+/// on a second copy of the world, one step that undo takes back, and a save that reopens
+/// turned (the file's `nTRN` holds it).
+#[test]
+fn transform_object_turns_a_node_as_the_core_does_and_the_file_keeps_it() {
+    use vxr_core::select::Transform as T;
+    let bytes = world_file();
+    let mut s = Scene::from_vox(&bytes).unwrap();
+    let mut o = Session::new(&s, Some(&bytes));
+    let mut want = s.world().unwrap().clone();
+    let before = s.world_voxels(false);
+
+    assert!(want.transform(2, T::Rotate(0)));
+    let t = call(&mut o, &mut s, "transform_object", json!({"node": 2, "kind": "rotate", "axis": "x"}));
+    assert_eq!(s.world_voxels(false), want.world_voxels(false));
+    assert_ne!(s.world_voxels(false), before, "the trees stand another way");
+    let (lo, size) = want.extent(2).unwrap();
+    let hi: [i32; 3] = std::array::from_fn(|k| lo[k] + size[k] as i32 - 1);
+    assert_eq!(
+        t,
+        format!(
+            "rotated group 2 (3 objects) 90 degrees about X, now from {lo:?} to {hi:?}; 1 node changed in the world, no voxel of any model; staged so far: 1 node in the world"
+        )
+    );
+    assert!(want.transform(1, T::Flip(2)));
+    let t = call(&mut o, &mut s, "transform_object", json!({"node": 1, "kind": "flip", "axis": "z"}));
+    assert!(t.starts_with("flipped object 1 on Z, now from "), "{t}");
+    assert_eq!(s.world_voxels(false), want.world_voxels(false));
+    assert_eq!(s.world().unwrap().tree, want.tree);
+
+    o.apply(&mut s).unwrap();
+    let turned = s.world_voxels(false);
+    let back = Scene::from_vox(&s.to_vox().unwrap()).unwrap();
+    assert_eq!(back.world_voxels(false), turned);
+    assert!(s.undo());
+    assert_eq!(s.world_voxels(false), before, "both turns are one change, one undo");
+}
+
+/// `reorder` puts a node where a drag of its row puts it (`World::place`): the same tree,
+/// the same file, with every voxel where it was, and it follows nodes earlier steps made.
+#[test]
+fn reorder_moves_a_node_in_the_tree_as_the_row_drag_does() {
+    let bytes = world_file();
+    let mut s = Scene::from_vox(&bytes).unwrap();
+    let mut ui = Scene::from_vox(&bytes).unwrap();
+    let all = s.world_voxels(false);
+    let mut o = Session::new(&s, Some(&bytes));
+    let kids = |s: &Scene, g: usize| s.world().unwrap().tree.children(g).to_vec();
+    assert_eq!((kids(&s, 0), kids(&s, 2), kids(&s, 5)), (vec![1, 2, 7, 8], vec![3, 4, 5], vec![6]));
+
+    // Within its group, to the end and in front of a sibling.
+    assert_eq!(
+        call(&mut o, &mut s, "reorder", json!({"node": 1})),
+        "moved object 1 into the top of the world, which now holds nodes [2, 7, 8, 1] in this order; 1 node changed in the world, no voxel of any model; staged so far: 1 node in the world"
+    );
+    let t = call(&mut o, &mut s, "reorder", json!({"node": 4, "before": 3}));
+    assert!(t.starts_with("moved object 4 into group 2, which now holds nodes [4, 3, 5] in this order; "), "{t}");
+    // Into another group (a turned and moved one keeps the node where it shows), and out.
+    let t = call(&mut o, &mut s, "reorder", json!({"node": 1, "parent": 5, "before": 6}));
+    assert!(t.starts_with("moved object 1 into group 5, which now holds nodes [1, 6] in this order; "), "{t}");
+    let t = call(&mut o, &mut s, "reorder", json!({"node": 5, "parent": 0, "before": 2}));
+    assert!(
+        t.starts_with("moved group 5 (2 objects) into the top of the world, which now holds nodes [5, 2, 7, 8] in"),
+        "{t}"
+    );
+    assert_eq!(
+        call(&mut o, &mut s, "reorder", json!({"node": 5, "before": 2})),
+        "group 5 (2 objects) is already there in the top of the world: nothing changed"
+    );
+    assert_eq!(s.world_voxels(false), all, "no voxel moved");
+    for (i, p, b) in [(1, 0, None), (4, 2, Some(3)), (1, 5, Some(6)), (5, 0, Some(2))] {
+        assert_eq!(ui.edit_world(|w| w.place(i, p, b)), Ok(true));
+    }
+    assert_eq!(s.world().unwrap().tree, ui.world().unwrap().tree);
+    assert!(s.to_vox().unwrap() == ui.to_vox().unwrap());
+
+    // A copy made by an earlier step is followed when that step's numbers change.
+    assert!(call(&mut o, &mut s, "duplicate", json!({"node": 7})).starts_with("copied object 7 as object 9"));
+    assert!(call(&mut o, &mut s, "duplicate", json!({"node": 3})).starts_with("copied object 3 as object 10"));
+    let t = call(&mut o, &mut s, "reorder", json!({"node": 10, "parent": 5}));
+    assert!(t.starts_with("moved object 10 into group 5, which now holds nodes [1, 6, 10] in this order"), "{t}");
+    let step = o.steps().len() - 3;
+    assert!(o.set_dropped(&mut s, step, true), "without the copy of 7, the copy of 3 is node 9");
+    assert_eq!((kids(&s, 5), kids(&s, 2)), (vec![1, 6, 9], vec![4, 3]));
+    assert!(o.set_dropped(&mut s, step, false));
+    assert_eq!((kids(&s, 5), kids(&s, 2)), (vec![1, 6, 10], vec![4, 3]));
+    assert_eq!(s.world().unwrap().objects().len(), 6 + 2, "the two copies, nothing else");
+}
+
 #[test]
 fn world_tools_refuse_cleanly() {
     let bytes = world_file();
@@ -1384,11 +1486,26 @@ fn world_tools_refuse_cleanly() {
     for (tool, args, says) in [
         ("move_object", json!({"node": 0, "offset": [1, 0, 0]}), "node 0 is the root"),
         ("move_object", json!({"node": 99, "offset": [1, 0, 0]}), "node 99: not an object or group of this world"),
+        ("transform_object", json!({"node": 0, "kind": "flip", "axis": "x"}), "node 0 is the root"),
         ("duplicate", json!({"node": 42}), "node 42: not an object or group"),
         ("ungroup", json!({"node": 1}), "node 1: object 1 is not a group"),
         ("group", json!({"nodes": []}), "nodes: give the objects or groups to group"),
         ("group", json!({"nodes": [1, 3]}), "the nodes do not share a parent"),
+        ("reorder", json!({"node": 0, "before": 1}), "node 0 is the root"),
+        ("reorder", json!({"node": 1, "parent": 3}), "parent 3: object 3 is not a group"),
+        ("reorder", json!({"node": 1, "parent": 99}), "node 99: not an object or group of this world"),
+        ("reorder", json!({"node": 2, "parent": 5}), "parent 5: group 2 (3 objects) cannot go into itself"),
+        ("reorder", json!({"node": 2, "parent": 2}), "parent 2: group 2 (3 objects) cannot go into itself"),
+        ("reorder", json!({"node": 1, "before": 3}), "before 3: give another node of the top of the world"),
+        ("reorder", json!({"node": 3, "before": 3}), "before 3: give another node of group 2"),
+        ("reorder", json!({"node": 1, "parent": 2, "before": 6}), "before 6: give another node of group 2"),
         ("set_layer", json!({"node": 1}), "give layer"),
+    ] {
+        let (k, m) = err(&mut o, &mut s, tool, args);
+        assert!(k == ErrorKind::Invalid && m.contains(says), "{tool}: {m}");
+    }
+    o.begin_turn();
+    for (tool, args, says) in [
         ("set_layer", json!({"node": 1, "layer": 1, "new_layer": "x"}), "not both"),
         ("set_layer", json!({"node": 1, "layer": 42}), "layer 42: no such layer; the layers are [0, 1, 2]"),
         ("set_layer", json!({"node": 1, "new_layer": "  "}), "new_layer: a name of 1 to 64 characters"),
@@ -1577,6 +1694,215 @@ fn select_face_volume_and_invert() {
     assert!(e.contains("face, volume, all, none or invert"), "{e}");
     // Selections are not edits: only the erase is staged.
     assert_eq!(o.changes(&s).removed.len(), 1);
+}
+
+#[test]
+fn palette_adjust_shifts_slots_or_the_selection_s_slots() {
+    let mut s = small();
+    let before = s.palette;
+    let mut o = Session::new(&s, None);
+    // A third of a turn moves each channel to the next: red becomes green.
+    let t = call(&mut o, &mut s, "palette_adjust", json!({"slots": [20, 10, 20], "hue": 120}));
+    assert_eq!(t, "shifted 2 slots (19 voxels use them): slot 10: #8c5528 -> #288c55; slot 20: #d72323 -> #23d723");
+    // The slots of the selected voxels: only slot 20's are selected. Half the value.
+    call(&mut o, &mut s, "select", json!({"color": 20}));
+    let t = call(&mut o, &mut s, "palette_adjust", json!({"selection": true, "value": -50}));
+    assert_eq!(t, "shifted 1 slot (3 voxels use it): slot 20: #23d723 -> #116c11");
+    assert_eq!(s.palette[10], [0x28, 0x8c, 0x55, 255]);
+    let c = o.changes(&s);
+    assert_eq!((c.repainted.len(), c.palette.len()), (0, 2), "colours change, voxels do not");
+    for (args, want) in [
+        (json!({"hue": 10}), "give slots or selection: true"),
+        (json!({"slots": [10], "selection": true, "hue": 10}), "give slots or selection: true"),
+        (json!({"slots": [0], "hue": 10}), "slot 0"),
+        (json!({"slots": [10]}), "all 0"),
+        (json!({"slots": [10], "hue": 181}), "hue is 181: give -180 to 180"),
+        (json!({"slots": [10], "saturation": -101}), "saturation is -101"),
+        (json!({"slots": [10], "value": 100.5}), "value is 100.5"),
+    ] {
+        let e = err(&mut o, &mut s, "palette_adjust", args.clone()).1;
+        assert!(e.contains(want), "{args}: {e}");
+    }
+    call(&mut o, &mut s, "select", json!({"none": true}));
+    let e = err(&mut o, &mut s, "palette_adjust", json!({"selection": true, "hue": 10})).1;
+    assert!(e.contains("nothing is selected"), "{e}");
+    // Discarded, the palette is the file's again.
+    o.discard(&mut s);
+    assert_eq!(s.palette, before);
+}
+
+/// The colour and material every voxel of the file shows, by world cell.
+fn look(s: &Scene) -> Vec<([i32; 3], [u8; 4], vxr_core::material::Material)> {
+    s.world_voxels(false).into_iter().map(|(p, v)| (p, s.palette[v as usize], s.materials[v as usize])).collect()
+}
+
+/// Standard base64 with padding, as an agent sends a file.
+fn base64(bytes: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for c in bytes.chunks(3) {
+        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        for i in 0..4 {
+            out.push(if i <= c.len() { A[(n >> (18 - 6 * i) & 63) as usize] as char } else { '=' });
+        }
+    }
+    out
+}
+
+#[test]
+fn image_import_puts_the_same_voxels_as_import_image() {
+    // A 40 x 3 picture (wider than the 32 bounds) with the slab's brown, the column's red, an
+    // off-palette blue and a transparent gap, every length of base64 tail among the sizes.
+    let px: Vec<u8> = (0..120)
+        .flat_map(|i| match i % 4 {
+            0 => [140, 85, 40, 255],
+            1 => [215, 35, 35, 255],
+            2 => [20, 20, 240, 255],
+            _ => [0, 0, 0, 0],
+        })
+        .collect();
+    for (w, h, at) in [(40, 3, None), (5, 2, Some([3, 6, -2])), (1, 1, Some([0, 0, 0]))] {
+        let png = vxr_core::files::png(w, h, &px[..(w * h * 4) as usize]).unwrap();
+        let img = vxr_core::image::decode(&png).unwrap();
+        let mut want = small();
+        want.import_image(&img, at).unwrap();
+        let mut s = small();
+        let (cells, bounds) = (voxels(&s), s.bounds());
+        let mut o = Session::new(&s, None);
+        let t = call(&mut o, &mut s, "image_import", json!({"png": base64(&png), "at": at}));
+        assert_eq!((voxels(&s), s.bounds()), (voxels(&want), want.bounds()), "{w}x{h} {at:?}: {t}");
+        o.discard(&mut s);
+        assert_eq!((voxels(&s), s.bounds()), (cells, bounds), "{w}x{h}");
+    }
+    let mut s = small();
+    let mut o = Session::new(&s, None);
+    let png = vxr_core::files::png(40, 3, &px).unwrap();
+    let t = call(&mut o, &mut s, "image_import", json!({"png": base64(&png)}));
+    assert!(t.starts_with("imported a 40x3 image at [-20, 0, 4] (its bottom-left pixel; it spans x -20 to 19, y 0 to 2): 90 cells changed in 3 slots; bounds x -20..19, y 0..31, z -16..15; "), "{t}");
+    let mut c = |p| get(&mut o, &mut s, p);
+    // Bottom row, left to right: brown is slot 10, red 20, the blue its nearest slot, a gap.
+    assert_eq!([c([-20, 0, 4]), c([-19, 0, 4]), c([-17, 0, 4])], [10, 20, 0]);
+    for (args, why) in [
+        (json!({"png": "iVBO%"}), "png: it is not base64 (A-Z, a-z, 0-9, + and /, with = padding)"),
+        (json!({"png": base64(b"GIF89a")}), "png: it is not a PNG image"),
+        (
+            json!({"png": base64(&vxr_core::files::png(2, 1, &[9, 9, 9, 0, 9, 9, 9, 0]).unwrap())}),
+            "every pixel of the image is transparent",
+        ),
+    ] {
+        assert_eq!(err(&mut o, &mut s, "image_import", args), (ErrorKind::Invalid, why.to_string()));
+    }
+}
+
+#[test]
+fn save_view_saves_what_the_view_flyout_saves_and_undoes() {
+    use vxr_core::views::SavedView;
+    let v = SavedView { target: [2.5, 4.0, -1.5], yaw: 1.25, pitch: -0.5, distance: 42.0, ortho: true };
+    let mut want = small();
+    assert!(want.save_view(4, v, 45.0));
+    let mut s = small();
+    let mut o = Session::new(&s, None);
+    let args = json!({"slot": 5, "target": v.target, "yaw": v.yaw.to_degrees(), "pitch": v.pitch.to_degrees(), "distance": 42, "orthographic": true});
+    let t = call(&mut o, &mut s, "save_view", args.clone());
+    assert!(t.starts_with("saved view 5: looking at [2.5, 4.0, -1.5]"), "{t}");
+    assert_eq!(s.cameras, want.cameras, "the same camera as the flyout's Save");
+    assert_eq!(
+        json(&o.summary(&s))["saved_views"],
+        json!(["view 5: target [2.5, 4.0, -1.5], yaw 72, pitch -29, distance 42.0, orthographic"])
+    );
+    assert!(call(&mut o, &mut s, "save_view", args).starts_with("replaced view 5"));
+    o.discard(&mut s);
+    let mut o = Session::new(&s, None);
+    assert!(s.cameras.is_empty() && json(&o.summary(&s)).get("saved_views").is_none(), "discarded: no camera");
+    for (args, why) in [
+        (json!({"slot": 0, "target": [0, 0, 0], "yaw": 0, "pitch": 0, "distance": 9}), "slot 0: the slots are 1 to 10"),
+        (
+            json!({"slot": 11, "target": [0, 0, 0], "yaw": 0, "pitch": 0, "distance": 9}),
+            "slot 11: the slots are 1 to 10",
+        ),
+        (json!({"slot": 1, "target": [0, 0, 0], "yaw": 0, "pitch": 91, "distance": 9}), "pitch 91: -90 to 90"),
+        (
+            json!({"slot": 1, "target": [0, 0, 0], "yaw": 0, "pitch": 0, "distance": 0}),
+            "target, yaw and distance must be numbers, and distance above 0",
+        ),
+    ] {
+        assert_eq!(err(&mut o, &mut s, "save_view", args), (ErrorKind::Invalid, why.to_string()));
+    }
+    assert!(s.cameras.is_empty());
+}
+
+#[test]
+fn palette_import_reads_text_into_the_first_slots() {
+    let mut s = small();
+    let (cells, palette) = (voxels(&s), s.palette);
+    let mut o = Session::new(&s, None);
+    // Ten hex lines: slot 10 (the 16 floor voxels) takes the tenth, slot 20 keeps its red.
+    let text: String = (1..=10).map(|i| format!("#{:02x}00{:02x}\n", i * 16, 255 - i)).collect();
+    let t = call(&mut o, &mut s, "palette_import", json!({"text": text}));
+    assert_eq!(
+        t,
+        "imported 10 colours into slots 1 to 10: 10 changed colour, and 16 voxels use those slots; now slot 1 #1000fe, slot 2 #2000fd, slot 3 #3000fc, slot 4 #4000fb, slot 5 #5000fa, slot 6 #6000f9, slot 7 #7000f8, slot 8 #8000f7, …"
+    );
+    assert_eq!((s.palette[10], s.palette[11], s.palette[20]), ([160, 0, 245, 255], palette[11], palette[20]));
+    assert_eq!(voxels(&s), cells, "no voxel changes slot");
+    // The same colours again, as a GIMP palette of one colour: nothing changes.
+    let t = call(&mut o, &mut s, "palette_import", json!({"text": "GIMP Palette\nName: one\n16 0 254 first\n"}));
+    assert_eq!(t, "imported 1 colour into slot 1: 0 changed colour, and 0 voxels use those slots; now slot 1 #1000fe");
+    // A text that is not a palette is refused whole.
+    let before = s.palette;
+    let (kind, m) = err(&mut o, &mut s, "palette_import", json!({"text": "000000\nfloor: brown\n"}));
+    assert_eq!(
+        (kind, m.as_str()),
+        (ErrorKind::Invalid, "text: line 2 is not a color (\"floor: brown\"): a color is six hex digits like ff8800")
+    );
+    assert_eq!(s.palette, before);
+    o.discard(&mut s);
+    assert_eq!((s.palette, voxels(&s)), (palette, cells));
+}
+
+#[test]
+fn palette_sort_orders_slots_and_every_voxel_follows() {
+    let mut s = small();
+    let (before, cells, palette) = (look(&s), voxels(&s), s.palette);
+    let mut o = Session::new(&s, None);
+    // Red (hue 0) goes before the brown (hue 27): the two slots trade places.
+    let t = call(&mut o, &mut s, "palette_sort", json!({"by": "hue", "slots": [20, 10]}));
+    assert_eq!(
+        t,
+        "sorted 2 slots by hue: 2 slots moved and 19 voxels follow their colours, so the scene looks the same; now slot 10 #d72323, slot 20 #8c5528"
+    );
+    assert_eq!(look(&s), before);
+    assert_eq!((get(&mut o, &mut s, [1, 2, 1]), get(&mut o, &mut s, [0, 0, 0])), (10, 20));
+    let t = call(&mut o, &mut s, "palette_sort", json!({"by": "hue", "slots": [10, 20]}));
+    assert_eq!(t, "2 slots already in order by hue: nothing changed");
+    assert!(err(&mut o, &mut s, "palette_sort", json!({"by": "hue", "slots": [0, 4]})).1.contains("slot 0"));
+    assert!(o.call(&mut s, "palette_sort", json!({"by": "name"})).is_err());
+    o.discard(&mut s);
+    assert_eq!((s.palette, voxels(&s)), (palette, cells));
+
+    // The voxels a staged new object waits to take follow their colours too.
+    let bytes = desk_file();
+    let mut s = Scene::from_vox(&bytes).unwrap();
+    let before = look(&s);
+    let mut o = Session::new(&s, Some(&bytes));
+    call(&mut o, &mut s, "make_object", json!({"from_slot": 4, "name": "book"}));
+    let t = call(&mut o, &mut s, "palette_sort", json!({"by": "value"}));
+    assert!(t.starts_with("sorted the palette by value: ") && t.contains(" and 296 voxels follow"), "{t}");
+    o.apply(&mut s).unwrap();
+    assert_eq!(s.world().unwrap().objects().len(), 2);
+    assert_eq!(look(&s), before);
+
+    // In a world every object's model follows, the linked copies once, and undo gives the file back.
+    let bytes = world_file();
+    let mut s = Scene::from_vox(&bytes).unwrap();
+    let before = look(&s);
+    let mut o = Session::new(&s, Some(&bytes));
+    let t = call(&mut o, &mut s, "palette_sort", json!({"by": "saturation"}));
+    // The grey slab's slot stays first; the trees' one model (13 voxels) and the gems' (1) follow.
+    assert!(t.contains(" and 14 voxels follow"), "{t}");
+    assert_eq!(look(&s), before);
+    assert_ne!(s.palette, Scene::from_vox(&bytes).unwrap().palette);
+    apply_and_undo(o, &mut s, &bytes);
 }
 
 #[test]
@@ -2111,7 +2437,7 @@ fn file_names_stay_data_beside_the_names_make_object_gives() {
 /// What a brush drag from `from` to `to` adds to an empty scene, as world cells.
 fn dragged(shape: Shape, from: [i32; 3], to: [i32; 3]) -> Vec<[i32; 3]> {
     let mut s = empty();
-    let brush = Brush { tool: Tool::Add, shape, mirror: [false; 3], lock: None, color: 7, size: 1 };
+    let brush = Brush { tool: Tool::Add, shape, mirror: [false; 3], lock: None, color: 7, size: 1, inside: false };
     // Gestures work in map cells; add starts on the cell in front of the face pressed.
     let (from, to) = (s.to_map(from), s.to_map(to));
     let t = Target { voxel: [from[0], from[1] - 1, from[2]], normal: [0, 1, 0], value: 1, ground: false };
@@ -2142,4 +2468,251 @@ fn an_agent_s_circle_and_line_draw_what_the_brush_draws() {
     // map cells (never negative): z is -1.5 halfway, which half away from zero takes to -2.
     let (from, to) = ([-4, 10, -1], [0, 10, -2]);
     assert_eq!(called("line", json!({"from": from, "to": to, "slot": 7})), dragged(Shape::Line, from, to));
+}
+
+/// An 8 x 4 x 8 block of slot 10 at x and z 0..7, with the 4 x 4 x 4 middle (2..5) selected.
+fn block_with_a_selected_middle() -> Scene {
+    let mut s = empty();
+    let at = |x, y, z| s.to_map([x, y, z]);
+    let cells: Vec<_> = (0..8)
+        .flat_map(|x| (0..4).flat_map(move |y| (0..8).map(move |z| [x, y, z])))
+        .map(|p| at(p[0], p[1], p[2]))
+        .collect();
+    let middle: Vec<_> = (2..6)
+        .flat_map(|x| (0..4).flat_map(move |y| (2..6).map(move |z| [x, y, z])))
+        .map(|p| at(p[0], p[1], p[2]))
+        .collect();
+    s.edit(cells.into_iter().map(|p| (p, 10)));
+    s.select(middle, vxr_core::select::Mode::Replace);
+    s
+}
+
+#[test]
+fn a_shape_limited_to_the_selection_changes_what_the_limited_brush_changes() {
+    // Break caught: the agent's `selection: true` and the brush's region option drifting
+    // apart. Each row is a tool call and the same drag with a limited brush.
+    let rows = [
+        (
+            "box",
+            json!({"from": [0, 2, 0], "to": [7, 2, 7], "mode": "erase"}),
+            Tool::Erase,
+            Shape::Box,
+            [0, 2, 0],
+            [7, 2, 7],
+        ),
+        (
+            "line",
+            json!({"from": [0, 3, 0], "to": [7, 3, 7], "mode": "erase"}),
+            Tool::Erase,
+            Shape::Line,
+            [0, 3, 0],
+            [7, 3, 7],
+        ),
+        (
+            "sphere",
+            json!({"center": [4, 2, 4], "radius": 3, "slot": 7, "mode": "paint"}),
+            Tool::Paint,
+            Shape::Sphere,
+            [4, 2, 4],
+            [7, 2, 4],
+        ),
+        (
+            "circle",
+            json!({"center": [3, 1, 3], "radius": 2, "slot": 7, "mode": "paint"}),
+            Tool::Paint,
+            Shape::Circle,
+            [3, 1, 3],
+            [5, 1, 3],
+        ),
+    ];
+    let mut counts = Vec::new();
+    for (tool, mut args, brush_tool, shape, from, to) in rows {
+        let mut b = block_with_a_selected_middle();
+        let brush = Brush { tool: brush_tool, shape, mirror: [false; 3], lock: None, color: 7, size: 1, inside: true };
+        let t = Target { voxel: b.to_map(from), normal: [0, 1, 0], value: 10, ground: false };
+        let Press::Drag(mut g) = b.press(brush, t) else { panic!("expected a drag") };
+        let to = b.to_map(to);
+        g.move_to(&mut b, to);
+        let changed = g.release(&mut b);
+
+        let mut s = block_with_a_selected_middle();
+        let mut o = Session::new(&s, None);
+        args["selection"] = json!(true);
+        let said = call(&mut o, &mut s, tool, args);
+        assert!(said.starts_with(&format!("{changed} cells changed")), "{tool}: {said}");
+        o.apply(&mut s).unwrap();
+        assert_eq!(voxels(&s), voxels(&b), "{tool}");
+        counts.push(changed);
+    }
+    // The box and the line cross the 4 x 4 middle; the ball and the disc are cut to it.
+    assert_eq!(counts, [16, 4, 63, 15]);
+}
+
+#[test]
+fn the_selection_option_on_face_and_erase_and_its_refusals() {
+    let mut s = block_with_a_selected_middle();
+    let mut o = Session::new(&s, None);
+    // The top face is 64 voxels; 16 of them are selected.
+    let said = call(&mut o, &mut s, "face", json!({"cell": [0, 3, 0], "mode": "erase", "selection": true}));
+    assert!(said.starts_with("16 cells changed"), "{said}");
+    assert_eq!((get(&mut o, &mut s, [2, 3, 2]), get(&mut o, &mut s, [1, 3, 1])), (0, 10));
+    // Listed cells: one selected, one not, one already erased.
+    let said = call(&mut o, &mut s, "erase", json!({"cells": [[2, 2, 2], [0, 0, 0], [2, 3, 2]], "selection": true}));
+    assert!(said.starts_with("1 cells changed"), "{said}");
+    assert_eq!((get(&mut o, &mut s, [2, 2, 2]), get(&mut o, &mut s, [0, 0, 0])), (0, 10));
+    // Add is never limited, so asking for it is a mistake worth saying.
+    assert_eq!(
+        err(&mut o, &mut s, "box", json!({"from": [0, 0, 0], "to": [1, 1, 1], "slot": 7, "selection": true})),
+        (ErrorKind::Invalid, "selection: true limits mode erase and paint; add is never limited".into())
+    );
+    call(&mut o, &mut s, "select", json!({"none": true}));
+    assert_eq!(
+        err(&mut o, &mut s, "line", json!({"from": [0, 0, 0], "to": [7, 0, 0], "mode": "erase", "selection": true})),
+        (ErrorKind::Invalid, "nothing is selected: call select first".into())
+    );
+    assert_eq!(get(&mut o, &mut s, [0, 0, 0]), 10, "a refused call changes nothing");
+}
+
+#[test]
+fn paint_and_erase_by_slot_change_what_replace_and_remove_colour_change() {
+    // Break caught: the agent's `from_slot` (with and without `selection: true`) and the
+    // editor's Replace color and Remove color drifting apart. The block's bottom layer is
+    // slot 11, the rest slot 10; a quarter of each is selected.
+    let block = || {
+        let mut s = block_with_a_selected_middle();
+        let floor: Vec<_> = voxels(&s).into_iter().filter(|c| c.0[1] == 0).map(|c| (s.to_map(c.0), 11)).collect();
+        s.edit(floor);
+        s
+    };
+    let rows = [
+        ("paint", json!({"slot": 7, "from_slot": 10, "selection": true}), 10, 7, true),
+        ("erase", json!({"from_slot": 11, "selection": true}), 11, 0, true),
+        ("paint", json!({"slot": 7, "from_slot": 10}), 10, 7, false),
+        ("erase", json!({"from_slot": 11}), 11, 0, false),
+    ];
+    let mut counts = Vec::new();
+    for (tool, args, from, to, limited) in rows {
+        let mut b = block();
+        // The editor's command stays inside a selection whenever there is one.
+        if !limited {
+            b.deselect();
+        }
+        let changed = b.replace_color(from, to);
+
+        let mut s = block();
+        let mut o = Session::new(&s, None);
+        let said = call(&mut o, &mut s, tool, args);
+        assert!(said.starts_with(&format!("{changed} cells changed")), "{tool}: {said}");
+        o.apply(&mut s).unwrap();
+        assert_eq!(voxels(&s), voxels(&b), "{tool}");
+        counts.push(changed);
+    }
+    // 192 voxels of slot 10 with 48 selected, 64 of slot 11 with 16 selected.
+    assert_eq!(counts, [48, 16, 192, 64]);
+}
+
+#[test]
+fn erase_by_slot_and_the_selection_limit_refuse_what_they_cannot_do() {
+    let mut s = block_with_a_selected_middle();
+    let mut o = Session::new(&s, None);
+    assert_eq!(
+        err(&mut o, &mut s, "erase", json!({"from_slot": 10, "cells": [[0, 0, 0]]})),
+        (ErrorKind::Invalid, "give only one of cells, parts and from_slot".into())
+    );
+    assert_eq!(
+        err(&mut o, &mut s, "erase", json!({"from_slot": 0})),
+        (ErrorKind::Invalid, "slot 0 is empty, not a colour: slots are 1 to 255".into())
+    );
+    call(&mut o, &mut s, "select", json!({"none": true}));
+    // Before, paint with from_slot ignored `selection: true` and recoloured the whole model.
+    for (tool, args) in [
+        ("paint", json!({"slot": 7, "from_slot": 10, "selection": true})),
+        ("erase", json!({"from_slot": 10, "selection": true})),
+    ] {
+        assert_eq!(
+            err(&mut o, &mut s, tool, args),
+            (ErrorKind::Invalid, "nothing is selected: call select first".into()),
+            "{tool}"
+        );
+    }
+    assert_eq!(get(&mut o, &mut s, [0, 0, 0]), 10, "a refused call changes nothing");
+}
+
+#[test]
+fn stamp_sets_the_copy_down_as_the_pattern_brush_does() {
+    // Break caught: the agent's stamp and the pattern brush drifting apart (which way the
+    // copy grows, how it is centred, what erase and paint leave alone). Each row is a call
+    // and the same press with the brush: the tool grows from the cell toward `side`, the
+    // brush out of the pressed face for add and into it for erase and paint.
+    let rows = [
+        ("add", [6, 0, 6], "top", Tool::Add, [6, -1, 6], [0, 1, 0]),
+        ("add", [4, 2, 1], "right", Tool::Add, [3, 2, 1], [1, 0, 0]),
+        ("add", [1, 2, -1], "back", Tool::Add, [1, 2, 0], [0, 0, -1]),
+        ("erase", [1, 3, 1], "bottom", Tool::Erase, [1, 3, 1], [0, 1, 0]),
+        ("paint", [3, 0, 2], "left", Tool::Paint, [3, 0, 2], [1, 0, 0]),
+    ];
+    for (mode, at, side, tool, voxel, normal) in rows {
+        let mut s = opened();
+        let mut o = Session::new(&s, None);
+        // The column of three and the slab cell under it: an L-free 1 x 4 x 1 of two colours.
+        call(&mut o, &mut s, "select", json!({"from": [1, 0, 1], "to": [1, 3, 1]}));
+        assert_eq!(call(&mut o, &mut s, "copy", json!({})), "copied 4 voxels, a 1 x 4 x 1 box from [1, 0, 1]");
+        call(&mut o, &mut s, "select", json!({"none": true}));
+
+        let mut b = opened();
+        b.clipboard = o.clipboard().cloned();
+        let brush =
+            Brush { tool, shape: Shape::Pattern, mirror: [false; 3], lock: None, color: 7, size: 1, inside: false };
+        let t = Target { voxel: b.to_map(voxel), normal, value: 1, ground: false };
+        let Press::Drag(g) = b.press(brush, t) else { panic!("expected a drag") };
+        let changed = g.release(&mut b);
+        assert!(changed > 0, "{mode} {side}: the brush changed nothing");
+
+        let said = call(&mut o, &mut s, "stamp", json!({"at": [at], "side": side, "mode": mode}));
+        assert!(said.starts_with(&format!("stamped 1 times; {changed} cells changed")), "{mode} {side}: {said}");
+        o.apply(&mut s).unwrap();
+        assert_eq!(voxels(&s), voxels(&b), "{mode} {side}");
+    }
+}
+
+#[test]
+fn stamp_repeats_the_clipboard_in_one_step_and_says_what_it_needs() {
+    let mut s = opened();
+    let bytes = s.to_vox().unwrap();
+    let mut o = Session::new(&s, None);
+    assert_eq!(err(&mut o, &mut s, "stamp", json!({"at": [[5, 0, 5]]})).1, "the clipboard is empty: copy or cut first");
+    call(&mut o, &mut s, "select", json!({"from": [1, 0, 1], "to": [1, 3, 1]}));
+    call(&mut o, &mut s, "copy", json!({}));
+    assert_eq!(err(&mut o, &mut s, "stamp", json!({"at": []})).1, "at is empty: give the cells to stamp at");
+    assert_eq!(
+        err(&mut o, &mut s, "stamp", json!({"at": [[5, 0, 5]], "selection": true})).1,
+        "selection: true limits mode erase and paint; add is never limited"
+    );
+    // Three stamps, the last two overlapping one cell apart in height: the later one wins
+    // where they meet, as two brush presses in that order would leave it. The selection stays.
+    let r = call(&mut o, &mut s, "stamp", json!({"at": [[8, 0, 8], [10, 0, 10], [10, 1, 10]]}));
+    assert!(r.starts_with("stamped 3 times; 9 cells changed"), "{r}");
+    assert_eq!(o.selection().count(), 4);
+    let column = |o: &mut Session, s: &mut Scene, x: i32| {
+        o.begin_turn();
+        let cells: Vec<[i32; 3]> = (0..6).map(|y| [x, y, x]).collect();
+        let got = json(&call(o, s, "get_voxels", json!({"cells": cells})));
+        (0..6).map(|i| got["cells"][i][3].as_i64().unwrap()).collect::<Vec<_>>()
+    };
+    assert_eq!(column(&mut o, &mut s, 8), [10, 20, 20, 20, 0, 0]);
+    assert_eq!(column(&mut o, &mut s, 10), [10, 10, 20, 20, 20, 0]);
+    // At the edge the cells outside are skipped and counted.
+    let r = call(&mut o, &mut s, "stamp", json!({"at": [[15, 30, 15]]}));
+    assert!(r.starts_with("stamped 1 times; 2 cells changed") && r.contains("warning: 2 cells were outside"), "{r}");
+    // Erase limited to the selection: the stamp covers the column and the slab under it, and
+    // only the selected ones go. Here all four are selected; deselect the slab cell first.
+    call(&mut o, &mut s, "select", json!({"from": [1, 0, 1], "to": [1, 0, 1], "mode": "subtract"}));
+    let r = call(&mut o, &mut s, "stamp", json!({"at": [[1, 0, 1]], "mode": "erase", "selection": true}));
+    assert!(r.starts_with("stamped 1 times; 3 cells changed"), "{r}");
+    assert_eq!(column(&mut o, &mut s, 1), [10, 0, 0, 0, 0, 0]);
+    // More stamps than the limit allows are refused before any work.
+    let many: Vec<[i32; 3]> = (0..600_000).map(|i| [i % 16, 0, 0]).collect();
+    let (_, m) = err(&mut o, &mut s, "stamp", json!({"at": many}));
+    assert_eq!(m, "600000 stamps of 4 voxels are 2400000 cells; at most 2000000");
+    apply_and_undo(o, &mut s, &bytes);
 }

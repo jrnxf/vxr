@@ -3815,6 +3815,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "vxr-embed"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "js-sys",
+ "vxr-core",
+ "vxr-render",
+ "vxr-vox",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "wgpu",
+]
+
+[[package]]
 name = "vxr-mcp"
 version = "0.1.0"
 dependencies = [

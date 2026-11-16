@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 
+use proptest::prelude::*;
 use vxr_core::Scene;
 use vxr_core::select::{Mode, Region, Transform};
 use vxr_core::tools::Target;
@@ -271,4 +272,48 @@ fn moving_onto_other_voxels_overwrites_and_undo_restores_them() {
     assert_eq!((s.map.get(O, O, O), s.map.get(O + 5, O, O + 5)), (5, 0));
     assert!(s.undo());
     assert_eq!(voxels(&s), before);
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: std::env::var("PROPTEST_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(256),
+        ..ProptestConfig::default()
+    })]
+
+    /// Replace colour and remove colour (`to` 0) on any model and selection: a voxel of
+    /// `from` takes `to` when nothing is selected or it is selected, every other cell stays,
+    /// the count is the voxels that changed, removed voxels leave the selection, and one
+    /// undo gives back voxels and selection.
+    #[test]
+    fn replace_color_changes_the_colour_s_voxels_inside_the_selection_and_no_others(
+        // Cells on both sides of a brick edge (8); the flag is "selected".
+        model in prop::collection::btree_map((4i32..12, 4i32..12, 4i32..12), (1u8..=4, any::<bool>()), 1..120),
+        none_selected in prop::bool::weighted(0.3),
+        from in 0u8..=5,
+        to in 0u8..=5,
+    ) {
+        let mut s = Scene::new([16, 16, 16]);
+        s.edit(model.iter().map(|(&(x, y, z), &(v, _))| ([x, y, z], v)));
+        if !none_selected {
+            s.select(model.iter().filter(|c| c.1.1).map(|(&(x, y, z), _)| [x, y, z]), Mode::Replace);
+        }
+        let (before, selected) = (voxels(&s), sel(&s));
+        let mut want = before.clone();
+        for (p, v) in &before {
+            if *v == from && (selected.is_empty() || selected.contains(p)) {
+                if to == 0 { want.remove(p); } else { want.insert(*p, to); }
+            }
+        }
+        let changed = before.iter().filter(|(p, v)| want.get(*p) != Some(*v)).count();
+        prop_assert_eq!(s.replace_color(from, to), changed);
+        prop_assert_eq!(&voxels(&s), &want);
+        let kept: Vec<_> = selected.iter().copied().filter(|p| want.contains_key(p)).collect();
+        prop_assert_eq!(sel(&s), kept);
+        // One undo step, and none when nothing changed (undo would take the model back).
+        if changed > 0 {
+            prop_assert!(s.undo());
+        }
+        prop_assert_eq!(voxels(&s), before);
+        prop_assert_eq!(sel(&s), selected);
+    }
 }

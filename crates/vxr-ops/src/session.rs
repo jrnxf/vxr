@@ -19,9 +19,10 @@ use std::collections::{HashMap, HashSet};
 use serde_json::Value;
 use vxr_core::history::At;
 use vxr_core::material::{Kind, Material};
+use vxr_core::palette::{Shift, SortKey, slots_of, sort_table};
 use vxr_core::scene::MAX_EXTENT;
 use vxr_core::select::{Clip, bounds};
-use vxr_core::tools::{MAX_RADIUS, ball_cells, box_cells, line_cells, line_steps};
+use vxr_core::tools::{MAX_RADIUS, ball_cells, box_cells, line_cells, line_steps, pattern_cells};
 use vxr_core::{Scene, World};
 use vxr_vox::chunk::{NOTE, Note};
 use vxr_vox::raw::RawFile;
@@ -31,6 +32,9 @@ use crate::args::*;
 use crate::look::Camera;
 use crate::parts::{self, Part};
 use crate::text::{clean, hex, parse_hex};
+
+/// The field of view a saved view records, in degrees: the editor's.
+const VIEW_FOV: f32 = 45.0;
 
 /// Limits per request (`docs/research/ai.md` section 5, and per turn from test 1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -473,14 +477,21 @@ impl Session {
                 self.edit(scene, a.cells, Mode::Add, slot, a.name.as_deref())
             }
             Op::Erase(a) => {
-                let cells = match (self.parts_cells(scene, &a.part, &a.parts)?, a.cells.is_empty()) {
-                    (Some(_), false) => return Err(invalid("give cells or parts, not both")),
-                    (Some(cells), true) => cells,
-                    (None, _) => {
+                let parts = self.parts_cells(scene, &a.part, &a.parts)?;
+                if usize::from(parts.is_some()) + usize::from(!a.cells.is_empty()) + usize::from(a.from_slot.is_some())
+                    > 1
+                {
+                    return Err(invalid("give only one of cells, parts and from_slot"));
+                }
+                let cells = match (parts, a.from_slot) {
+                    (Some(cells), _) => cells,
+                    (None, Some(from)) => self.of_color(scene, from, a.selection)?,
+                    (None, None) => {
                         self.list_limit(a.cells.len())?;
                         a.cells
                     }
                 };
+                let cells = self.inside(scene, cells, Mode::Erase, a.selection)?;
                 self.edit(scene, cells, Mode::Erase, 0, None)
             }
             Op::Box(a) => {
@@ -491,6 +502,7 @@ impl Session {
                     return Err(invalid(format!("the box spans {volume} cells; at most {}", self.limits.box_cells)));
                 }
                 let cells: Vec<Cell> = box_cells(lo, hi, a.hollow).collect();
+                let cells = self.inside(scene, cells, a.mode, a.selection)?;
                 self.edit(scene, cells, a.mode, slot, a.name.as_deref())
             }
             Op::Line(a) => {
@@ -499,16 +511,19 @@ impl Session {
                     return Err(invalid(format!("the line is over {MAX_LINE} cells")));
                 }
                 let cells: Vec<Cell> = line_cells(a.from, a.to).collect();
+                let cells = self.inside(scene, cells, a.mode, a.selection)?;
                 self.edit(scene, cells, a.mode, slot, a.name.as_deref())
             }
             Op::Sphere(a) => {
                 let slot = shape_slot(a.mode, a.slot)?;
                 let cells = round(a.center, a.radius, a.flat_axis)?;
+                let cells = self.inside(scene, cells, a.mode, a.selection)?;
                 self.edit(scene, cells, a.mode, slot, a.name.as_deref())
             }
             Op::Circle(a) => {
                 let slot = shape_slot(a.mode, a.slot)?;
                 let cells = round(a.center, a.radius, Some(a.axis.unwrap_or(Axis::Y)))?;
+                let cells = self.inside(scene, cells, a.mode, a.selection)?;
                 self.edit(scene, cells, a.mode, slot, a.name.as_deref())
             }
             Op::Face(a) => {
@@ -518,7 +533,8 @@ impl Session {
                 let face = self.face(scene, a.cell, side)?;
                 // Add builds on the open side; erase and paint work on the face's own voxels.
                 let d = if a.mode == Mode::Add { n } else { [0; 3] };
-                let cells = face.into_iter().map(|p| add(scene.to_world(p), d)).collect();
+                let cells: Vec<Cell> = face.into_iter().map(|p| add(scene.to_world(p), d)).collect();
+                let cells = self.inside(scene, cells, a.mode, a.selection)?;
                 self.edit(scene, cells, a.mode, slot, a.name.as_deref())
             }
             Op::Fill(a) => {
@@ -534,8 +550,7 @@ impl Session {
                 let cells: Vec<Cell> = if let Some(cells) = self.parts_cells(scene, &a.part, &a.parts)? {
                     cells
                 } else if let Some(from) = a.from_slot {
-                    let from = self::slot(from)?;
-                    self.voxels_where(scene, |_, v| v == from)
+                    self.of_color(scene, from, a.selection)?
                 } else if a.selection {
                     self.selected(scene)
                 } else if let (Some(f), Some(t)) = (a.from, a.to) {
@@ -578,6 +593,37 @@ impl Session {
                 self.selection = st.made.iter().copied().collect();
                 Ok(format!("pasted at {corner:?} (low corner); {}", self.stage_text(scene, &st)))
             }
+            Op::Stamp(a) => {
+                let Some(clip) = self.clip.clone() else {
+                    return Err(invalid("the clipboard is empty: copy or cut first"));
+                };
+                if a.at.is_empty() {
+                    return Err(invalid("at is empty: give the cells to stamp at"));
+                }
+                let total = (a.at.len() as i64).saturating_mul(clip.voxels.len() as i64);
+                if total > self.limits.box_cells {
+                    return Err(invalid(format!(
+                        "{} stamps of {} voxels are {total} cells; at most {}",
+                        a.at.len(),
+                        clip.voxels.len(),
+                        self.limits.box_cells
+                    )));
+                }
+                let grow = a.side.unwrap_or(Side::Top).normal();
+                // Staging keeps a cell's first slot: the last stamp goes first, so it wins.
+                let mut cells: Vec<(Cell, u8)> =
+                    a.at.iter().rev().flat_map(|&at| pattern_cells(&clip, at, grow)).collect();
+                if a.selection {
+                    let keep: HashSet<Cell> =
+                        self.inside(scene, cells.iter().map(|c| c.0).collect(), a.mode, true)?.into_iter().collect();
+                    cells.retain(|c| keep.contains(&c.0));
+                }
+                if a.mode == Mode::Erase {
+                    cells.iter_mut().for_each(|c| c.1 = 0);
+                }
+                let st = self.stage(scene, cells, a.mode == Mode::Paint)?;
+                Ok(format!("stamped {} times; {}", a.at.len(), self.stage_text(scene, &st)))
+            }
             Op::Delete(_) => {
                 let st = self.delete(scene)?;
                 Ok(self.stage_text(scene, &st))
@@ -619,6 +665,19 @@ impl Session {
                 let what = self.node(scene, a.node)?;
                 let t = self.world_edit(scene, |w| w.move_by(a.node, a.offset))?.1;
                 Ok(format!("moved {what} by {:?}{}; {t}", a.offset, self.extent_text(scene, a.node)))
+            }
+            Op::TransformObject(a) => {
+                let what = self.node(scene, a.node)?;
+                let (t, did) = match a.kind {
+                    TurnKind::Rotate => (vxr_core::select::Transform::Rotate(a.axis.index()), "rotated"),
+                    TurnKind::Flip => (vxr_core::select::Transform::Flip(a.axis.index()), "flipped"),
+                };
+                let (turned, text) = self.world_edit(scene, |w| w.transform(a.node, t))?;
+                if !turned {
+                    return Err(invalid(format!("node {}: {what} holds no object to turn", a.node)));
+                }
+                let how = if a.kind == TurnKind::Rotate { "90 degrees about" } else { "on" };
+                Ok(format!("{did} {what} {how} {:?}{}; {text}", a.axis, self.extent_text(scene, a.node)))
             }
             Op::Duplicate(a) => {
                 let what = self.node(scene, a.node)?;
@@ -667,6 +726,34 @@ impl Session {
                 let t = self.world_edit(scene, |w| w.ungroup(a.node))?.1;
                 let into = if parent == 0 { "the top of the world".to_string() } else { format!("group {parent}") };
                 Ok(format!("ungrouped {what}: nodes {kids:?} moved up into {into}; {t}"))
+            }
+            Op::Reorder(a) => {
+                let what = self.node(scene, a.node)?;
+                let w = scene.world().expect("a world");
+                let parents = w.tree.parents();
+                let parent = a.parent.unwrap_or_else(|| parents[a.node].expect("a node in the tree has a parent"));
+                if parent != 0 {
+                    let p = self.node(scene, parent)?;
+                    if w.model_of(parent).is_some() {
+                        return Err(invalid(format!("parent {parent}: {p} is not a group")));
+                    }
+                    if std::iter::successors(Some(parent), |&k| parents[k]).any(|k| k == a.node) {
+                        return Err(invalid(format!("parent {parent}: {what} cannot go into itself")));
+                    }
+                }
+                let into = if parent == 0 { "the top of the world".to_string() } else { format!("group {parent}") };
+                if let Some(b) = a.before {
+                    self.node(scene, b)?;
+                    if b == a.node || parents[b] != Some(parent) {
+                        return Err(invalid(format!("before {b}: give another node of {into}")));
+                    }
+                }
+                let (moved, t) = self.world_edit(scene, |w| w.place(a.node, parent, a.before))?;
+                if !moved {
+                    return Ok(format!("{what} is already there in {into}: nothing changed"));
+                }
+                let order = scene.world().expect("a world").tree.children(parent).to_vec();
+                Ok(format!("moved {what} into {into}, which now holds nodes {order:?} in this order; {t}"))
             }
             Op::Hide(a) => {
                 let what = self.node(scene, a.node)?;
@@ -812,6 +899,179 @@ impl Session {
                     m.kind.name(),
                     settings(&m),
                     self.slot_count(scene, to)
+                ))
+            }
+            Op::PaletteAdjust(a) => {
+                let slots = match (a.slots.is_empty(), a.selection) {
+                    (false, false) => {
+                        let mut slots = a.slots.iter().map(|&s| slot(s)).collect::<Result<Vec<_>, _>>()?;
+                        slots.sort_unstable();
+                        slots.dedup();
+                        slots
+                    }
+                    (true, true) if scene.at() == At::World => {
+                        return Err(invalid(
+                            "selection works on one model: give slots, or open an object with edit_object first",
+                        ));
+                    }
+                    (true, true) => {
+                        let slots = slots_of(self.selection.iter().map(|&p| self.get(scene, p)));
+                        if slots.is_empty() {
+                            return Err(invalid("nothing is selected: call select first, or give slots"));
+                        }
+                        slots
+                    }
+                    _ => return Err(invalid("give slots or selection: true, one of them")),
+                };
+                for (name, v, max) in
+                    [("hue", a.hue, 180.0), ("saturation", a.saturation, 100.0), ("value", a.value, 100.0)]
+                {
+                    if !(-max..=max).contains(&v) {
+                        return Err(invalid(format!("{name} is {v}: give -{max} to {max}")));
+                    }
+                }
+                let shift = Shift { hue: a.hue, sat: a.saturation / 100.0, val: a.value / 100.0 };
+                if shift.is_zero() {
+                    return Err(invalid("hue, saturation and value are all 0: nothing to shift"));
+                }
+                self.open(scene);
+                let base: Vec<_> = slots.iter().map(|&s| (s, scene.palette[s as usize])).collect();
+                scene.shift_colors(&base, shift);
+                let voxels: usize = slots.iter().map(|&s| self.slot_count(scene, s)).sum();
+                let lines: Vec<String> = base
+                    .iter()
+                    .map(|&(s, old)| format!("slot {s}: {} -> {}", hex(old), hex(scene.palette[s as usize])))
+                    .collect();
+                Ok(format!(
+                    "shifted {} slot{} ({voxels} voxels use {}): {}",
+                    slots.len(),
+                    if slots.len() == 1 { "" } else { "s" },
+                    if slots.len() == 1 { "it" } else { "them" },
+                    lines.join("; ")
+                ))
+            }
+            Op::PaletteImport(a) => {
+                let colors = vxr_core::palette::parse(a.text.as_bytes()).map_err(|e| invalid(format!("text: {e}")))?;
+                let n = colors.len();
+                let used: usize = (1..=n).map(|s| self.slot_count(scene, s as u8)).sum();
+                self.open(scene);
+                let changed = scene.put_colors(&colors);
+                let first: Vec<String> =
+                    (1..=n.min(8)).map(|s| format!("slot {s} {}", hex(scene.palette[s]))).collect();
+                Ok(format!(
+                    "imported {n} colour{} into slot{}: {changed} changed colour, and {used} voxels use those slots; now {}{}",
+                    if n == 1 { "" } else { "s" },
+                    if n == 1 { " 1".to_string() } else { format!("s 1 to {n}") },
+                    first.join(", "),
+                    if n > 8 { ", …" } else { "" }
+                ))
+            }
+            Op::SaveView(a) => {
+                if !(1..=vxr_core::views::SLOTS).contains(&(a.slot as i32)) {
+                    return Err(invalid(format!("slot {}: the slots are 1 to 10", a.slot)));
+                }
+                if !(-90.0..=90.0).contains(&a.pitch) {
+                    return Err(invalid(format!("pitch {}: -90 to 90", a.pitch)));
+                }
+                let finite = a.target.iter().chain([&a.yaw, &a.distance]).all(|v| v.is_finite());
+                if !finite || a.distance <= 0.0 {
+                    return Err(invalid("target, yaw and distance must be numbers, and distance above 0"));
+                }
+                let v = vxr_core::views::SavedView {
+                    target: a.target,
+                    yaw: a.yaw.to_radians(),
+                    pitch: a.pitch.to_radians(),
+                    distance: a.distance,
+                    ortho: a.orthographic,
+                };
+                let was = scene.saved_view(a.slot as i32 - 1).is_some();
+                self.open(scene);
+                if !scene.put_view(a.slot as i32 - 1, v, VIEW_FOV) {
+                    return Err(invalid("that view cannot be saved"));
+                }
+                let how = if a.orthographic { "orthographic" } else { "perspective" };
+                let did = if was { "replaced" } else { "saved" };
+                Ok(format!(
+                    "{did} view {}: looking at {:?} from yaw {} pitch {}, {} voxels away, {how}",
+                    a.slot, a.target, a.yaw, a.pitch, a.distance
+                ))
+            }
+            Op::ImageImport(a) => {
+                if scene.at() == At::World {
+                    return Err(invalid(WORLD));
+                }
+                let bytes = base64(&a.png)
+                    .ok_or_else(|| invalid("png: it is not base64 (A-Z, a-z, 0-9, + and /, with = padding)"))?;
+                let img = vxr_core::image::decode(&bytes).map_err(|e| invalid(format!("png: {e}")))?;
+                let p = scene.place_image(&img, a.at).map_err(invalid)?;
+                let b = scene.bounds();
+                if (p.lo, p.size) != (b.lo, b.size) {
+                    self.rebound(scene, p.lo, p.size)?;
+                }
+                let st = self.stage(scene, p.cells, false)?;
+                Ok(format!(
+                    "imported a {}x{} image at {:?} (its bottom-left pixel; it spans x {} to {}, y {} to {}): {} cells changed in {} slot{}; bounds {}; {}",
+                    img.width,
+                    img.height,
+                    p.at,
+                    p.at[0],
+                    p.at[0] + img.width as i32 - 1,
+                    p.at[1],
+                    p.at[1] + img.height as i32 - 1,
+                    st.changed,
+                    p.slots,
+                    if p.slots == 1 { "" } else { "s" },
+                    self.bounds_text(scene),
+                    self.staged_text(scene)
+                ))
+            }
+            Op::PaletteSort(a) => {
+                let mut slots: Vec<u8> = if a.slots.is_empty() {
+                    (1..=255).collect()
+                } else {
+                    a.slots.iter().map(|&s| slot(s)).collect::<Result<_, _>>()?
+                };
+                slots.sort_unstable();
+                slots.dedup();
+                let key = match a.by {
+                    SortBy::Hue => SortKey::Hue,
+                    SortBy::Saturation => SortKey::Saturation,
+                    SortBy::Value => SortKey::Value,
+                };
+                let table = sort_table(&scene.palette, &slots, key);
+                let moved = (1..=255u8).filter(|&s| table[s as usize] != s).count();
+                let what =
+                    if a.slots.is_empty() { "the palette".to_string() } else { format!("{} slots", slots.len()) };
+                if moved == 0 {
+                    return Ok(format!("{what} already in order by {}: nothing changed", key.name()));
+                }
+                // The model being edited goes through the change's own cells; the file's other
+                // models, and the voxels a new object waits to take, follow beside it.
+                let mut voxels = 0;
+                if scene.at() != At::World {
+                    let cells = self.voxels_of(scene, |v| table[v as usize] != v);
+                    voxels = cells.len();
+                    let remap = cells.into_iter().map(|(w, v)| (w, table[v as usize])).collect();
+                    self.stage(scene, remap, true)?;
+                }
+                self.open(scene);
+                for (k, p) in self.pending.iter_mut().enumerate() {
+                    if let Pending::Object { voxels: taken, .. } = p {
+                        for v in taken.iter_mut().filter(|v| table[v.1 as usize] != v.1) {
+                            voxels += (self.moved.get(&v.0) == Some(&k)) as usize;
+                            v.1 = table[v.1 as usize];
+                        }
+                    }
+                }
+                scene.move_slots(&table);
+                voxels += scene.remap_models(&table);
+                let first: Vec<String> =
+                    slots.iter().take(8).map(|&s| format!("slot {s} {}", hex(scene.palette[s as usize]))).collect();
+                Ok(format!(
+                    "sorted {what} by {}: {moved} slots moved and {voxels} voxels follow their colours, so the scene looks the same; now {}{}",
+                    key.name(),
+                    first.join(", "),
+                    if slots.len() > 8 { ", ..." } else { "" }
                 ))
             }
             Op::Undo(_) => {
@@ -1109,6 +1369,34 @@ impl Session {
             self.selection.iter().filter(|&&p| self.get(scene, p) != 0).map(|&p| scene.to_world(p)).collect();
         out.sort_unstable();
         out
+    }
+
+    /// Replace colour and remove colour (`from_slot` on paint and erase): the voxels of slot
+    /// `from`, with `only` just the selected ones, by the rule the editor's commands use
+    /// ([`vxr_core::select::of_color`]).
+    fn of_color(&self, scene: &Scene, from: u8, only: bool) -> Result<Vec<Cell>, Error> {
+        let from = slot(from)?;
+        if only && self.selected(scene).is_empty() {
+            return Err(invalid("nothing is selected: call select first"));
+        }
+        let only = only.then_some(&self.selection);
+        Ok(self.voxels_where(scene, |q, v| vxr_core::select::of_color(only, scene.to_map(q), v, from)))
+    }
+
+    /// The region option (`selection: true` on a shape or on erase): the cells of `cells` an
+    /// erase or a paint limited to the selection may change, by the rule the brushes use
+    /// ([`vxr_core::select::inside`]). Without `only`, every cell.
+    fn inside(&self, scene: &Scene, cells: Vec<Cell>, mode: Mode, only: bool) -> Result<Vec<Cell>, Error> {
+        if !only {
+            return Ok(cells);
+        }
+        if mode == Mode::Add {
+            return Err(invalid("selection: true limits mode erase and paint; add is never limited"));
+        }
+        if self.selected(scene).is_empty() {
+            return Err(invalid("nothing is selected: call select first"));
+        }
+        Ok(cells.into_iter().filter(|&q| vxr_core::select::inside(&self.selection, scene.to_map(q))).collect())
     }
 
     fn list_limit(&self, n: usize) -> Result<(), Error> {
@@ -1946,6 +2234,7 @@ impl Session {
     fn revert(&mut self, scene: &mut Scene) {
         if self.open {
             scene.revert_voxels();
+            scene.revert_cameras();
             for i in 1..=255u8 {
                 if scene.palette[i as usize] != self.palette_before[i as usize] {
                     scene.put_color(i, self.palette_before[i as usize]);
@@ -2067,9 +2356,12 @@ struct Lane {
 fn world_args(op: &mut Op) -> (Vec<&mut usize>, Option<&mut i32>) {
     match op {
         Op::MoveObject(a) => (vec![&mut a.node], None),
+        Op::TransformObject(a) => (vec![&mut a.node], None),
         Op::Duplicate(a) => (vec![&mut a.node], None),
         Op::Group(a) => (a.nodes.iter_mut().collect(), None),
         Op::Ungroup(a) => (vec![&mut a.node], None),
+        // Parent 0 is the root, which no step makes: it is found as it is.
+        Op::Reorder(a) => (std::iter::once(&mut a.node).chain(&mut a.parent).chain(&mut a.before).collect(), None),
         Op::Hide(a) => (vec![&mut a.node], None),
         Op::SetLayer(a) => (vec![&mut a.node], a.layer.as_mut()),
         Op::DeleteObject(a) => (vec![&mut a.node], None),
@@ -2141,20 +2433,45 @@ fn nodes_text(n: usize) -> String {
 }
 
 /// How many nodes under the root of `new` differ from `old`: added or taken out of the tree,
-/// moved to another parent, or with another name, flag, layer, transform or model. A
-/// group whose children change does not count; the children do.
+/// moved to another parent or to another place among the children it stays with, or with
+/// another name, flag, layer, transform or model. A group whose children change does not
+/// count; the children do.
 fn changed_nodes(old: &Tree, new: &Tree) -> usize {
     fn at<'a>(t: &'a Tree, p: &[Option<usize>], i: usize) -> Option<(&'a TreeNode, usize)> {
         Some((t.nodes.get(i)?, p.get(i).copied().flatten()?))
     }
     let (po, pn) = (old.parents(), new.parents());
-    (1..old.nodes.len().max(new.nodes.len()))
-        .filter(|&i| match (at(old, &po, i), at(new, &pn, i)) {
-            (None, None) => false,
-            (Some((a, pa)), Some((b, pb))) => pa != pb || !same_node(a, b),
-            _ => true,
-        })
-        .count()
+    let n = old.nodes.len().max(new.nodes.len());
+    let changed = |i: usize| match (at(old, &po, i), at(new, &pn, i)) {
+        (None, None) => false,
+        (Some((a, pa)), Some((b, pb))) => pa != pb || !same_node(a, b),
+        _ => true,
+    };
+    // The fewest children that moved within a group both trees have: those outside the
+    // longest run of children that kept their order.
+    let reordered = |g: usize| {
+        let reached = |p: &[Option<usize>], i: usize| i == 0 || p.get(i).copied().flatten().is_some();
+        if !reached(&po, g) || !reached(&pn, g) {
+            return 0;
+        }
+        let (Some(TreeNode { kind: NodeKind::Group(a), .. }), Some(TreeNode { kind: NodeKind::Group(b), .. })) =
+            (old.nodes.get(g), new.nodes.get(g))
+        else {
+            return 0;
+        };
+        let place: HashMap<usize, usize> = a.iter().enumerate().map(|(k, &c)| (c, k)).collect();
+        let stayed: Vec<usize> = b.iter().filter(|&&c| !changed(c)).filter_map(|c| place.get(c).copied()).collect();
+        let mut run: Vec<usize> = Vec::new();
+        for &k in &stayed {
+            match run.binary_search(&k) {
+                Ok(_) => {}
+                Err(at) if at == run.len() => run.push(k),
+                Err(at) => run[at] = k,
+            }
+        }
+        stayed.len() - run.len()
+    };
+    (1..n).filter(|&i| changed(i)).count() + (0..n).map(reordered).sum::<usize>()
 }
 
 /// Whether two nodes are the same but for the children a group holds.
@@ -2200,4 +2517,29 @@ pub(crate) fn span(lo: Cell, hi: Cell) -> i64 {
 
 pub(crate) fn inside(p: Cell, lo: Cell, hi: Cell) -> bool {
     (0..3).all(|k| p[k] >= lo[k] && p[k] <= hi[k])
+}
+
+/// Standard base64 (with or without `=` padding; spaces and line breaks skipped), or None
+/// when another character is in it.
+fn base64(text: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(text.len() / 4 * 3);
+    let (mut acc, mut bits) = (0u32, 0);
+    for c in text.bytes().filter(|c| !c.is_ascii_whitespace()) {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' => break,
+            _ => return None,
+        };
+        acc = acc << 6 | v as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
 }

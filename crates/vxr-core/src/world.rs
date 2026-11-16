@@ -14,6 +14,7 @@ use vxr_vox::{Document, WorldSave};
 
 use crate::brickmap::BrickMap;
 use crate::scene::{MAX_EXTENT, vox_to_world, world_to_vox};
+use crate::select::Transform;
 
 /// Most models a file may hold, and most cells (their sizes multiplied out) across them.
 /// Each model is a dense grid of brick slots over its size, so a few bytes of `SIZE` chunk
@@ -361,6 +362,29 @@ impl World {
         if lo[0] > hi[0] { ([0; 3], [0; 3]) } else { (lo, hi) }
     }
 
+    /// Every shown object in one map, in world axes, with the overlap rule, and the world
+    /// cell of its cell (0, 0, 0). An error when the shown objects span more than
+    /// [`MAX_EXTENT`] on an axis.
+    pub fn shown_map(&self) -> Result<(BrickMap, [i32; 3]), String> {
+        let (lo, hi) = self.shown_box();
+        let mut size = [0u32; 3];
+        for a in 0..3 {
+            let extent = hi[a] as i64 - lo[a] as i64 + 1;
+            if extent > MAX_EXTENT as i64 {
+                return Err(format!("the world would be over {MAX_EXTENT} voxels on an axis ({extent})"));
+            }
+            size[a] = extent as u32;
+        }
+        let mut map = BrickMap::new(size);
+        self.for_each_voxel(true, |_, p, c| {
+            let m: [i32; 3] = std::array::from_fn(|a| p[a] - lo[a]);
+            if map.get(m[0], m[1], m[2]) == 0 {
+                map.set(m[0], m[1], m[2], c);
+            }
+        });
+        Ok((map, lo))
+    }
+
     /// The objects showing model `m`: more than one means linked copies.
     pub fn users(&self, m: usize) -> usize {
         self.objects().into_iter().filter(|&i| self.model_of(i) == Some(m)).count()
@@ -420,6 +444,49 @@ impl World {
         let local = mat_vec(&transpose(&parent.r), world_to_vox(d));
         let t = &mut self.tree.nodes[i].local.t;
         *t = std::array::from_fn(|a| t[a] + local[a]);
+    }
+
+    /// Turn node `i` a quarter turn about a vxr axis ([`Transform::Rotate`]) or mirror it
+    /// along one ([`Transform::Flip`]), in place: every voxel of its objects goes where
+    /// [`Transform::apply`] sends its world cell within the box the node fills
+    /// ([`World::extent`]), the rule a selection in a model follows. Only the node's own
+    /// transform changes, so models and linked copies elsewhere keep theirs and the file
+    /// keeps it as the `nTRN`'s `_r` and `_t`. [`Transform::Move`] is [`World::move_by`].
+    /// False, with nothing changed, for the root, an empty group or [`Transform::Loop`].
+    pub fn transform(&mut self, i: usize, t: Transform) -> bool {
+        let parents = self.tree.parents();
+        let Some(p) = parents.get(i).copied().flatten() else { return false };
+        match t {
+            Transform::Move(d) => {
+                self.move_by(i, d);
+                return true;
+            }
+            Transform::Loop(..) => return false,
+            Transform::Rotate(a) | Transform::Flip(a) if a > 2 => return false,
+            Transform::Rotate(_) | Transform::Flip(_) => {}
+        }
+        let Some((lo, size)) = self.extent(i) else { return false };
+        let hi: [i32; 3] = std::array::from_fn(|k| lo[k] + size[k] as i32 - 1);
+        // The rule is affine in the cell, q = M p + c, in vxr axes. In the file's axes it is
+        // q = R p + d with R = C M C^-1 and d = C c, where C is `world_to_vox`.
+        let c = t.apply([0; 3], lo, hi);
+        let unit = |k: usize| std::array::from_fn(|a| (a == k) as i32);
+        let cols: [[i32; 3]; 3] = std::array::from_fn(|k| {
+            let m = t.apply(vox_to_world(unit(k)), lo, hi);
+            world_to_vox(std::array::from_fn(|a| m[a] - c[a]))
+        });
+        let r = transpose(&cols);
+        let d = world_to_vox(c);
+        // Transforms place cell centres in doubled coordinates (cell q is 2q + 1), so the
+        // step that sends cell p to R p + d moves centres by d + (1 - R 1) / 2.
+        let ones = mat_vec(&r, [1; 3]);
+        let step = Affine { r, t: std::array::from_fn(|k| d[k] + (1 - ones[k]) / 2) };
+        let parent = self.transform_in(&parents, p);
+        let back = transpose(&parent.r);
+        let inverse = Affine { r: back, t: mat_vec(&back, parent.t).map(|v| -v) };
+        let node = &mut self.tree.nodes[i];
+        node.local = inverse.then(&step).then(&parent).then(&node.local);
+        true
     }
 
     /// The objects at or under node `i`.
@@ -514,6 +581,65 @@ impl World {
         let Some(at) = kids.iter().position(|&k| k == g) else { return false };
         kids.splice(at..=at, members);
         true
+    }
+
+    /// Move node `i` (and what it holds) to another place in the tree: under group `parent`,
+    /// in front of its child `before`, or at the end with None. It keeps where it is in the
+    /// world (its own transform takes up the difference between the two groups'); whether
+    /// it shows follows the group it lands in. The order matters where objects overlap
+    /// (see [`World::version`]) and is the order the file lists them in. False, with nothing
+    /// changed, for the root, a `parent` that is not a group of the tree or is `i` or under
+    /// it, a `before` that is `i` or not a child of `parent`, and when `i` is already there.
+    pub fn place(&mut self, i: usize, parent: usize, before: Option<usize>) -> bool {
+        let parents = self.tree.parents();
+        let Some(old) = parents.get(i).copied().flatten() else { return false };
+        let reached = parent == 0 || parents.get(parent).copied().flatten().is_some();
+        if !reached || !matches!(self.tree.nodes.get(parent).map(|n| &n.kind), Some(Kind::Group(_))) {
+            return false;
+        }
+        let mut up = Some(parent);
+        while let Some(p) = up {
+            if p == i {
+                return false;
+            }
+            up = parents[p];
+        }
+        if before.is_some_and(|b| b == i || parents.get(b).copied().flatten() != Some(parent)) {
+            return false;
+        }
+        let mut kids: Vec<usize> = self.tree.children(parent).iter().copied().filter(|&k| k != i).collect();
+        let at = before.and_then(|b| kids.iter().position(|&k| k == b)).unwrap_or(kids.len());
+        kids.insert(at, i);
+        if kids == self.tree.children(parent) {
+            return false;
+        }
+        if parent != old {
+            let (from, to) = (self.transform_in(&parents, old), self.transform_in(&parents, parent));
+            let back = transpose(&to.r);
+            let inverse = Affine { r: back, t: mat_vec(&back, to.t).map(|v| -v) };
+            let node = &mut self.tree.nodes[i];
+            node.local = inverse.then(&from).then(&node.local);
+            if let Kind::Group(k) = &mut self.tree.nodes[old].kind {
+                k.retain(|&k| k != i);
+            }
+        }
+        self.tree.nodes[parent].kind = Kind::Group(kids);
+        true
+    }
+
+    /// Move node `i` one place up (toward the start) or down among the children of its
+    /// group, as [`World::place`]. False at the end of the list and for the root.
+    pub fn shift(&mut self, i: usize, down: bool) -> bool {
+        let Some(p) = self.tree.parents().get(i).copied().flatten() else { return false };
+        let kids = self.tree.children(p);
+        let Some(at) = kids.iter().position(|&k| k == i) else { return false };
+        let before = match (down, at) {
+            (false, 0) => return false,
+            (false, _) => Some(kids[at - 1]),
+            (true, _) if at + 1 >= kids.len() => return false,
+            (true, _) => kids.get(at + 2).copied(),
+        };
+        self.place(i, p, before)
     }
 
     pub fn set_name(&mut self, i: usize, name: Option<&str>) {

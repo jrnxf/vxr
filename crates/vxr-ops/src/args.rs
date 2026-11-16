@@ -145,7 +145,7 @@ pub struct Place {
     pub name: Option<String>,
 }
 
-/// Clear listed cells (at most 4096), or every voxel of one or more parts. For a region use box with mode erase.
+/// Clear listed cells (at most 4096), every voxel of one or more parts, or every voxel of slot from_slot (remove a colour). For a region use box with mode erase.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Erase {
@@ -157,6 +157,12 @@ pub struct Erase {
     /// Several part ids or names.
     #[serde(default)]
     pub parts: Vec<String>,
+    /// Clear every voxel of this slot.
+    #[schemars(range(min = 1, max = 255))]
+    pub from_slot: Option<u8>,
+    /// Clear only those of them that are selected (select first).
+    #[serde(default)]
+    pub selection: bool,
 }
 
 /// Fill the box between two corner cells (both included). hollow keeps only its outer shell.
@@ -172,6 +178,9 @@ pub struct BoxShape {
     pub mode: Mode,
     #[serde(default)]
     pub hollow: bool,
+    /// Change only voxels that are selected (select first); for mode erase and paint.
+    #[serde(default)]
+    pub selection: bool,
     /// Name the voxels this makes as a part.
     pub name: Option<String>,
 }
@@ -187,6 +196,9 @@ pub struct Line {
     pub slot: Option<u8>,
     #[serde(default)]
     pub mode: Mode,
+    /// Change only voxels that are selected (select first); for mode erase and paint.
+    #[serde(default)]
+    pub selection: bool,
     /// Name the voxels this makes as a part.
     pub name: Option<String>,
 }
@@ -204,6 +216,9 @@ pub struct Sphere {
     #[serde(default)]
     pub mode: Mode,
     pub flat_axis: Option<Axis>,
+    /// Change only voxels that are selected (select first); for mode erase and paint.
+    #[serde(default)]
+    pub selection: bool,
     /// Name the voxels this makes as a part.
     pub name: Option<String>,
 }
@@ -221,6 +236,9 @@ pub struct Circle {
     #[serde(default)]
     pub mode: Mode,
     pub axis: Option<Axis>,
+    /// Change only voxels that are selected (select first); for mode erase and paint.
+    #[serde(default)]
+    pub selection: bool,
     /// Name the voxels this makes as a part.
     pub name: Option<String>,
 }
@@ -238,6 +256,9 @@ pub struct FaceShape {
     pub slot: Option<u8>,
     #[serde(default)]
     pub mode: Mode,
+    /// Change only voxels that are selected (select first); for mode erase and paint.
+    #[serde(default)]
+    pub selection: bool,
     /// Name the voxels this makes as a part.
     pub name: Option<String>,
 }
@@ -250,7 +271,7 @@ pub struct Fill {
     pub slot: u8,
 }
 
-/// Recolour filled cells: of parts, of slot from_slot, the selection, or in a box (from, to). Empty cells stay empty.
+/// Recolour filled cells: of parts, of slot from_slot (replace a colour; with selection: true only the selected ones), the selection, or in a box (from, to). Empty cells stay empty.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Paint {
@@ -265,7 +286,7 @@ pub struct Paint {
     /// Recolour every voxel of this slot.
     #[schemars(range(min = 1, max = 255))]
     pub from_slot: Option<u8>,
-    /// Recolour the selection.
+    /// Recolour the selection, or with from_slot only its voxels of that slot.
     #[serde(default)]
     pub selection: bool,
     pub from: Option<Cell>,
@@ -339,6 +360,20 @@ pub struct Cut {}
 #[serde(deny_unknown_fields)]
 pub struct Paste {
     pub at: Option<Cell>,
+}
+
+/// Stamp your clipboard (copy or cut first) as a pattern, once at each cell of at, in one step: the pattern brush. The clipboard's box starts in the cell and grows toward side (default top: it stands on the cell, as paste puts it), centred on the cell across that. Mode add puts its voxels, erase clears the cells where it has voxels, paint gives the voxels it covers its colours. Where stamps overlap the later one wins. Cells outside the editable bounds are skipped with a warning. The selection stays.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Stamp {
+    /// Cells [x, y, z], one stamp each.
+    pub at: Vec<Cell>,
+    pub side: Option<Side>,
+    #[serde(default)]
+    pub mode: Mode,
+    /// Change only voxels that are selected (select first); for mode erase and paint.
+    #[serde(default)]
+    pub selection: bool,
 }
 
 /// Erase the selected voxels; the selection empties.
@@ -438,6 +473,23 @@ pub struct MoveObject {
     pub offset: Cell,
 }
 
+/// What transform_object does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum TurnKind {
+    Rotate,
+    Flip,
+}
+
+/// Rotate or flip an object or group of the world in place, as Rotate X and Flip X do on the picked object in world mode. rotate: 90 degrees about axis (counter-clockwise looking down it) around the middle of the box the node fills; flip: mirror across the middle on axis. Call it again for 180 or 270 degrees. node is its number from the summary's world list. A group turns with everything in it. No model changes, so a linked copy turns on its own, and the file keeps the turn.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TransformObject {
+    pub node: usize,
+    pub kind: TurnKind,
+    pub axis: Axis,
+}
+
 /// Copy an object or group of the world and put the copy beside it on +x, as Cmd-D does. linked makes a linked copy that shares the models (editing one changes every copy, as Cmd-Shift-D does); otherwise each copied object gets its own model. The result gives the copy's node.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -459,6 +511,15 @@ pub struct Group {
 #[serde(deny_unknown_fields)]
 pub struct Ungroup {
     pub node: usize,
+}
+
+/// Move an object or group of the world to another place in the scene tree, as a drag of its row does: into group parent (0 is the top of the world; default the group it is in), in front of its child before (default the end). It stays where it is in the world, and shows or hides with the group it lands in. Where objects overlap, the order in the tree decides which shows.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Reorder {
+    pub node: usize,
+    pub parent: Option<usize>,
+    pub before: Option<usize>,
 }
 
 /// Hide an object or group of the world, or show it again with hidden false, as its eye in the scene tree does. A hidden object stays in the file.
@@ -559,6 +620,91 @@ pub struct PaletteCopy {
     pub from: u8,
     #[schemars(range(min = 1, max = 255))]
     pub to: u8,
+}
+
+/// Shift the hue, saturation and value of several palette slots at once, as the palette's group edit does (Shift-click swatches, then the three sliders): every voxel of those slots changes with them, in one undo step. Give slots, or selection: true for the slots the selected voxels use. Hue turns the colours around the wheel in degrees; saturation and value scale by a percent (-100 removes it, 100 doubles it), so greys stay grey and a ramp keeps its order.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PaletteAdjust {
+    /// The slots to shift, 1 to 255.
+    #[serde(default)]
+    pub slots: Vec<u8>,
+    /// Shift the slots the selected voxels use, instead of slots (on one model only).
+    #[serde(default)]
+    pub selection: bool,
+    /// Degrees to turn the hue, -180 to 180.
+    #[serde(default)]
+    #[schemars(range(min = -180, max = 180))]
+    pub hue: f32,
+    /// Percent to scale the saturation by, -100 to 100.
+    #[serde(default)]
+    #[schemars(range(min = -100, max = 100))]
+    pub saturation: f32,
+    /// Percent to scale the value (brightness) by, -100 to 100.
+    #[serde(default)]
+    #[schemars(range(min = -100, max = 100))]
+    pub value: f32,
+}
+
+/// Sort palette slots by hue, saturation or value, as Sort palette does: the colours and materials of the slots trade places and every voxel of the file follows its colour, so the scene looks the same and only the palette order changes, in one undo step. Leave slots out for the whole palette, or give the slots to sort among themselves (a ramp, the used colours).
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PaletteSort {
+    pub by: SortBy,
+    /// The slots to sort among themselves, 1 to 255. Leave out for every slot.
+    #[serde(default)]
+    pub slots: Vec<u8>,
+}
+
+/// Import a palette from text, as Import palette… does with a text file: the colours go to slots 1 up in the order of the text, in one undo step, and every voxel of those slots changes colour. Slots after the last colour and every material stay. The text is one rrggbb per line with or without # (the .hex of Lospec), or a GIMP .gpl palette (a first line GIMP Palette, then r g b name lines); at most 255 colours. To set chosen slots, use palette_set.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PaletteImport {
+    /// The palette file's text.
+    pub text: String,
+}
+
+/// Import a PNG image as voxels, as Import image… does: one cell thick, upright in the x-y plane as the front view shows the picture, each pixel one voxel in the palette slot nearest its colour (set the colours with palette_set or palette_import first for an exact match). Pixels under half opaque stay empty. The bounds grow to hold it. At most 1024 pixels on a side, and the changed-cell limit counts every pixel.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ImageImport {
+    /// The PNG file as standard base64.
+    pub png: String,
+    /// The cell of the image's bottom-left pixel. Without it the image stands on the ground, centred across the bounds on x, one cell in front of the frontmost voxel (halfway back in an empty model).
+    pub at: Option<Cell>,
+}
+
+/// Save a view into one of the file's ten saved view slots, as the View flyout's saved views do: the user can go to it with one click, and it is saved in the file as a MagicaVoxel camera (rCAM), in one undo step. A slot that holds a view is replaced. The yaw and pitch are the user's orbit: yaw 0 looks from the front (+z), 90 from the right (+x); pitch 30 looks down from 30 degrees above. scene_summary lists the views saved so far.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SaveView {
+    /// The slot, 1 to 10.
+    #[schemars(range(min = 1, max = 10))]
+    pub slot: u8,
+    /// The point the view looks at and turns around, in world coordinates (the middle of cell [x, y, z] is [x + 0.5, y + 0.5, z + 0.5]).
+    pub target: [f32; 3],
+    /// Degrees around the vertical axis: 0 from the front (+z), 90 from the right (+x), 180 from the back.
+    pub yaw: f32,
+    /// Degrees above the horizon, -90 (from straight below) to 90 (from straight above).
+    #[schemars(range(min = -90, max = 90))]
+    pub pitch: f32,
+    /// How far the eye is from the target, in voxels, above 0.
+    pub distance: f32,
+    /// Parallel (orthographic) projection instead of perspective.
+    #[serde(default)]
+    pub orthographic: bool,
+}
+
+/// What palette_sort orders the colours by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum SortBy {
+    /// Greys first, dark to light, then the colours around the wheel from red.
+    Hue,
+    /// From grey to vivid.
+    Saturation,
+    /// From dark to light.
+    Value,
 }
 
 /// Where look looks from.
@@ -685,6 +831,7 @@ ops! {
     "copy" => Copy(CopySelection),
     "cut" => Cut(Cut),
     "paste" => Paste(Paste),
+    "stamp" => Stamp(Stamp),
     "delete" => Delete(Delete),
     "hollow" => Hollow(Hollow),
     "fill_inside" => FillInside(FillInside),
@@ -693,12 +840,19 @@ ops! {
     "palette_set" => PaletteSet(PaletteSet),
     "palette_swap" => PaletteSwap(PaletteSwap),
     "palette_copy" => PaletteCopy(PaletteCopy),
+    "palette_adjust" => PaletteAdjust(PaletteAdjust),
+    "palette_sort" => PaletteSort(PaletteSort),
+    "palette_import" => PaletteImport(PaletteImport),
+    "image_import" => ImageImport(ImageImport),
     "material_set" => MaterialSet(MaterialSet),
+    "save_view" => SaveView(SaveView),
     "make_object" => MakeObject(MakeObject),
     "move_object" => MoveObject(MoveObject),
+    "transform_object" => TransformObject(TransformObject),
     "duplicate" => Duplicate(Duplicate),
     "group" => Group(Group),
     "ungroup" => Ungroup(Ungroup),
+    "reorder" => Reorder(Reorder),
     "hide" => Hide(Hide),
     "set_layer" => SetLayer(SetLayer),
     "delete_object" => DeleteObject(DeleteObject),
@@ -750,11 +904,11 @@ impl Op {
     /// model too, for the objects make_object stages.
     pub fn scope(name: &str) -> Scope {
         match name {
-            "move_object" | "duplicate" | "group" | "ungroup" | "hide" | "set_layer" | "delete_object"
-            | "new_layer" | "hide_layer" => Scope::World,
+            "move_object" | "transform_object" | "duplicate" | "group" | "ungroup" | "reorder" | "hide"
+            | "set_layer" | "delete_object" | "new_layer" | "hide_layer" => Scope::World,
             "place" | "erase" | "box" | "line" | "sphere" | "circle" | "face" | "fill" | "paint" | "select"
-            | "transform" | "copy" | "cut" | "paste" | "delete" | "hollow" | "fill_inside" | "resize" | "crop"
-            | "palette_swap" | "make_object" => Scope::Model,
+            | "transform" | "copy" | "cut" | "paste" | "stamp" | "delete" | "hollow" | "fill_inside" | "resize"
+            | "crop" | "palette_swap" | "make_object" | "image_import" => Scope::Model,
             _ => Scope::Any,
         }
     }

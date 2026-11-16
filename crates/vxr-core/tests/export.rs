@@ -3,8 +3,10 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use vxr_core::Scene;
-use vxr_core::export::{Quad, obj, quads, slices};
+use proptest::prelude::*;
+use vxr_core::export::{Quad, Sprite, obj, quads, slices, sprite};
+use vxr_core::files::{obj_files, slices_png, sprite_png};
+use vxr_core::{BrickMap, Scene};
 
 /// The generated fixtures, plus the island when it has been built.
 fn files() -> Vec<(String, Vec<u8>)> {
@@ -197,5 +199,156 @@ fn slices_hold_every_voxel_of_every_fixture_and_the_island() {
             n += 1;
         });
         assert_eq!(s.rgba.chunks(4).filter(|p| p[3] != 0).count(), n, "{name}");
+    }
+}
+
+/// A sprite as text, one letter per pixel: `.` transparent, `T` the colour itself (a top
+/// face), `R` four fifths of it (a right face), `L` three fifths (a left face).
+fn letters(s: &Sprite, colour: [u8; 3]) -> Vec<String> {
+    let shade = |n: u16| colour.map(|v| (v as u16 * n / 5) as u8);
+    s.rgba
+        .chunks(s.width as usize * 4)
+        .map(|row| {
+            row.chunks(4)
+                .map(|p| match p {
+                    [0, 0, 0, 0] => '.',
+                    [r, g, b, 255] if [*r, *g, *b] == shade(5) => 'T',
+                    [r, g, b, 255] if [*r, *g, *b] == shade(4) => 'R',
+                    [r, g, b, 255] if [*r, *g, *b] == shade(3) => 'L',
+                    _ => '?',
+                })
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn a_sprite_draws_each_voxel_as_a_pixel_art_cube() {
+    let mut palette = [[0, 0, 0, 255]; 256];
+    palette[9] = [200, 100, 50, 255];
+    let one = |at: [i32; 3]| {
+        let mut m = BrickMap::new([16, 16, 16]);
+        m.set(at[0], at[1], at[2], 9);
+        m
+    };
+    // One voxel, wherever it is in the map: the image is the voxel's own box.
+    let s = sprite(&one([5, 9, 2]), &palette, 1).unwrap();
+    assert_eq!(letters(&s, [200, 100, 50]), ["TTTT", "LLRR", "LLRR"]);
+    let s = sprite(&one([0, 0, 15]), &palette, 2).unwrap();
+    assert_eq!(
+        letters(&s, [200, 100, 50]),
+        ["..TTTT..", "TTTTTTTT", "LLTTTTRR", "LLLLRRRR", "LLLLRRRR", "LLLLRRRR", "..LLRR.."]
+    );
+    // An L of three voxels: one step along x goes two pixels right and one down, one along
+    // z two left and one down, and the nearer voxel hides the faces behind it. The image is
+    // the box of the voxels, so the empty near corner leaves the last row clear.
+    let mut m = one([3, 0, 3]);
+    m.set(4, 0, 3, 9);
+    m.set(3, 0, 4, 9);
+    let s = sprite(&m, &palette, 1).unwrap();
+    assert_eq!(letters(&s, [200, 100, 50]), ["..TTTT..", "TTTTTTTT", "LLRRLLRR", "LLRRLLRR", "........"]);
+    // A column of two: one voxel up is two pixels up, and the upper one hides the top below.
+    let mut m = one([3, 0, 3]);
+    m.set(3, 1, 3, 9);
+    let s = sprite(&m, &palette, 1).unwrap();
+    assert_eq!(letters(&s, [200, 100, 50]), ["TTTT", "LLRR", "LLRR", "LLRR", "LLRR"]);
+    assert!(sprite(&BrickMap::new([16, 16, 16]), &palette, 1).is_none());
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: std::env::var("PROPTEST_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(256),
+        ..ProptestConfig::default()
+    })]
+
+    /// Exporting a selection gives, byte for byte, what exporting a scene that holds only
+    /// those voxels gives: the OBJ centred on them, the slices and the sprite in the
+    /// selection's own box. Selected cells that hold no voxel do not count, and a
+    /// selection without any voxel is refused.
+    #[test]
+    fn a_selection_exports_as_a_scene_of_only_its_voxels(
+        // Cells on both sides of a brick edge (8) on every axis; the flag is "selected".
+        cells in prop::collection::btree_map([5..11i32, 6..11i32, 4..11i32], (1..4u8, any::<bool>()), 1..60),
+        empty in prop::collection::vec([0..16i32, 0..16i32, 0..16i32], 0..8),
+    ) {
+        const NONE: &str = "nothing is selected: select voxels first";
+        let colours = |s: &mut Scene| {
+            s.palette[1] = [250, 20, 40, 255];
+            s.palette[2] = [30, 240, 60, 255];
+            s.palette[3] = [15, 25, 235, 255];
+        };
+        let mut all = Scene::new([16, 16, 16]);
+        colours(&mut all);
+        all.edit(cells.iter().map(|(p, (c, _))| (*p, *c)));
+        let picked: Vec<_> = cells.iter().filter(|(_, (_, on))| *on).map(|(p, (c, _))| (*p, *c)).collect();
+        // The selection: the picked voxels, and cells that hold nothing.
+        let empty: Vec<[i32; 3]> = empty.into_iter().filter(|p| !cells.contains_key(p)).collect();
+        let sel: Vec<[i32; 3]> = empty.iter().copied().chain(picked.iter().map(|(p, _)| *p)).collect();
+        let (obj, slices, sprite) =
+            (obj_files(&all, "m", Some(&sel)), slices_png(&all, Some(&sel)), sprite_png(&all, Some(&sel)));
+        if picked.is_empty() {
+            prop_assert_eq!(obj.err(), Some(NONE.to_string()));
+            prop_assert_eq!(slices.err(), Some(NONE.to_string()));
+            prop_assert_eq!(sprite.err(), Some(NONE.to_string()));
+            return Ok(());
+        }
+        let mut only = Scene::new([16, 16, 16]);
+        colours(&mut only);
+        only.edit(picked.iter().copied());
+        prop_assert_eq!(obj.clone().unwrap(), obj_files(&only, "m", None).unwrap());
+        prop_assert_eq!(sprite.unwrap(), sprite_png(&only, None).unwrap());
+        // The slices of a whole scene are its bounds, so fit them to the voxels first.
+        only.crop();
+        prop_assert_eq!(slices.unwrap(), slices_png(&only, None).unwrap());
+        // Unless every voxel is selected, the selection is not the whole scene.
+        if picked.len() < cells.len() {
+            prop_assert_ne!(obj.unwrap(), obj_files(&all, "m", None).unwrap());
+        }
+    }
+
+    /// The sprite is what a painter makes: every voxel stamped as the one-voxel cube, the
+    /// farthest first, each at its place by the three steps.
+    #[test]
+    fn a_sprite_is_every_cube_painted_back_to_front(
+        // Cells on both sides of a brick edge (8) on every axis.
+        cells in prop::collection::btree_map([5..11i32, 6..11i32, 4..11i32], 1..4u8, 1..60),
+        scale in 1..4u32,
+    ) {
+        let mut palette = [[0, 0, 0, 255]; 256];
+        palette[1] = [250, 20, 40, 255];
+        palette[2] = [30, 240, 60, 255];
+        palette[3] = [15, 25, 235, 255];
+        let mut m = BrickMap::new([16, 16, 16]);
+        for (p, c) in &cells {
+            m.set(p[0], p[1], p[2], *c);
+        }
+        let got = sprite(&m, &palette, scale).unwrap();
+
+        let lo = [0, 1, 2].map(|a| cells.keys().map(|p| p[a]).min().unwrap());
+        let hi = [0, 1, 2].map(|a| cells.keys().map(|p| p[a]).max().unwrap() + 1);
+        let s = scale as i32;
+        let (w, h) = (2 * s * (hi[0] - lo[0] + hi[2] - lo[2]), s * (hi[0] - lo[0] + hi[2] - lo[2]) + 2 * s * (hi[1] - lo[1]) - 1);
+        prop_assert_eq!((got.width as i32, got.height as i32), (w, h));
+        let mut want = vec![0u8; (w * h * 4) as usize];
+        let mut order: Vec<_> = cells.iter().collect();
+        order.sort_by_key(|(p, _)| p[0] + p[1] + p[2]);
+        for (p, c) in order {
+            let mut one = BrickMap::new([8, 8, 8]);
+            one.set(0, 0, 0, *c);
+            let stamp = sprite(&one, &palette, scale).unwrap();
+            let [x, y, z] = [0, 1, 2].map(|a| p[a] - lo[a]);
+            // The stamp's top left corner: the box's left edge is the far end of z, its top the top layer.
+            let left = 2 * s * (x - z) + 2 * s * (hi[2] - lo[2] - 1);
+            let top = s * (x + z) - 2 * s * y + 2 * s * (hi[1] - lo[1] - 1);
+            for j in 0..stamp.height as i32 {
+                for i in 0..stamp.width as i32 {
+                    let px = &stamp.rgba[((j * stamp.width as i32 + i) * 4) as usize..][..4];
+                    if px[3] != 0 {
+                        want[(((top + j) * w + left + i) * 4) as usize..][..4].copy_from_slice(px);
+                    }
+                }
+            }
+        }
+        prop_assert!(got.rgba == want, "scale {} cells {:?}", scale, cells);
     }
 }

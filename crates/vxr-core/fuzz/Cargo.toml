@@ -19,6 +19,34 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "bricks_decode"
+path = "fuzz_targets/bricks_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "embed_open"
+path = "fuzz_targets/embed_open.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "palette_parse"
+path = "fuzz_targets/palette_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "image_decode"
+path = "fuzz_targets/image_decode.rs"
+test = false
+doc = false
+bench = false
+
 # Keep the fuzz crate out of the repo workspace.
 [workspace]
 members = ["."]

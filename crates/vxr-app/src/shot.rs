@@ -26,6 +26,8 @@ struct Shot {
     host: Vec<Action>,
     /// The system's light or dark setting, as a window reports it (none: unknown).
     system: Option<egui::Theme>,
+    /// The last text a frame put on the clipboard.
+    copied: Option<String>,
 }
 
 impl Shot {
@@ -47,8 +49,12 @@ impl Shot {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
-        let ed = Editor::new(gpu, scene, name, FORMAT, (w, h), ppp, crate::native::fonts())?;
-        Ok(Self { ed, target, time: 0.0, host: Vec::new(), system: None })
+        let mut ed = Editor::new(gpu, scene, name, FORMAT, (w, h), ppp, crate::native::fonts())?;
+        // Stand-ins named as the viewer's files: the real ones are checked in a browser.
+        ed.embed_viewer = Some(Box::new(|| {
+            Ok(Some(vxr_app::files::EMBED_VIEWER.iter().map(|n| (n.to_string(), n.as_bytes().to_vec())).collect()))
+        }));
+        Ok(Self { ed, target, time: 0.0, host: Vec::new(), system: None, copied: None })
     }
 
     /// Draw `n` frames (egui needs a couple to lay out and upload fonts).
@@ -71,8 +77,13 @@ impl Shot {
             };
             input.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point =
                 Some(self.ed.native_ppp);
-            let (host, _) = self.ed.frame(input, &view);
+            let (host, platform) = self.ed.frame(input, &view);
             self.host.extend(host);
+            for c in platform.commands {
+                if let egui::OutputCommand::CopyText(text) = c {
+                    self.copied = Some(text);
+                }
+            }
         }
     }
 
@@ -318,6 +329,7 @@ fn run_steps(dir: &Path, scene: Option<&Path>) -> Result<(), String> {
     world(dir)?;
     new_scene_save(dir)?;
     host_actions()?;
+    embed_export(dir)?;
     new_scene_command(dir)?;
     projects(dir)?;
     library(dir)?;
@@ -567,6 +579,7 @@ fn phone(dir: &Path, load: &dyn Fn() -> Result<(Scene, String), String>) -> Resu
         "brush-face",
         "brush-line",
         "center",
+        "pattern",
         "mirror",
         "lock",
         "library",
@@ -886,10 +899,20 @@ struct Fake {
     /// The last library export saved.
     zip: Vec<u8>,
     obj: Vec<String>,
+    /// The last PNG handed over.
+    png: Vec<u8>,
+    /// The last text file handed over.
+    text: String,
     /// The desktop's files, as the projects store sees them: each save changes its file there.
     disk: Option<vxr_app::projects::Memory>,
     /// The session token kept, as the desktop keeps it in the keychain.
     session: Option<String>,
+    /// The last embed folder written: its name and files.
+    embed: Option<(String, Vec<vxr_app::files::File>)>,
+    /// The palette file the next Import palette picks; None is a cancelled dialog.
+    palette: Option<(String, Vec<u8>)>,
+    /// The image the next Import image picks; None is a cancelled dialog.
+    image: Option<(String, Vec<u8>)>,
 }
 
 impl Platform for Fake {
@@ -929,6 +952,20 @@ impl Platform for Fake {
     }
     fn save_png(&mut self, name: &str, bytes: &[u8]) -> Result<Option<String>, String> {
         self.calls.push(format!("save_png {name} {}", bytes.starts_with(b"\x89PNG")));
+        self.png = bytes.to_vec();
+        Ok((!self.cancel).then(|| name.to_string()))
+    }
+    fn pick_palette(&mut self) -> Result<Option<(String, Vec<u8>)>, String> {
+        self.calls.push("pick_palette".into());
+        Ok(self.palette.take())
+    }
+    fn pick_image(&mut self) -> Result<Option<(String, Vec<u8>)>, String> {
+        self.calls.push("pick_image".into());
+        Ok(self.image.take())
+    }
+    fn save_text(&mut self, name: &str, text: &str) -> Result<Option<String>, String> {
+        self.calls.push(format!("save_text {name}"));
+        self.text = text.to_string();
         Ok((!self.cancel).then(|| name.to_string()))
     }
     fn save_all(
@@ -966,10 +1003,154 @@ impl Platform for Fake {
         self.zip = bytes.to_vec();
         Ok(Some(name.into()))
     }
+    fn save_folder(&mut self, name: &str, files: &[vxr_app::files::File]) -> Result<Option<String>, String> {
+        self.calls.push(format!("save_folder {name}"));
+        if self.cancel {
+            return Ok(None);
+        }
+        self.embed = Some((name.into(), files.to_vec()));
+        Ok(Some(name.into()))
+    }
     fn keep_session(&mut self, token: Option<&str>) {
         self.calls.push(format!("keep_session {}", token.is_some()));
         self.session = token.map(str::to_string);
     }
+}
+
+/// The Embed command: the file menu's row and Cmd-K ask the host and put the tag on the
+/// clipboard in the same frame; the host traces the poster from the viewer's first view at
+/// the tag's shape and then writes the folder: the page, the scene as a brick scene file
+/// that reads back as the scene, the lit poster and the viewer's files. A build without
+/// the viewer, an empty scene and a cancelled dialog each write nothing and say why.
+fn embed_export(dir: &Path) -> Result<(), String> {
+    use vxr_app::files::{EMBED_POSTER, embed_snippet};
+    let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    let mut s = Shot::new(house(), "my house.vox", 2.0)?;
+    s.frames(2);
+    s.ed.ui.render = vxr_app::render::RenderSettings { spp: 0, ..Default::default() };
+    let tag = embed_snippet("my house.vox");
+    s.open_file_row("export-embed")?;
+    check(
+        s.host.contains(&Action::Embed) && !s.ed.ui.file_menu && s.copied.as_deref() == Some(tag.as_str()),
+        format!("the file menu's Embed row asks the host and puts the tag on the clipboard ({:?})", s.copied),
+    )?;
+    s.host.clear();
+    s.copied = None;
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("embed".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    check(
+        s.host.contains(&Action::Embed) && s.copied.as_deref() == Some(tag.as_str()),
+        "Cmd-K Embed does the same".into(),
+    )?;
+
+    let mut p = Fake::default();
+    let viewer = s.ed.embed_viewer.replace(Box::new(|| Err("this build has no embed viewer".into())));
+    run_action(&mut s.ed, &mut p, Action::Embed);
+    s.frames(2);
+    check(
+        s.ed.export.is_none() && s.ed.ui.toast_text() == Some("Could not embed: this build has no embed viewer"),
+        format!("a build without the viewer traces nothing and says so ({:?})", s.ed.ui.toast_text()),
+    )?;
+    s.ed.embed_viewer = viewer;
+
+    let mut p = Fake::default();
+    s.host.clear();
+    run_action(&mut s.ed, &mut p, Action::Embed);
+    check(
+        s.ed.export.as_ref().is_some_and(|x| x.embed && x.size() == EMBED_POSTER),
+        "Embed starts tracing the poster at 1280×800".into(),
+    )?;
+    let mut n = 0;
+    while s.ed.embedded.is_none() && n < 3000 {
+        s.frames(1);
+        let _ = s.ed.gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        n += 1;
+    }
+    let Some(poster) = s.ed.embedded.clone() else {
+        return check(false, format!("the embed's poster did not finish in {n} frames"));
+    };
+    check(
+        s.host.contains(&Action::Embedded) && !s.host.contains(&Action::Exported) && s.ed.exported.is_none(),
+        "the traced poster goes to the host as an embed, not as a PNG to save".into(),
+    )?;
+    p.cancel = true;
+    run_action(&mut s.ed, &mut p, Action::Embedded);
+    check(
+        p.embed.is_none() && p.calls == ["save_folder my-house-embed"],
+        "a cancelled folder dialog writes nothing".into(),
+    )?;
+    p.cancel = false;
+    s.ed.embedded = Some(poster);
+    run_action(&mut s.ed, &mut p, Action::Embedded);
+    s.frames(2);
+    let Some((folder, files)) = p.embed.take() else {
+        return check(false, format!("Embed wrote no folder ({:?})", s.ed.ui.toast_text()));
+    };
+    let names: Vec<&str> = files.iter().map(|f| f.0.as_str()).collect();
+    check(
+        folder == "my-house-embed"
+            && names
+                == [
+                    "index.html",
+                    "my-house.vxrb",
+                    "my-house.png",
+                    "voxel-scene.js",
+                    "vxr_embed.js",
+                    "vxr_embed_bg.wasm",
+                ]
+            && s.ed.ui.toast_text() == Some("Saved my-house-embed (6 files). Its index.html shows the tag to paste."),
+        format!("the folder my-house-embed holds the page, the scene, the poster and the viewer ({names:?})"),
+    )?;
+    let page = String::from_utf8_lossy(&files[0].1);
+    check(
+        page.contains(&tag.replace('\n', "\n    ")[tag.find("<voxel-scene").unwrap_or(0)..]),
+        "its page shows the tag that was copied".into(),
+    )?;
+    let mut want = std::collections::BTreeMap::new();
+    s.ed.scene.for_each_voxel(|c, v| {
+        want.insert(c, s.ed.scene.palette[v as usize]);
+    });
+    let mut got = std::collections::BTreeMap::new();
+    let (map, palette) = vxr_core::bricks::open(&files[1].1)?;
+    map.for_each(|c, v| {
+        got.insert(c, palette[v as usize]);
+    });
+    check(got == want && !want.is_empty(), format!("its scene file reads back as the scene ({} voxels)", got.len()))?;
+    std::fs::write(dir.join("app-embed-poster.png"), &files[2].1).map_err(|e| e.to_string())?;
+    let mut r = png::Decoder::new(std::io::Cursor::new(&files[2].1)).read_info().map_err(|e| e.to_string())?;
+    let mut buf = vec![0; r.output_buffer_size().unwrap_or(0)];
+    let info = r.next_frame(&mut buf).map_err(|e| e.to_string())?;
+    let px = |x: u32, y: u32| {
+        let i = ((y * info.width + x) * 4) as usize;
+        [buf[i], buf[i + 1], buf[i + 2]]
+    };
+    // The house is framed whole in the middle: its pixels differ from the backdrop's at the
+    // same height, and the picture's edges are all backdrop.
+    let (w, h) = (info.width, info.height);
+    let house_px = (0..w).filter(|&x| {
+        let (a, b) = (px(x, h / 2), px(2, h / 2));
+        (0..3).any(|i| a[i].abs_diff(b[i]) > 24)
+    });
+    let (lo, hi) = house_px.fold((w, 0), |(lo, hi), x| (lo.min(x), hi.max(x)));
+    check(
+        (w, h) == EMBED_POSTER && lo > w / 20 && hi < w - w / 20 && hi - lo > w / 4,
+        format!("its poster is {w}×{h} with the house whole in the middle (columns {lo} to {hi})"),
+    )?;
+
+    let mut s = Shot::new(Scene::new([16, 16, 16]), "empty.vox", 2.0)?;
+    s.frames(2);
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("embed".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    run_action(&mut s.ed, &mut p, Action::Embed);
+    s.frames(2);
+    check(
+        s.copied.is_none()
+            && s.ed.export.is_none()
+            && s.ed.ui.toast_text() == Some("Could not embed: the scene is empty"),
+        format!("an empty scene copies and traces nothing and says so ({:?})", s.ed.ui.toast_text()),
+    )
 }
 
 /// The file actions the UI asks of a host, run by the one [`run_action`] both hosts use,
@@ -982,7 +1163,7 @@ fn host_actions() -> Result<(), String> {
     s.ed.scene.edit([([0, 7, 0], 3u8)]);
     s.frames(2);
     let mut p = Fake { cancel: true, ..Default::default() };
-    for a in [Action::Save, Action::ExportObj, Action::ExportSlices] {
+    for a in [Action::Save, Action::ExportObj, Action::ExportSlices, Action::ExportSprite] {
         run_action(&mut s.ed, &mut p, a);
     }
     s.frames(2);
@@ -1019,6 +1200,75 @@ fn host_actions() -> Result<(), String> {
         p.calls.last().is_some_and(|c| c == "save_png chosen-slices.png true"),
         format!("PNG slices go out as a PNG named for the scene ({:?})", p.calls.last()),
     )?;
+    run_action(&mut s.ed, &mut p, Action::ExportSprite);
+    s.frames(2);
+    let toast = s.ed.ui.toast_text().unwrap_or_default().to_string();
+    check(
+        p.calls.last().is_some_and(|c| c == "save_png chosen-sprite.png true")
+            && toast.starts_with("Saved chosen-sprite.png (")
+            && toast.ends_with(", transparent)"),
+        format!("the isometric sprite goes out as a PNG named for the scene ({:?}, {toast})", p.calls.last()),
+    )?;
+    // Only the selection: the switch changes nothing while nothing is selected, then the
+    // OBJ, the slices and the sprite take the selected voxels alone under names of their own.
+    use vxr_app::files::{slices_png, sprite_png};
+    run_action(&mut s.ed, &mut p, Action::ExportSelection);
+    s.frames(2);
+    let said = s.ed.ui.toast_text().unwrap_or_default().to_string();
+    run_action(&mut s.ed, &mut p, Action::ExportSlices);
+    check(
+        s.ed.ui.export_selection
+            && said.contains("once voxels are selected")
+            && p.calls.last().is_some_and(|c| c == "save_png chosen-slices.png true")
+            && p.png == slices_png(&s.ed.scene, None)?.0,
+        format!("Only the selection, with nothing selected, still exports the whole scene ({said})"),
+    )?;
+    s.ed.scene.select_color(20, vxr_core::select::Mode::Replace);
+    s.frames(2);
+    let roof: Vec<[i32; 3]> = s.ed.scene.selection().collect();
+    let total = s.voxels();
+    run_action(&mut s.ed, &mut p, Action::ExportSlices);
+    s.frames(2);
+    let toast = s.ed.ui.toast_text().unwrap_or_default().to_string();
+    let (want, [w, h], layers) = slices_png(&s.ed.scene, Some(&roof))?;
+    check(
+        p.calls.last().is_some_and(|c| c == "save_png chosen-selection-slices.png true")
+            && p.png == want
+            && layers == 2
+            && (roof.len() as u64) < total
+            && toast == format!("Saved chosen-selection-slices.png (the selection, 2 layers, {w}×{h})"),
+        format!("with the roof selected the slices are its {} voxels alone, in its own box: {toast}", roof.len()),
+    )?;
+    run_action(&mut s.ed, &mut p, Action::ExportSprite);
+    check(
+        p.calls.last().is_some_and(|c| c == "save_png chosen-selection-sprite.png true")
+            && p.png == sprite_png(&s.ed.scene, Some(&roof))?.0
+            && p.png != sprite_png(&s.ed.scene, None)?.0,
+        format!("and the sprite is the roof alone ({:?})", p.calls.last()),
+    )?;
+    p.stem = None;
+    run_action(&mut s.ed, &mut p, Action::ExportObj);
+    s.frames(2);
+    let toast = s.ed.ui.toast_text().unwrap_or_default().to_string();
+    let quads = vxr_app::files::obj_files(&s.ed.scene, "x", Some(&roof))?.1;
+    check(
+        p.calls.last().is_some_and(|c| c == "save_all chosen-selection")
+            && p.obj == ["chosen-selection.obj", "chosen-selection.mtl", "chosen-selection.png"]
+            && toast == format!("Saved chosen-selection.obj (the selection, {quads} quads)"),
+        format!("and the OBJ is the roof alone, under a name of its own: {toast}"),
+    )?;
+    run_action(&mut s.ed, &mut p, Action::ExportSelection);
+    s.frames(2);
+    let said = s.ed.ui.toast_text().unwrap_or_default().to_string();
+    run_action(&mut s.ed, &mut p, Action::ExportSprite);
+    check(
+        !s.ed.ui.export_selection
+            && said.contains("take the whole scene")
+            && p.calls.last().is_some_and(|c| c == "save_png chosen-sprite.png true")
+            && p.png == sprite_png(&s.ed.scene, None)?.0,
+        format!("switched off, the exports take the whole scene again, the roof still selected ({said})"),
+    )?;
+    s.ed.scene.deselect();
     s.ed.ui.theme = vxr_app::theme::ThemeChoice::from_id("nord").unwrap_or_default();
     run_action(&mut s.ed, &mut p, Action::Theme);
     check(
@@ -2640,6 +2890,67 @@ fn selection(dir: &Path) -> Result<(), String> {
     s.frames_with(2, vec![key(egui::Key::Backspace, none)]);
     check(s.voxels() == v && count(&s) == 0, "Backspace deletes the selection".into())?;
 
+    // The pattern brush (T, the rail's stamp button, Cmd-K): the copy of block A as a stamp.
+    // A press on the ground shows it standing there, a drag moves it, the release leaves it
+    // (a drag is read on the middle of the pressed layer, half a cell above the ground)
+    // as one undo step; with erase, a press on its top takes exactly it away again.
+    s.frames_with(2, vec![key(egui::Key::A, none)]);
+    s.frames_with(2, vec![key(egui::Key::T, none)]);
+    let by_key = s.ed.ui.shape == Shape::Pattern;
+    s.ed.ui.shape = Shape::Voxel;
+    s.frames(2);
+    s.ui_click("pattern")?;
+    let by_rail = s.ed.ui.shape == Shape::Pattern;
+    s.ed.ui.shape = Shape::Voxel;
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("pattern brush".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, none)]);
+    check(
+        by_key && by_rail && (s.ed.ui.tool, s.ed.ui.shape) == (Tool::Add, Shape::Pattern),
+        format!("T, the rail's stamp button and Cmd-K Pattern brush choose the pattern brush ({by_key} {by_rail})"),
+    )?;
+    let get = |s: &Shot, p: [i32; 3]| s.ed.scene.map.get(p[0], p[1], p[2]);
+    let position = s.ed.scene.history().position();
+    s.ed.pointer_moved(Some(project(&s.ed, [59.5, 0.0, 61.5])));
+    s.ed.button(Button::Left, true, false);
+    let pressed = (s.ed.span(), s.voxels(), get(&s, [57, 1, 60]));
+    s.ed.pointer_moved(Some(project(&s.ed, [60.5, 0.5, 61.5])));
+    s.ed.pointer_moved(Some(project(&s.ed, [61.5, 0.5, 61.5])));
+    s.frames(2);
+    s.save_png(&dir.join("pattern-brush.png"))?;
+    let moved = (s.voxels(), get(&s, [57, 1, 60]), get(&s, [59, 1, 60]), get(&s, [62, 0, 62]));
+    s.ed.button(Button::Left, false, false);
+    let placed = s.ed.scene.history().position() != position && count(&s) == 0;
+    check(
+        pressed == (Some(("PATTERN", "4×2×3".into())), v + 24, 13) && moved == (v + 24, 0, 13, 12) && placed,
+        format!("pattern brush: a press shows the stamp {pressed:?}, a drag moves it {moved:?}, the release places it"),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::E, none)]);
+    s.stroke(project(&s.ed, [61.5, 1.99, 61.5]), &[]);
+    let carved = s.voxels();
+    s.ed.undo();
+    let back = s.voxels();
+    s.ed.undo();
+    check(
+        carved == v && back == v + 24 && s.voxels() == v,
+        format!("pattern brush with erase takes the stamp's shape away ({carved}); each is one undo step ({back})"),
+    )?;
+    // With nothing copied, a press changes nothing and says what the brush needs.
+    let clip = s.ed.scene.clipboard.take();
+    s.frames_with(2, vec![key(egui::Key::A, none)]);
+    s.stroke(project(&s.ed, [52.5, 0.0, 72.5]), &[]);
+    s.frames(2);
+    check(
+        s.voxels() == v
+            && s.ed.ui.toast_text() == Some("Copy a selection first: the pattern brush stamps it")
+            && s.ed.scene.history().position() == position,
+        format!("pattern brush with nothing copied changes nothing and says so ({:?})", s.ed.ui.toast_text()),
+    )?;
+    s.save_png(&dir.join("pattern-brush-empty.png"))?;
+    s.ed.scene.clipboard = clip;
+    s.tool(Tool::Select, Shape::Voxel);
+    s.frames(2);
+
     s.frames_with(2, vec![key(egui::Key::A, egui::Modifiers::COMMAND)]);
     let all = count(&s);
     s.ui_click("deselect")?;
@@ -2699,6 +3010,67 @@ fn selection(dir: &Path) -> Result<(), String> {
         ),
     )?;
     s.ui_click("deselect")?;
+
+    // The region option: with block B selected and "Brush inside only" on, erase and paint
+    // change B's voxels and leave block A alone, add still builds anywhere, and with the
+    // option off (Cmd-K) or nothing selected the brushes reach every voxel again.
+    s.stroke(b_top, &[]);
+    let had = (count(&s), s.voxels());
+    s.ui_click("brush-inside")?;
+    let said = s.ed.ui.toast_text().unwrap_or_default().to_string();
+    s.save_png(&dir.join("selection-brush-inside.png"))?;
+    s.tool(Tool::Erase, Shape::Voxel);
+    s.stroke(a_top, &[]);
+    let outside = s.voxels();
+    s.stroke(b_top, &[]);
+    let inside = (count(&s), s.voxels());
+    s.tool(Tool::Paint, Shape::Voxel);
+    s.stroke(a_top, &[]);
+    let painted = s.ed.scene.map.get(51, 1, 61);
+    s.tool(Tool::Add, Shape::Voxel);
+    s.stroke(a_top, &[]);
+    let added = s.voxels();
+    check(
+        had == (8, 32)
+            && s.ed.ui.inside
+            && said == "Erase and paint stay inside the selection (8 voxels)"
+            && outside == 32
+            && inside == (7, 31)
+            && painted == 12
+            && added == 32,
+        format!(
+            "Brush inside only ({said:?}): erase outside the selection changes nothing ({outside}), inside it takes a voxel {inside:?}, paint outside keeps slot {painted}, add still builds ({added})"
+        ),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("brush only inside".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, none)]);
+    let said = s.ed.ui.toast_text().unwrap_or_default().to_string();
+    s.tool(Tool::Erase, Shape::Voxel);
+    s.stroke(a_top, &[]);
+    let off = (s.ed.ui.inside, s.voxels());
+    s.ui_click("brush-inside")?;
+    s.ui_click("deselect")?;
+    s.stroke(a_top, &[]);
+    let none_selected = (s.ed.ui.inside, s.voxels());
+    check(
+        said == "Erase and paint reach every voxel" && off == (false, 31) && none_selected == (true, 30),
+        format!(
+            "Cmd-K turns it off ({said:?}) and erase reaches block A {off:?}; on again with nothing selected it reaches every voxel {none_selected:?}"
+        ),
+    )?;
+    // Back to the scene and the tool the next steps start from.
+    s.tool(Tool::Select, Shape::Voxel);
+    s.frames(2);
+    s.ui_click("brush-inside")?;
+    for _ in 0..4 {
+        s.frames_with(2, vec![key(egui::Key::Z, egui::Modifiers::COMMAND)]);
+    }
+    s.frames_with(2, vec![key(egui::Key::Escape, none)]);
+    check(
+        !s.ed.ui.inside && s.voxels() == 32 && count(&s) == 0 && s.ed.scene.to_vox()? == saved,
+        format!("four undos give back the 32 voxels ({}), nothing selected ({})", s.voxels(), count(&s)),
+    )?;
 
     s.stroke(a_top, &[]);
     let before = bounds(&s);
@@ -2840,6 +3212,7 @@ fn model_tools(dir: &Path) -> Result<(), String> {
 /// the model it edits.
 fn world(dir: &Path) -> Result<(), String> {
     use vxr_core::history::At;
+    use vxr_core::select::Transform;
     let bytes = vxr_vox::fixtures::all()
         .into_iter()
         .find(|f| f.name == "22-world")
@@ -2935,6 +3308,51 @@ fn world(dir: &Path) -> Result<(), String> {
     check(d == 1 && n.0[1] == after.0[1], "an arrow nudges the picked object one cell along the ground".into())?;
     s.frames_with(2, vec![key(egui::Key::ArrowUp, egui::Modifiers::SHIFT)]);
     check(place(&s, o)?.0[1] == n.0[1] + 1, "Shift-Up raises it one cell".into())?;
+    // Rotate and flip the picked object from Cmd-K: the core's turn, shown and said.
+    let run = |s: &mut Shot, command: &str| {
+        s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+        s.frames_with(1, vec![egui::Event::Text(command.into())]);
+        s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    };
+    let name = vxr_app::editor::node_name(s.ed.scene.world().ok_or("no world")?, o);
+    for (command, t, says) in [
+        ("rotate y", Transform::Rotate(1), format!("Rotated {name} about Y")),
+        ("flip x", Transform::Flip(0), format!("Flipped {name} on X")),
+    ] {
+        let mut want = s.ed.scene.world().ok_or("no world")?.clone();
+        let (was, cells, turn) = (place(&s, o)?, s.voxels(), want.tree.nodes[o].local.r);
+        want.transform(o, t);
+        run(&mut s, command);
+        let w = s.ed.scene.world().ok_or("no world")?;
+        let now = place(&s, o)?;
+        let fits = match t {
+            Transform::Rotate(_) => now.1 == [was.1[2], was.1[1], was.1[0]],
+            _ => now == was,
+        };
+        check(
+            w.tree == want.tree
+                && w.tree.nodes[o].local.r != turn
+                && fits
+                && s.voxels() == cells
+                && s.ed.scene.picked() == Some(o)
+                && s.ed.ui.toast_text() == Some(says.as_str()),
+            format!(
+                "Cmd-K '{command}' turns the picked object in place, {:?} to {:?} ({:?})",
+                was.1,
+                now.1,
+                s.ed.ui.toast_text()
+            ),
+        )?;
+        s.frames_with(2, vec![key(egui::Key::Z, egui::Modifiers::COMMAND)]);
+        let undone = place(&s, o)? == was && s.ed.scene.world().is_some_and(|w| w.tree != want.tree);
+        s.frames_with(2, vec![key(egui::Key::Z, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT)]);
+        check(
+            undone && s.ed.scene.world().is_some_and(|w| w.tree == want.tree),
+            format!("'{command}' is one undo step, and redo puts it back"),
+        )?;
+    }
+    s.frames(2);
+    s.save_png(&dir.join("app-2x-world-turned.png"))?;
     let counts = |s: &Shot| s.ed.scene.world().map_or((0, 0), |w| (w.objects().len(), w.models.len()));
     let (n0, m0) = counts(&s);
     s.frames_with(2, vec![key(egui::Key::D, egui::Modifiers::COMMAND)]);
@@ -2964,6 +3382,47 @@ fn world(dir: &Path) -> Result<(), String> {
     let had = s.ed.scene.picked().is_some();
     s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
     check(had && s.ed.scene.picked().is_none() && s.ed.scene.selected_count() == 0, "Escape picks nothing".into())?;
+    let tree = s.ed.scene.world().ok_or("no world")?.tree.clone();
+    run(&mut s, "rotate y");
+    check(
+        s.ed.scene.world().is_some_and(|w| w.tree == tree)
+            && s.ed.ui.toast_text() == Some("Click an object to pick it first"),
+        format!("with no object picked, 'rotate y' turns nothing and says to pick one ({:?})", s.ed.ui.toast_text()),
+    )?;
+    // Sort palette in the world: every object's model follows its colours, so each voxel
+    // shows what it showed and the view is the same picture, pixel for pixel.
+    {
+        // The render corner off (it keeps sampling), and past the 1.8 s a toast shows.
+        let corner = std::mem::replace(&mut s.ed.ui.show_render, false);
+        let view_px = |s: &mut Shot| {
+            s.frames(120);
+            pollster::block_on(read_texture(&s.ed.gpu.device, &s.ed.gpu.queue, &s.ed.renderer.color))
+        };
+        let look = |s: &Shot| -> Vec<([i32; 3], [u8; 4])> {
+            s.ed.scene.world_voxels(false).into_iter().map(|(p, v)| (p, s.ed.scene.palette[v as usize])).collect()
+        };
+        let (was, seen) = (s.ed.scene.palette, look(&s));
+        run(&mut s, "sort palette by hue");
+        let sorted = s.ed.scene.palette != was && look(&s) == seen;
+        let toast = s.ed.ui.toast_text().map(str::to_string);
+        // Both pictures are taken after the command palette closed, with nothing under the pointer lit.
+        let px = view_px(&mut s);
+        s.frames_with(2, vec![key(egui::Key::Z, egui::Modifiers::COMMAND)]);
+        let undone = s.ed.scene.palette == was && look(&s) == seen;
+        let differ =
+            px.as_chunks::<4>().0.iter().zip(view_px(&mut s).as_chunks::<4>().0).filter(|(p, q)| p != q).count();
+        check(
+            sorted
+                && undone
+                && differ == 0
+                && toast.as_deref().is_some_and(|t| t.starts_with("Sorted the palette by hue (")),
+            format!(
+                "in the world, Cmd-K Sort palette by hue reorders the palette and every object looks the same: \
+                 {differ} view pixels differ between the sorted palette and its undo ({toast:?})"
+            ),
+        )?;
+        s.ed.ui.show_render = corner;
+    }
     s.stroke(p, &[]);
     s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
     s.frames_with(1, vec![egui::Event::Text("duplicate object".into())]);
@@ -3540,6 +3999,197 @@ fn groups(s: &mut Shot, bytes: &[u8], dir: &Path) -> Result<(), String> {
     s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
     s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
 
+    // Cmd-click on a row picks it beside the others: both rows show on and all their voxels
+    // show selected. Cmd-G groups the picks as one, H hides them all, Backspace deletes
+    // them all, each one undo step; an action for one row says so and changes nothing.
+    s.frames(30);
+    s.ui_click(&format!("tree-{slab}"))?;
+    let p = s.at(&format!("tree-{trees}"))?;
+    s.ui_drag(p, p, egui::Modifiers::COMMAND);
+    let voxels_of = |s: &Shot, i: usize| {
+        let w = s.ed.scene.world().unwrap();
+        w.objects_under(i)
+            .iter()
+            .map(|&o| {
+                let mut n = 0;
+                w.for_each_object_voxel(o, |_, _| n += 1);
+                n
+            })
+            .sum::<usize>()
+    };
+    let both = voxels_of(s, slab) + voxels_of(s, trees);
+    check(
+        s.ed.scene.picks() == [slab, trees]
+            && s.ed.ui.picks == [slab, trees]
+            && s.ed.ui.tree_on == Some(trees)
+            && s.ed.scene.selected_count() == both,
+        format!("Cmd-click picks a second row: both show selected ({} of {both} voxels)", s.ed.scene.selected_count()),
+    )?;
+    s.frames(20);
+    s.save_png(&dir.join("app-tree-picks.png"))?;
+    let (top, start) = (s.ed.scene.world().unwrap().tree.children(0).to_vec(), s.ed.scene.history().position());
+    s.frames_with(2, vec![key(egui::Key::ArrowRight, egui::Modifiers::NONE)]);
+    check(
+        s.ed.scene.world_voxels(false) == world
+            && s.ed.scene.history().position() == start
+            && s.ed.ui.toast_text().is_some_and(|t| t.starts_with("Click one row to pick only it")),
+        format!("an arrow with two rows picked moves nothing and says why ({:?})", s.ed.ui.toast_text()),
+    )?;
+    let shown = s.ed.scene.world_voxels(true);
+    s.frames_with(2, vec![key(egui::Key::H, egui::Modifiers::NONE)]);
+    let hidden = |s: &Shot| {
+        let w = s.ed.scene.world().unwrap();
+        [slab, trees].map(|i| w.tree.nodes[i].hidden)
+    };
+    check(
+        hidden(s) == [true, true] && s.ed.scene.world_voxels(true).len() < shown.len(),
+        format!("H hides both picked rows ({:?}, {:?})", hidden(s), s.ed.ui.toast_text()),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
+    check(
+        hidden(s) == [false, false] && s.ed.scene.world_voxels(true) == shown,
+        "hiding both is one undo step".into(),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::G, cmd)]);
+    let g = s.ed.scene.picked().filter(|&g| g != slab && g != trees);
+    let w = s.ed.scene.world().unwrap();
+    let mut order = vec![slab, trees];
+    order.sort_by_key(|&i| top.iter().position(|&k| k == i));
+    check(
+        g.is_some_and(|g| w.tree.children(g) == order.as_slice() && w.tree.children(0).len() == top.len() - 1)
+            && s.ed.scene.picks().len() == 1
+            && s.ed.scene.world_voxels(false) == world,
+        format!("Cmd-G puts both picked rows into one new group, in place ({:?})", s.ed.ui.toast_text()),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
+    check(s.ed.scene.world().unwrap().tree.children(0) == top, "grouping both is one undo step".into())?;
+    s.ui_click(&format!("tree-{slab}"))?;
+    let p = s.at(&format!("tree-{trees}"))?;
+    s.ui_drag(p, p, egui::Modifiers::COMMAND);
+    s.frames_with(2, vec![key(egui::Key::Backspace, egui::Modifiers::NONE)]);
+    let gone = |s: &Shot| [slab, trees].map(|i| s.ed.scene.world().unwrap().in_tree(i));
+    check(
+        gone(s) == [false, false] && s.ed.scene.picks().is_empty(),
+        format!("Backspace deletes both picked rows ({:?})", s.ed.ui.toast_text()),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
+    check(gone(s) == [true, true] && s.ed.scene.world_voxels(false) == world, "deleting both is one undo step".into())?;
+    s.ui_click(&format!("tree-{slab}"))?;
+    let p = s.at(&format!("tree-{trees}"))?;
+    s.ui_drag(p, p, egui::Modifiers::COMMAND);
+    s.ui_drag(p, p, egui::Modifiers::COMMAND);
+    let out = s.ed.scene.picks() == [slab];
+    s.ui_drag(p, p, egui::Modifiers::COMMAND);
+    s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+    check(
+        out && s.ed.scene.picks().is_empty() && s.ed.scene.selected_count() == 0,
+        "Cmd-click a picked row takes it out, and Escape picks nothing".into(),
+    )?;
+
+    // A drag of a tree row moves it in the tree: onto the middle of a group row it goes into
+    // the group (the row shows a ring), on the top edge of a row it goes in front of it (a
+    // line shows the gap). The objects stay where they show.
+    s.frames(120);
+    let kids = |s: &Shot, g: usize| s.ed.scene.world().unwrap().tree.children(g).to_vec();
+    // The id of the last undo step: it changes with every step made.
+    let step = |s: &Shot| s.ed.scene.history().position();
+    let (top, in_trees, start) = (kids(s, 0), kids(s, trees), step(s));
+    let row = |s: &Shot, i: usize| s.ed.ui.hits.get(&format!("tree-{i}")).copied().ok_or("a tree row is not on screen");
+    let button = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    // Press on a row and move the pointer to `to`, without the release.
+    let carry = |s: &mut Shot, from: egui::Pos2, to: egui::Pos2| {
+        s.frames_with(1, vec![egui::Event::PointerMoved(from)]);
+        s.frames_with(1, vec![button(from, true)]);
+        for k in 1..=6 {
+            s.frames_with(1, vec![egui::Event::PointerMoved(from + (to - from) * k as f32 / 6.0)]);
+        }
+    };
+    let (from, over) = (row(s, slab)?.center(), row(s, trees)?);
+    let to = over.center();
+    carry(s, from, to);
+    let ring = s.ed.ui.hits.get("tree-drop").copied();
+    s.save_png(&dir.join("app-tree-drag-into.png"))?;
+    s.frames_with(3, vec![button(to, false)]);
+    let slab_row = s.ed.ui.tree.iter().find(|r| r.node == slab).cloned();
+    check(
+        ring == Some(over)
+            && kids(s, trees) == [in_trees.clone(), vec![slab]].concat()
+            && !kids(s, 0).contains(&slab)
+            && slab_row.is_some_and(|r| r.depth == 1)
+            && s.ed.scene.picked() == Some(slab)
+            && s.ed.scene.world_voxels(false) == world
+            && step(s) != start
+            && !s.ed.ui.hits.contains_key("tree-drop"),
+        format!(
+            "a tree row dragged onto a group row goes into the group, in place, as one undo step (trees holds {:?})",
+            kids(s, trees)
+        ),
+    )?;
+    s.save_png(&dir.join("app-tree-dragged.png"))?;
+    s.frames(120);
+    let (from, over) = (row(s, slab)?.center(), row(s, trees)?);
+    let to = egui::pos2(over.left() + 30.0, over.top() + 3.0);
+    carry(s, from, to);
+    let line = s.ed.ui.hits.get("tree-drop").copied();
+    s.save_png(&dir.join("app-tree-drag-line.png"))?;
+    s.frames_with(3, vec![button(to, false)]);
+    let back = step(s);
+    check(
+        line.is_some_and(|l| (l.center().y - over.top()).abs() < 0.5 && l.height() < 8.0)
+            && kids(s, 0) == top
+            && kids(s, trees) == in_trees
+            && s.ed.scene.world_voxels(false) == world,
+        format!(
+            "dragged to the top edge of the group's row it goes back in front of it (the top holds {:?})",
+            kids(s, 0)
+        ),
+    )?;
+    // Escape during a drag leaves the row where it was; so does a drop on the row itself.
+    s.frames(120);
+    let (from, to) = (row(s, slab)?.center(), row(s, trees)?.center());
+    carry(s, from, to);
+    s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+    let dropped = !s.ed.ui.hits.contains_key("tree-drop");
+    s.frames_with(3, vec![button(to, false)]);
+    carry(s, from, from + egui::vec2(20.0, 4.0));
+    s.frames_with(3, vec![button(from + egui::vec2(20.0, 4.0), false)]);
+    check(
+        dropped && kids(s, 0) == top && kids(s, trees) == in_trees && step(s) == back,
+        "Escape during a row drag, and a drop on the row itself, move nothing".into(),
+    )?;
+    // Cmd-K moves the picked row one place down and up among its group.
+    let run = |s: &mut Shot, text: &str| {
+        s.frames_with(2, vec![key(egui::Key::K, cmd)]);
+        s.frames_with(1, vec![egui::Event::Text(text.into())]);
+        s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    };
+    s.frames(30);
+    s.ui_click(&format!("tree-{slab}"))?;
+    run(s, "move down in scene");
+    let (down, went) = (kids(s, 0), step(s));
+    run(s, "move up in scene");
+    let (up, came) = (kids(s, 0), step(s));
+    run(s, "move up in scene");
+    check(
+        top[..2] == [slab, trees]
+            && down[..2] == [trees, slab]
+            && up == top
+            && kids(s, 0) == top
+            && went != back
+            && came != went
+            && step(s) == came
+            && s.ed.scene.picked() == Some(slab),
+        format!("Cmd-K 'Move down in scene tree' and 'Move up in scene tree' step the picked row ({down:?})"),
+    )?;
+    for _ in 0..4 {
+        s.frames_with(2, vec![key(egui::Key::Z, cmd)]);
+    }
+
     // Tab with a group picked edits the group's first object.
     s.frames(30);
     s.ui_click(&format!("tree-{trees}"))?;
@@ -3815,8 +4465,117 @@ fn views(dir: &Path) -> Result<(), String> {
     check(s.ed.ui.view == Some(View::Right), "Cmd-K 'Right view'".into())?;
     s.ui_click("view-front")?;
     check(s.ed.ui.view == Some(View::Front), "the flyout's Front button".into())?;
+    saved_views(&mut s, dir)?;
     press(&mut s, egui::Key::Escape);
     check(!s.ed.ui.view_panel, "Escape closes the View flyout".into())?;
+    Ok(())
+}
+
+/// The View flyout's saved views, with the flyout open on a new scene that has none: a click
+/// on an empty slot saves the view there as one undo step, a click on a full slot brings the
+/// camera back to it, Save and then a full slot saves over it, Escape cancels Save, Cmd-K
+/// arms Save and opens the saved views, and undo empties the slot again.
+fn saved_views(s: &mut Shot, dir: &Path) -> Result<(), String> {
+    let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    let command = |s: &mut Shot, q: &str| {
+        s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+        s.frames_with(1, vec![egui::Event::Text(q.into())]);
+        s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    };
+    // Where the view looks from and along, at three points: equal for equal views, whatever
+    // turn of the yaw holds it.
+    let look = |s: &Shot| {
+        let (w, h) = (s.ed.width as f32, s.ed.height as f32);
+        [[w / 2.0, h / 2.0], [10.0, 10.0], [w - 10.0, h - 10.0]].map(|[x, y]| s.ed.cam.ray(x, y, w, h))
+    };
+    let same = |a: &[(glam::Vec3, glam::Vec3); 3], b: &[(glam::Vec3, glam::Vec3); 3]| {
+        a.iter().zip(b).all(|((o, d), (p, e))| (*o - *p).length() < 1e-2 && (*d - *e).length() < 1e-4)
+    };
+    let orbit = |s: &mut Shot| {
+        s.ed.cam.yaw += 1.3;
+        s.ed.cam.pitch = -0.3;
+        s.ed.cam.distance *= 1.6;
+        s.ed.cam.target += glam::Vec3::new(3.0, -2.0, 5.0);
+        s.ed.cam.ortho = !s.ed.cam.ortho;
+        s.frames(2);
+    };
+    let toast = |s: &Shot| s.ed.ui.toast_text().unwrap_or("").to_string();
+    check(
+        s.ed.scene.saved_views().is_empty()
+            && (1..=10).all(|n| s.ed.ui.hits.contains_key(format!("view-slot-{n}").as_str()))
+            && s.ed.ui.hits.contains_key("view-save")
+            && !s.ed.ui.saved_views.iter().any(|f| *f),
+        "the View flyout shows the ten view slots and Save, all empty on a new scene".into(),
+    )?;
+    let position = s.ed.scene.history().position();
+    let first = look(s);
+    s.ui_click("view-slot-3")?;
+    check(
+        s.ed.ui.saved_views[2]
+            && s.ed.scene.saved_view(2).is_some()
+            && s.ed.scene.cameras.len() == 1
+            && s.ed.scene.history().position() > position
+            && toast(s) == "Saved the view as view 3",
+        format!("a click on empty slot 3 saves the view there as one undo step: {}", toast(s)),
+    )?;
+    let saved_at = s.ed.scene.history().position();
+    orbit(s);
+    let moved = !same(&look(s), &first);
+    s.ui_click("view-slot-3")?;
+    check(
+        moved && same(&look(s), &first) && s.ed.scene.history().position() == saved_at,
+        "after an orbit, a click on slot 3 brings the camera back to the saved view, no undo step".into(),
+    )?;
+    s.ui_click("view-save")?;
+    let armed = s.ed.ui.save_view_pick;
+    s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+    check(
+        armed && !s.ed.ui.save_view_pick && s.ed.ui.view_panel,
+        "Save arms saving into a slot, Escape cancels it and keeps the flyout".into(),
+    )?;
+    orbit(s);
+    let second = look(s);
+    s.ui_click("view-save")?;
+    s.ui_click("view-slot-3")?;
+    let over = !s.ed.ui.save_view_pick && s.ed.scene.history().position() > saved_at;
+    orbit(s);
+    s.ui_click("view-slot-3")?;
+    check(
+        over && same(&look(s), &second) && s.ed.scene.cameras.len() == 1,
+        "Save then slot 3 saves the view over it, and slot 3 now goes to the new view".into(),
+    )?;
+    command(s, "save view to a slot");
+    let cmd_armed = s.ed.ui.save_view_pick && s.ed.ui.view_panel;
+    orbit(s);
+    s.frames(2);
+    s.save_png(&dir.join("app-2x-view-saved.png"))?;
+    s.ui_click("view-slot-10")?;
+    check(
+        cmd_armed
+            && s.ed.ui.saved_views[9]
+            && s.ed.scene.saved_view(9).is_some()
+            && toast(s) == "Saved the view as view 10",
+        "Cmd-K Save view to a slot… opens the flyout armed, and slot 10 takes the view".into(),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+    let closed = !s.ed.ui.view_panel;
+    command(s, "saved views");
+    check(
+        closed && s.ed.ui.view_panel && !s.ed.ui.save_view_pick,
+        "Cmd-K Saved views opens the View flyout, not armed".into(),
+    )?;
+    s.ed.undo();
+    s.frames(2);
+    let ten_gone = !s.ed.ui.saved_views[9] && s.ed.scene.saved_view(9).is_none();
+    s.ed.undo();
+    s.ui_click("view-slot-3")?;
+    let back = same(&look(s), &first);
+    s.ed.undo();
+    s.frames(2);
+    check(
+        ten_gone && back && s.ed.scene.cameras.is_empty() && !s.ed.ui.saved_views[2],
+        "undo takes back slot 10, then the save over slot 3, then slot 3".into(),
+    )?;
     Ok(())
 }
 
@@ -4464,6 +5223,54 @@ fn render_panel(s: &mut Shot, dir: &Path) -> Result<(), String> {
     s.ui_drag(from, to, egui::Modifiers::NONE);
     let ap = s.ed.preview.lighting.aperture;
     check(sky && ap > 0.0, format!("sky backdrop toggle on, depth of field slider: lens radius {ap:.1} voxels"))?;
+    // Click to focus: the crosshair arms it and Escape cancels it, Cmd-K arms it again; a
+    // click on nothing keeps it armed, and a click on a voxel near the bottom of the view puts
+    // that voxel on the focus plane, uses no tool and makes no undo step.
+    s.ui_click("rs-focus-pick")?;
+    let armed = s.ed.ui.focus_pick;
+    s.save_png(&dir.join("app-2x-focus-pick.png"))?;
+    s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+    let cancelled = !s.ed.ui.focus_pick && s.ed.ui.render_panel;
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("focus on a point".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    check(
+        armed && cancelled && s.ed.ui.focus_pick,
+        "the Render panel's crosshair arms click to focus, Escape cancels it, Cmd-K Focus on a point… arms it".into(),
+    )?;
+    let (w, h) = (s.ed.width as f32, s.ed.height as f32);
+    let (voxels, position) = (s.voxels(), s.ed.scene.history().position());
+    let sky = (0..40).map(|k| [w * (0.05 + 0.0225 * k as f32), h * 0.12]).find(|&p| {
+        s.ed.pointer_moved(Some(p));
+        s.ed.cursor().is_none()
+    });
+    let Some(sky) = sky else { return check(false, "no empty pixel along the top of the view".into()) };
+    s.ed.button(Button::Left, true, false);
+    s.ed.button(Button::Left, false, false);
+    s.frames(1);
+    let missed = s.ed.ui.focus_pick && s.ed.ui.toast_text().is_some_and(|t| t.starts_with("Nothing there to focus on"));
+    let p = s.top_face_pixel([w * 0.5, h * 0.8])?;
+    let cell = s.ed.cursor().map(|t| t.voxel).unwrap_or_default();
+    let want = vxr_app::render::focus_on(&s.ed.cam, cell).unwrap_or(0.0);
+    s.ed.button(Button::Left, true, false);
+    s.ed.button(Button::Left, false, false);
+    s.frames(2);
+    let got = s.ed.preview.lighting.focus;
+    check(
+        missed
+            && !s.ed.ui.focus_pick
+            && s.ed.ui.render.focus == want
+            && want < 0.95
+            && (got - want * s.ed.cam.distance).abs() < 1e-3
+            && s.voxels() == voxels
+            && s.ed.scene.history().position() == position
+            && s.ed.ui.toast_text().is_some_and(|t| t.starts_with(&format!("Focus set to {want:.2}× target"))),
+        format!(
+            "a click on the sky at {sky:?} keeps it armed; a click on voxel {cell:?} at {p:?} sets the focus to \
+             {want:.3}× target ({got:.1} voxels), with no edit and no undo step"
+        ),
+    )?;
+    s.ed.ui.render.focus = 1.0;
     let restarts = s.ed.preview.restarts;
     s.ui_click("rs-physical-sky")?;
     s.frames(1);
@@ -4513,6 +5320,7 @@ fn render_panel(s: &mut Shot, dir: &Path) -> Result<(), String> {
     )?;
     std::fs::write(dir.join("render-export.png"), &png).map_err(|e| e.to_string())?;
     println!("wrote {}", dir.join("render-export.png").display());
+    turntable(s, dir)?;
 
     // Cmd-K starts one, the panel's button cancels it.
     s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
@@ -4579,17 +5387,195 @@ fn visible_faces(voxels: &std::collections::BTreeMap<[i32; 3], u8>) -> usize {
     n
 }
 
+/// A PNG as 160 by 90 cells of mean colour (8 by 8 pixels of a 1280 by 720 picture each), which
+/// averages the path tracer's noise away so two pictures of one view compare as near equal.
+fn cells_of(png: &[u8]) -> Result<Vec<[f32; 3]>, String> {
+    let mut r = png::Decoder::new(std::io::Cursor::new(png)).read_info().map_err(|e| e.to_string())?;
+    let mut buf = vec![0; r.output_buffer_size().unwrap_or(0)];
+    let info = r.next_frame(&mut buf).map_err(|e| e.to_string())?;
+    if (info.width, info.height) != (1280, 720) {
+        return Err(format!("a frame is {}×{}, not 1280×720", info.width, info.height));
+    }
+    let mut cells = vec![[0f32; 3]; 160 * 90];
+    for (i, p) in buf.as_chunks::<4>().0.iter().enumerate() {
+        let cell = &mut cells[(i / 1280 / 8) * 160 + (i % 1280) / 8];
+        for c in 0..3 {
+            cell[c] += p[c] as f32 / 64.0;
+        }
+    }
+    Ok(cells)
+}
+
+/// Whether `turn` is the animated PNG of `frames`: the same pictures in order, each shown for
+/// an equal share of the four seconds of a turn, looping for ever. Else what differs.
+fn animates(turn: &[u8], frames: &[Vec<u8>]) -> Result<(), String> {
+    let pixels = |png: &[u8]| -> Result<Vec<u8>, String> {
+        let mut r = png::Decoder::new(std::io::Cursor::new(png)).read_info().map_err(|e| e.to_string())?;
+        let mut buf = vec![0; r.output_buffer_size().unwrap_or(0)];
+        r.next_frame(&mut buf).map_err(|e| e.to_string())?;
+        Ok(buf)
+    };
+    let mut r = png::Decoder::new(std::io::Cursor::new(turn)).read_info().map_err(|e| e.to_string())?;
+    let control = *r.info().animation_control().ok_or("the file is a still picture")?;
+    if (control.num_frames as usize, control.num_plays) != (frames.len(), 0) {
+        return Err(format!("{} frames played {} times", control.num_frames, control.num_plays));
+    }
+    let mut buf = vec![0; r.output_buffer_size().unwrap_or(0)];
+    for (i, frame) in frames.iter().enumerate() {
+        r.next_frame(&mut buf).map_err(|e| format!("frame {}: {e}", i + 1))?;
+        let delay = r.info().frame_control().map(|f| (f.delay_num, f.delay_den));
+        if delay != Some((4, frames.len() as u16)) {
+            return Err(format!("frame {} is shown for {delay:?}", i + 1));
+        }
+        if buf != pixels(frame)? {
+            return Err(format!("frame {} is not the picture of its file", i + 1));
+        }
+    }
+    Ok(())
+}
+
+/// The mean difference of two [`cells_of`] pictures, in 8-bit levels.
+fn cells_apart(a: &[[f32; 3]], b: &[[f32; 3]]) -> f32 {
+    a.iter().zip(b).map(|(a, b)| (0..3).map(|c| (a[c] - b[c]).abs()).sum::<f32>()).sum::<f32>() / (a.len() * 3) as f32
+}
+
+/// Step frames until `done`, keeping the CPU at most a frame ahead of the GPU; false when
+/// it did not happen in 20,000 frames.
+fn wait_for(s: &mut Shot, done: impl Fn(&Shot) -> bool) -> bool {
+    for _ in 0..20_000 {
+        if done(s) {
+            return true;
+        }
+        s.frames(1);
+        let _ = s.ed.gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    }
+    done(s)
+}
+
+/// The turntable export from the open Render panel: the frame count's control, the button
+/// beside Export PNG, a full turn of the view in equal steps (its last frame against a single
+/// render one step before the first view), the folder the host is handed, and Cmd-K.
+fn turntable(s: &mut Shot, dir: &Path) -> Result<(), String> {
+    let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+    s.ui_click("rs-frames0")?;
+    s.frames(1);
+    s.host.clear();
+    s.ui_click("rs-turntable")?;
+    s.frames(1);
+    check(
+        s.ed.ui.render.frames == 0
+            && s.ed.export.as_ref().and_then(|x| x.frame()) == Some((1, 8))
+            && !s.ed.ui.hits.contains_key("rs-turntable")
+            && s.ed.ui.toast_text() == Some("Rendering a turntable: 8 frames of 1280×720 at 64 spp"),
+        format!(
+            "8 frames and the Turntable button start a turntable, which takes the buttons' row ({:?})",
+            s.ed.ui.toast_text()
+        ),
+    )?;
+    wait_for(s, |s| s.ed.export.as_ref().and_then(|x| x.frame()).is_none_or(|f| f.0 >= 4));
+    s.save_png(&dir.join("app-2x-render-turntable.png"))?;
+    let t0 = std::time::Instant::now();
+    wait_for(s, |s| s.ed.turned.is_some());
+    let Some(frames) = s.ed.turned.clone() else {
+        return check(false, "the turntable did not finish".into());
+    };
+    check(
+        frames.len() == 8 && s.host.contains(&Action::Turned) && !s.host.contains(&Action::Exported),
+        format!("it ends with {} frames for the host, not a PNG to save", frames.len()),
+    )?;
+    // One step before the first view, as a single render: the last frame of a full turn.
+    let yaw = s.ed.cam.yaw;
+    s.ed.cam.yaw = yaw - std::f32::consts::FRAC_PI_4;
+    s.ed.start_export()?;
+    wait_for(s, |s| s.ed.exported.is_some());
+    s.ed.cam.yaw = yaw;
+    let Some((single, _)) = s.ed.exported.take() else {
+        return check(false, "the single render to compare with did not finish".into());
+    };
+    let want = cells_of(&single)?;
+    let cells = frames.iter().map(|f| cells_of(f)).collect::<Result<Vec<_>, _>>()?;
+    let apart: Vec<f32> = cells.iter().map(|c| cells_apart(c, &want)).collect();
+    let others = apart[..7].iter().copied().fold(f32::MAX, f32::min);
+    check(
+        apart[7] < 1.0 && others > 4.0 * apart[7].max(0.25),
+        format!(
+            "the frames are one full turn in 8 equal steps: only the last equals the view one step before \
+             the first (levels apart, by frame: {apart:.2?}; {:.1} s for the turn)",
+            t0.elapsed().as_secs_f64()
+        ),
+    )?;
+    for (i, f) in frames.iter().enumerate() {
+        std::fs::write(dir.join(format!("render-turntable-{}.png", i + 1)), f).map_err(|e| e.to_string())?;
+    }
+    let mut p = Fake { cancel: true, ..Default::default() };
+    run_action(&mut s.ed, &mut p, Action::Turned);
+    let cancelled = p.embed.is_none() && s.ed.turned.is_none();
+    p.cancel = false;
+    s.ed.turned = Some(frames.clone());
+    run_action(&mut s.ed, &mut p, Action::Turned);
+    s.frames(2);
+    let (folder, mut files) = p.embed.take().unwrap_or_default();
+    let turn = files.pop().unwrap_or_default();
+    let names: Vec<&str> = files.iter().map(|f| f.0.as_str()).collect();
+    let stem = vxr_app::files::embed_stem(&s.ed.ui.scene_name);
+    check(
+        cancelled
+            && folder == format!("{stem}-turntable")
+            && names == (1..=8).map(|i| format!("{stem}-0{i}.png")).collect::<Vec<_>>()
+            && files.iter().map(|f| &f.1).eq(frames.iter())
+            && s.ed.ui.toast_text() == Some(&format!("Saved {stem}-turntable (8 frames and the animation)")),
+        format!(
+            "the host writes them in order as one folder, and nothing when the dialog is cancelled ({folder}: \
+             {names:?}, {:?})",
+            s.ed.ui.toast_text()
+        ),
+    )?;
+    let animated = animates(&turn.1, &frames);
+    std::fs::write(dir.join("render-turntable.png"), &turn.1).map_err(|e| e.to_string())?;
+    check(
+        turn.0 == format!("{stem}.png") && animated.is_ok(),
+        format!(
+            "the folder's last file {} is the 8 frames as one animated PNG that loops, a turn in 4 seconds \
+             ({} KB, the frames {} KB): {animated:?}",
+            turn.0,
+            turn.1.len() / 1024,
+            frames.iter().map(Vec::len).sum::<usize>() / 1024
+        ),
+    )?;
+    // Cmd-K starts one too, and the row's Cancel stops it with no frames left behind.
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("export turntable".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    let started = s.ed.export.as_ref().is_some_and(|x| x.frame().is_some());
+    wait_for(s, |s| s.ed.export.as_ref().and_then(|x| x.frame()).is_none_or(|f| f.0 >= 2));
+    s.host.clear();
+    s.ui_click("rs-export")?;
+    s.frames(3);
+    check(
+        started
+            && s.ed.export.is_none()
+            && s.ed.turned.is_none()
+            && s.host.is_empty()
+            && s.ed.ui.hits.contains_key("rs-turntable"),
+        "Cmd-K Export turntable starts one; Cancel export stops it part way and hands the host nothing".into(),
+    )?;
+    Ok(())
+}
+
 /// The top bar's Export menu and the OBJ export: the menu opens, closes and opens the Render
 /// panel, its OBJ row and Cmd-K ask the host to export, and the files (written as the native
 /// host does) cover the model's visible faces, natively in model mode and on 22-world's
 /// shown objects in world mode.
 fn export(s: &mut Shot, dir: &Path) -> Result<(), String> {
-    use vxr_app::files::{obj_files, slices_png};
+    use vxr_app::files::{obj_files, slices_png, sprite_png};
     let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
     s.ui_click("scene-select")?;
     s.frames(12);
     check(
-        s.ed.ui.file_menu && s.ed.ui.hits.contains_key("export-obj") && s.ed.ui.hits.contains_key("export-render"),
+        s.ed.ui.file_menu
+            && s.ed.ui.hits.contains_key("export-obj")
+            && s.ed.ui.hits.contains_key("export-render")
+            && s.ed.ui.hits.contains_key("export-turntable"),
         "the scene name opens the file menu with its Export section".into(),
     )?;
     s.save_png(&dir.join("app-2x-export.png"))?;
@@ -4612,6 +5598,11 @@ fn export(s: &mut Shot, dir: &Path) -> Result<(), String> {
     s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
 
     s.host.clear();
+    s.open_file_row("export-turntable")?;
+    s.frames(1);
+    let turning = s.ed.export.as_ref().is_some_and(|x| x.frame().is_some());
+    s.ed.export = None;
+    check(turning && !s.ed.ui.file_menu, "its Turntable row starts a turntable and closes the menu".into())?;
     s.open_file_row("export-obj")?;
     check(
         s.host.contains(&Action::ExportObj) && !s.ed.ui.file_menu,
@@ -4633,6 +5624,259 @@ fn export(s: &mut Shot, dir: &Path) -> Result<(), String> {
     s.frames_with(1, vec![egui::Event::Text("export png slices".into())]);
     s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
     check(s.host.contains(&Action::ExportSlices), "Cmd-K Export PNG slices asks the host too".into())?;
+    s.host.clear();
+    s.open_file_row("export-sprite")?;
+    check(
+        s.host.contains(&Action::ExportSprite) && !s.ed.ui.file_menu,
+        "its Isometric sprite row asks the host to export and closes the menu".into(),
+    )?;
+    s.host.clear();
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("export isometric sprite".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    check(s.host.contains(&Action::ExportSprite), "Cmd-K Export isometric sprite asks the host too".into())?;
+    // The palette, as an image and as text: the rows, Cmd-K, and what the host is handed.
+    s.host.clear();
+    s.open_file_row("export-palette-png")?;
+    let png_row = s.host.contains(&Action::ExportPalette(false)) && !s.ed.ui.file_menu;
+    s.open_file_row("export-palette-hex")?;
+    check(
+        png_row && s.host.contains(&Action::ExportPalette(true)) && !s.ed.ui.file_menu,
+        "its Palette image and Palette colors rows ask the host to export and close the menu".into(),
+    )?;
+    s.host.clear();
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("export palette as png".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("export palette as text".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    check(
+        s.host == [Action::ExportPalette(false), Action::ExportPalette(true)],
+        "Cmd-K Export palette as PNG and Export palette as text ask the host too".into(),
+    )?;
+    {
+        let stem = s.ed.export_stem();
+        let palette = s.ed.scene.palette;
+        let mut p = Fake { cancel: true, ..Default::default() };
+        run_action(&mut s.ed, &mut p, Action::ExportPalette(false));
+        s.frames(2);
+        let cancelled = s.ed.ui.toast_text() != Some(&format!("Saved {stem}-palette.png (256×1, slot 1 first)"));
+        p.cancel = false;
+        run_action(&mut s.ed, &mut p, Action::ExportPalette(false));
+        s.frames(2);
+        let png_toast = s.ed.ui.toast_text() == Some(&format!("Saved {stem}-palette.png (256×1, slot 1 first)"));
+        run_action(&mut s.ed, &mut p, Action::ExportPalette(true));
+        s.frames(2);
+        let hex_toast = s.ed.ui.toast_text() == Some(&format!("Saved {stem}-palette.hex (255 colors, one per line)"));
+        let mut r = png::Decoder::new(std::io::Cursor::new(&p.png)).read_info().map_err(|e| e.to_string())?;
+        let mut px = vec![0; r.output_buffer_size().unwrap_or(0)];
+        let info = r.next_frame(&mut px).map_err(|e| e.to_string())?;
+        let pixels = (1..=255usize).filter(|&i| px[(i - 1) * 4..i * 4] == palette[i]).count();
+        let lines = p
+            .text
+            .lines()
+            .zip(&palette[1..])
+            .filter(|(l, c)| **l == format!("{:02x}{:02x}{:02x}", c[0], c[1], c[2]))
+            .count();
+        check(
+            cancelled
+                && png_toast
+                && hex_toast
+                && (info.width, info.height, pixels) == (256, 1, 255)
+                && (p.text.lines().count(), lines) == (255, 255)
+                && p.calls[1..]
+                    == [format!("save_png {stem}-palette.png true"), format!("save_text {stem}-palette.hex")],
+            format!(
+                "the host writes {stem}-palette.png (256×1, {pixels} of 255 slots at their pixel) and \
+                 {stem}-palette.hex ({lines} of 255 slots on their line), and nothing when the dialog is cancelled"
+            ),
+        )?;
+
+        // Import palette: a cancelled dialog and a file that is not a palette change
+        // nothing, a text palette sets its slots in one undo step, and the PNG exported
+        // above brings every colour back.
+        let position = s.ed.scene.history().position();
+        run_action(&mut s.ed, &mut p, Action::ImportPalette);
+        s.frames(2);
+        let cancelled = s.ed.scene.palette == palette && s.ed.scene.history().position() == position;
+        p.palette = Some(("notes.txt".into(), b"000000\nmy shopping list\n".to_vec()));
+        run_action(&mut s.ed, &mut p, Action::ImportPalette);
+        s.frames(2);
+        let refused = s.ed.ui.toast_text()
+            == Some(
+                "Could not import notes.txt: line 2 is not a color (\"my shopping list\"): a color is six hex digits \
+                 like ff8800",
+            )
+            && s.ed.scene.palette == palette
+            && s.ed.scene.history().position() == position;
+        s.save_png(&dir.join("app-2x-palette-import-refused.png"))?;
+        // Every colour inverted, as .hex text: the whole island changes.
+        let inverted: String = palette[1..]
+            .iter()
+            .map(|c| format!("#{:02X}{:02X}{:02X}\r\n", 255 - c[0], 255 - c[1], 255 - c[2]))
+            .collect();
+        p.palette = Some(("inverted.hex".into(), inverted.into_bytes()));
+        run_action(&mut s.ed, &mut p, Action::ImportPalette);
+        s.frames(2);
+        let text_toast = s.ed.ui.toast_text() == Some("Imported 255 colors from inverted.hex into slots 1 to 255");
+        let slots = (1..=255usize)
+            .filter(|&i| {
+                let (c, was) = (s.ed.scene.palette[i], palette[i]);
+                c == [255 - was[0], 255 - was[1], 255 - was[2], 255]
+            })
+            .count();
+        let one_step = s.ed.scene.history().position() != position;
+        s.frames(4);
+        s.save_png(&dir.join("app-2x-palette-imported.png"))?;
+        s.ed.undo();
+        let undone = s.ed.scene.palette == palette;
+        s.ed.redo();
+        p.palette = Some(("island-palette.png".into(), p.png.clone()));
+        run_action(&mut s.ed, &mut p, Action::ImportPalette);
+        s.frames(2);
+        let png_toast = s.ed.ui.toast_text() == Some("Imported 255 colors from island-palette.png into slots 1 to 255");
+        let back = s.ed.scene.palette == palette;
+        p.palette = Some(("island-palette.png".into(), p.png.clone()));
+        run_action(&mut s.ed, &mut p, Action::ImportPalette);
+        s.frames(2);
+        let same = s.ed.ui.toast_text() == Some("island-palette.png has the colors slots 1 to 255 already have");
+        check(
+            cancelled && refused,
+            "Import palette changes nothing when the dialog is cancelled, and a file that is not a palette is \
+             refused with its line and what a color is"
+                .into(),
+        )?;
+        check(
+            text_toast && slots == 255 && one_step && undone,
+            format!("a .hex palette of 255 colors sets {slots} of 255 slots as one undo step"),
+        )?;
+        check(
+            png_toast && back && same && p.calls.iter().filter(|c| *c == "pick_palette").count() == 5,
+            "the exported palette PNG imports back to the same 255 colors, and a second import says nothing changed"
+                .into(),
+        )?;
+        // Leave the history as it was: the two imports are taken back.
+        s.ed.undo();
+        s.ed.undo();
+        if s.ed.scene.palette != palette || s.ed.scene.history().position() != position {
+            return Err("the palette imports did not undo".into());
+        }
+
+        // Import image: a cancelled dialog and a file that is not a PNG change nothing; a
+        // 24 x 16 sign in two island colours with a clear 4 x 4 window stands in front of the
+        // model as 368 voxels in one undo step, every pixel in its exact slot.
+        let (voxels, bounds) = (s.voxels(), s.ed.scene.bounds());
+        let mut used = std::collections::BTreeSet::new();
+        s.ed.scene.for_each_voxel(|_, v| {
+            used.insert(v);
+        });
+        let mut used = used.into_iter().map(|v| palette[v as usize]);
+        let (a, b) = (used.next().unwrap_or([255; 4]), used.next().unwrap_or([0, 0, 0, 255]));
+        let px: Vec<u8> = (0..24 * 16)
+            .flat_map(|i| {
+                let (x, y) = (i % 24, i / 24);
+                match (x, y) {
+                    (10..=13, 6..=9) => [0, 0, 0, 0],
+                    (0 | 23, _) | (_, 0 | 15) => a,
+                    _ => b,
+                }
+            })
+            .collect();
+        run_action(&mut s.ed, &mut p, Action::ImportImage);
+        s.frames(2);
+        let cancelled = s.voxels() == voxels && s.ed.scene.history().position() == position;
+        p.image = Some(("photo.jpg".into(), b"\xff\xd8\xff\xe0 a JPEG".to_vec()));
+        run_action(&mut s.ed, &mut p, Action::ImportImage);
+        s.frames(2);
+        let refused = s.ed.ui.toast_text() == Some("Could not import photo.jpg: it is not a PNG image")
+            && s.voxels() == voxels
+            && s.ed.scene.history().position() == position;
+        p.image = Some(("sign.png".into(), vxr_core::files::png(24, 16, &px)?));
+        run_action(&mut s.ed, &mut p, Action::ImportImage);
+        s.frames(4);
+        let toast = s.ed.ui.toast_text().unwrap_or_default().to_string();
+        let first = |c: [u8; 4]| (1..256).find(|&i| palette[i] == c).unwrap_or(0) as u8;
+        let mut placed = 0;
+        let mut z = None;
+        s.ed.scene.for_each_voxel(|p, _| z = z.max(Some(p[2])));
+        let front = z.unwrap_or(0);
+        for i in 0..24 * 16 {
+            let (x, y) = (i % 24, i / 24);
+            let want = match px[i as usize * 4 + 3] {
+                0 => 0,
+                _ => first([px[i as usize * 4], px[i as usize * 4 + 1], px[i as usize * 4 + 2], 255]),
+            };
+            let cx = (bounds.size[0] as i32 - 24).div_euclid(2) + x;
+            let at =
+                s.ed.scene.to_map([bounds.lo[0] + cx, bounds.floor + 15 - y, s.ed.scene.to_world([0, 0, front])[2]]);
+            placed += (s.ed.scene.map.get(at[0], at[1], at[2]) == want) as usize;
+        }
+        let one_step = s.ed.scene.history().position() != position;
+        s.save_png(&dir.join("app-2x-image-imported.png"))?;
+        s.ed.undo();
+        let undone =
+            s.voxels() == voxels && s.ed.scene.bounds() == bounds && s.ed.scene.history().position() == position;
+        check(
+            cancelled && refused,
+            "Import image changes nothing when the dialog is cancelled, and a file that is not a PNG is refused \
+             with why"
+                .into(),
+        )?;
+        check(
+            toast.starts_with("Imported sign.png (24×16) as 368 voxels in 2 colors")
+                && placed == 384
+                && one_step
+                && undone
+                && p.calls.iter().filter(|c| *c == "pick_image").count() == 3,
+            format!(
+                "a 24×16 PNG stands in front of the model with {placed} of 384 pixels in their exact slot or \
+                 clear, as one undo step that undo takes back with the bounds ({toast})"
+            ),
+        )?;
+    }
+    s.host.clear();
+    s.open_file_row("import-palette")?;
+    let row = s.host == [Action::ImportPalette] && !s.ed.ui.file_menu;
+    s.host.clear();
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("import palette".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    check(
+        row && s.host == [Action::ImportPalette],
+        "the file menu's Import Palette… row and Cmd-K Import palette… ask the host for a palette file".into(),
+    )?;
+    s.host.clear();
+    s.open_file_row("import-image")?;
+    let row = s.host == [Action::ImportImage] && !s.ed.ui.file_menu;
+    s.host.clear();
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("import image".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    check(
+        row && s.host == [Action::ImportImage],
+        "the file menu's Import Image as voxels… row and Cmd-K Import image… ask the host for a PNG".into(),
+    )?;
+    // Only the selection is a switch: its row flips it and keeps the menu open.
+    s.host.clear();
+    s.open_file_row("export-selection")?;
+    s.frames(2);
+    let on = s.ed.ui.export_selection && s.ed.ui.file_menu;
+    s.save_png(&dir.join("app-2x-export-selection.png"))?;
+    s.ui_click("export-selection")?;
+    s.frames(2);
+    check(
+        on && !s.ed.ui.export_selection && s.ed.ui.file_menu && s.host.is_empty(),
+        "its Only the selection row switches on and off, keeps the menu open and exports nothing".into(),
+    )?;
+    s.frames_with(2, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("export only the selection".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    check(
+        s.host.contains(&Action::ExportSelection),
+        "Cmd-K Export only the selection asks the host to switch it".into(),
+    )?;
 
     // The slices the native host writes: one tile per layer, every voxel at its cell.
     let decode = |bytes: &[u8]| -> Result<(u32, u32, Vec<u8>), String> {
@@ -4641,7 +5885,7 @@ fn export(s: &mut Shot, dir: &Path) -> Result<(), String> {
         let info = r.next_frame(&mut px).map_err(|e| e.to_string())?;
         Ok((info.width, info.height, px))
     };
-    let (png_bytes, _, layers) = slices_png(&s.ed.scene)?;
+    let (png_bytes, _, layers) = slices_png(&s.ed.scene, None)?;
     std::fs::write(dir.join(s.ed.slices_name()), &png_bytes).map_err(|e| e.to_string())?;
     let (w, h, px) = decode(&png_bytes)?;
     let size = s.ed.scene.bounds().size;
@@ -4663,9 +5907,56 @@ fn export(s: &mut Shot, dir: &Path) -> Result<(), String> {
         ),
     )?;
 
+    // The sprite the native host writes: the voxels' box seen from the front-right-top
+    // corner, every pixel a shade of a colour in use or clear, and the voxel nearest the
+    // eye, which nothing hides, as a whole pixel-art cube at its place.
+    let (png_bytes, _) = sprite_png(&s.ed.scene, None)?;
+    std::fs::write(dir.join(s.ed.sprite_name()), &png_bytes).map_err(|e| e.to_string())?;
+    let (w, h, px) = decode(&png_bytes)?;
+    let (mut lo, mut hi) = ([i32::MAX; 3], [i32::MIN; 3]);
+    let mut near = ([0; 3], 0u8);
+    let mut shades = std::collections::HashSet::new();
+    s.ed.scene.for_each_voxel(|p, c| {
+        for a in 0..3 {
+            lo[a] = lo[a].min(p[a]);
+            hi[a] = hi[a].max(p[a] + 1);
+        }
+        if p.iter().sum::<i32>() > near.0.iter().sum::<i32>() {
+            near = (p, c);
+        }
+        let [r, g, b, _] = s.ed.scene.palette[c as usize];
+        for n in [5u16, 4, 3] {
+            shades.insert([r, g, b].map(|v| (v as u16 * n / 5) as u8));
+        }
+    });
+    let [ex, ey, ez] = [0, 1, 2].map(|a| hi[a] - lo[a]);
+    let (clear, mut odd) = (px.chunks(4).filter(|p| p[3] == 0).count(), 0usize);
+    for p in px.chunks(4).filter(|p| p[3] != 0) {
+        odd += (p[3] != 255 || !shades.contains(&[p[0], p[1], p[2]])) as usize;
+    }
+    let [x, y, z] = [0, 1, 2].map(|a| near.0[a] - lo[a]);
+    let (left, top) = (2 * (x - z) + 2 * (ez - 1), (x + z) - 2 * y + 2 * (ey - 1));
+    let [r, g, b, _] = s.ed.scene.palette[near.1 as usize];
+    let shade = |n: u16| [r, g, b].map(|v| (v as u16 * n / 5) as u8);
+    let cube = [[5, 5, 5, 5], [3, 3, 4, 4], [3, 3, 4, 4]];
+    let whole = (0..3).all(|j| {
+        (0..4).all(|i| {
+            let at = (((top + j as i32) * w as i32 + left + i as i32) * 4) as usize;
+            px.get(at..at + 3) == Some(&shade(cube[j][i])[..]) && px[at + 3] == 255
+        })
+    });
+    check(
+        (w as i32, h as i32) == (2 * (ex + ez), ex + ez + 2 * ey - 1) && odd == 0 && clear > 0 && whole,
+        format!(
+            "{}: {w}×{h} for {ex}×{ey}×{ez} voxels, {clear} clear pixels, {odd} of no voxel's colour, the nearest voxel {:?} a whole cube ({whole})",
+            s.ed.sprite_name(),
+            near.0
+        ),
+    )?;
+
     // What the native host writes, and what it holds.
     let stem = s.ed.export_stem();
-    let (files, quads) = obj_files(&s.ed.scene, &stem)?;
+    let (files, quads) = obj_files(&s.ed.scene, &stem, None)?;
     let out = dir.join("obj");
     std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
     for (name, bytes) in &files {
@@ -4711,7 +6002,7 @@ fn export(s: &mut Shot, dir: &Path) -> Result<(), String> {
     w.frames(2);
     let all = w.ed.scene.world_voxels(false);
     let shown = w.ed.scene.world_voxels(true);
-    let (files, quads) = obj_files(&w.ed.scene, &w.ed.export_stem())?;
+    let (files, quads) = obj_files(&w.ed.scene, &w.ed.export_stem(), None)?;
     let (_, nf, area) = obj_stats(&String::from_utf8_lossy(&files[0].1))?;
     check(
         nf == quads && area as usize == visible_faces(&shown) && shown.len() < all.len(),
@@ -4722,10 +6013,20 @@ fn export(s: &mut Shot, dir: &Path) -> Result<(), String> {
             all.len() - shown.len()
         ),
     )?;
-    let (png_bytes, _, _) = slices_png(&w.ed.scene)?;
+    let (png_bytes, _, _) = slices_png(&w.ed.scene, None)?;
     let (_, _, px) = decode(&png_bytes)?;
     let filled = px.chunks(4).filter(|p| p[3] != 0).count();
     check(filled == shown.len(), format!("in world mode 22-world-slices.png holds its {filled} shown voxels"))?;
+    // The sprite is the box of the shown voxels only.
+    let (_, [sw, sh]) = sprite_png(&w.ed.scene, None)?;
+    let ext = [0, 1, 2].map(|a| {
+        let at = shown.keys().map(|p| p[a]);
+        (at.clone().max().unwrap_or(0) + 1 - at.min().unwrap_or(0)) as u32
+    });
+    check(
+        [sw, sh] == [2 * (ext[0] + ext[2]), ext[0] + ext[2] + 2 * ext[1] - 1],
+        format!("in world mode 22-world-sprite.png is {sw}×{sh}, the box of its shown voxels {ext:?}"),
+    )?;
     Ok(())
 }
 
@@ -6858,6 +8159,252 @@ fn palette(s: &mut Shot, dir: &Path) -> Result<(), String> {
     check(s.ed.scene.palette[free as usize + 1] == cu, format!("copy slot {used} to slot {}", free + 1))?;
     s.ed.undo();
 
+    // Replace: the colour's voxels take another slot and both slots keep their colours.
+    s.ed.ui.slot = used;
+    s.frames(2);
+    s.ui_click("replace")?;
+    check(s.ed.ui.slot_op == Some(vxr_app::ui::SlotOp::Replace), "Replace… arms the next swatch click".into())?;
+    s.save_png(&dir.join("color-replace.png"))?;
+    s.ui_click(&format!("sw{free}"))?;
+    let m = &s.ed.scene.map;
+    let n = counts[used as usize];
+    check(
+        m.counts[free as usize] == n
+            && m.counts[used as usize] == 0
+            && (s.ed.scene.palette[used as usize], s.ed.scene.palette[free as usize]) == (cu, cf)
+            && s.ed.ui.slot == free
+            && s.ed.ui.toast_text() == Some(format!("Replaced slot {used} with slot {free}: {n} voxels").as_str()),
+        format!("replace slot {used} with slot {free}: {n} voxels take the slot, no colour changes"),
+    )?;
+    s.ed.undo();
+    check(s.ed.scene.map.counts == counts, "one undo reverts the replace".into())?;
+
+    // Remove, with some of the colour selected: only the selected voxels go.
+    s.ed.ui.slot = used;
+    let mut some = Vec::new();
+    s.ed.scene.for_each_voxel(|p, v| {
+        if v == used && some.len() < 5 {
+            some.push(p);
+        }
+    });
+    s.ed.scene.select(some, vxr_core::select::Mode::Replace);
+    s.frames(2);
+    s.ui_click("remove-color")?;
+    check(
+        s.ed.scene.map.counts[used as usize] == n - 5
+            && s.ed.scene.map.voxels == voxels - 5
+            && s.ed.scene.selected_count() == 0
+            && s.ed.ui.toast_text() == Some(format!("Removed slot {used} in the selection: 5 voxels").as_str()),
+        format!("Remove erases the 5 selected voxels of slot {used} and leaves its other {}", n - 5),
+    )?;
+    s.ed.undo();
+    check(
+        s.ed.scene.map.counts == counts && s.ed.scene.selected_count() == 5,
+        "one undo gives back the voxels and the selection".into(),
+    )?;
+    s.ed.scene.deselect();
+
+    // Shift-click a second swatch: the editor becomes the group editor on both slots.
+    s.ed.ui.slot = used;
+    s.frames(2);
+    let other = (1..=255u8)
+        .find(|&i| i != used && counts[i as usize] > 0 && s.ed.ui.hits.contains_key(&format!("sw{i}")))
+        .ok_or("no second used swatch on screen")?;
+    let (cg, co) = (s.ed.scene.palette[used as usize], s.ed.scene.palette[other as usize]);
+    let p = s.at(&format!("sw{other}"))?;
+    s.ui_drag(p, p, egui::Modifiers::SHIFT);
+    check(
+        s.ed.ui.colors == [used, other]
+            && s.ed.ui.slot == other
+            && s.ed.ui.hits.contains_key("group-hue")
+            && !s.ed.ui.hits.contains_key("sv"),
+        format!("Shift-click selects slots {used} and {other} and the editor edits both"),
+    )?;
+    // The hue slider at five sixths is +120 degrees: every channel moves to the next one.
+    let r = s.ed.ui.hits["group-hue"];
+    let turn = |c: [u8; 4]| [c[2], c[0], c[1], c[3]];
+    s.ui_drag(
+        r.center(),
+        egui::pos2(r.left() + 1.0 + (r.width() - 2.0) * 5.0 / 6.0, r.center().y),
+        egui::Modifiers::NONE,
+    );
+    s.frames(2);
+    s.save_png(&dir.join("color-group.png"))?;
+    check(
+        s.ed.scene.palette[used as usize] == turn(cg)
+            && s.ed.scene.palette[other as usize] == turn(co)
+            && s.ed.scene.map.counts == counts
+            && s.ed.ui.group_shift == vxr_core::palette::Shift { hue: 120.0, sat: 0.0, val: 0.0 },
+        format!(
+            "the Hue slider at +120 turns both colours ({cg:?} -> {:?}, {co:?} -> {:?}) and no voxel changes",
+            s.ed.scene.palette[used as usize], s.ed.scene.palette[other as usize]
+        ),
+    )?;
+    // Value down to a half from there: the drag starts from the colours before the group edit.
+    let r = s.ed.ui.hits["group-val"];
+    s.ui_drag(r.center(), egui::pos2(r.left() + 1.0 + (r.width() - 2.0) / 4.0, r.center().y), egui::Modifiers::NONE);
+    let both = vxr_core::palette::Shift { hue: 120.0, sat: 0.0, val: -0.5 };
+    check(
+        s.ed.scene.palette[used as usize] == both.apply(cg) && s.ed.scene.palette[other as usize] == both.apply(co),
+        format!("the Value slider at -50% then halves them: {:?}", s.ed.scene.palette[used as usize]),
+    )?;
+    s.ed.undo();
+    check(
+        s.ed.scene.palette[used as usize] == turn(cg) && s.ed.scene.palette[other as usize] == turn(co),
+        "one undo takes back the Value drag for both slots".into(),
+    )?;
+    s.ed.undo();
+    s.frames(2);
+    check(
+        s.ed.scene.palette[used as usize] == cg
+            && s.ed.scene.palette[other as usize] == co
+            && s.ed.ui.group_shift == vxr_core::palette::Shift::default()
+            && s.ed.ui.colors == [used, other],
+        "and one more the Hue drag; the sliders return to zero and the slots stay selected".into(),
+    )?;
+    // A plain click ends the selection: the editor is the one colour's again.
+    s.ui_click(&format!("sw{used}"))?;
+    check(
+        s.ed.ui.colors.is_empty() && s.ed.ui.slot == used && s.ed.ui.hits.contains_key("sv"),
+        "a plain click on a swatch ends the selection".into(),
+    )?;
+    // Cmd-K Select used colors: the selection's colours, or the model's with none selected.
+    let cmd_k = |s: &mut Shot| {
+        let key =
+            |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+        s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+        s.frames_with(1, vec![egui::Event::Text("select used colors".into())]);
+        s.frames_with(3, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    };
+    let mut two = Vec::new();
+    s.ed.scene.for_each_voxel(|p, v| {
+        if (v == used || v == other) && two.iter().filter(|&&(_, w)| w == v).count() < 2 {
+            two.push((p, v));
+        }
+    });
+    s.ed.scene.select(two.iter().map(|c| c.0), vxr_core::select::Mode::Replace);
+    cmd_k(s);
+    let mut want = vec![used, other];
+    want.sort_unstable();
+    check(
+        s.ed.ui.colors == want
+            && s.ed.ui.hits.contains_key("group-hue")
+            && s.ed.ui.toast_text() == Some("Selected the 2 colors in the selection"),
+        format!("Cmd-K Select used colors selects the selection's slots {want:?}"),
+    )?;
+    s.ed.scene.deselect();
+    cmd_k(s);
+    let in_use: Vec<u8> = (1..=255u8).filter(|&i| counts[i as usize] > 0).collect();
+    check(
+        s.ed.ui.colors == in_use
+            && s.ed.ui.toast_text() == Some(format!("Selected the {} colors in the model", in_use.len()).as_str()),
+        format!("with nothing selected it selects the {} colours in the model", in_use.len()),
+    )?;
+    s.save_png(&dir.join("color-group-all.png"))?;
+    s.ui_click(&format!("sw{used}"))?;
+
+    // Sort palette: the slots trade colours and materials and the voxels follow, so the
+    // scene looks the same; the current colour stays current in its new slot.
+    {
+        use vxr_core::palette::{SortKey, sort_table};
+        let run = |s: &mut Shot, text: &str| {
+            let key =
+                |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+            s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+            s.frames_with(1, vec![egui::Event::Text(text.into())]);
+            s.frames_with(3, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+        };
+        // What every voxel shows, as one number that changes when any voxel's colour does.
+        let look = |s: &Shot| {
+            let mut sum = 0u64;
+            s.ed.scene.for_each_voxel(|p, v| {
+                let c = s.ed.scene.palette[v as usize];
+                let cell = (p[0] as u64) << 40 | (p[1] as u64) << 20 | p[2] as u64;
+                sum = sum.wrapping_add(cell.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ u32::from_le_bytes(c) as u64);
+            });
+            sum
+        };
+        // The editor has settled after Select used colors: a plain click ends that selection.
+        s.frames(2);
+        s.ui_click(&format!("sw{used}"))?;
+        let none_selected = s.ed.ui.colors.is_empty();
+        let all: Vec<u8> = (1..=255).collect();
+        let (before, seen, position) = (s.ed.scene.palette, look(s), s.ed.scene.history().position());
+        let table = sort_table(&before, &all, SortKey::Hue);
+        let moved = (1..=255u8).filter(|&i| table[i as usize] != i).count();
+        run(s, "sort palette by hue");
+        let now = s.ed.scene.palette;
+        check(
+            moved > 0
+                && none_selected
+                && (1..=255usize).all(|i| now[table[i] as usize] == before[i])
+                && sort_table(&now, &all, SortKey::Hue) == std::array::from_fn(|i| i as u8)
+                && look(s) == seen
+                && s.ed.scene.map.counts[table[used as usize] as usize] == counts[used as usize]
+                && s.ed.ui.slot == table[used as usize]
+                && s.ed.scene.history().position() != position
+                && s.ed.ui.toast_text() == Some(format!("Sorted the palette by hue ({moved} slots moved)").as_str()),
+            format!(
+                "Cmd-K Sort palette by hue puts every slot in hue order ({moved} moved): the voxels follow, \
+                 the scene looks the same and the current colour moves from slot {used} to {} (now slot {}, {:?})",
+                table[used as usize],
+                s.ed.ui.slot,
+                s.ed.ui.toast_text()
+            ),
+        )?;
+        let position = s.ed.scene.history().position();
+        s.save_png(&dir.join("palette-sorted.png"))?;
+        run(s, "sort palette by hue");
+        check(
+            s.ed.scene.history().position() == position
+                && s.ed.ui.toast_text() == Some("Already in order by hue: the palette"),
+            format!("sorting again changes nothing and says so ({:?})", s.ed.ui.toast_text()),
+        )?;
+        s.ed.undo();
+        s.ed.ui.slot = used;
+        s.frames(2);
+        check(
+            s.ed.scene.palette == before && s.ed.scene.map.counts == counts && look(s) == seen,
+            "one undo gives the palette's order back".into(),
+        )?;
+        // With slots selected in the palette, only those are sorted among themselves.
+        let at = s.at(&format!("sw{other}"))?;
+        s.ui_drag(at, at, egui::Modifiers::SHIFT);
+        let (lo, hi) = (used.min(other), used.max(other));
+        // The two are put out of order first, so that the sort has something to move.
+        if sort_table(&before, &[lo, hi], SortKey::Value)[lo as usize] == lo {
+            s.ed.scene.swap_colors(lo, hi);
+            s.frames(2);
+        }
+        let (mid, mid_counts, seen) = (s.ed.scene.palette, s.ed.scene.map.counts, look(s));
+        run(s, "sort palette by brightness");
+        let now = s.ed.scene.palette;
+        check(
+            s.ed.ui.colors.len() == 2
+                && s.ed.ui.colors.contains(&lo)
+                && s.ed.ui.colors.contains(&hi)
+                && (now[lo as usize], now[hi as usize]) == (mid[hi as usize], mid[lo as usize])
+                && (1..=255u8).all(|i| i == lo || i == hi || now[i as usize] == mid[i as usize])
+                && s.ed.scene.map.counts[lo as usize] == mid_counts[hi as usize]
+                && look(s) == seen
+                && s.ed.ui.toast_text() == Some("Sorted the 2 selected colors by brightness (2 slots moved)"),
+            format!(
+                "with slots {lo} and {hi} selected, Sort palette by brightness sorts only those two ({:?}, {:?})",
+                s.ed.ui.colors,
+                s.ed.ui.toast_text()
+            ),
+        )?;
+        s.ed.undo();
+        if s.ed.scene.palette != before {
+            s.ed.undo();
+        }
+        s.ui_click(&format!("sw{used}"))?;
+        check(
+            s.ed.scene.palette == before && s.ed.scene.map.counts == counts && s.ed.ui.colors.is_empty(),
+            "undo gives the two slots back".into(),
+        )?;
+    }
+
     // The palette shows the colours in use (and the current one); All shows every slot.
     s.ed.ui.slot = used;
     s.frames(2);
@@ -7626,6 +9173,33 @@ fn agents_look_render(
     )?;
     let (t, e) = s.agent_call(live, claude, "render_settings", json!({"gamma": 1.5, "vignette": 3}));
     check(e && t.contains("vignette") && (s.ed.ui.render.gamma - 1.8).abs() < 1e-6, format!("all or nothing: {t}"))?;
+    // focus_on: a world cell in focus from the user's view, as the panel's crosshair puts it.
+    let mut first = None;
+    s.ed.scene.for_each_voxel(|p, _| {
+        first.get_or_insert(p);
+    });
+    let map = first.unwrap_or_default();
+    let cell = s.ed.scene.to_world(map);
+    let want = vxr_app::render::focus_on(&s.ed.cam, map).unwrap_or(0.0);
+    let (t, e) = s.agent_call(live, claude, "render_settings", json!({"focus_on": cell, "gamma": 2.0}));
+    let v: Value = serde_json::from_str(&t).unwrap_or_default();
+    let set = !e && s.ed.ui.render.focus == want && v["focus"].as_f64().is_some_and(|f| (f - want as f64).abs() < 1e-3);
+    let eye = s.ed.cam.eye() + (s.ed.cam.eye() - s.ed.cam.target).normalize() * 4.0;
+    let behind = s.ed.scene.to_world(eye.floor().as_ivec3().to_array());
+    let mut refused = Vec::new();
+    for bad in [json!({"focus_on": behind}), json!({"focus_on": cell, "focus": 1.0}), json!({"focus_on": [1, 2]})] {
+        let (t, e) = s.agent_call(live, claude, "render_settings", bad.clone());
+        refused.push(
+            e && t.starts_with("focus_on") && s.ed.ui.render.focus == want && (s.ed.ui.render.gamma - 2.0).abs() < 1e-6,
+        );
+    }
+    check(
+        set && refused == [true; 3],
+        format!(
+            "render_settings focus_on {cell:?} sets the focus to {want:.3}× target; a cell behind the view, \
+             focus_on with focus and a short cell are refused and change nothing: {refused:?} {t}"
+        ),
+    )?;
     check(s.ed.scene.history().position() == position, "render settings are no undo step".into())?;
 
     // Exports into the downloads folder, under the scene's name.
@@ -7654,6 +9228,60 @@ fn agents_look_render(
     )?;
     let (t, e) = s.agent_call(live, claude, "export", json!({"kind": "slices"}));
     check(!e && downloads.join("house-slices.png").is_file(), format!("the PNG slices land in Downloads: {t}"))?;
+    let (t, e) = s.agent_call(live, claude, "export", json!({"kind": "sprite"}));
+    let png = std::fs::read(downloads.join("house-sprite.png")).unwrap_or_default();
+    let want = vxr_app::files::sprite_png(&s.ed.scene, None).map(|(png, _)| png).unwrap_or_default();
+    check(
+        !e && !png.is_empty() && png == want && t.contains("house-sprite.png") && t.contains("transparent background"),
+        format!("the isometric sprite lands in Downloads, the file the Export menu makes: {t}"),
+    )?;
+    // Only the selection: the agent's own, never the user's, and refused with none.
+    let user = s.ed.scene.selected_count();
+    let (none, refused) = s.agent_call(live, claude, "export", json!({"kind": "sprite", "selection": true}));
+    let (bad, bad_kind) = s.agent_call(live, claude, "export", json!({"kind": "render", "selection": true}));
+    check(
+        user == 0
+            && refused
+            && none.contains("nothing is selected: select voxels first")
+            && bad_kind
+            && bad.contains("only for kind obj, slices and sprite")
+            && !downloads.join("house-selection-sprite.png").exists(),
+        format!("export of the selection with nothing selected is refused and writes nothing: {none} / {bad}"),
+    )?;
+    let (_, e0) = s.agent_call(live, claude, "select", json!({"color": 20}));
+    let mut roof = Vec::new();
+    s.ed.scene.for_each_voxel(|p, c| {
+        if c == 20 {
+            roof.push(p);
+        }
+    });
+    let (t, e) = s.agent_call(live, claude, "export", json!({"kind": "sprite", "selection": true}));
+    let png = std::fs::read(downloads.join("house-selection-sprite.png")).unwrap_or_default();
+    let want = vxr_app::files::sprite_png(&s.ed.scene, Some(&roof)).map(|(png, _)| png).unwrap_or_default();
+    check(
+        !e0 && !e
+            && !roof.is_empty()
+            && png == want
+            && t.contains("the selection: ")
+            && s.ed.scene.selected_count() == 0
+            && !s.ed.ui.export_selection,
+        format!(
+            "after its select of the roof, the sprite of the selection is the roof alone and the user's selection stays empty: {t}"
+        ),
+    )?;
+    let (t, e) = s.agent_call(live, claude, "export", json!({"kind": "obj", "selection": true}));
+    let (t2, e2) = s.agent_call(live, claude, "export", json!({"kind": "obj", "selection": true}));
+    let quads = vxr_app::files::obj_files(&s.ed.scene, "x", Some(&roof)).map(|f| f.1).unwrap_or(0);
+    let again = std::fs::read_to_string(downloads.join("house-selection-1.obj")).unwrap_or_default();
+    check(
+        !e && !e2
+            && t.contains(&format!("the selection: {quads} quads"))
+            && downloads.join("house-selection.obj").is_file()
+            && again.contains("mtllib house-selection-1.mtl\n")
+            && again.matches("\nf ").count() == quads,
+        format!("its OBJ is the roof alone, and a second one beside it is still the roof: {t} / {t2}"),
+    )?;
+    let _ = s.agent_call(live, claude, "select", json!({"none": true}));
     let (t, e) = s.agent_call(live, claude, "export", json!({"kind": "render"}));
     let png = std::fs::read(downloads.join("house-render.png")).unwrap_or_default();
     let size = png::Decoder::new(std::io::Cursor::new(png))
@@ -7665,6 +9293,110 @@ fn agents_look_render(
         format!("a render export answers once traced, its PNG in Downloads ({size:?}): {t}"),
     )?;
     check(s.ed.exported.is_none(), "the agent's render asks the user nothing".into())?;
+
+    // A turntable: the panel's count of frames, set through render_settings, as one folder.
+    let (t, e) = s.agent_call(live, claude, "render_settings", json!({"turntable_frames": 12}));
+    check(e && t.contains("one of [8, 16, 32, 64]"), format!("a frame count the panel lacks is refused: {t}"))?;
+    let (t, e) = s.agent_call(live, claude, "render_settings", json!({"turntable_frames": 8}));
+    let v: Value = serde_json::from_str(&t).unwrap_or_default();
+    check(!e && v["turntable_frames"] == 8 && s.ed.ui.render.frames == 0, format!("8 frames are set: {t}"))?;
+    s.host.clear();
+    let (t, e) = s.agent_call(live, claude, "export", json!({"kind": "turntable"}));
+    let folder = downloads.join("house-turntable");
+    let mut frames: Vec<Vec<u8>> =
+        names(&folder).iter().map(|n| std::fs::read(folder.join(n)).unwrap_or_default()).collect();
+    // The animated file sorts last; the frames come before it.
+    let animated = frames.pop().map_or(Err("no files".to_string()), |turn| animates(&turn, &frames));
+    let sizes: Vec<(u32, u32)> = frames
+        .iter()
+        .map(|png| {
+            png::Decoder::new(std::io::Cursor::new(png))
+                .read_info()
+                .map(|r| (r.info().width, r.info().height))
+                .unwrap_or((0, 0))
+        })
+        .collect();
+    let answer: Value = serde_json::from_str(&t).unwrap_or_default();
+    let listed: Vec<&str> = answer["exported"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    let want: Vec<String> = (1..=8).map(|i| format!("house-0{i}.png")).chain(["house.png".to_string()]).collect();
+    let distinct = frames.iter().collect::<std::collections::BTreeSet<_>>().len();
+    check(
+        !e && names(&folder) == want
+            && listed == want.iter().map(|n| folder.join(n).to_string_lossy().into_owned()).collect::<Vec<_>>()
+            && sizes == [(1280, 720); 8]
+            && distinct == 8
+            && answer["what"].as_str().is_some_and(|w| {
+                w.starts_with("a turntable: 8 frames of 1280 x 720 at 64 samples") && w.contains("house.png")
+            })
+            && animated.is_ok()
+            && s.ed.turned.is_none()
+            && !s.host.contains(&Action::Turned)
+            && s.ed.ui.toast_text() == Some("Claude Code exported the folder house-turntable into Downloads"),
+        format!(
+            "a turntable export answers once every frame is traced: the folder house-turntable in Downloads \
+             with 8 different 1280×720 frames in order and house.png that animates them ({animated:?}), asking \
+             the user nothing ({:?}, {sizes:?}): {t}",
+            names(&folder)
+        ),
+    )?;
+
+    // The embed folder, as the Embed command makes it, but into Downloads and with the tag
+    // in the answer instead of on the user's clipboard.
+    let viewer = s.ed.embed_viewer.replace(Box::new(|| Err("this build has no embed viewer".into())));
+    let (t, e) = s.agent_call(live, claude, "export", json!({"kind": "embed"}));
+    check(
+        e && t.contains("could not embed: this build has no embed viewer") && s.ed.export.is_none(),
+        format!("without the viewer an agent's embed traces nothing and says why: {t}"),
+    )?;
+    s.ed.embed_viewer = viewer;
+    s.copied = None;
+    s.host.clear();
+    let before = names(downloads);
+    let (t, e) = s.agent_call(live, claude, "export", json!({"kind": "embed"}));
+    let folder = downloads.join("house-embed");
+    let scene = std::fs::read(folder.join("house.vxrb")).unwrap_or_default();
+    let shown = vxr_core::bricks::open(&scene).map(|(map, _)| map.voxels).unwrap_or(0);
+    let poster = png::Decoder::new(std::io::Cursor::new(std::fs::read(folder.join("house.png")).unwrap_or_default()))
+        .read_info()
+        .map(|r| (r.info().width, r.info().height))
+        .unwrap_or((0, 0));
+    let path = |f: &str| folder.join(f).to_string_lossy().into_owned();
+    let answer: Value = serde_json::from_str(&t).unwrap_or_default();
+    let listed: Vec<&str> = answer["exported"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    check(
+        !e && names(&folder)
+            == ["house.png", "house.vxrb", "index.html", "voxel-scene.js", "vxr_embed.js", "vxr_embed_bg.wasm"]
+            && listed
+                == ["index.html", "house.vxrb", "house.png", "voxel-scene.js", "vxr_embed.js", "vxr_embed_bg.wasm"]
+                    .map(path)
+            && shown == s.voxels()
+            && poster == vxr_app::files::EMBED_POSTER
+            && answer["what"].as_str().is_some_and(|w| w.contains(&vxr_app::files::embed_snippet("house.vox"))),
+        format!(
+            "an embed export answers once its poster is traced: the folder house-embed in Downloads with the \
+             scene ({shown} voxels), a {poster:?} poster and the viewer, and the tag in the answer: {t}"
+        ),
+    )?;
+    let loose: Vec<String> = names(downloads).into_iter().filter(|n| !before.contains(n)).collect();
+    check(
+        loose == ["house-embed"]
+            && s.copied.is_none()
+            && s.ed.embedded.is_none()
+            && !s.host.contains(&Action::Embedded)
+            && s.ed.ui.toast_text() == Some("Claude Code exported the folder house-embed into Downloads"),
+        format!(
+            "it adds only that folder, leaves the clipboard alone and asks the user nothing ({loose:?}, {:?})",
+            s.ed.ui.toast_text()
+        ),
+    )?;
+    let first = std::fs::read(folder.join("index.html")).unwrap_or_default();
+    let (t, e) = s.agent_call(live, claude, "export", json!({"kind": "embed"}));
+    check(
+        !e && downloads.join("house-embed-1/house.vxrb").is_file()
+            && t.contains("house-embed-1")
+            && std::fs::read(folder.join("index.html")).is_ok_and(|b| b == first),
+        format!("again it makes house-embed-1 and replaces nothing: {t}"),
+    )?;
     check(s.ed.scene.history().position() == position, "exports are no undo step".into())?;
     s.ed.ui.render = vxr_app::render::RenderSettings::default();
     Ok(())
@@ -7843,6 +9575,40 @@ fn agents_live(dir: &Path) -> Result<(), String> {
         check(s.voxels() == flag && s.ed.ui.agents.edits[3].applied, "Cmd-Z brings the flag back".into())?;
         // The queries and exports after it push the first edits out of ACTIVITY's last 10 calls.
         agents_look_render(&mut s, &mut live, &mut claude, &downloads, dir)?;
+
+        // save_view, from an agent of its own so its edit keeps no other call out of ACTIVITY:
+        // it fills the slot the View flyout shows, one undo step, and the slot then goes to it.
+        let mut viewer = LiveAgent::new(&sock_dir, "opencode");
+        let (view_at, cam) = (s.ed.scene.history().position(), s.ed.cam);
+        let (t, e) = s.agent_call(
+            &mut live,
+            &mut viewer,
+            "save_view",
+            serde_json::json!({"slot": 4, "target": [2.5, 3, -1], "yaw": 30, "pitch": 20, "distance": 40}),
+        );
+        s.live_frames(&mut live, 2);
+        let full = s.ed.ui.saved_views[3];
+        let went = s.ed.go_to_view(3);
+        let c = &s.ed.cam;
+        let target = c.target + glam::Vec3::from(s.ed.scene.origin.map(|v| v as f32));
+        check(
+            !e && t.starts_with("saved view 4")
+                && full
+                && went
+                && (target - glam::Vec3::new(2.5, 3.0, -1.0)).length() < 1e-3
+                && (c.yaw - 30f32.to_radians()).abs() < 1e-4
+                && (c.pitch - 20f32.to_radians()).abs() < 1e-4
+                && (c.distance - 40.0).abs() < 1e-3
+                && !c.ortho
+                && s.ed.scene.history().position() > view_at,
+            format!("save_view fills the View flyout's slot 4 as one undo step, and the slot goes to it: {t}"),
+        )?;
+        s.ed.undo();
+        s.live_frames(&mut live, 2);
+        check(!s.ed.ui.saved_views[3] && s.ed.scene.history().position() == view_at, "undo empties slot 4".into())?;
+        drop(viewer);
+        s.ed.cam = cam;
+        s.live_frames(&mut live, 2);
 
         // A call waits while the user drags, and runs when the drag ends.
         s.tool(Tool::Add, Shape::Voxel);

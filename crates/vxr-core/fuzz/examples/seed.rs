@@ -1,12 +1,34 @@
 //! Write the generated fixtures, the fuzz regressions and the prototype island (when
-//! built) as seeds: `cargo run --example seed -- corpus/scene_from_vox`.
+//! built) as seeds: `cargo run --example seed -- corpus/scene_from_vox`. With `--bricks`
+//! before the folder, write the same scenes as brick scene files, for `bricks_decode`.
 
 fn main() {
-    let Some(dir) = std::env::args().nth(1) else {
-        eprintln!("usage: seed <dir>");
-        std::process::exit(2);
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let (bricks, dir) = match args.as_slice() {
+        [dir] => (false, dir.clone()),
+        [flag, dir] if flag == "--bricks" => (true, dir.clone()),
+        _ => {
+            eprintln!("usage: seed [--bricks] <dir>");
+            std::process::exit(2);
+        }
     };
     std::fs::create_dir_all(&dir).unwrap();
+    if bricks {
+        let root = env!("CARGO_MANIFEST_DIR");
+        let mut files: Vec<(String, Vec<u8>)> =
+            vxr_vox::fixtures::all().into_iter().map(|f| (f.name.to_string(), f.builder.build().write())).collect();
+        if let Ok(island) = std::fs::read(format!("{root}/../../../prototype/demo/scene.vox")) {
+            files.push(("island".into(), island));
+        }
+        for (name, vox) in files {
+            // A file with several objects opens as the composed world.
+            if let Ok(scene) = vxr_core::Scene::from_vox(&vox) {
+                std::fs::write(format!("{dir}/{name}.vxrb"), vxr_core::bricks::encode(&scene.map, &scene.palette))
+                    .unwrap();
+            }
+        }
+        return;
+    }
     for f in vxr_vox::fixtures::all() {
         std::fs::write(format!("{dir}/{}.vox", f.name), f.builder.build().write()).unwrap();
     }
