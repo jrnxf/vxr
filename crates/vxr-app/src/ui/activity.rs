@@ -181,6 +181,7 @@ pub fn verb(c: &AgentCall, running: bool) -> String {
         "palette_copy" => ("Copying a colour", "Copied a colour".into()),
         "palette_adjust" => ("Shifting colours", "Shifted colours".into()),
         "palette_sort" => ("Sorting the palette", "Sorted the palette".into()),
+        "palette_import" => ("Importing a palette", "Imported a palette".into()),
         "material_set" => ("Setting a material", "Set a material".into()),
         "move_object" => ("Moving an object", "Moved an object".into()),
         "transform_object" => ("Turning an object", "Turned an object".into()),
@@ -218,7 +219,7 @@ pub fn tool_icon(tool: &str) -> char {
         "move_object" | "transform_object" => icon::MOVE,
         "erase" | "delete" | "cut" | "delete_object" => icon::ERASER,
         "paint" | "palette_set" | "palette_swap" | "palette_copy" | "palette_adjust" | "palette_sort"
-        | "material_set" => icon::PAINTBRUSH,
+        | "palette_import" | "material_set" => icon::PAINTBRUSH,
         "select" | "copy" | "paste" => icon::SELECT,
         "undo" => icon::UNDO,
         "redo" => icon::REDO,

@@ -25,6 +25,8 @@ extern "C" {
     /// The page's side of [`Browser`]: `window.vxrHost` in `www/app.js`.
     #[wasm_bindgen(js_namespace = vxrHost, js_name = pickOpen)]
     fn page_pick_open();
+    #[wasm_bindgen(js_namespace = vxrHost, js_name = pickPalette)]
+    fn page_pick_palette();
     #[wasm_bindgen(js_namespace = vxrHost, js_name = download)]
     fn page_download(bytes: &[u8], name: &str, mime: &str);
     #[wasm_bindgen(js_namespace = vxrHost, js_name = keepTheme)]
@@ -189,6 +191,11 @@ impl Platform for Browser {
         page_store_put(&file_key(project), bytes);
         self.kept = Some((project.into(), content_hash(bytes)));
         Ok(Some(Saved { name: name.into(), copy: bytes.len() as u64, ..Default::default() }))
+    }
+
+    fn pick_palette(&mut self) -> Result<Option<(String, Vec<u8>)>, String> {
+        page_pick_palette();
+        Ok(None)
     }
 
     fn open_project(&mut self, project: &Project) -> Result<Option<Opened>, String> {
@@ -733,6 +740,12 @@ impl App {
             ..Default::default()
         };
         vxr_app::host::open(&mut self.host.editor, &mut Browser::default(), file);
+    }
+
+    /// The palette file the user picked for Import palette: a PNG or text.
+    pub fn import_palette(&mut self, bytes: &[u8], name: &str) {
+        self.woken = true;
+        self.host.editor.import_palette(name, bytes);
     }
 
     /// The page could not open project `name`'s file: `why`.

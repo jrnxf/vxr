@@ -2754,6 +2754,25 @@ impl Editor {
         format!("{}-sprite.png", self.part_stem(self.exports_selection().is_some()))
     }
 
+    /// Give slots 1 up the colours of the palette file `name` (a PNG or text the user picked
+    /// for Import palette), as one undo step, and say what happened. A file that is not a
+    /// palette changes nothing.
+    pub fn import_palette(&mut self, name: &str, bytes: &[u8]) {
+        let colors = match vxr_core::palette::parse(bytes) {
+            Ok(colors) => colors,
+            // The reason says what a palette file holds; it stays long enough to read.
+            Err(e) => return self.ui.alert(&self.ctx, format!("Could not import {name}: {e}")),
+        };
+        self.gesture = None;
+        let n = colors.len();
+        let to = if n == 1 { "slot 1".to_string() } else { format!("slots 1 to {n}") };
+        let msg = match self.scene.import_colors(&colors) {
+            0 => format!("{name} has the colors {to} already have"),
+            _ => format!("Imported {n} color{} from {name} into {to}", if n == 1 { "" } else { "s" }),
+        };
+        self.ui.toast(&self.ctx, msg);
+    }
+
     /// The file name for a palette export: the scene's name with `-palette` and `ext`.
     pub fn palette_name(&self, ext: &str) -> String {
         format!("{}-palette.{ext}", self.export_stem())

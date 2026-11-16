@@ -745,14 +745,22 @@ fn the_housekeeping_select_and_palette_tools_change_the_window_and_undo_gives_th
         "sorted 2 slots by saturation: 2 slots moved and 59 voxels follow their colours, so the scene looks the same; now slot 12 #d93a7b, slot 13 #2a6fb0"
     );
     assert_eq!(w.scene.history().position(), position + 3);
+    // A palette imported from text: one undo step in the window.
+    let t = call(&mut w, &mut a, "palette_import", json!({"text": "#102030\n405060\n"}));
+    assert_eq!(
+        t,
+        "imported 2 colours into slots 1 to 2: 2 changed colour, and 0 voxels use those slots; now slot 1 #102030, slot 2 #405060"
+    );
+    assert_eq!(w.scene.history().position(), position + 4);
+    assert_eq!((w.scene.palette[1], w.scene.palette[2]), ([0x10, 0x20, 0x30, 255], [0x40, 0x50, 0x60, 255]));
     call(&mut w, &mut a, "show_world", json!({}));
-    // Thirteen edits applied, one undo step each (the delete was undone): undone, the save is
+    // Fourteen edits applied, one undo step each (the delete was undone): undone, the save is
     // the file's bytes.
     let mut steps = 0;
     while w.scene.undo() {
         steps += 1;
     }
-    assert_eq!(steps, 13);
+    assert_eq!(steps, 14);
     assert_eq!(w.scene.to_vox().unwrap(), bytes);
 }
 

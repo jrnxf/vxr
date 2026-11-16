@@ -125,6 +125,12 @@ pub trait Platform {
     /// Keep the desktop app's session token for the next start (Some), or delete it (None).
     fn keep_session(&mut self, _token: Option<&str>) {}
 
+    /// Ask for a palette file to import (a PNG or text): its name and bytes. A browser
+    /// answers later, as [`Platform::pick_open`] does, and the page hands the file to [`Editor::import_palette`].
+    fn pick_palette(&mut self) -> Result<Option<(String, Vec<u8>)>, String> {
+        Err("there is no file picker here".into())
+    }
+
     /// Write the scene's `.vox` bytes as a copy named `name` (a download in the browser, a save
     /// dialog on the desktop); returns the name it was given.
     fn export_vox(&mut self, _name: &str, _bytes: &[u8]) -> Result<Option<String>, String> {
@@ -351,6 +357,11 @@ pub fn run_action(ed: &mut Editor, p: &mut dyn Platform, action: Action) {
                 Err(e) => toast(ed, format!("Could not export: {e}")),
             }
         }
+        Action::ImportPalette => match p.pick_palette() {
+            Ok(Some((name, bytes))) => ed.import_palette(&name, &bytes),
+            Ok(None) => {}
+            Err(e) => toast(ed, format!("Could not import a palette: {e}. Try Import palette again")),
+        },
         Action::ExportPalette(text) => {
             let written = if text {
                 p.save_text(&ed.palette_name("hex"), &vxr_core::palette::hex(&ed.scene.palette))

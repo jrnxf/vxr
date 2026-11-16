@@ -155,6 +155,20 @@ impl Platform for Desktop {
         read(&path).map(Some)
     }
 
+    fn pick_palette(&mut self) -> Result<Option<(String, Vec<u8>)>, String> {
+        let kinds = ["png", "hex", "gpl", "txt"];
+        let Some(path) = rfd::FileDialog::new().add_filter("Palette", &kinds).pick_file() else {
+            return Ok(None);
+        };
+        // A palette is small: no more of a file is read than the reader needs to refuse it.
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        std::fs::File::open(&path)
+            .and_then(|f| f.take(vxr_core::palette::IMPORT_MAX_BYTES as u64 + 1).read_to_end(&mut bytes))
+            .map_err(|e| format!("{}: {e}", file_name(&path)))?;
+        Ok(Some((file_name(&path), bytes)))
+    }
+
     fn open_project(&mut self, project: &Project) -> Result<Option<Opened>, String> {
         read(project.path.as_deref().ok_or("it has no file")?).map(Some)
     }

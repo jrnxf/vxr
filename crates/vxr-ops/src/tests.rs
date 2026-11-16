@@ -95,6 +95,7 @@ fn tool_schemas() {
             "palette_copy",
             "palette_adjust",
             "palette_sort",
+            "palette_import",
             "material_set",
             "make_object",
             "move_object",
@@ -1661,6 +1662,35 @@ fn palette_adjust_shifts_slots_or_the_selection_s_slots() {
 /// The colour and material every voxel of the file shows, by world cell.
 fn look(s: &Scene) -> Vec<([i32; 3], [u8; 4], vxr_core::material::Material)> {
     s.world_voxels(false).into_iter().map(|(p, v)| (p, s.palette[v as usize], s.materials[v as usize])).collect()
+}
+
+#[test]
+fn palette_import_reads_text_into_the_first_slots() {
+    let mut s = small();
+    let (cells, palette) = (voxels(&s), s.palette);
+    let mut o = Session::new(&s, None);
+    // Ten hex lines: slot 10 (the 16 floor voxels) takes the tenth, slot 20 keeps its red.
+    let text: String = (1..=10).map(|i| format!("#{:02x}00{:02x}\n", i * 16, 255 - i)).collect();
+    let t = call(&mut o, &mut s, "palette_import", json!({"text": text}));
+    assert_eq!(
+        t,
+        "imported 10 colours into slots 1 to 10: 10 changed colour, and 16 voxels use those slots; now slot 1 #1000fe, slot 2 #2000fd, slot 3 #3000fc, slot 4 #4000fb, slot 5 #5000fa, slot 6 #6000f9, slot 7 #7000f8, slot 8 #8000f7, …"
+    );
+    assert_eq!((s.palette[10], s.palette[11], s.palette[20]), ([160, 0, 245, 255], palette[11], palette[20]));
+    assert_eq!(voxels(&s), cells, "no voxel changes slot");
+    // The same colours again, as a GIMP palette of one colour: nothing changes.
+    let t = call(&mut o, &mut s, "palette_import", json!({"text": "GIMP Palette\nName: one\n16 0 254 first\n"}));
+    assert_eq!(t, "imported 1 colour into slot 1: 0 changed colour, and 0 voxels use those slots; now slot 1 #1000fe");
+    // A text that is not a palette is refused whole.
+    let before = s.palette;
+    let (kind, m) = err(&mut o, &mut s, "palette_import", json!({"text": "000000\nfloor: brown\n"}));
+    assert_eq!(
+        (kind, m.as_str()),
+        (ErrorKind::Invalid, "text: line 2 is not a color (\"floor: brown\"): a color is six hex digits like ff8800")
+    );
+    assert_eq!(s.palette, before);
+    o.discard(&mut s);
+    assert_eq!((s.palette, voxels(&s)), (palette, cells));
 }
 
 #[test]

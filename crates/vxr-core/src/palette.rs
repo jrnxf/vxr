@@ -1,6 +1,6 @@
 //! Palette colour maths: HSV, the group edit that shifts the hue, saturation and value of
 //! several slots at once (MagicaVoxel's palette multi-select), sorting the palette, and the
-//! palette as a PNG strip and as text.
+//! palette as a PNG strip and as text, written and read.
 
 use crate::Scene;
 
@@ -148,6 +148,99 @@ pub fn hex(palette: &[[u8; 4]; 256]) -> String {
     palette[1..].iter().map(|c| format!("{:02x}{:02x}{:02x}\n", c[0], c[1], c[2])).collect()
 }
 
+/// The most bytes [`parse`] reads, and the most its PNG decoder may allocate. A palette is
+/// 256 pixels or 255 short lines; anything near this size is not one.
+pub const IMPORT_MAX_BYTES: usize = 1 << 20;
+
+/// The colours of a palette file, for slots 1 up (at least one, at most 255): a PNG, or
+/// text ([`parse_text`]). In a PNG, pixel `i` in reading order is slot `i + 1`, as in
+/// [`strip`]: an image has at most 256 pixels in any shape (256 x 1, 16 x 16, 8 x 1), and
+/// the 256th is slot 0's and is left out. The file is from a stranger: every size is
+/// checked before anything is allocated.
+pub fn parse(bytes: &[u8]) -> Result<Vec<[u8; 4]>, String> {
+    if bytes.len() > IMPORT_MAX_BYTES {
+        return Err("it is over 1 MB, too large for a palette".into());
+    }
+    if bytes.starts_with(b"\x89PNG") {
+        return parse_png(bytes);
+    }
+    parse_text(std::str::from_utf8(bytes).map_err(|_| "it is not a palette: pick a PNG image, a .hex or a .gpl file")?)
+}
+
+fn parse_png(bytes: &[u8]) -> Result<Vec<[u8; 4]>, String> {
+    let bad = |e: png::DecodingError| format!("the PNG does not read ({e})");
+    let fits = |w: u32, h: u32| match w as u64 * h as u64 {
+        0..=256 => Ok(()),
+        _ => Err(format!("the image is {w}×{h} pixels: a palette image has at most 256, one per slot")),
+    };
+    // The header's size first, so a photo is refused by its size and not by the decoder's
+    // memory limit.
+    if let (Some(b"IHDR"), Some(size)) = (bytes.get(12..16), bytes.get(16..24)) {
+        let at = |i: usize| u32::from_be_bytes([size[i], size[i + 1], size[i + 2], size[i + 3]]);
+        fits(at(0), at(4))?;
+    }
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    decoder.set_transformations(png::Transformations::normalize_to_color8());
+    decoder.set_limits(png::Limits { bytes: IMPORT_MAX_BYTES });
+    let mut reader = decoder.read_info().map_err(bad)?;
+    let (w, h) = reader.info().size();
+    fits(w, h)?;
+    let mut px = vec![0; reader.output_buffer_size().ok_or("the PNG is too large")?];
+    let info = reader.next_frame(&mut px).map_err(bad)?;
+    let n = info.color_type.samples();
+    Ok(px[..info.buffer_size()]
+        .chunks_exact(n)
+        .take(255)
+        .map(|p| match n {
+            1 => [p[0], p[0], p[0], 255],
+            2 => [p[0], p[0], p[0], p[1]],
+            3 => [p[0], p[1], p[2], 255],
+            _ => [p[0], p[1], p[2], p[3]],
+        })
+        .collect())
+}
+
+/// The colours of a text palette, for slots 1 up (at least one, at most 255), each opaque.
+/// Two formats: one `rrggbb` per line with or without a `#` ([`hex`], the `.hex` of Lospec),
+/// or a GIMP `.gpl` (a first line `GIMP Palette`, then `r g b name` lines, with `Name:`
+/// style headers and `#` comments skipped). Empty lines are skipped; any other line is an
+/// error that names it, so a file that is not a palette changes nothing.
+pub fn parse_text(text: &str) -> Result<Vec<[u8; 4]>, String> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let mut lines = text.lines().map(str::trim).enumerate().filter(|(_, l)| !l.is_empty()).peekable();
+    let gimp = lines.next_if(|(_, l)| l.eq_ignore_ascii_case("GIMP Palette")).is_some();
+    let mut colors = Vec::new();
+    for (n, line) in lines {
+        let rgb = if gimp {
+            if line.starts_with('#') || (colors.is_empty() && line.contains(':')) {
+                continue;
+            }
+            let mut parts = line.split_whitespace().map(|p| p.parse::<u8>().ok());
+            match [parts.next(), parts.next(), parts.next()] {
+                [Some(Some(r)), Some(Some(g)), Some(Some(b))] => Some([r, g, b]),
+                _ => None,
+            }
+        } else {
+            let digits = line.strip_prefix('#').unwrap_or(line);
+            (digits.len() == 6 && digits.bytes().all(|b| b.is_ascii_hexdigit()))
+                .then(|| [0, 2, 4].map(|i| u8::from_str_radix(&digits[i..i + 2], 16).unwrap_or(0)))
+        };
+        let Some([r, g, b]) = rgb else {
+            let shown: String = line.chars().take(24).collect();
+            let want = if gimp { "three numbers from 0 to 255" } else { "six hex digits like ff8800" };
+            return Err(format!("line {} is not a color ({shown:?}): a color is {want}", n + 1));
+        };
+        if colors.len() == 255 {
+            return Err("it has more than 255 colors, and a palette holds 255".into());
+        }
+        colors.push([r, g, b, 255]);
+    }
+    if colors.is_empty() {
+        return Err("it has no colors".into());
+    }
+    Ok(colors)
+}
+
 /// The palette slots a set of voxels uses, in slot order.
 pub fn slots_of(voxels: impl IntoIterator<Item = u8>) -> Vec<u8> {
     let mut seen = [false; 256];
@@ -194,6 +287,26 @@ impl Scene {
         let n = self.remap_slots(&table);
         self.commit();
         (table, n)
+    }
+
+    /// Give slots 1 up the colours of `colors` (an imported palette, [`parse`]) inside the
+    /// open edit, opening one if needed. Slots past the last colour, slot 0 and every
+    /// material stay. Returns how many slots took another colour.
+    pub fn put_colors(&mut self, colors: &[[u8; 4]]) -> usize {
+        let mut changed = 0;
+        for (slot, &c) in (1..=255u8).zip(colors) {
+            changed += (self.palette[slot as usize] != c) as usize;
+            self.put_color(slot, c);
+        }
+        changed
+    }
+
+    /// [`Scene::put_colors`] as one undo step.
+    pub fn import_colors(&mut self, colors: &[[u8; 4]]) -> usize {
+        self.commit();
+        let changed = self.put_colors(colors);
+        self.commit();
+        changed
     }
 
     /// The slots the selected voxels use, or the slots the whole model uses while nothing
@@ -433,6 +546,171 @@ mod tests {
         assert_eq!((info.width, info.height, info.color_type), (256, 1, png::ColorType::Rgba));
         assert_eq!((&px[..4], &px[254 * 4..255 * 4]), (&[10, 20, 30, 255][..], &[255, 238, 221, 255][..]));
         assert_eq!(px[255 * 4..], scene.palette[0]);
+    }
+
+    fn encode(
+        w: u32,
+        h: u32,
+        color: png::ColorType,
+        depth: png::BitDepth,
+        plte: Option<&[u8]>,
+        data: &[u8],
+    ) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut e = png::Encoder::new(&mut out, w, h);
+        e.set_color(color);
+        e.set_depth(depth);
+        if let Some(p) = plte {
+            e.set_palette(p.to_vec());
+        }
+        e.write_header().unwrap().write_image_data(data).unwrap();
+        out
+    }
+
+    proptest! {
+        // What the palette export writes, the import reads back: the PNG whole, the text
+        // without alpha. A shorter palette leaves the slots after it, and nothing touches
+        // slot 0 or a material. One undo takes the import back.
+        #[test]
+        fn an_exported_palette_imports_back(
+            colors in proptest::collection::vec(any::<[u8; 4]>(), 256),
+            n in 1usize..=255,
+        ) {
+            let mut from = Scene::new([4; 3]);
+            from.palette.copy_from_slice(&colors);
+            let png = parse(&crate::files::palette_png(&from).unwrap()).unwrap();
+            prop_assert_eq!(&png[..], &colors[1..]);
+            let text = parse(hex(&from.palette).as_bytes()).unwrap();
+            let opaque: Vec<[u8; 4]> = colors[1..].iter().map(|c| [c[0], c[1], c[2], 255]).collect();
+            prop_assert_eq!(&text, &opaque);
+
+            let mut scene = Scene::new([4; 3]);
+            scene.set_material(3, metal());
+            // Some slots hold the file's colour already: they do not count as changed.
+            for slot in (1..=255).filter(|&s| colors[s][3] % 2 == 0) {
+                scene.palette[slot] = colors[slot];
+            }
+            let (before, materials, position) = (scene.palette, scene.materials, scene.history().position());
+            let changed = scene.import_colors(&png[..n]);
+            prop_assert_eq!(&scene.palette[1..=n], &colors[1..=n]);
+            prop_assert_eq!(&scene.palette[n + 1..], &before[n + 1..]);
+            prop_assert_eq!((scene.palette[0], scene.materials), (before[0], materials));
+            prop_assert_eq!(changed, (1..=n).filter(|&s| before[s] != colors[s]).count());
+            if changed > 0 {
+                prop_assert!(scene.history().position() != position);
+                scene.undo();
+            }
+            prop_assert_eq!(scene.palette, before);
+        }
+    }
+
+    #[test]
+    fn text_palettes_read_as_hex_lines_or_gimp() {
+        let rgb = |c: &[[u8; 3]]| Ok(c.iter().map(|c| [c[0], c[1], c[2], 255]).collect::<Vec<_>>());
+        let many = |n: usize| "102030\n".repeat(n);
+        type Read = Result<Vec<[u8; 4]>, String>;
+        let cases: [(&str, Read); 12] = [
+            ("\u{feff}#FF8800\r\n\r\n  00ff7f  \r\n", rgb(&[[255, 136, 0], [0, 255, 127]])),
+            (
+                "GIMP Palette\nName: Dusk: night\nColumns: 4\n#\n  0   0   0\tBlack\n255 136 7 Untitled: 2\n# end\n9 8 7\n",
+                rgb(&[[0, 0, 0], [255, 136, 7], [9, 8, 7]]),
+            ),
+            ("ff8800\nff880\n", Err("line 2 is not a color (\"ff880\"): a color is six hex digits like ff8800".into())),
+            ("ff8800ff\n", Err("line 1 is not a color (\"ff8800ff\"): a color is six hex digits like ff8800".into())),
+            ("+f8800\n", Err("line 1 is not a color (\"+f8800\"): a color is six hex digits like ff8800".into())),
+            ("ééé\n", Err("line 1 is not a color (\"ééé\"): a color is six hex digits like ff8800".into())),
+            (
+                "gimp palette\n1 2 3\n1 2 256\n",
+                Err("line 3 is not a color (\"1 2 256\"): a color is three numbers from 0 to 255".into()),
+            ),
+            (
+                "GIMP Palette\n1 2\n",
+                Err("line 2 is not a color (\"1 2\"): a color is three numbers from 0 to 255".into()),
+            ),
+            (
+                "this is a long line of prose, not a palette at all\n",
+                Err("line 1 is not a color (\"this is a long line of p\"): a color is six hex digits like ff8800"
+                    .into()),
+            ),
+            (" \n\n", Err("it has no colors".into())),
+            ("GIMP Palette\nName: none\n", Err("it has no colors".into())),
+            (&many(256), Err("it has more than 255 colors, and a palette holds 255".into())),
+        ];
+        for (text, want) in cases {
+            assert_eq!(parse(text.as_bytes()), want, "{text:?}");
+        }
+        assert_eq!(parse(many(255).as_bytes()).map(|c| c.len()), Ok(255));
+        assert_eq!(
+            parse(&[0xff, 0xfe, 0x00]),
+            Err("it is not a palette: pick a PNG image, a .hex or a .gpl file".into())
+        );
+        assert_eq!(parse(&vec![b'\n'; IMPORT_MAX_BYTES + 1]), Err("it is over 1 MB, too large for a palette".into()));
+    }
+
+    #[test]
+    fn palette_images_of_any_shape_and_kind_read_in_reading_order() {
+        use png::{BitDepth::*, ColorType::*};
+        // 16 x 16 RGB: 255 slots, and the last pixel (slot 0's) is left out.
+        let data: Vec<u8> = (0..256u32).flat_map(|i| [i as u8, (i * 3) as u8, 7]).collect();
+        let got = parse(&encode(16, 16, Rgb, Eight, None, &data)).unwrap();
+        assert_eq!(got.len(), 255);
+        assert_eq!((got[0], got[17], got[254]), ([0, 0, 7, 255], [17, 51, 7, 255], [254, 250, 7, 255]));
+        // Grey, grey with alpha, 16 bits a channel, and a 2-bit indexed image.
+        assert_eq!(
+            parse(&encode(2, 1, Grayscale, Eight, None, &[9, 200])).unwrap(),
+            [[9, 9, 9, 255], [200, 200, 200, 255]]
+        );
+        assert_eq!(parse(&encode(1, 1, GrayscaleAlpha, Eight, None, &[9, 200])).unwrap(), [[9, 9, 9, 200]]);
+        assert_eq!(
+            parse(&encode(1, 1, Rgb, Sixteen, None, &[0x12, 0x34, 0xab, 0xcd, 0xff, 0x00])).unwrap(),
+            [[0x12, 0xab, 0xff, 255]]
+        );
+        let plte = [10, 20, 30, 40, 50, 60, 70, 80, 90, 1, 2, 3];
+        assert_eq!(
+            parse(&encode(3, 1, Indexed, Two, Some(&plte), &[0b11_00_10_00])).unwrap(),
+            [[1, 2, 3, 255], [10, 20, 30, 255], [70, 80, 90, 255]]
+        );
+    }
+
+    #[test]
+    fn hostile_palette_images_are_refused() {
+        // One pixel too many, in two shapes.
+        for (w, h) in [(257, 1), (16, 17)] {
+            let png = crate::files::png(w, h, &vec![0; (w * h * 4) as usize]).unwrap();
+            assert_eq!(
+                parse(&png),
+                Err(format!("the image is {w}×{h} pixels: a palette image has at most 256, one per slot"))
+            );
+        }
+        // A header that claims a huge image is refused from the header alone: the sizes
+        // multiply past 32 bits, and nothing of that size is allocated.
+        let mut huge = crate::files::png(1, 1, &[0; 4]).unwrap();
+        huge[16..24].copy_from_slice(&[0xff, 0xff, 0xff, 0xff, 0x7f, 0xff, 0xff, 0xff]);
+        let crc = {
+            let mut c = !0u32;
+            for &b in &huge[12..29] {
+                c ^= b as u32;
+                for _ in 0..8 {
+                    c = (c >> 1) ^ (0xedb8_8320 & (c & 1).wrapping_neg());
+                }
+            }
+            !c
+        };
+        huge[29..33].copy_from_slice(&crc.to_be_bytes());
+        assert_eq!(
+            parse(&huge),
+            Err("the image is 4294967295×2147483647 pixels: a palette image has at most 256, one per slot".into())
+        );
+        // A cut file is an error, never a short palette or a panic. Cut inside the 12 bytes
+        // of the end chunk, after the pixels, it may still read, and then it reads whole.
+        let scene = Scene::new([4; 3]);
+        let whole = crate::files::palette_png(&scene).unwrap();
+        for cut in 0..whole.len() {
+            match parse(&whole[..cut]) {
+                Ok(got) => assert!(cut >= whole.len() - 12 && got == scene.palette[1..], "cut at {cut}: {got:?}"),
+                Err(e) => assert!(e.starts_with("the PNG does not read") || cut < 4, "cut at {cut}: {e}"),
+            }
+        }
     }
 
     #[test]

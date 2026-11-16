@@ -908,6 +908,8 @@ struct Fake {
     session: Option<String>,
     /// The last embed folder written: its name and files.
     embed: Option<(String, Vec<vxr_app::files::File>)>,
+    /// The palette file the next Import palette picks; None is a cancelled dialog.
+    palette: Option<(String, Vec<u8>)>,
 }
 
 impl Platform for Fake {
@@ -949,6 +951,10 @@ impl Platform for Fake {
         self.calls.push(format!("save_png {name} {}", bytes.starts_with(b"\x89PNG")));
         self.png = bytes.to_vec();
         Ok((!self.cancel).then(|| name.to_string()))
+    }
+    fn pick_palette(&mut self) -> Result<Option<(String, Vec<u8>)>, String> {
+        self.calls.push("pick_palette".into());
+        Ok(self.palette.take())
     }
     fn save_text(&mut self, name: &str, text: &str) -> Result<Option<String>, String> {
         self.calls.push(format!("save_text {name}"));
@@ -5270,7 +5276,88 @@ fn export(s: &mut Shot, dir: &Path) -> Result<(), String> {
                  {stem}-palette.hex ({lines} of 255 slots on their line), and nothing when the dialog is cancelled"
             ),
         )?;
+
+        // Import palette: a cancelled dialog and a file that is not a palette change
+        // nothing, a text palette sets its slots in one undo step, and the PNG exported
+        // above brings every colour back.
+        let position = s.ed.scene.history().position();
+        run_action(&mut s.ed, &mut p, Action::ImportPalette);
+        s.frames(2);
+        let cancelled = s.ed.scene.palette == palette && s.ed.scene.history().position() == position;
+        p.palette = Some(("notes.txt".into(), b"000000\nmy shopping list\n".to_vec()));
+        run_action(&mut s.ed, &mut p, Action::ImportPalette);
+        s.frames(2);
+        let refused = s.ed.ui.toast_text()
+            == Some(
+                "Could not import notes.txt: line 2 is not a color (\"my shopping list\"): a color is six hex digits \
+                 like ff8800",
+            )
+            && s.ed.scene.palette == palette
+            && s.ed.scene.history().position() == position;
+        s.save_png(&dir.join("app-2x-palette-import-refused.png"))?;
+        // Every colour inverted, as .hex text: the whole island changes.
+        let inverted: String = palette[1..]
+            .iter()
+            .map(|c| format!("#{:02X}{:02X}{:02X}\r\n", 255 - c[0], 255 - c[1], 255 - c[2]))
+            .collect();
+        p.palette = Some(("inverted.hex".into(), inverted.into_bytes()));
+        run_action(&mut s.ed, &mut p, Action::ImportPalette);
+        s.frames(2);
+        let text_toast = s.ed.ui.toast_text() == Some("Imported 255 colors from inverted.hex into slots 1 to 255");
+        let slots = (1..=255usize)
+            .filter(|&i| {
+                let (c, was) = (s.ed.scene.palette[i], palette[i]);
+                c == [255 - was[0], 255 - was[1], 255 - was[2], 255]
+            })
+            .count();
+        let one_step = s.ed.scene.history().position() != position;
+        s.frames(4);
+        s.save_png(&dir.join("app-2x-palette-imported.png"))?;
+        s.ed.undo();
+        let undone = s.ed.scene.palette == palette;
+        s.ed.redo();
+        p.palette = Some(("island-palette.png".into(), p.png.clone()));
+        run_action(&mut s.ed, &mut p, Action::ImportPalette);
+        s.frames(2);
+        let png_toast = s.ed.ui.toast_text() == Some("Imported 255 colors from island-palette.png into slots 1 to 255");
+        let back = s.ed.scene.palette == palette;
+        p.palette = Some(("island-palette.png".into(), p.png.clone()));
+        run_action(&mut s.ed, &mut p, Action::ImportPalette);
+        s.frames(2);
+        let same = s.ed.ui.toast_text() == Some("island-palette.png has the colors slots 1 to 255 already have");
+        check(
+            cancelled && refused,
+            "Import palette changes nothing when the dialog is cancelled, and a file that is not a palette is \
+             refused with its line and what a color is"
+                .into(),
+        )?;
+        check(
+            text_toast && slots == 255 && one_step && undone,
+            format!("a .hex palette of 255 colors sets {slots} of 255 slots as one undo step"),
+        )?;
+        check(
+            png_toast && back && same && p.calls.iter().filter(|c| *c == "pick_palette").count() == 5,
+            "the exported palette PNG imports back to the same 255 colors, and a second import says nothing changed"
+                .into(),
+        )?;
+        // Leave the history as it was: the two imports are taken back.
+        s.ed.undo();
+        s.ed.undo();
+        if s.ed.scene.palette != palette || s.ed.scene.history().position() != position {
+            return Err("the palette imports did not undo".into());
+        }
     }
+    s.host.clear();
+    s.open_file_row("import-palette")?;
+    let row = s.host == [Action::ImportPalette] && !s.ed.ui.file_menu;
+    s.host.clear();
+    s.frames_with(2, vec![key(egui::Key::K, egui::Modifiers::COMMAND)]);
+    s.frames_with(1, vec![egui::Event::Text("import palette".into())]);
+    s.frames_with(2, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+    check(
+        row && s.host == [Action::ImportPalette],
+        "the file menu's Import Palette… row and Cmd-K Import palette… ask the host for a palette file".into(),
+    )?;
     // Only the selection is a switch: its row flips it and keeps the menu open.
     s.host.clear();
     s.open_file_row("export-selection")?;

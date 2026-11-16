@@ -10,7 +10,7 @@ Status as of 2026-11-16 (Monday; Phase 3, after the web embed and the exports fo
 - **Priority**: P1 is needed before a MagicaVoxel user could switch, P2 is expected soon after, P3 is nice to have or out of scope for now.
 - **Why**: which reason people love MagicaVoxel it serves (see `docs/market-research.md`, "Why it is loved"): **minutes** (results in minutes), **sculpt** (the hand-sculpting feel), **palette** (palette-first work), **render** (a beautiful built-in renderer), **lossless** (lossless `.vox`). A dash means it serves none of them directly.
 - **Build order**: the numbers in brackets, such as [1], are the Part 3 order in which the done rows were built (1 lossless save, 2 palette editing, 3 preview, render and materials, 4 line and center brushes, 5 selection and transform, 6 model tools, 7 camera and view, 8 world editor, 9 export).
-- **Next, in order**: palette import (PNG and text), the pattern brush, scene tree multi-select and reorder, image import, click to focus, saved camera views. Sort palette, image import and saved views are P3 rows pulled forward because a switching user meets them early.
+- **Next, in order**: the pattern brush, scene tree multi-select and reorder, image import, click to focus, saved camera views. Sort palette, image import and saved views are P3 rows pulled forward because a switching user meets them early.
 
 MagicaVoxel versions: 0.99.7.2 (July 2025) is the current build and is Windows-only. The Mac build stopped at 0.99.6.2 (September 2020) [S1]. A user switching from the Mac build expects the 0.99.6 set; a Windows user expects 0.99.7's palette groups, layer sorting and animation timeline.
 
@@ -89,7 +89,7 @@ Feature names below follow the update log [S1] unless another source is given.
 | Mask unused colours | `pal mask` [S1 0.97.1]; vxr shows dots on used colours | partial (used dots) | P3 | palette |
 | Select voxels by colour and colours by voxels | Palette menu [S1 0.99.5] | done [5] (voxels by colour: Cmd-K Select color; colours by voxels: Cmd-K Select used colors selects, in the palette, the slots the selected voxels use, or the model's while nothing is selected) | P1 | palette |
 | Palette notes | A note per palette row, saved in NOTE [S1 0.99.5.1, S2] | missing (kept by lossless save [1]) | P3 | lossless |
-| Import and export palettes | IO panel, text and image [S1 0.99.5.1] | partial [9] (export: the Export menu's Palette image, a 256x1 `.png` with slot 1 first as MagicaVoxel loads it, and Palette colors, a `.hex` text file with one `rrggbb` line per slot; Cmd-K Export palette as PNG and as text; agents use `export` kind `palette`; import is next) | P2 | palette |
+| Import and export palettes | IO panel, text and image [S1 0.99.5.1] | done [9] (export: the Export menu's Palette image, a 256x1 `.png` with slot 1 first as MagicaVoxel loads it, and Palette colors, a `.hex` text file with one `rrggbb` line per slot; Cmd-K Export palette as PNG and as text; agents use `export` kind `palette`. Import: the file menu's Import Palette… and Cmd-K Import palette… read a PNG of up to 256 pixels, a `.hex` or a GIMP `.gpl` into slots 1 up as one undo step; agents use `palette_import` with the file's text) | P2 | palette |
 
 ## Materials
 

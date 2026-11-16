@@ -633,6 +633,14 @@ pub struct PaletteSort {
     pub slots: Vec<u8>,
 }
 
+/// Import a palette from text, as Import palette… does with a text file: the colours go to slots 1 up in the order of the text, in one undo step, and every voxel of those slots changes colour. Slots after the last colour and every material stay. The text is one rrggbb per line with or without # (the .hex of Lospec), or a GIMP .gpl palette (a first line GIMP Palette, then r g b name lines); at most 255 colours. To set chosen slots, use palette_set.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PaletteImport {
+    /// The palette file's text.
+    pub text: String,
+}
+
 /// What palette_sort orders the colours by.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
@@ -779,6 +787,7 @@ ops! {
     "palette_copy" => PaletteCopy(PaletteCopy),
     "palette_adjust" => PaletteAdjust(PaletteAdjust),
     "palette_sort" => PaletteSort(PaletteSort),
+    "palette_import" => PaletteImport(PaletteImport),
     "material_set" => MaterialSet(MaterialSet),
     "make_object" => MakeObject(MakeObject),
     "move_object" => MoveObject(MoveObject),

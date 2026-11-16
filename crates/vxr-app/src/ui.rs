@@ -266,6 +266,9 @@ pub enum Action {
     ExportSprite,
     /// Export the palette as a 256 x 1 PNG (false) or as `.hex` text (true).
     ExportPalette(bool),
+    /// Ask for a palette file (a PNG or text) and give its colours to slots 1 up (the host
+    /// picks the file).
+    ImportPalette,
     /// Flip "Only the selection" for the OBJ, slices and sprite exports, and say so.
     ExportSelection,
     /// Flip the region option (erase and paint stay inside the selection), and say so.
@@ -1079,6 +1082,7 @@ const COMMANDS: &[Command] = &[
     Command { label: "Export only the selection", keys: &[], run: |h| h.actions.push(Action::ExportSelection) },
     Command { label: "Export palette as PNG", keys: &[], run: |h| h.actions.push(Action::ExportPalette(false)) },
     Command { label: "Export palette as text", keys: &[], run: |h| h.actions.push(Action::ExportPalette(true)) },
+    Command { label: "Import palette…", keys: &[], run: |h| h.actions.push(Action::ImportPalette) },
     Command { label: "Ask AI…", keys: &["Tab"], run: |h| h.open_ask_bar("") },
     Command { label: "Organize into objects (AI)", keys: &[], run: |h| h.organize() },
     Command { label: "Assistant panel", keys: &["⌘", "J"], run: |h| h.toggle_ai() },
@@ -2996,6 +3000,9 @@ impl Hybrid {
             Entry::Sep,
             Entry::Row("export-palette-png", icon::PALETTE, "Palette image", "256×1 .png"),
             Entry::Row("export-palette-hex", icon::PALETTE, "Palette colors", ".hex"),
+            Entry::Sep,
+            Entry::Head("IMPORT"),
+            Entry::Row("import-palette", icon::PALETTE, "Palette…", ".png .hex .gpl"),
         ];
         let height = |e: &Entry| match e {
             Entry::Head(_) => 26.0,
@@ -3109,6 +3116,7 @@ impl Hybrid {
             Some("export-embed") => self.actions.push(Action::Embed),
             Some("export-palette-png") => self.actions.push(Action::ExportPalette(false)),
             Some("export-palette-hex") => self.actions.push(Action::ExportPalette(true)),
+            Some("import-palette") => self.actions.push(Action::ImportPalette),
             _ => {}
         }
         if flip {

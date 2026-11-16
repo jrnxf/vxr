@@ -661,6 +661,12 @@ fn the_ui_s_other_actions_have_tools() {
         t,
         "sorted 2 slots by value: 2 slots moved and 0 voxels follow their colours, so the scene looks the same; now slot 201 #330033, slot 202 #4d0033"
     );
+    // A palette imported from text, in the world: the colours go to the first slots.
+    let t = c.ok("palette_import", json!({"text": "#102030\n405060\n"}));
+    assert_eq!(
+        t,
+        "imported 2 colours into slots 1 to 2: 2 changed colour, and 0 voxels use those slots; now slot 1 #102030, slot 2 #405060"
+    );
     c.ok("edit_object", json!({"node": 1}));
     c.ok("resize", json!({"size": [8, 3, 8]}));
     let t = c.ok("face", json!({"cell": [0, 0, 0], "slot": 9}));
@@ -682,12 +688,12 @@ fn the_ui_s_other_actions_have_tools() {
     let w = summary(&mut d)["world"].clone();
     assert_eq!(w["nodes"].as_array().unwrap().len(), 7, "the gem is gone: {w}");
     assert!(w["layers"].as_array().unwrap().iter().any(|l| l["id"] == 0 && l["hidden"] == true), "{w}");
-    // Twelve edits, twelve undo steps, and the selections none.
+    // Thirteen edits, thirteen undo steps, and the selections none.
     let mut steps = 0;
     while !c.tool("undo", json!({})).1 {
         steps += 1;
     }
-    assert_eq!(steps, 12);
+    assert_eq!(steps, 13);
     c.ok("save", json!({"path": "undone.vox"}));
     assert_eq!(std::fs::read(dir.0.join("undone.vox")).unwrap(), bytes);
 }

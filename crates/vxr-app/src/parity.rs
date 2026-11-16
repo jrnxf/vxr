@@ -32,6 +32,8 @@ fn tool(a: &Action) -> Option<&'static str> {
         // The palette's selection is `slots`, or `selection: true` for the used colours.
         Action::ShiftColors(_) | Action::SelectUsedColors => Some("palette_adjust"),
         Action::SortPalette(_) => Some("palette_sort"),
+        // The tool takes the file's text; the UI's file picker reads PNG too.
+        Action::ImportPalette => Some("palette_import"),
         // In world mode rotate and flip turn the picked object: `transform_object`.
         Action::Transform(_) => Some("transform"),
         Action::SelectAll | Action::InvertSelection | Action::SelectColor | Action::Deselect => Some("select"),
@@ -132,6 +134,7 @@ fn with_tools() -> Vec<Action> {
         Action::SelectUsedColors,
         Action::SortPalette(vxr_core::palette::SortKey::Hue),
         Action::ExportPalette(false),
+        Action::ImportPalette,
         Action::Transform(Transform::Rotate(0)),
         Action::SelectAll,
         Action::InvertSelection,

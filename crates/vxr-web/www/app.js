@@ -476,8 +476,18 @@ async function fetchEmbed() {
   }
 }
 
+// Import palette: a PNG or text file. No more is read than the editor needs to refuse a
+// file too large for a palette (over 1 MB).
+const paletteInput = Object.assign(document.createElement('input'), { type: 'file', accept: '.png,.hex,.gpl,.txt' });
+paletteInput.addEventListener('change', async () => {
+  const f = paletteInput.files[0];
+  paletteInput.value = '';
+  if (f) app.import_palette(new Uint8Array(await f.slice(0, (1 << 20) + 1).arrayBuffer()), f.name);
+});
+
 window.vxrHost = {
   pickOpen,
+  pickPalette: () => paletteInput.click(),
   download,
   fetchEmbed,
   keepToured() {

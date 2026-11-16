@@ -1151,6 +1151,7 @@ async () => {
       await frames(14);
       await click(...hit('export-palette-png'));
       await frames();
+      const palettePng = zipBlob;
       const pp = zipBlob ? await slicePixels(zipBlob) : null;
       step('its Palette image row downloads island-palette.png, 256 by 1',
         zipName === 'island-palette.png' && !st().fileMenu && pp && pp.w === 256 && pp.h === 1 && /palette\.png \(256×1, slot 1 first\)$/.test(st().toast || ''),
@@ -1173,6 +1174,54 @@ async () => {
       await key('Enter');
       await frames();
       step('Cmd-K Export palette as text downloads it too', zipName === 'island-palette.hex', `${zipName}`);
+      // Import palette: the row opens the page's file picker, a text palette sets its slots,
+      // the PNG exported above brings them back, and an image that is not a palette is refused.
+      {
+        let picker = null;
+        const inputClick = HTMLInputElement.prototype.click;
+        HTMLInputElement.prototype.click = function () { if (this.type === 'file') picker = this; else inputClick.call(this); };
+        const give = async (name, body) => {
+          const dt = new DataTransfer();
+          dt.items.add(new File([body], name));
+          picker.files = dt.files;
+          picker.dispatchEvent(new Event('change'));
+          await new Promise((r) => setTimeout(r, 50));
+          await frames(3);
+        };
+        const first = () => [1, 2, 3].map((i) => hexOf(i)).join();
+        const was = first();
+        await click(...hit('scene-select'));
+        await frames(14);
+        await click(...hit('import-palette'));
+        await frames();
+        step('its Import Palette… row opens a file picker for .png, .hex and .gpl files',
+          !!picker && picker.accept === '.png,.hex,.gpl,.txt' && !st().fileMenu, `${picker && picker.accept}`);
+        if (picker) {
+          await give('ramp.hex', '#FF0000\r\n00ff00\n0000ff\n');
+          step('a .hex file of three colors sets slots 1 to 3',
+            first() === 'ff0000,00ff00,0000ff' && st().toast === 'Imported 3 colors from ramp.hex into slots 1 to 3', `${first()} ${st().toast}`);
+          const wide = document.createElement('canvas');
+          wide.width = 300; wide.height = 1;
+          wide.getContext('2d').fillRect(0, 0, 300, 1);
+          await give('photo.png', await new Promise((r) => wide.toBlob(r, 'image/png')));
+          step('an image of more than 256 pixels is refused and changes nothing',
+            first() === 'ff0000,00ff00,0000ff' && (st().toast || '').startsWith('Could not import photo.png: the image is 300×1 pixels: a palette image has at most 256'), `${first()} ${st().toast}`);
+          picker = null;
+          await key('k', cmd);
+          for (const ch of 'import palette') await key(ch);
+          await key('Enter');
+          await frames();
+          const again = !!picker;
+          if (picker && palettePng) await give('island-palette.png', palettePng);
+          step('Cmd-K Import palette… asks too, and the exported palette PNG brings the colors back',
+            again && first() === was && st().toast === 'Imported 255 colors from island-palette.png into slots 1 to 255', `${again} ${first()} ${st().toast}`);
+          await key('z', cmd);
+          await key('z', cmd);
+          await frames();
+          step('undo takes both imports back', first() === was, first());
+        }
+        HTMLInputElement.prototype.click = inputClick;
+      }
       // Only the selection: with one colour selected and the switch on, the slices and the
       // OBJ hold those voxels alone, under names of their own; switched off, the whole scene.
       const toolWas = st().tool;

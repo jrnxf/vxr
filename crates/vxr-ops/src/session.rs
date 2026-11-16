@@ -888,6 +888,22 @@ impl Session {
                     lines.join("; ")
                 ))
             }
+            Op::PaletteImport(a) => {
+                let colors = vxr_core::palette::parse(a.text.as_bytes()).map_err(|e| invalid(format!("text: {e}")))?;
+                let n = colors.len();
+                let used: usize = (1..=n).map(|s| self.slot_count(scene, s as u8)).sum();
+                self.open(scene);
+                let changed = scene.put_colors(&colors);
+                let first: Vec<String> =
+                    (1..=n.min(8)).map(|s| format!("slot {s} {}", hex(scene.palette[s]))).collect();
+                Ok(format!(
+                    "imported {n} colour{} into slot{}: {changed} changed colour, and {used} voxels use those slots; now {}{}",
+                    if n == 1 { "" } else { "s" },
+                    if n == 1 { " 1".to_string() } else { format!("s 1 to {n}") },
+                    first.join(", "),
+                    if n > 8 { ", …" } else { "" }
+                ))
+            }
             Op::PaletteSort(a) => {
                 let mut slots: Vec<u8> = if a.slots.is_empty() {
                     (1..=255).collect()
