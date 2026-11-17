@@ -1,13 +1,14 @@
 // Write the preview, scaled to `rect`, into the editor's colour texture before the editor's
 // blit. A compute write into the existing texture avoids a second render pass over the whole
 // target (a load + store of every tile on a tiled GPU). Pixels outside the rounded corners
-// keep the editor image; the UI draws the panel's border on top.
+// keep the editor image; the UI draws the panel's border on top. Below full opacity (the
+// editor's intro) the preview mixes with `under`, a copy of the editor image there.
 
 struct Rect {
     origin: vec2<f32>,
     size: vec2<f32>,
     radius: f32,
-    pad0: f32,
+    opacity: f32,
     pad1: vec2<f32>,
 };
 
@@ -15,6 +16,7 @@ struct Rect {
 @group(0) @binding(1) var samp: sampler;
 @group(0) @binding(2) var dst: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(3) var<uniform> rect: Rect;
+@group(0) @binding(4) var under: texture_2d<f32>;
 
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -26,5 +28,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (length(max(q, vec2<f32>(0.0))) > r) { return; }
     let uv = p / rect.size;
     let c = textureSampleLevel(src, samp, uv, 0.0);
-    textureStore(dst, vec2<u32>(rect.origin) + gid.xy, vec4<f32>(c.rgb, 1.0));
+    var rgb = c.rgb;
+    if (rect.opacity < 1.0) {
+        rgb = mix(textureLoad(under, gid.xy, 0).rgb, rgb, rect.opacity);
+    }
+    textureStore(dst, vec2<u32>(rect.origin) + gid.xy, vec4<f32>(rgb, 1.0));
 }

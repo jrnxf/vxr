@@ -2084,14 +2084,15 @@ impl Hybrid {
         true
     }
 
-    /// How long each panel takes to slide in, and the delay of the panels at the left and
-    /// right edges, then the bottom, after the top bar.
-    const INTRO_SECS: f64 = 0.36;
-    const INTRO_STAGGER: f64 = 0.04;
+    /// How long the intro takes, how far each panel moves in from its nearest screen edge as
+    /// it fades in, and how much farther out the scene starts before it settles in.
+    const INTRO_SECS: f64 = 0.32;
+    const INTRO_NUDGE: f32 = 10.0;
+    const INTRO_ZOOM: f32 = 0.03;
 
     /// Count the editor's frames and start the intro's clock on the second: the first one
     /// can take long (shaders, the scene's upload), and the page shows the boot cube until it
-    /// is drawn. The panels wait off screen until then.
+    /// is drawn. The panels wait, hidden, until then.
     fn intro_tick(ctx: &Context, on: bool) {
         let key = Id::unique("intro");
         let (frames, start) = ctx.data(|d| d.get_temp::<(u32, Option<f64>)>(key)).unwrap_or((0, None));
@@ -2102,34 +2103,48 @@ impl Hybrid {
         let now = ctx.input(|i| i.time);
         let start = start.or((frames >= 1).then_some(now));
         ctx.data_mut(|d| d.insert_temp(key, (frames.saturating_add(1), start)));
-        if start.is_none_or(|t| now - t < Self::INTRO_SECS + 3.0 * Self::INTRO_STAGGER + 0.1) {
+        if start.is_none_or(|t| now - t < Self::INTRO_SECS + 0.1) {
             ctx.request_repaint();
         }
     }
 
-    /// While the intro runs, how far the panel at `rect` is from its place: it slides in from
-    /// its nearest screen edge, the top first, then the sides, then the bottom.
-    fn intro_offset(ctx: &Context, rect: Rect) -> Option<egui::Vec2> {
+    /// While the intro runs, how far along it is (0 to 1, eased); None once it is over.
+    fn intro_progress(ctx: &Context) -> Option<f32> {
         let (_, start) = ctx.data(|d| d.get_temp::<(u32, Option<f64>)>(Id::unique("intro"))).unwrap_or((0, None));
         let elapsed = start.map_or(0.0, |t| ctx.input(|i| i.time) - t);
         // A while past the end, so the last frame puts every panel back in place.
-        if elapsed > Self::INTRO_SECS + 3.0 * Self::INTRO_STAGGER + 0.1 {
+        if elapsed > Self::INTRO_SECS + 0.1 {
             return None;
         }
-        let screen = ctx.content_rect();
-        let gap = 24.0;
-        let edges = [
-            (rect.top() - screen.top(), 0.0, vec2(0.0, screen.top() - rect.bottom() - gap)),
-            (rect.left() - screen.left(), 1.0, vec2(screen.left() - rect.right() - gap, 0.0)),
-            (screen.right() - rect.right(), 1.0, vec2(screen.right() - rect.left() + gap, 0.0)),
-            (screen.bottom() - rect.bottom(), 2.0, vec2(0.0, screen.bottom() - rect.top() + gap)),
-        ];
-        let (_, step, away) = edges.into_iter().min_by(|a, b| a.0.total_cmp(&b.0))?;
-        let t = ((elapsed - step * Self::INTRO_STAGGER) / Self::INTRO_SECS).clamp(0.0, 1.0) as f32;
-        Some(away * (1.0 - egui::emath::easing::cubic_out(t)))
+        Some(egui::emath::easing::cubic_out((elapsed / Self::INTRO_SECS).clamp(0.0, 1.0) as f32))
     }
 
-    /// Slide the layer of `id` (drawn at `rect`) in while the intro runs, after any fit to the
+    /// The panels' opacity: 0 until the intro starts, then fading in with it.
+    pub(crate) fn intro_alpha(ctx: &Context) -> f32 {
+        Self::intro_progress(ctx).unwrap_or(1.0)
+    }
+
+    /// How much farther out than the camera the scene shows: it settles in with the intro.
+    pub(crate) fn intro_zoom(ctx: &Context) -> f32 {
+        1.0 + Self::INTRO_ZOOM * (1.0 - Self::intro_alpha(ctx))
+    }
+
+    /// While the intro runs, how far the panel at `rect` is from its place, toward its
+    /// nearest screen edge.
+    fn intro_offset(ctx: &Context, rect: Rect) -> Option<egui::Vec2> {
+        let t = Self::intro_progress(ctx)?;
+        let screen = ctx.content_rect();
+        let edges = [
+            (rect.top() - screen.top(), vec2(0.0, -1.0)),
+            (rect.left() - screen.left(), vec2(-1.0, 0.0)),
+            (screen.right() - rect.right(), vec2(1.0, 0.0)),
+            (screen.bottom() - rect.bottom(), vec2(0.0, 1.0)),
+        ];
+        let (_, away) = edges.into_iter().min_by(|a, b| a.0.total_cmp(&b.0))?;
+        Some(away * Self::INTRO_NUDGE * (1.0 - t))
+    }
+
+    /// Move the layer of `id` (drawn at `rect`) in while the intro runs, after any fit to the
     /// phone's region (`scaled`).
     pub(crate) fn intro_slide(ctx: &Context, order: Order, id: &str, rect: Rect, scaled: bool) {
         let Some(offset) = Self::intro_offset(ctx, rect) else {
@@ -2179,7 +2194,9 @@ impl Hybrid {
         if order == Order::Middle {
             Self::intro_slide(ctx, order, id, rect, scaled);
         }
+        let alpha = if order == Order::Middle { Self::intro_alpha(ctx) } else { 1.0 };
         Area::new(Id::unique(id)).fade_in(false).order(order).fixed_pos(rect.min).constrain(false).show(ctx, |ui| {
+            ui.multiply_opacity(alpha);
             if scaled {
                 // The screen clips the panel where it would be unscaled, not where it shows.
                 ui.set_clip_rect(rect.expand(64.0));
@@ -5809,7 +5826,8 @@ impl Hybrid {
         }
         let top = if self.touch { TOP } else { screen.bottom() - 12.0 - size.y };
         let corner = Rect::from_min_size(pos2(screen.right() - 12.0 - size.x, top), size);
-        // The render shows outside egui, at render_rect, so the intro moves the rect itself.
+        // The render shows outside egui, at render_rect, so the intro moves the rect itself
+        // (and the editor fades the image in).
         let corner = if full { corner } else { corner.translate(Self::intro_offset(ctx, corner).unwrap_or_default()) };
         // A phone held sideways with the assistant open has no room for it beside the dock.
         if self.phone && !full && corner.intersects(self.dock_area.expand(8.0)) {
@@ -5839,6 +5857,9 @@ impl Hybrid {
         Area::new(Id::unique("render")).fade_in(false).order(Order::Middle).fixed_pos(area.min).constrain(false).show(
             ctx,
             |ui| {
+                if !full {
+                    ui.multiply_opacity(Self::intro_alpha(ctx));
+                }
                 if full {
                     // Only the chips' row keeps the pointer from the view.
                     ui.allocate_rect(row, Sense::hover());
@@ -6336,6 +6357,7 @@ impl Hybrid {
         Area::new(Id::unique("hint")).fade_in(false).order(Order::Middle).fixed_pos(rect.min).constrain(false).show(
             ctx,
             |ui| {
+                ui.multiply_opacity(Self::intro_alpha(ctx));
                 let at = pos2(rect.left() + 14.0, rect.top() + 8.0);
                 let p = ui.painter();
                 p.galley_with_override_text_color(at + vec2(0.0, 1.0), g.clone(), th().text_shadow);

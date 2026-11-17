@@ -3240,7 +3240,11 @@ impl Editor {
             frame: self.ui.frame,
             line: ppp,
         };
-        self.renderer.set_camera(queue, &self.cam, tint);
+        // The scene settles in from a little farther out while the editor's intro runs. Only
+        // the view: the camera, its picks and the render corner keep the real distance.
+        let mut cam = self.cam;
+        cam.distance *= crate::ui::Hybrid::intro_zoom(&self.ctx);
+        self.renderer.set_camera(queue, &cam, tint);
         let mut enc = dev.create_command_encoder(&Default::default());
         // The preview's passes go first so they can be timed on their own (see preview.rs).
         let corner = self.ui.render_rect.filter(|_| self.ui.show_render);
@@ -3279,7 +3283,8 @@ impl Editor {
         if let Some(r) = corner {
             let px = [r.left() * ppp, r.top() * ppp, r.width() * ppp, r.height() * ppp];
             let radius = if full { 0.0 } else { crate::ui::R as f32 * ppp };
-            self.preview.composite_into(dev, queue, &mut enc, &self.renderer.color, px, radius);
+            let opacity = if full { 1.0 } else { crate::ui::Hybrid::intro_alpha(&self.ctx) };
+            self.preview.composite_into(dev, queue, &mut enc, &self.renderer.color, px, radius, opacity);
         }
         self.renderer.blit(&mut enc, view, None);
         let jobs = self.ctx.tessellate(shapes, ppp);

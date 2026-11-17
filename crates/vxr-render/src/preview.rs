@@ -108,7 +108,8 @@ struct RectU {
     origin: [f32; 2],
     size: [f32; 2],
     radius: f32,
-    pad: [f32; 3],
+    opacity: f32,
+    pad: [f32; 2],
 }
 
 /// The voxel box an edit changed (voxel units, max exclusive).
@@ -533,6 +534,14 @@ impl Preview {
                 entry(1, wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering)),
                 entry(2, storage_tex()),
                 entry(3, uniform(false)),
+                entry(
+                    4,
+                    wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                ),
             ],
         });
         let cs_pl = layout("preview composite", &[Some(&cs_layout)]);
@@ -974,7 +983,8 @@ impl Preview {
 
     /// Write the preview into `rect` (x, y, w, h in pixels) of the editor's colour texture
     /// (rgba8unorm, storage binding) with rounded corners of `radius` pixels, before the
-    /// editor's blit draws it to the screen.
+    /// editor's blit draws it to the screen. Below an `opacity` of 1 it shows over the editor
+    /// image there, as the editor's panels fade in.
     #[allow(clippy::too_many_arguments)]
     pub fn composite_into(
         &self,
@@ -984,7 +994,11 @@ impl Preview {
         color: &wgpu::Texture,
         rect: [f32; 4],
         radius: f32,
+        opacity: f32,
     ) {
+        if opacity <= 0.0 {
+            return;
+        }
         let r = rect.map(f32::round);
         let (cw, ch) = (color.width() as f32, color.height() as f32);
         // Clip to the target.
@@ -992,9 +1006,36 @@ impl Preview {
         if r[0] < 0.0 || r[1] < 0.0 || size[0] < 1.0 || size[1] < 1.0 {
             return;
         }
-        let u = RectU { origin: [r[0], r[1]], size: [r[2], r[3]], radius, pad: [0.0; 3] };
+        let opacity = opacity.min(1.0);
+        let u = RectU { origin: [r[0], r[1]], size: [r[2], r[3]], radius, opacity, pad: [0.0; 2] };
         queue.write_buffer(&self.cs_rect, 0, bytemuck::bytes_of(&u));
         let dst = color.create_view(&Default::default());
+        // What the preview covers, to mix with while it fades in. Only for the intro's few
+        // frames, so a new texture each time; at full opacity the shader never reads it.
+        let under = (opacity < 1.0).then(|| {
+            let extent = wgpu::Extent3d { width: size[0] as u32, height: size[1] as u32, depth_or_array_layers: 1 };
+            let t = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("preview under"),
+                size: extent,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: color.format(),
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            enc.copy_texture_to_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: color,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d { x: r[0] as u32, y: r[1] as u32, z: 0 },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                t.as_image_copy(),
+                extent,
+            );
+            t.create_view(&Default::default())
+        });
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("preview composite"),
             layout: &self.cs_layout,
@@ -1003,6 +1044,10 @@ impl Preview {
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&dst) },
                 wgpu::BindGroupEntry { binding: 3, resource: self.cs_rect.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(under.as_ref().unwrap_or(&self.out_view)),
+                },
             ],
         });
         let mut p = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
