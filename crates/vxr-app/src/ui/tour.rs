@@ -454,8 +454,6 @@ fn body_job(text: &str, width: f32) -> LayoutJob {
 /// A ring that pulses around the control a step needs, over everything but dialogs.
 fn draw_ring(ctx: &Context, at: Rect, now: f64) {
     let pulse = (now * 2.4).sin() as f32 * 0.5 + 0.5;
-    // It slides in with the panel it sits on.
-    Hybrid::intro_slide(ctx, Order::Foreground, "tour-ring", at, false);
     let painter = ctx.layer_painter(egui::LayerId::new(Order::Foreground, Id::unique("tour-ring")));
     let r = at.expand(3.0 + 2.0 * pulse);
     painter.rect_stroke(
