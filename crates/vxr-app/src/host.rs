@@ -776,8 +776,7 @@ impl Host {
         };
         surface.configure(&gpu.device, &config);
         gpu.report_problems();
-        let mut editor = Editor::new(gpu, scene, name, format, (config.width, config.height), ppp, fonts)?;
-        editor.ui.intro = true;
+        let editor = Editor::new(gpu, scene, name, format, (config.width, config.height), ppp, fonts)?;
         Ok(Self { editor, surface, config })
     }
 
