@@ -47,6 +47,11 @@ impl Transport for Net {
 fn fetch(request: Request, tx: mpsc::Sender<Piece>, stop: Arc<AtomicBool>, record: Option<PathBuf>) {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .http_status_as_error(false)
+        // A redirect is never followed: it would carry the key (x-api-key, which the HTTP
+        // library does not strip as it does Authorization) to a host the user did not name.
+        // The 3xx comes back as the answer's status.
+        .max_redirects(0)
+        .max_redirects_will_error(false)
         .timeout_connect(Some(Duration::from_secs(30)))
         .timeout_per_read(Some(Duration::from_secs(vxr_ai::net::IDLE_SECS)))
         .build()
@@ -190,6 +195,50 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::Session;
+
+    /// A provider (or whatever answers at the URL) that redirects must not get the request
+    /// sent on to another host: the key header would go with it.
+    #[test]
+    fn a_redirect_is_not_followed_so_the_key_stays_with_the_host_named() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use vxr_ai::net::{Piece, Request, Transport};
+        let elsewhere = TcpListener::bind("127.0.0.1:0").unwrap();
+        elsewhere.set_nonblocking(true).unwrap();
+        let named = TcpListener::bind("127.0.0.1:0").unwrap();
+        let to = format!("http://{}/v1/messages", elsewhere.local_addr().unwrap());
+        let url = format!("http://{}/v1/messages", named.local_addr().unwrap());
+        let served = std::thread::spawn(move || {
+            let (mut c, _) = named.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = c.read(&mut buf);
+            let answer = format!("HTTP/1.1 307 Temporary Redirect\r\nLocation: {to}\r\nContent-Length: 0\r\n\r\n");
+            c.write_all(answer.as_bytes()).unwrap();
+        });
+        let request = Request { url, headers: vec![("x-api-key".into(), "sk-ant-secret".into())], body: "{}".into() };
+        let mut stream = super::Net::new().send(request);
+        let mut status = None;
+        let start = std::time::Instant::now();
+        'wait: while start.elapsed() < std::time::Duration::from_secs(10) {
+            for piece in stream.poll() {
+                match piece {
+                    Piece::Status(s) => status = Some(s),
+                    Piece::End | Piece::Failed(_) | Piece::Blocked(_) => break 'wait,
+                    Piece::Bytes(_) => {}
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        served.join().unwrap();
+        assert_eq!(status, Some(307), "the redirect comes back as the answer");
+        let followed = AtomicBool::new(false);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        if elsewhere.accept().is_ok() {
+            followed.store(true, Ordering::Relaxed);
+        }
+        assert!(!followed.load(Ordering::Relaxed), "the request was sent on to the redirect's host");
+    }
 
     #[test]
     fn session_token_kept_per_server_and_deleted() {

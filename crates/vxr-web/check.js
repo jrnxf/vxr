@@ -1606,6 +1606,8 @@ async () => {
     step('picking the compatible endpoint keeps its settings open', ai().setup && !!at('ai-base') && !!at('ai-key'), JSON.stringify(ai()));
     await paste('ai-base', 'http://192.168.1.20:11434/v1');
     step('a host the browser cannot reach says so under the URL', !!at('ai-base-limit'));
+    await paste('ai-base', 'http://example.com/v1');
+    step('plain http to a host on the internet says the key would go in clear text', !!at('ai-base-clear-text') && !at('ai-base-limit'));
     await paste('ai-base', 'http://localhost:8080/v1');
     step('a local server on any port needs no line', !at('ai-base-limit'));
     await paste('ai-base', `${location.origin}/__fake/v1`);
@@ -1670,7 +1672,7 @@ async () => {
     });
     const plain = stored && new TextDecoder().decode(new Uint8Array(stored.ct)).includes('sk-test');
     const back = await window.vxrKeys.load();
-    step('a remembered key is kept, stored encrypted and reads back', a.hasKey[2] && a.remembered[2] && !!stored && !plain && JSON.stringify(back) === '[["compatible","sk-test-not-a-real-key"]]', JSON.stringify([a.hasKey, a.remembered, !!stored, plain]));
+    step('a remembered key is kept with the origin it was typed for, stored wrapped and reads back', a.hasKey[2] && a.remembered[2] && !!stored && !plain && back.length === 1 && back[0][0] === 'compatible' && back[0][1] === location.origin + '\nsk-test-not-a-real-key', JSON.stringify([a.hasKey, a.remembered, !!stored, plain]));
     if (ai().setup) await clickAt('ai-done');
     step('the panel turns to the conversation', !ai().setup && !!at('ai-draft'), JSON.stringify(ai()));
     // A request: streamed from the stand-in, its box staged under the card, its answer sent back.

@@ -182,7 +182,21 @@ impl Assistant {
     /// Whether a key is kept for `kind` (read once, then cached until it changes).
     pub fn has_key(&mut self, kind: Kind) -> bool {
         let i = kind.index();
-        *self.has[i].get_or_insert_with(|| self.keys.has(kind))
+        if let Some(has) = self.has[i] {
+            return has;
+        }
+        // The compatible endpoint's key counts only for the origin it was typed for.
+        let has = if kind == Kind::Compatible { self.key(kind).is_some() } else { self.keys.has(kind) };
+        self.has[i] = Some(has);
+        has
+    }
+
+    /// The key a request to `kind` goes out with. The compatible endpoint's key is kept with
+    /// the origin it was typed for ([`vxr_ai::net::bind_key`]) and is given only for that
+    /// origin: a changed URL, or the default one after a restart, never gets another host's key.
+    fn key(&mut self, kind: Kind) -> Option<String> {
+        let kept = self.keys.get(kind)?;
+        if kind == Kind::Compatible { vxr_ai::net::key_for(&self.settings.base, &kept) } else { Some(kept) }
     }
 
     pub fn key_place(&self) -> KeyPlace {
@@ -202,7 +216,14 @@ impl Assistant {
         if key.is_empty() {
             return Err("The key is empty".into());
         }
-        self.keys.set(kind, key, remember)?;
+        if kind == Kind::Compatible {
+            if let Some(why) = vxr_ai::net::clear_text_problem(&self.settings.base) {
+                return Err(why);
+            }
+            self.keys.set(kind, &vxr_ai::net::bind_key(&self.settings.base, key), remember)?;
+        } else {
+            self.keys.set(kind, key, remember)?;
+        }
         self.has[kind.index()] = Some(true);
         if self.settings.kind != kind {
             self.settings = Settings { base: self.settings.base.clone(), ..Settings::new(kind, self.settings.browser) };
@@ -236,6 +257,10 @@ impl Assistant {
     /// Use these settings for the next request (the model picker, the endpoint fields).
     pub fn set_settings(&mut self, s: Settings) {
         if s != self.settings {
+            // Another endpoint: whether its key is kept is asked again.
+            if vxr_ai::net::origin(&s.base) != vxr_ai::net::origin(&self.settings.base) {
+                self.has[Kind::Compatible.index()] = None;
+            }
             self.settings = s;
             if self.settings.model.trim().is_empty() {
                 self.settings.model = default_model(self.settings.kind).into();
@@ -259,6 +284,11 @@ impl Assistant {
         }
         if !self.ready() {
             return Err(NO_KEY.into());
+        }
+        if self.settings.kind == Kind::Compatible
+            && let Some(why) = vxr_ai::net::clear_text_problem(&self.settings.base)
+        {
+            return Err(why);
         }
         let text = text.trim();
         let summary = review.session.summary(scene);
@@ -292,7 +322,7 @@ impl Assistant {
     /// Ask for the next answer.
     fn request(&mut self, now: f64) {
         let kind = self.settings.kind;
-        let key = self.keys.get(kind);
+        let key = self.key(kind);
         if kind.needs_key() && key.is_none() {
             self.has[kind.index()] = Some(false);
             return self.finish(Progress::Failed(NO_KEY.into()), now);
@@ -430,7 +460,7 @@ impl Assistant {
     }
 
     fn failed(&mut self, e: String, retry: bool, now: f64) {
-        let key = self.keys.get(self.settings.kind);
+        let key = self.key(self.settings.kind);
         let e = scrub(&e, key.as_deref());
         drop(key);
         let Some(run) = &mut self.run else { return };
@@ -1245,5 +1275,66 @@ mod tests {
         assert!(!b.ready() && b.settings.browser);
         b.set_settings(Settings::new(Kind::Compatible, true));
         assert!(b.ready(), "a compatible endpoint may need no key");
+    }
+
+    fn auth(r: &vxr_ai::Request) -> Option<String> {
+        r.headers.iter().find(|(k, _)| k == "authorization").map(|(_, v)| v.clone())
+    }
+
+    /// The compatible endpoint's key goes only to the origin it was typed for: another URL
+    /// gets no key and the panel asks for one, and the first URL has its key again.
+    #[test]
+    fn a_compatible_key_is_sent_only_to_the_origin_it_was_typed_for() {
+        let fake = Scripted::new(0);
+        let mut a = Assistant::new(Box::new(fake.clone()), Box::new(MemoryKeys::default()), false);
+        let at = |base: &str| Settings { base: base.into(), ..Settings::new(Kind::Compatible, false) };
+        a.set_settings(at("https://openrouter.ai/api/v1"));
+        a.set_key(Kind::Compatible, "sk-or-1", false).unwrap();
+        assert!(a.has_key(Kind::Compatible));
+        let mut s = scene();
+        let mut r = Review::new(&s, "x");
+        let mut ask = |a: &mut Assistant, now: f64| {
+            // What goes out is the point: the answer is a refusal, which ends the run at once.
+            fake.fail(400, r#"{"error":{"message":"no"}}"#);
+            a.send("x", &mut r, &s, now).unwrap();
+            for k in 1..50 {
+                a.tick(Some(&mut r), &mut s, now + k as f64 * 0.1);
+            }
+            fake.requests().last().cloned().unwrap()
+        };
+        let sent = ask(&mut a, 0.0);
+        assert_eq!(auth(&sent).as_deref(), Some("Bearer sk-or-1"));
+        // Another host: the key stays where it is kept, and is not sent.
+        a.set_settings(at("https://example.com/v1"));
+        assert!(!a.has_key(Kind::Compatible), "the panel asks for this host's key");
+        let sent = ask(&mut a, 100.0);
+        assert!(sent.url.starts_with("https://example.com/v1/"), "{}", sent.url);
+        assert_eq!(auth(&sent), None, "another host never gets the key");
+        // Back at the first host, its key is still there.
+        a.set_settings(at("https://openrouter.ai/api/v1"));
+        assert!(a.has_key(Kind::Compatible));
+        assert_eq!(auth(&ask(&mut a, 200.0)).as_deref(), Some("Bearer sk-or-1"));
+    }
+
+    /// Plain http to a host that is not on this computer or network would send the key and
+    /// the scene in clear text: no request goes out, and no key is kept for it.
+    #[test]
+    fn a_clear_text_endpoint_is_refused_before_anything_is_sent() {
+        let fake = Scripted::new(0);
+        let mut a = Assistant::new(Box::new(fake.clone()), Box::new(MemoryKeys::default()), false);
+        a.set_settings(Settings { base: "http://example.com/v1".into(), ..Settings::new(Kind::Compatible, false) });
+        let e = a.set_key(Kind::Compatible, "sk-1", false).unwrap_err();
+        assert!(e.contains("clear text"), "{e}");
+        assert!(!a.has_key(Kind::Compatible));
+        let s = scene();
+        let mut r = Review::new(&s, "x");
+        let e = a.send("x", &mut r, &s, 0.0).unwrap_err();
+        assert!(e.contains("clear text") && e.contains("https://"), "{e}");
+        assert!(fake.requests().is_empty() && a.entries.is_empty(), "nothing was sent or shown as sent");
+        // A local server over http is what Ollama and LM Studio are.
+        a.set_settings(Settings { base: "http://localhost:11434/v1".into(), ..Settings::new(Kind::Compatible, false) });
+        fake.answer(anthropic("ok", &[]));
+        a.send("x", &mut r, &s, 0.0).unwrap();
+        assert_eq!(fake.requests().len(), 1);
     }
 }
