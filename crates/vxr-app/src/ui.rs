@@ -231,6 +231,7 @@ mod icon {
     pub const CLOUD_CHECK: char = '\u{e66e}';
     pub const REFRESH_CW: char = '\u{e145}';
     pub const CIRCLE_HELP: char = '\u{e082}';
+    pub const USER: char = '\u{e19f}';
     pub const KEYBOARD: char = '\u{e284}';
     pub const PLAY: char = '\u{e13c}';
     pub const FOCUS: char = '\u{e29e}';
@@ -2148,6 +2149,46 @@ impl Hybrid {
         // assistant and the command button only: no name, no New and no Embed (both in the
         // command list, which the command button opens).
         let slim = self.narrow;
+        // The right island, laid out from the right edge. Sized first: the left island takes
+        // the room it leaves, and a long scene name is cut to fit, so the two never overlap.
+        let embed_label = ctx.fonts_mut(|f| f.layout_no_wrap("Embed".into(), sans_semibold(13.0), th().on_accent));
+        let ew = if slim { 0.0 } else { 10.0 + 16.0 + 6.0 + embed_label.size().x + 10.0 + 4.0 };
+        // The account control, at the far right after a divider, where there is sign-in.
+        let cw = self.account_chip_width(ctx);
+        let aw = if self.account.is_some() { cw + 14.0 } else { 0.0 };
+        // Held upright with the account control, a phone has no room for the theme button
+        // beside the library and file buttons (300 points across at 390 CSS px): the themes
+        // stay in the command list, and the two islands never overlap.
+        let themes = !(slim && self.account.is_some());
+        let rw = 4.0 + 36.0 + 4.0 + 36.0 + 4.0 + 36.0 + 4.0 + if themes { 36.0 + 4.0 } else { 0.0 } + ew + aw;
+        let room = screen.right() - 12.0 - rw - 8.0 - 12.0;
+        let fixed = 12.0
+            + LOGO_STEP
+            + brand.size().x
+            + 10.0
+            + crumb_w
+            + SLASH_W
+            + (sel_w - name.size().x)
+            + if history { 13.0 + 2.0 * 36.0 } else { 0.0 }
+            + 4.0;
+        let name_room = (room - fixed).max(28.0);
+        let (name, sel_w) = if !slim && name.size().x > name_room {
+            let mut job = LayoutJob::single_section(
+                self.scene_name.clone(),
+                TextFormat { font_id: sans(13.0), color: th().text, ..Default::default() },
+            );
+            job.wrap = egui::text::TextWrapping {
+                max_width: name_room,
+                max_rows: 1,
+                break_anywhere: true,
+                overflow_character: Some('…'),
+            };
+            let cut = ctx.fonts_mut(|f| f.layout_job(job));
+            let w = sel_w - name.size().x + cut.size().x;
+            (cut, w)
+        } else {
+            (name, sel_w)
+        };
         let w = if slim {
             4.0 + 2.0 * 36.0 + 4.0
         } else {
@@ -2272,13 +2313,6 @@ impl Hybrid {
             // Below the button: above it is the window's edge.
             tooltip(ctx, at, label, keys, Some((Rect::from_min_max(pos2(-1e6, -1e6), pos2(1e6, at.top())), true)));
         }
-        // The right island, laid out from the right edge.
-        let embed_label = ctx.fonts_mut(|f| f.layout_no_wrap("Embed".into(), sans_semibold(13.0), th().on_accent));
-        let ew = if slim { 0.0 } else { 10.0 + 16.0 + 6.0 + embed_label.size().x + 10.0 + 4.0 };
-        // The account control, at the far right after a divider, where there is sign-in.
-        let cw = self.account_chip_width(ctx);
-        let aw = if self.account.is_some() { cw + 14.0 } else { 0.0 };
-        let rw = 4.0 + 36.0 + 4.0 + 36.0 + 4.0 + 36.0 + 4.0 + 36.0 + 4.0 + ew + aw;
         let right = Rect::from_min_size(pos2(screen.right() - 12.0 - rw, 12.0), vec2(rw, 40.0));
         let mut theme_tip = None;
         let mut help_tip = None;
@@ -2328,13 +2362,18 @@ impl Hybrid {
             }
             // The Theme menu.
             let mut tx = ax - 36.0 - 4.0 - 36.0;
-            let r = tbtn_on(ui, &mut tx, cy, Some(icon::PALETTE), "", "theme", true, self.theme_menu);
-            self.hits.insert("theme".into(), r.rect);
-            if r.hovered() && !self.theme_menu {
-                theme_tip = Some(r.rect);
-            }
-            if r.clicked() {
-                self.theme_menu = !self.theme_menu;
+            if themes {
+                let r = tbtn_on(ui, &mut tx, cy, Some(icon::PALETTE), "", "theme", true, self.theme_menu);
+                self.hits.insert("theme".into(), r.rect);
+                if r.hovered() && !self.theme_menu {
+                    theme_tip = Some(r.rect);
+                }
+                if r.clicked() {
+                    self.theme_menu = !self.theme_menu;
+                }
+            } else {
+                self.theme_menu = false;
+                tx = ax;
             }
             // Help (F1), left of the theme.
             let mut hx = tx - 36.0 - 4.0 - 36.0;
@@ -7229,6 +7268,51 @@ mod tests {
 
     /// Draw the touch layout on a screen of `points` with `open` applied, and list what is
     /// wrong: a hit or a panel off the screen, and a dock or top bar button under another panel.
+    /// A scene name of any length leaves the top bar's two islands apart: the name is cut
+    /// with an ellipsis to the room the right island leaves, in a window and on a tablet.
+    #[test]
+    fn a_long_scene_name_never_runs_under_the_right_of_the_top_bar() {
+        for (w, touch) in [(1000.0, false), (760.0, false), (1280.0, false), (820.0, true)] {
+            let ctx = egui::Context::default();
+            super::install(&ctx, None);
+            let name = "a very long scene name that goes on and on and on and on and on and on and on.vox";
+            let mut h = super::Hybrid::new([[0; 4]; 256], [false; 256], name);
+            h.touch = touch;
+            h.account = Some(account_row(false));
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, 700.0));
+            for _ in 0..3 {
+                let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+                let mut out = ctx.run_ui(input, |u| {
+                    h.ui(u.ctx(), &super::Stats::default());
+                });
+                out.textures_delta.clear();
+            }
+            let left = ["library", "scene-select", "undo", "redo"]
+                .iter()
+                .filter_map(|n| h.hits.get(*n))
+                .filter(|r| r.top() < 60.0)
+                .fold(f32::MIN, |m, r| m.max(r.right()));
+            let right = h.hits["help"].left();
+            assert!(left + 8.0 <= right, "{w} wide: the left island ends at {left}, the right starts at {right}");
+            assert!(h.hits["scene-select"].width() >= 60.0, "{w} wide: the name button keeps a few letters");
+        }
+    }
+
+    fn account_row(signed_in: bool) -> super::AccountRow {
+        super::AccountRow {
+            signed_in,
+            email: signed_in.then(|| "user@example.com".into()),
+            sync: super::Sync::Synced,
+            scenes: 3,
+            busy: false,
+            used: 0,
+            cap: 100 << 20,
+            can_add: false,
+            exporting: false,
+            deleting: false,
+        }
+    }
+
     fn phone_problems(points: (f32, f32), open: impl Fn(&mut super::Hybrid)) -> Vec<String> {
         let ctx = egui::Context::default();
         super::install(&ctx, None);
@@ -7266,6 +7350,26 @@ mod tests {
                 bad.push(format!("panel {:?} {r:?} leaves the screen", id.id));
             }
         }
+        // The top bar's two islands never overlap: no button of one sits on a button of the other.
+        let top = |names: &[&str]| -> Vec<(String, egui::Rect)> {
+            names.iter().filter_map(|n| h.hits.get(*n).map(|r| (n.to_string(), *r))).collect()
+        };
+        for (a, ra) in top(&["library", "scene-select", "undo", "redo"]) {
+            // Undo and redo are on the dock in the touch layout, not in the bar.
+            if ra.top() > 60.0 {
+                continue;
+            }
+            for (b, rb) in top(&["help", "theme", "ai-toggle", "keys", "account"]) {
+                if ra.expand(2.0).intersects(rb) {
+                    bad.push(format!("top bar: {a} {ra:?} and {b} {rb:?} overlap"));
+                }
+            }
+        }
+        if h.account.is_some() && !h.hits.contains_key("account") {
+            bad.push("no account button".into());
+        }
+        // Held upright with the account control, the themes are in the command list only.
+        let no_theme = h.narrow && h.account.is_some();
         for n in [
             "tool-add",
             "tool-erase",
@@ -7289,6 +7393,9 @@ mod tests {
             "ai-toggle",
             "keys",
         ] {
+            if n == "theme" && no_theme {
+                continue;
+            }
             let Some(r) = h.hits.get(n) else {
                 bad.push(format!("no {n} button"));
                 continue;
@@ -7316,7 +7423,7 @@ mod tests {
     #[test]
     fn the_touch_layout_fits_phones() {
         type Open = fn(&mut super::Hybrid);
-        let scenarios: [(&str, Open); 18] = [
+        let scenarios: [(&str, Open); 21] = [
             ("plain", |_| {}),
             ("assistant", |h| h.ai_open = true),
             ("assistant+palette", |h| (h.ai_open, h.palette_open) = (true, true)),
@@ -7353,6 +7460,13 @@ mod tests {
                 })
             }),
             ("close", |h| h.confirm_close = true),
+            // The site has sign-in: the account control is in the bar, signed out and signed in.
+            ("signed out", |h| h.account = Some(account_row(false))),
+            ("signed in", |h| h.account = Some(account_row(true))),
+            ("signed out, assistant", |h| {
+                h.account = Some(account_row(false));
+                h.ai_open = true;
+            }),
         ];
         // 360, 390 and 430 CSS px wide upright, then 844 and 932 wide sideways, at 1.3 points.
         for pts in [(277.0, 649.0), (300.0, 649.0), (331.0, 685.0), (649.0, 300.0), (717.0, 331.0)] {

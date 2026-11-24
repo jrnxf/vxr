@@ -21,14 +21,26 @@ async (stage, view) => {
   const W = innerWidth, H = innerHeight;
   const rect = (n) => window.vxr.hit_rect(n);
   const on = (r) => r.length === 4 && r[0] >= -0.5 && r[1] >= -0.5 && r[2] <= W + 0.5 && r[3] <= H + 0.5;
-  const targets = ['tool-add', 'tool-erase', 'tool-paint', 'tool-pick', 'select', 'dock-color', 'undo', 'redo', 'voxel',
+  // Held upright with the account control in the bar, the theme button gives up its place
+  // (the themes are in the command list), so the two halves of the top bar never overlap.
+  const noTheme = W < 400 && rect('account').length === 4;
+  const apart = (what) => {
+    const left = ['library', 'scene-select'].map(rect).filter((r) => r.length === 4);
+    const right = ['help', 'theme', 'ai-toggle', 'keys', 'account'].map(rect).filter((r) => r.length === 4);
+    const hit = left.some((a) => right.some((b) => a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3]));
+    const gap = Math.min(...right.map((r) => r[0])) - Math.max(...left.map((r) => r[2]));
+    step(`${what}: the two halves of the top bar do not overlap`, left.length === 2 && right.length >= 3 && !hit && gap >= 4, `gap ${gap}`);
+  };
+  const allTargets = ['tool-add', 'tool-erase', 'tool-paint', 'tool-pick', 'select', 'dock-color', 'undo', 'redo', 'voxel',
     'brush-box', 'brush-face', 'brush-line', 'center', 'pattern', 'mirror', 'lock', 'library', 'scene-select', 'theme', 'ai-toggle', 'keys'];
+  const targets = allTargets.filter((n) => !(n === 'theme' && noTheme));
   // Every dock and top bar target is on screen, and the dock's are at least 44 CSS px.
   const reachable = (what) => {
     const lost = targets.filter((n) => !on(rect(n)));
     const small = targets.slice(0, 15).filter((n) => { const r = rect(n); return r.length === 4 && Math.min(r[2] - r[0], r[3] - r[1]) < 43.5; });
     step(`${what}: every dock and top bar target is on screen`, lost.length === 0, JSON.stringify(lost));
     step(`${what}: every dock target is 44 CSS px or more`, small.length === 0, JSON.stringify(small));
+    apart(what);
   };
   const shown = (name, what) => step(`${what} is on screen`, on(rect(name)), JSON.stringify(rect(name)));
   const state = () => JSON.parse(window.vxr.state());
