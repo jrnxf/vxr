@@ -119,9 +119,10 @@ pub fn sprite_png(scene: &Scene, only: Only) -> Result<(Vec<u8>, [u32; 2]), Stri
 }
 
 /// The embed viewer's files, which a page with a `<voxel-scene>` tag loads from one folder:
-/// the loader the page includes, then the glue and the wasm it fetches
-/// (`crates/vxr-embed/build` makes them).
-pub const EMBED_VIEWER: [&str; 3] = ["voxel-scene.js", "vxr_embed.js", "vxr_embed_bg.wasm"];
+/// the loader the page includes, then the glue and the wasm it fetches, and the notices of
+/// the open source work compiled into them, which go wherever the viewer is copied
+/// (`crates/vxr-embed/build` makes all four).
+pub const EMBED_VIEWER: [&str; 4] = ["voxel-scene.js", "vxr_embed.js", "vxr_embed_bg.wasm", "licenses.txt"];
 
 /// The poster's size in pixels: the tag's 16:10 shape, sharp at 640 CSS pixels wide on a
 /// screen with two pixels per point.

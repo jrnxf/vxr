@@ -24,7 +24,8 @@
           };
           nightly = pkgs.rust-bin.selectLatestNightlyWith (t: t.minimal);
           # wasm-bindgen-cli must match the wasm-bindgen crate version exactly (pinned in Cargo.toml).
-          web = with pkgs; [ wasm-bindgen-cli_0_2_129 binaryen twiggy brotli nodejs wrangler ];
+          # cargo-about writes the notices in the web and embed builds (crates/vxr-web/notices).
+          web = with pkgs; [ wasm-bindgen-cli_0_2_129 binaryen twiggy brotli nodejs wrangler cargo-about ];
         in
         {
           default = pkgs.mkShell { packages = [ stable ] ++ web; };

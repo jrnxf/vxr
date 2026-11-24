@@ -6,7 +6,7 @@ fast voxel scenes: an open-source voxel scene editor (Rust, wgpu) with a one-tag
 
 - Rust core on wgpu (Metal, Vulkan, DX12, WebGPU in the browser). Desktop first; the browser build and the embed come from the same code. No server for the editor: the only server code is the optional account and cloud library, a Cloudflare Worker in TypeScript (`crates/vxr-web/worker/`) behind `/api/*` and `/account`, with D1 and R2.
 - UI drawn in Rust with egui (picked by test 3, see `docs/decisions.md`) so the Hybrid UI runs native and in the browser.
-- The real build is the Cargo workspace at the root (Phase 3, in progress). Run everything through `./dev <command>`, a Nix dev shell (`nix/flake.nix`: Rust with the wasm32 target, wasm-bindgen, wasm-opt, twiggy, brotli). `./dev --fuzz <command>` adds nightly and cargo-fuzz for the fuzz targets in `crates/vxr-core/fuzz` (the `.vox` open path, the brick scene file and the embed's open path) (its README has the commands).
+- The real build is the Cargo workspace at the root (Phase 3, in progress). Run everything through `./dev <command>`, a Nix dev shell (`nix/flake.nix`: Rust with the wasm32 target, wasm-bindgen, wasm-opt, twiggy, brotli, cargo-about). `./dev --fuzz <command>` adds nightly and cargo-fuzz for the fuzz targets in `crates/vxr-core/fuzz` (the `.vox` open path, the brick scene file and the embed's open path) (its README has the commands).
 - The Phase 2 spikes in `spikes/` build separately through `spikes/dev <command>`. Wrap timed GPU runs in `spikes/gpu-lock` so benchmarks never share the GPU.
 
 ## Build and test

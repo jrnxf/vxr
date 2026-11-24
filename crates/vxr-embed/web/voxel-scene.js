@@ -12,6 +12,8 @@
 //
 // Events, each with `detail` holding times in ms and, on failure, `error`:
 // `vxr-frame` (the first frame is on screen), `vxr-nowebgpu`, `vxr-error`.
+//
+// Third-party notices: licenses.txt, beside this file. Keep it with the viewer's files.
 (() => {
   const BASE = new URL('.', document.currentScript ? document.currentScript.src : location.href);
   const now = () => performance.now();

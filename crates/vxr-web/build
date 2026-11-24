@@ -35,7 +35,17 @@ cp "$fonts"/*.ttf "$fonts"/*.txt "$dist/fonts/"
 # The embed viewer, which Embed fetches and packs into its zip.
 "$root/crates/vxr-embed/build"
 mkdir -p "$dist/embed"
-cp "$root/crates/vxr-embed/dist"/voxel-scene.js "$root/crates/vxr-embed/dist"/vxr_embed.js "$root/crates/vxr-embed/dist"/vxr_embed_bg.wasm "$dist/embed/"
+cp "$root/crates/vxr-embed/dist"/voxel-scene.js "$root/crates/vxr-embed/dist"/vxr_embed.js "$root/crates/vxr-embed/dist"/vxr_embed_bg.wasm \
+  "$root/crates/vxr-embed/dist"/licenses.txt "$dist/embed/"
+# The site's own notices, at /licenses.txt: the crates in the editor's wasm, then Preact, which
+# the landing and account pages are built with. The fonts' licences are in fonts/.
+"$here/notices" vxr-web "$dist/licenses.txt"
+{
+  printf '\n================================================================================\n'
+  printf 'MIT License\n\nUsed by:\n- preact %s (https://github.com/preactjs/preact)\n\n' \
+    "$(node -p "require('$here/node_modules/preact/package.json').version")"
+  cat "$here/node_modules/preact/LICENSE"
+} >> "$dist/licenses.txt"
 site_key="${TURNSTILE_SITE_KEY:-1x00000000000000000000AA}"
 [[ "$site_key" =~ ^[0-9A-Za-z_-]+$ ]] || { echo "build: TURNSTILE_SITE_KEY has unexpected characters" >&2; exit 1; }
 node -e "

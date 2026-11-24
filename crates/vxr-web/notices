@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Write the notices of every Rust crate compiled into one of the wasm builds as plain text:
+#   notices <crate> <out-file>            for example: notices vxr-embed dist/licenses.txt
+# MIT and Apache-2.0 ask for their notice with every copy, and the site and each exported embed
+# folder are copies. cargo-about reads the licences (about.toml lists the accepted ones: a
+# crate under any other fails here, as it does in the release) and about-web.hbs lays them out.
+# The tool comes from the nix dev shell (../../dev); with VXR_TOOLS=path it comes from the PATH,
+# as ./cloudflare-build sets up where there is no nix.
+set -euo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
+root="$(cd "$here/../.." && pwd)"
+crate="$1"
+out="$2"
+run() { if [ "${VXR_TOOLS:-}" = path ]; then "$@"; else "$root/dev" "$@"; fi; }
+cd "$root"
+run cargo-about generate --locked --fail -c about.toml -m "crates/$crate/Cargo.toml" \
+  --target wasm32-unknown-unknown about-web.hbs -o "$out"
+# A file with no crate in it means the tool found nothing, not that there is nothing to say.
+grep -q '^- wgpu ' "$out" || { echo "notices: $out lists no wgpu: the notices are not whole" >&2; exit 1; }

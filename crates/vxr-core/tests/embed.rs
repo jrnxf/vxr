@@ -50,7 +50,8 @@ fn the_folder_holds_what_the_view_shows_and_its_page_names_only_its_files() {
                 "my-pre-script-alert-1-script-island-co.png",
                 "voxel-scene.js",
                 "vxr_embed.js",
-                "vxr_embed_bg.wasm"
+                "vxr_embed_bg.wasm",
+                "licenses.txt"
             ],
             "{}",
             f.name
