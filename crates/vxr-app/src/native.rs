@@ -218,7 +218,7 @@ impl Platform for Desktop {
         let Some(path) = rfd::FileDialog::new().add_filter("PNG", &["png"]).set_file_name(name).save_file() else {
             return Ok(None);
         };
-        std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+        save_atomic(&path, bytes)?;
         Ok(Some(file_name(&path)))
     }
 
@@ -227,7 +227,7 @@ impl Platform for Desktop {
         let Some(path) = rfd::FileDialog::new().add_filter("Text", &[ext]).set_file_name(name).save_file() else {
             return Ok(None);
         };
-        std::fs::write(&path, text).map_err(|e| e.to_string())?;
+        save_atomic(&path, text.as_bytes())?;
         Ok(Some(file_name(&path)))
     }
 
@@ -235,7 +235,7 @@ impl Platform for Desktop {
         let Some(path) = rfd::FileDialog::new().add_filter("Zip", &["zip"]).set_file_name(name).save_file() else {
             return Ok(None);
         };
-        std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+        save_atomic(&path, bytes)?;
         Ok(Some(file_name(&path)))
     }
 
@@ -252,8 +252,23 @@ impl Platform for Desktop {
         let stem = path.file_stem().map_or("vxr".into(), |s| s.to_string_lossy().into_owned());
         let dir = path.parent().map(|d| d.to_path_buf()).unwrap_or_default();
         let files = make(&stem)?;
+        // The dialog asked about the .obj only. Its .mtl and texture go beside it under the
+        // same name, so ask before they replace files that are already there.
+        let chosen = file_name(&path);
+        let taken = vxr_app::files::in_the_way(&dir, files.iter().map(|f| f.0.as_str()).filter(|n| *n != chosen));
+        if !taken.is_empty() {
+            let answer = rfd::MessageDialog::new()
+                .set_level(rfd::MessageLevel::Warning)
+                .set_title("Replace these files?")
+                .set_description(replace_question(&taken, &dir))
+                .set_buttons(rfd::MessageButtons::OkCancelCustom("Replace".into(), "Cancel".into()))
+                .show();
+            if !matches!(&answer, rfd::MessageDialogResult::Custom(b) if b == "Replace") {
+                return Ok(None);
+            }
+        }
         for (name, bytes) in &files {
-            std::fs::write(dir.join(name), bytes).map_err(|e| e.to_string())?;
+            save_atomic(&dir.join(name), bytes).map_err(|e| format!("{name}: {e}"))?;
         }
         Ok(files.first().map(|f| f.0.clone()))
     }
@@ -289,6 +304,19 @@ impl Platform for Desktop {
     fn intercept(&mut self, action: &vxr_app::ui::Action, editor: &mut vxr_app::Editor) -> bool {
         self.live.act(action, editor)
     }
+}
+
+/// What the export asks before it replaces the files `taken` in `dir`.
+fn replace_question(taken: &[String], dir: &Path) -> String {
+    let folder = dir.file_name().map_or_else(|| dir.display().to_string(), |n| n.to_string_lossy().into_owned());
+    let (names, they) = match taken {
+        [one] => (one.clone(), "it"),
+        [most @ .., last] => (format!("{} and {last}", most.join(", ")), "them"),
+        [] => (String::new(), "them"),
+    };
+    format!(
+        "\u{201c}{folder}\u{201d} already has {names}. The export writes these beside the .obj and replaces {they}."
+    )
 }
 
 /// The file at `path` to open, with when it last changed.
@@ -572,5 +600,33 @@ impl ApplicationHandler<Wake> for App {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The OBJ dialog confirms the .obj alone: the files written beside it are found and
+    /// named before they replace anything.
+    #[test]
+    fn an_export_names_the_sibling_files_it_would_replace() {
+        let dir = std::env::temp_dir().join(format!("vxr-export-ask-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let set = ["castle.obj", "castle.mtl", "castle.png"];
+        let siblings = |dir: &Path| vxr_app::files::in_the_way(dir, set.into_iter().filter(|n| *n != "castle.obj"));
+        std::fs::write(dir.join("castle.obj"), b"old").unwrap();
+        assert!(siblings(&dir).is_empty(), "the .obj the dialog asked about is not asked about twice");
+        std::fs::write(dir.join("castle.png"), b"a reference image").unwrap();
+        assert_eq!(siblings(&dir), ["castle.png"]);
+        std::fs::write(dir.join("castle.mtl"), b"mine").unwrap();
+        let taken = siblings(&dir);
+        assert_eq!(taken, ["castle.mtl", "castle.png"]);
+        let q = replace_question(&taken, &dir);
+        assert!(q.contains("already has castle.mtl and castle.png") && q.ends_with("replaces them."), "{q}");
+        let q = replace_question(&taken[1..], &dir);
+        assert!(q.contains("already has castle.png.") && q.ends_with("replaces it."), "{q}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
