@@ -24,7 +24,8 @@ async (stage, arg) => {
     const lines = [];
     const note = (what, ok, extra = '') => lines.push(`${ok ? 'ok' : 'FAIL'} ${what}${ok ? '' : ': ' + extra}`);
     await waitFor(() => shownId() && shownId() !== 'loading');
-    const calls = +(await (await fetch('/__me-calls')).text());
+    // The calls this page made, not the server's count: in the whole check other pages ask too.
+    const calls = performance.getEntriesByType('resource').filter((e) => new URL(e.name).pathname === '/api/me').length;
     const heading = document.querySelector('#error h1').textContent;
     note('a server that fails shows "could not reach the server" with Try again, not "Accounts are off", after a second try',
       shownId() === 'error' && /could not reach the server/.test(heading) && !!document.getElementById('retry') && calls === 2, JSON.stringify([shownId(), heading, calls]));
