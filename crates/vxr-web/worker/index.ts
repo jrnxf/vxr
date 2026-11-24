@@ -7,8 +7,8 @@
 //   /api/account     deleting the account and everything it keeps (worker/account.ts)
 //   /account         the sign-in page (site/src/account/, built into dist/account.html)
 import { deleteAccount } from './account';
-import { HSTS } from './headers';
 import { type Auth, fromApp, makeAuth } from './auth';
+import { HSTS } from './headers';
 import { type Mailer, mailerFor } from './mail';
 import { LIMITS, type Limits, json, problem, projects, usage } from './projects';
 import { turnstile, type Verify } from './turnstile';
@@ -206,7 +206,6 @@ async function route(req: Request, env: Env, deps: Deps): Promise<Response> {
   }
   return problem(404, 'not_found');
 }
-
 
 /**
  * Answers one request. Anything thrown on the way is logged (Workers Logs keep it) and answered as
