@@ -43,7 +43,7 @@ for _ in $(seq 50); do curl -sf "$url" >/dev/null && break; sleep 0.1; done
 # still run and every result is printed.
 unwrap() { node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const m=s.match(/^result: (.*)$/m);if(!m){console.log('FAIL a stage threw: '+s.replace(/\s+/g,' ').slice(0,600));return}let v=JSON.parse(m[1]);while(typeof v==='string'&&v.startsWith('\"'))v=JSON.parse(v);console.log(v)})"; }
 axi() { chrome-devtools-axi "$@"; }
-stage() { axi eval --full "async () => ($(cat "$here/check.js"))('$1')" | unwrap; }
+stage() { { axi eval --full "async () => ($(cat "$here/check.js"))('$1')" 2>&1 || true; } | unwrap; }
 shot() { axi screenshot "$shots/embed-$1.png" >/dev/null; echo "wrote $shots/embed-$1.png"; }
 
 # A browser that does not start says why, in place of a silent exit.
