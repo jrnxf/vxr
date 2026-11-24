@@ -54,7 +54,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
     }
     let agent = agent.ok_or(USAGE)?;
     let root = setup::files_root(root)?;
-    std::fs::create_dir_all(&root).map_err(|e| format!("could not make {}: {e}", root.display()))?;
+    if let Some(line) = setup::make_root(&root)? {
+        println!("{line}");
+    }
     let exe = std::env::current_exe().map_err(|e| format!("could not find the vxr binary: {e}"))?;
     for line in pair(agent, Path::new(agent.name), &setup::servers(&setup::stable_exe(&exe), &root))? {
         println!("{line}");
@@ -82,12 +84,22 @@ pub fn run(args: &[String]) -> Result<(), String> {
     println!("Once the page is paired: {how}");
     println!();
     // A bridge from an earlier pair, in another terminal, already serves the page: say so
-    // rather than fail on its port.
-    if std::net::TcpStream::connect(("127.0.0.1", vxr_mcp::bridge::PORT)).is_ok() {
-        println!(
-            "vxr bridge is already running in another terminal: type the pairing code it printed there into the page."
-        );
-        return Ok(());
+    // rather than fail on its port. Only a bridge counts: another program on the port is named.
+    let port = vxr_mcp::bridge::PORT;
+    match vxr_mcp::bridge::probe(std::net::SocketAddr::from(([127, 0, 0, 1], port))) {
+        vxr_mcp::bridge::Listening::Nothing => {}
+        vxr_mcp::bridge::Listening::Bridge => {
+            println!(
+                "vxr bridge is already running in another terminal: type the pairing code it printed there into the page."
+            );
+            return Ok(());
+        }
+        vxr_mcp::bridge::Listening::Other => {
+            return Err(format!(
+                "another program is using port {port}, which vxr bridge needs for the browser editor. \
+                 Stop it (lsof -i tcp:{port} shows it) and run vxr pair again. The desktop app needs no bridge."
+            ));
+        }
     }
     vxr_mcp::bridge::run(&[])
 }

@@ -122,6 +122,52 @@ pub fn host_ok(host: &str, port: u16) -> bool {
     ["127.0.0.1", "localhost", "[::1]"].iter().any(|n| h == format!("{n}:{port}"))
 }
 
+/// The header [`probe`] sends, and the bridge's answer to it (a 403 with this text). A page
+/// cannot use it to learn anything: the answer carries no code and no state.
+pub const PROBE_HEADER: &str = "x-vxr-probe";
+pub const PROBE_ANSWER: &str = "vxr bridge is running";
+
+/// What listens on a loopback port: see [`probe`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Listening {
+    Nothing,
+    /// A vxr bridge answered.
+    Bridge,
+    /// Another program holds the port.
+    Other,
+}
+
+/// Ask what listens on `addr` with a handshake only a vxr bridge answers, so `vxr pair` never
+/// takes another program on the port for a bridge. A bridge answers 403 with a line that
+/// starts "vxr bridge" (an older one says who it answers; this one says [`PROBE_ANSWER`]).
+pub fn probe(addr: std::net::SocketAddr) -> Listening {
+    use std::io::{Read, Write};
+    let wait = std::time::Duration::from_secs(2);
+    let Ok(mut stream) = std::net::TcpStream::connect_timeout(&addr, wait) else { return Listening::Nothing };
+    let _ = stream.set_read_timeout(Some(wait));
+    let _ = stream.set_write_timeout(Some(wait));
+    let request = format!(
+        "GET / HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\
+         Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dnhyIGJyaWRnZSBwcm9iZQ==\r\n{PROBE_HEADER}: 1\r\n\r\n",
+        addr.port()
+    );
+    if stream.write_all(request.as_bytes()).is_err() {
+        return Listening::Other;
+    }
+    let mut answer = Vec::new();
+    let mut buf = [0u8; 512];
+    while answer.len() < 4096 {
+        match stream.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => answer.extend_from_slice(&buf[..n]),
+        }
+        if String::from_utf8_lossy(&answer).contains("vxr bridge") {
+            return Listening::Bridge;
+        }
+    }
+    Listening::Other
+}
+
 #[cfg(unix)]
 pub use server::{Bridge, Config, Running};
 
@@ -427,6 +473,10 @@ mod server {
         let check = |req: &Handshake, resp: Response| {
             let header = |k: &str| req.headers().get(k).and_then(|v| v.to_str().ok()).unwrap_or("");
             let (host, origin) = (header("host"), header("origin"));
+            // `vxr pair` asking whether a bridge holds the port: answered, and not logged.
+            if !header(PROBE_HEADER).is_empty() {
+                return Err(forbidden(PROBE_ANSWER));
+            }
             if !host_ok(host, shared.port) {
                 refused = Some(format!("Refused a connection for another host ({})", shown(host)));
                 return Err(forbidden("vxr bridge only answers 127.0.0.1"));

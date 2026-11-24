@@ -48,6 +48,36 @@ fn bridge(dir: &Dir, dev: bool) -> (Running, Arc<Mutex<Vec<String>>>) {
 
 type Ws = WebSocket<TcpStream>;
 
+/// `vxr pair` asks what holds the port before it says a bridge is running: only a bridge
+/// answers the probe, and the bridge prints nothing about it.
+#[test]
+fn a_probe_tells_a_bridge_from_another_program_on_the_port() {
+    use crate::bridge::{Listening, probe};
+    let dir = Dir::new("probe");
+    let (running, log) = bridge(&dir, false);
+    let before = log.lock().unwrap().len();
+    assert_eq!(probe(running.addr()), Listening::Bridge);
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(log.lock().unwrap().len(), before, "a probe is not logged: {:?}", log.lock().unwrap());
+    // Another program: one that says something else, and one that says nothing.
+    let other = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = other.local_addr().unwrap();
+    let t = std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        let (mut a, _) = other.accept().unwrap();
+        let _ = a.read(&mut [0u8; 512]);
+        a.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello").unwrap();
+        drop(a);
+        let (b, _) = other.accept().unwrap();
+        drop(b);
+    });
+    assert_eq!(probe(addr), Listening::Other);
+    assert_eq!(probe(addr), Listening::Other);
+    t.join().unwrap();
+    // The listener is gone, so nothing holds the port.
+    assert_eq!(probe(addr), Listening::Nothing);
+}
+
 /// A WebSocket handshake as a browser makes it, with `origin` (None sends none) and `host`
 /// (None for the address connected to).
 fn handshake(addr: SocketAddr, origin: Option<&str>, host: Option<&str>) -> Result<Ws, String> {
