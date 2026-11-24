@@ -5,7 +5,8 @@
 # below it start only when scrolled to, one wasm serves them all, a scene draws only while on
 # screen, the page keeps its scroll, a drag and the arrow keys turn the scene, the `.vox`
 # fallback draws the same picture as its brick scene file, and a damaged or missing file or a
-# browser without WebGPU keeps the poster with a note. Screenshots go into the git-ignored
+# browser without WebGPU keeps the poster with a note, and an element wider than a GPU texture
+# draws in fewer pixels and leaves the other scenes on the page live. Screenshots go into the git-ignored
 # crates/vxr-embed/shots/. Prints ok or FAIL per step and exits 1 on any failure. Run
 # crates/vxr-embed/build first.
 set -euo pipefail
@@ -48,6 +49,7 @@ shot live
 results+=$'\n'"$(stage vox)"
 results+=$'\n'"$(stage fail)"
 shot poster
+results+=$'\n'"$(stage wide)"
 
 echo "$results"
-[ -n "$results" ] && ! grep -q '^FAIL' <<<"$results" && [ "$(grep -c '^ok' <<<"$results")" -eq 19 ]
+[ -n "$results" ] && ! grep -q '^FAIL' <<<"$results" && [ "$(grep -c '^ok' <<<"$results")" -eq 23 ]

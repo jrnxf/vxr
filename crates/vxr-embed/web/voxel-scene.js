@@ -113,6 +113,8 @@
         });
         const glue = await loadEngine();
         t.engine = now();
+        // What this device can draw: the longest side and the most pixels of a picture.
+        this.max = [glue.gpu_max_side(), glue.gpu_max_pixels()];
         const viewer = new glue.Viewer(this.canvas);
         const err = viewer.load(new Uint8Array(await file));
         if (err) throw new Error(err);
@@ -138,8 +140,16 @@
     draw() {
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
       const r = this.getBoundingClientRect();
-      const w = Math.max(1, Math.round(r.width * dpr));
-      const h = Math.max(1, Math.round(r.height * dpr));
+      let w = Math.max(1, Math.round(r.width * dpr));
+      let h = Math.max(1, Math.round(r.height * dpr));
+      // A very large element draws in fewer pixels, stretched by CSS, never in more than the
+      // device can hold: a refused picture would end this scene.
+      const [side, pixels] = this.max;
+      const k = Math.min(1, side / w, side / h, Math.sqrt(pixels / (w * h)));
+      if (k < 1) {
+        w = Math.max(1, Math.floor(w * k));
+        h = Math.max(1, Math.floor(h * k));
+      }
       if (this.canvas.width !== w || this.canvas.height !== h) {
         this.canvas.width = w;
         this.canvas.height = h;

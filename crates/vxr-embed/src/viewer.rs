@@ -1,7 +1,8 @@
 //! The viewer the loader drives: one shared device for every `<voxel-scene>` on the page,
 //! and one [`Viewer`] per element (its canvas, its scene on the GPU and its picture).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use vxr_render::{GpuMap, brickmap_layout};
@@ -32,8 +33,35 @@ thread_local! {
 }
 
 /// The device reported an error nothing handled (out of memory, a lost device): every
-/// viewer stops drawing and its element goes back to the poster.
+/// viewer stops drawing and its element goes back to the poster. An error that is one
+/// viewer's own (its picture's size) is caught in that viewer's error scope instead and
+/// stops that viewer alone ([`Viewer::render`]).
 static BROKEN: AtomicBool = AtomicBool::new(false);
+
+/// The longest side of a picture, and the most pixels, the page's device can draw: its
+/// largest texture, and the largest storage buffer at 4 bytes a pixel. The element keeps its
+/// canvas within both ([`gpu_max_side`], [`gpu_max_pixels`]). (0, 0) before [`gpu_init`].
+fn picture_limits() -> (u32, u32) {
+    GPU.with(|g| {
+        g.borrow().as_ref().map_or((0, 0), |g| {
+            let l = g.device.limits();
+            let bytes = l.max_buffer_size.min(l.max_storage_buffer_binding_size);
+            (l.max_texture_dimension_2d, (bytes / 4).min(u32::MAX as u64) as u32)
+        })
+    })
+}
+
+/// The longest side, in pixels, a viewer's picture may have on this device.
+#[wasm_bindgen]
+pub fn gpu_max_side() -> u32 {
+    picture_limits().0
+}
+
+/// The most pixels a viewer's picture may have on this device.
+#[wasm_bindgen]
+pub fn gpu_max_pixels() -> u32 {
+    picture_limits().1
+}
 
 fn buffer_entry(binding: u32, ty: wgpu::BufferBindingType) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
@@ -157,6 +185,9 @@ pub struct Viewer {
     res: wgpu::Buffer,
     scene: Option<Scene>,
     target: Option<Target>,
+    /// The device refused this viewer's own picture (a validation error in its error
+    /// scope): it stops drawing, and the other viewers on the page go on.
+    broken: Rc<Cell<bool>>,
 }
 
 #[wasm_bindgen]
@@ -205,7 +236,15 @@ impl Viewer {
                     mapped_at_creation: false,
                 })
             };
-            Ok(Viewer { surface, format, view: uniform(96), res: uniform(16), scene: None, target: None })
+            Ok(Viewer {
+                surface,
+                format,
+                view: uniform(96),
+                res: uniform(16),
+                scene: None,
+                target: None,
+                broken: Rc::new(Cell::new(false)),
+            })
         })
     }
 
@@ -237,14 +276,25 @@ impl Viewer {
     /// (no scene yet, no size, or the device failed): the element then keeps its poster.
     pub fn render(&mut self, yaw: f32, pitch: f32, zoom: f32, w: u32, h: u32) -> bool {
         let Some(scene) = self.scene.as_ref() else { return false };
-        if w == 0 || h == 0 || BROKEN.load(Ordering::Relaxed) {
+        if w == 0 || h == 0 || BROKEN.load(Ordering::Relaxed) || self.broken.get() {
+            return false;
+        }
+        // A picture the device cannot hold is never asked for: the element sizes its canvas
+        // within these, and a caller that does not is refused here, before any GPU call.
+        let (max_side, max_pixels) = picture_limits();
+        if w.max(h) > max_side || w as u64 * h as u64 > max_pixels as u64 {
             return false;
         }
         GPU.with(|g| {
             let g = g.borrow();
             let Some(g) = g.as_ref() else { return false };
             let Some(blit) = g.blits.iter().find(|(f, _)| *f == self.format).map(|(_, p)| p) else { return false };
+            // A new size makes this viewer's own surface, buffer and bind groups. If the
+            // device refuses any of them, that is this viewer's error, not the page's: it is
+            // caught here, so it never reaches the handler that stops every viewer.
+            let mut scope = None;
             if self.target.as_ref().is_none_or(|t| t.w != w || t.h != h) {
+                scope = Some(g.device.push_error_scope(wgpu::ErrorFilter::Validation));
                 self.surface.configure(
                     &g.device,
                     &wgpu::SurfaceConfiguration {
@@ -343,6 +393,14 @@ impl Viewer {
             }
             g.queue.submit([enc.finish()]);
             g.queue.present(frame);
+            if let Some(scope) = scope {
+                let broken = self.broken.clone();
+                wasm_bindgen_futures::spawn_local(async move {
+                    if scope.pop().await.is_some() {
+                        broken.set(true);
+                    }
+                });
+            }
             true
         })
     }
