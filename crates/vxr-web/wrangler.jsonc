@@ -29,7 +29,7 @@
   "routes": [{ "pattern": "vxr.jrnxf.co", "custom_domain": true }],
   // Branch builds (`--env preview`): a separate Worker, vxr-preview, on workers.dev only, with its
   // own database and bucket and its own secrets (none by default, so sign-in is off there).
-  // README.md "Deploy" has how it was set up.
+  // docs/deploy.md has how it was set up.
   "env": {
     "preview": {
       "routes": [],
