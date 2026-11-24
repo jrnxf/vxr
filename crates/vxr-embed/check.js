@@ -8,6 +8,11 @@ async (stage) => {
   };
   const out = [];
   const step = (what, ok, extra = '') => out.push(`${ok ? 'ok' : 'FAIL'} embed ${what}${ok ? '' : ': ' + extra}`);
+  // Where the browser cannot show a WebGPU canvas (headless Chrome on a CI runner with a software
+  // GPU: the device works and the viewer runs, but the canvas reads back empty), the steps that
+  // read pixels print "skip" and everything else still runs. crates/vxr-embed/check sets it.
+  const pixels = !window.__vxrNoPixels;
+  const seen = (what, ok, extra = '') => (pixels ? step(what, ok, extra) : out.push(`skip embed ${what} (no pixels to read here)`));
   const $ = (id) => document.getElementById(id);
   const live = (el) => el.dataset.live !== undefined;
   // The picture an element draws now, as RGBA bytes.
@@ -42,7 +47,7 @@ async (stage) => {
   if (stage === 'first') {
     step('a brick scene file goes live on screen', await until(() => live(a) || a.t.error), a.t.error);
     const s = scene(grab(a));
-    step('the first frame shows lit voxels', s.share > 0.03 && s.colours >= 4, JSON.stringify(s));
+    seen('the first frame shows lit voxels', s.share > 0.03 && s.colours >= 4, JSON.stringify(s));
     step('the picture is the element at up to 2x', a.canvas.width === Math.round(a.getBoundingClientRect().width * Math.min(devicePixelRatio, 2)), String(a.canvas.width));
     await sleep(400);
     step('the poster fades out under the live scene', getComputedStyle(a.querySelector('img')).opacity === '0');
@@ -60,7 +65,7 @@ async (stage) => {
     }));
     ptr('pointerdown', 100); ptr('pointermove', 200); ptr('pointerup', 200);
     const turned = grab(a);
-    step('a drag turns the scene', Math.abs(a.yaw - (yaw - 0.8)) < 1e-6 && differ(before, turned) > 500, `${a.yaw} ${differ(before, turned)}`);
+    step('a drag turns the scene', Math.abs(a.yaw - (yaw - 0.8)) < 1e-6 && (!pixels || differ(before, turned) > 500), `${a.yaw} ${differ(before, turned)}`);
     const key = new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true, cancelable: true });
     a.dispatchEvent(key);
     step('the arrow keys turn it and it takes the focus', key.defaultPrevented && Math.abs(a.yaw - (yaw - 0.95)) < 1e-6 && a.tabIndex === 0, String(a.yaw));
@@ -86,7 +91,7 @@ async (stage) => {
     b.removeAttribute('autorotate');
     [b.yaw, b.pitch] = [a.yaw, a.pitch];
     const d = differ(grab(a), grab(b));
-    step('the .vox file and its brick scene file draw the same picture', d === 0, String(d));
+    seen('the .vox file and its brick scene file draw the same picture', d === 0, String(d));
   }
 
   if (stage === 'fail') {

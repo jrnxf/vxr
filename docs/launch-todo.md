@@ -17,7 +17,7 @@ Verify each point before acting on it.
 
 ### 5. CI covers what is checked by hand today
 
-- [ ] Run the browser checks (`crates/vxr-web/check`, `crates/vxr-embed/check`) in CI if headless Chrome with WebGPU runs on the runner. Otherwise write down what blocks it. They need wasm-bindgen-cli, binaryen and Chrome.
+- [ ] Run the browser checks in CI. Done for `crates/vxr-embed/check` (the Embed check job), without its steps that read pixels. Not done for `crates/vxr-web/check`. What blocks the rest, tried on the runner on 2026-11-24: headless Chrome gets a working WebGPU device from Mesa's software Vulkan (lavapipe), and the viewer loads, starts and fails as it should, but a WebGPU canvas is not shown there: it reads back empty and the screenshot is blank. Chrome's own SwiftShader adapter is worse (the viewer traps). The editor's check reads pixels in most stages, so it needs a runner with a GPU, or a way to read the frame that does not go through the canvas.
 - [ ] A fuzz smoke run of about a minute on the open path.
 
 ### 6. Platforms

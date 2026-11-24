@@ -19,13 +19,17 @@ url="http://127.0.0.1:$port/check.html"
 command -v chrome-devtools-axi >/dev/null || { echo "chrome-devtools-axi is not on the PATH" >&2; exit 1; }
 mkdir -p "$shots"
 
+# The tools come from the nix dev shell (../../dev); with VXR_TOOLS=path they come from the PATH,
+# as crates/vxr-web/cloudflare-build sets up where there is no nix (CI).
+run() { if [ "${VXR_TOOLS:-}" = path ]; then "$@"; else "$root/dev" "$@"; fi; }
 cd "$root"
 scenes="$(mktemp -d)"
-./dev cargo run -q --release -p vxr-embed --example scenes -- "$scenes" >&2
-./dev node "$here/check-server.js" "$port" "$dist" "$scenes" "$here" &
+run cargo run -q --release -p vxr-embed --example scenes -- "$scenes" >&2
+run node "$here/check-server.js" "$port" "$dist" "$scenes" "$here" &
 server=$!
 export CHROME_DEVTOOLS_AXI_SESSION=vxr-embed-check-$$
-export CHROME_DEVTOOLS_AXI_CHROME_ARGS='--enable-unsafe-webgpu --ignore-gpu-blocklist'
+# VXR_CHECK_CHROME_ARGS replaces the flags where Chrome has no GPU (CI: a software WebGPU adapter).
+export CHROME_DEVTOOLS_AXI_CHROME_ARGS="${VXR_CHECK_CHROME_ARGS:---enable-unsafe-webgpu --ignore-gpu-blocklist}"
 cleanup() {
   chrome-devtools-axi stop >/dev/null 2>&1 || true
   kill "$server" 2>/dev/null || true
@@ -35,14 +39,22 @@ trap cleanup EXIT
 for _ in $(seq 50); do curl -sf "$url" >/dev/null && break; sleep 0.1; done
 
 # eval prints the returned string JSON-quoted twice; unwrap it to plain lines.
-unwrap() { sed -n 's/^result: //p' | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{let v=JSON.parse(s);while(typeof v==='string'&&v.startsWith('\"'))v=JSON.parse(v);console.log(v)})"; }
+# A stage that threw has no result: its error becomes one FAIL line, so the stages after it
+# still run and every result is printed.
+unwrap() { node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const m=s.match(/^result: (.*)$/m);if(!m){console.log('FAIL a stage threw: '+s.replace(/\s+/g,' ').slice(0,600));return}let v=JSON.parse(m[1]);while(typeof v==='string'&&v.startsWith('\"'))v=JSON.parse(v);console.log(v)})"; }
 axi() { chrome-devtools-axi "$@"; }
-stage() { axi eval --full "async () => ($(cat "$here/check.js"))('$1')" | unwrap; }
+stage() { { axi eval --full "async () => ($(cat "$here/check.js"))('$1')" 2>&1 || true; } | unwrap; }
 shot() { axi screenshot "$shots/embed-$1.png" >/dev/null; echo "wrote $shots/embed-$1.png"; }
 
-axi open "$url" >/dev/null
+# A browser that does not start says why, in place of a silent exit.
+# The first call also starts Chrome, and on a slow machine it can give up before the page is
+# there: one more try.
+axi open "$url" >/dev/null 2>&1 || axi open "$url" >/dev/null 2>&1 || { echo "FAIL the browser opens the page: $(axi open "$url" 2>&1 | tail -n 8 | tr '\n' ' ')"; exit 1; }
 axi emulate --viewport "900x700x2" >/dev/null
 axi open "$url" >/dev/null
+# VXR_CHECK_NO_PIXELS=1: this browser cannot show a WebGPU canvas, so the steps that read
+# pixels are skipped (see check.js). Never set it where the picture can be read.
+[ -z "${VXR_CHECK_NO_PIXELS:-}" ] || axi eval "() => { window.__vxrNoPixels = true; return 'ok' }" >/dev/null
 results="$(stage first)"
 shot live
 results+=$'\n'"$(stage vox)"
@@ -50,4 +62,5 @@ results+=$'\n'"$(stage fail)"
 shot poster
 
 echo "$results"
-[ -n "$results" ] && ! grep -q '^FAIL' <<<"$results" && [ "$(grep -c '^ok' <<<"$results")" -eq 19 ]
+# Every step ran: passed, or skipped where there are no pixels to read.
+[ -n "$results" ] && ! grep -q '^FAIL' <<<"$results" && [ "$(grep -cE '^(ok|skip)' <<<"$results")" -eq 19 ]
