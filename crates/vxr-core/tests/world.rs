@@ -1165,3 +1165,83 @@ fn several_picked_rows_show_selected_together_and_group_as_one() {
     assert!(s.undo());
     assert!(s.world().unwrap().tree.children(0).contains(&slab));
 }
+
+/// A hostile file: object offsets at the ends of i32. Opening it and showing or editing its
+/// world must give an error or a scene, never an arithmetic overflow (a panic in a debug
+/// build, wrong offsets in a release build).
+#[test]
+fn offsets_at_the_ends_of_i32_never_overflow() {
+    const FAR: i32 = vxr_core::world::MAX_OFFSET;
+    for t in [i32::MAX, i32::MAX - 1, i32::MIN, i32::MIN + 1, 1 << 30, -(1 << 30), FAR, -FAR, FAR + 1, FAR / 2] {
+        for nest in [false, true] {
+            let mut b = Builder::new(200);
+            let m = b.model([2, 2, 2], vec![[0, 0, 0, 1], [1, 1, 1, 2]]);
+            let far = SceneNode::shape(m, None, [t, t, t]).named("far");
+            // Beside it, so the world is small however far away it is.
+            let n = if t > 0 { t - 4 } else { t + 4 };
+            let near = SceneNode::shape(m, None, [n, n, n]).named("near");
+            b.root = if nest { vec![SceneNode::group(None, [t, t, t], vec![far, near])] } else { vec![far, near] };
+            let bytes = b.build().write();
+            // The embed's open path reads the same file.
+            let _ = vxr_core::bricks::open(&bytes);
+            let opened = vxr_core::Scene::from_vox(&bytes);
+            // Only offsets within MAX_OFFSET of the origin open, counted down the groups.
+            let far = if nest { 2 * (t as i64).abs() } else { (t as i64).abs() };
+            assert_eq!(opened.is_ok(), far <= FAR as i64, "offset {t}, nested {nest}: {:?}", opened.as_ref().err());
+            let Ok(mut scene) = opened else { continue };
+            // The composed world, a cell lookup in it, an edit and a save.
+            scene.show_world();
+            let w = scene.world().expect("an opened file has a world");
+            let _ = w.object_at([0, 0, 0]);
+            let _ = w.object_at([t, t, t]);
+            // A move past the bound does nothing, and a move within it lands.
+            let moved = scene
+                .edit_world(|w| {
+                    let i = (0..w.tree.nodes.len())
+                        .find(|&i| w.tree.nodes[i].name.as_deref() == Some(&b"near"[..]))
+                        .unwrap();
+                    let before = w.world_transform(i).t;
+                    w.move_by(i, [i32::MAX, i32::MIN, i32::MAX]);
+                    let stayed = w.world_transform(i).t;
+                    w.move_by(i, [if t > 0 { -3 } else { 3 }, 0, 0]);
+                    (before == stayed, before == w.world_transform(i).t)
+                })
+                .unwrap();
+            assert_eq!(moved, (true, false), "offset {t}, nested {nest}");
+            let _ = scene.to_vox();
+        }
+    }
+}
+
+/// A hostile file: a node id at the end of i32 leaves no id for a new object. Adding one and
+/// saving must give an error, never an overflow.
+#[test]
+fn node_ids_at_the_end_of_i32_are_an_error_not_an_overflow() {
+    use vxr_vox::chunk::{Nshp, Ntrn};
+    let mut b = Builder::new(200);
+    let m = b.model([2, 2, 2], vec![[0, 0, 0, 1]]);
+    b.root = vec![SceneNode::shape(m, None, [0, 0, 0])];
+    let mut raw = b.build();
+    // A stray pair of nodes with the last two ids.
+    let stray = Ntrn {
+        id: i32::MAX - 1,
+        attrs: Default::default(),
+        child: i32::MAX,
+        reserved: -1,
+        layer: -1,
+        frames: vec![Default::default()],
+        extra: vec![],
+    };
+    raw.chunks.push(vxr_vox::Chunk::new(chunk::NTRN, stray.encode()));
+    let shape =
+        Nshp { id: i32::MAX, attrs: Default::default(), models: vec![(m as i32, Default::default())], extra: vec![] };
+    raw.chunks.push(vxr_vox::Chunk::new(chunk::NSHP, shape.encode()));
+    let bytes = raw.write();
+    let Ok(doc) = Document::read(&bytes) else { return };
+    let Ok(mut w) = World::from_doc(&doc) else { return };
+    let mut doc = doc;
+    let first = w.objects()[0];
+    w.copy(first, true).unwrap();
+    // Either the file is rebuilt with fresh ids, or the save says why not.
+    let _ = w.save_into(&mut doc);
+}

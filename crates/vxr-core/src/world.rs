@@ -22,6 +22,10 @@ use crate::select::Transform;
 /// budget is one scene of [`MAX_EXTENT`] on every axis, more than MagicaVoxel can make.
 pub const MAX_MODELS: usize = 1 << 16;
 pub const MAX_CELLS: u64 = (MAX_EXTENT as u64).pow(3);
+/// The farthest a node may sit from the origin on an axis, in voxels. A file's offsets are any
+/// i32; past this bound a world cell and twice a world cell no longer fit i32, so such a file
+/// is refused and a move stops at it.
+pub const MAX_OFFSET: i32 = 1 << 24;
 
 /// What models take of a scene's size limit: the file models they are saved as and their
 /// cells. A file over [`MAX_MODELS`] or [`MAX_CELLS`] does not open, so no edit may make a
@@ -110,9 +114,13 @@ pub fn local_to_vox(size: [i32; 3], u: [i32; 3]) -> [i32; 3] {
 /// The model voxel of world cell `q` (file axes) for a model of file size `size` placed by
 /// `w`: the inverse of [`vxr_vox::Scene::world_cell`]. It may fall outside the model.
 pub fn local_of(w: &Affine, size: [i32; 3], q: [i32; 3]) -> [i32; 3] {
-    let d: [i32; 3] = std::array::from_fn(|a| 2 * q[a] + 1 - 2 * w.t[a]);
-    let c = mat_vec(&transpose(&w.r), d);
-    std::array::from_fn(|a| (c[a] - 1).div_euclid(2) + size[a] / 2)
+    // In i64: `q` and `w.t` may each be anywhere in i32, and twice their difference is not.
+    let d: [i64; 3] = std::array::from_fn(|a| 2 * q[a] as i64 + 1 - 2 * w.t[a] as i64);
+    let r = transpose(&w.r);
+    let c: [i64; 3] = std::array::from_fn(|i| (0..3).map(|k| r[i][k] as i64 * d[k]).sum());
+    std::array::from_fn(|a| {
+        ((c[a] - 1).div_euclid(2) + size[a] as i64 / 2).clamp(i32::MIN as i64, i32::MAX as i64) as i32
+    })
 }
 
 fn transpose(r: &[[i32; 3]; 3]) -> [[i32; 3]; 3] {
@@ -153,7 +161,30 @@ impl World {
             }
             models.push(map);
         }
-        Ok(World { tree, models, version: s.version })
+        let world = World { tree, models, version: s.version };
+        if !world.offsets_in_range() {
+            return Err(format!("an object is more than {MAX_OFFSET} voxels from the origin"));
+        }
+        Ok(world)
+    }
+
+    /// Whether every node sits within [`MAX_OFFSET`] of the origin on each axis, counted in
+    /// i64 so that offsets from a hostile file cannot overflow the check itself.
+    fn offsets_in_range(&self) -> bool {
+        let parents = self.tree.parents();
+        (0..self.tree.nodes.len()).all(|i| {
+            let mut chain = vec![i];
+            while let Some(p) = parents[*chain.last().unwrap()] {
+                chain.push(p);
+            }
+            // A node's rotation only swaps and flips axes, so the largest offset along the
+            // chain bounds every axis of the world offset.
+            let far: i64 = chain
+                .iter()
+                .map(|&k| self.tree.nodes[k].local.t.iter().map(|t| (*t as i64).abs()).max().unwrap_or(0))
+                .sum();
+            far <= MAX_OFFSET as i64
+        })
     }
 
     /// What every model takes of the size limit, linked copies counted once.
@@ -438,12 +469,17 @@ impl World {
         true
     }
 
-    /// Move node `i` by `d` world cells (vxr axes).
+    /// Move node `i` by `d` world cells (vxr axes), as long as it stays within [`MAX_OFFSET`].
     pub fn move_by(&mut self, i: usize, d: [i32; 3]) {
         let parent = self.tree.parents()[i].map_or(Affine::IDENTITY, |p| self.world_transform(p));
         let local = mat_vec(&transpose(&parent.r), world_to_vox(d));
-        let t = &mut self.tree.nodes[i].local.t;
-        *t = std::array::from_fn(|a| t[a] + local[a]);
+        let before = self.tree.nodes[i].local.t;
+        self.tree.nodes[i].local.t = std::array::from_fn(|a| before[a].saturating_add(local[a]));
+        // A move that would take the node past MAX_OFFSET does nothing: beyond it the
+        // arithmetic on world cells no longer fits i32.
+        if !self.offsets_in_range() {
+            self.tree.nodes[i].local.t = before;
+        }
     }
 
     /// Turn node `i` a quarter turn about a vxr axis ([`Transform::Rotate`]) or mirror it

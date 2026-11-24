@@ -411,14 +411,24 @@ impl Document {
                 return Err(Error::new("the file has no scene graph root to edit"));
             }
             // Ids for new nodes, two each (nTRN, then nGRP or nSHP).
-            let mut next = scene.nodes.keys().next_back().map_or(0, |k| k + 1);
+            // A file may use ids up to i32::MAX, which leaves none for a new node.
+            let used_up = || Error::new("the file's node ids are used up; no object can be added");
+            let mut next = match scene.nodes.keys().next_back() {
+                Some(k) => k.checked_add(1).ok_or_else(used_up)?,
+                None => 0,
+            };
             let order = tree.order();
             let mut ids: Vec<(i32, i32)> = vec![(-1, -1); tree.nodes.len()];
             for &i in &order {
-                ids[i] = tree.nodes[i].ids.unwrap_or_else(|| {
-                    next += 2;
-                    (next - 2, next - 1)
-                });
+                ids[i] = match tree.nodes[i].ids {
+                    Some(pair) => pair,
+                    None => {
+                        let pair = (next, next.checked_add(1).ok_or_else(used_up)?);
+                        // The id after this pair, kept in range so the next node's check is exact.
+                        next = pair.1.saturating_add(1);
+                        pair
+                    }
+                };
             }
             let live: HashSet<i32> = order.iter().flat_map(|&i| [ids[i].0, ids[i].1]).collect();
             for &i in &order {
