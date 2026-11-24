@@ -216,7 +216,7 @@ export function Landing() {
               src="/landing.webp"
               width="1280"
               height="800"
-              alt="The vxr editor open on a small voxel island"
+              alt="A small voxel island with trees and a red-roofed house, drawn by vxr"
               fetchpriority="high"
             />
           </div>

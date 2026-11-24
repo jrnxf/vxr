@@ -19,6 +19,8 @@ const types = {
   '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.wasm': 'application/wasm',
   '.ttf': 'font/ttf', '.webp': 'image/webp', '.json': 'application/json', '.txt': 'text/plain', '.vox': 'application/octet-stream', '.png': 'image/png',
 };
+// The site's own pages: icons, the share image, the sitemap and the gzipped island.
+Object.assign(types, { '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.jpg': 'image/jpeg', '.xml': 'application/xml', '.gz': 'application/gzip' });
 
 // Cloudflare's _headers: a path pattern, then indented "Name: value" lines.
 const rules = [];
@@ -156,7 +158,13 @@ http.createServer((req, res) => {
   // A path without an extension is its .html file (Cloudflare's /about for about.html).
   const f = p.endsWith('/') ? p + 'index.html' : !path.extname(p) && fs.existsSync(p + '.html') ? p + '.html' : p;
   fs.readFile(f, (err, data) => {
-    if (err) { res.writeHead(404); res.end(); return; }
+    // An unknown path gets 404.html, as wrangler.jsonc's not_found_handling has Cloudflare do.
+    if (err) {
+      return fs.readFile(path.join(dist, '404.html'), (none, page) => {
+        res.writeHead(404, none ? {} : { ...headersFor(u), 'content-type': 'text/html' });
+        res.end(none ? undefined : page);
+      });
+    }
     if (bridgePort && f === path.join(dist, 'app.js')) {
       const src = data.toString().replace('new WebSocket(app.bridge_url())', `new WebSocket(app.bridge_url().replace(':41723', ':${+bridgePort}'))`);
       if (src === data.toString()) throw new Error('check-server: app.js no longer opens new WebSocket(app.bridge_url())');

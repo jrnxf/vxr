@@ -698,7 +698,7 @@ function whenEntered(f) {
 
 async function main() {
   if (!navigator.gpu || !(await navigator.gpu.requestAdapter().catch(() => null))) {
-    show('This browser has no WebGPU.', 'vxr needs WebGPU: try a recent Chrome, Edge or Safari on a desktop, or download the desktop app when it ships.');
+    show('This browser has no WebGPU.', 'vxr needs WebGPU: try a recent Chrome, Edge or Safari. Firefox has WebGPU on some systems only. On a Mac the desktop app needs no browser: brew install jrnxf/tap/vxr');
     return;
   }
   const get = async (u) => {
@@ -706,10 +706,18 @@ async function main() {
     if (!r.ok) throw new Error(`${u}: ${r.status}`);
     return new Uint8Array(await r.arrayBuffer());
   };
+  // The island is served gzipped (Cloudflare does not compress a .vox itself) and unpacked here;
+  // a browser without DecompressionStream takes the plain file.
+  const scene = async () => {
+    if (typeof DecompressionStream !== 'function') return get('scene.vox');
+    const r = await fetch('scene.vox.gz');
+    if (!r.ok) throw new Error(`scene.vox.gz: ${r.status}`);
+    return new Uint8Array(await new Response(r.body.pipeThrough(new DecompressionStream('gzip'))).arrayBuffer());
+  };
   const font = (n) => get('fonts/' + n).catch(() => new Uint8Array());
   // The scene and fonts do not need the module: fetch them alongside the wasm, not after it.
   const assets = Promise.all([
-    get('scene.vox'),
+    scene(),
     font('Geist-Regular.ttf'), font('Geist-Medium.ttf'), font('Geist-SemiBold.ttf'),
     font('GeistMono-Regular.ttf'), font('GeistMono-Medium.ttf'), font('GeistMono-UltraBlack.ttf'),
     font('Inter-Regular.ttf'), font('lucide.ttf'),

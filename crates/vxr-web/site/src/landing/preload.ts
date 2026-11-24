@@ -12,7 +12,7 @@ const FONTS = [
 ]
 const FILES = [
   "/pkg/vxr_web_bg.wasm",
-  "/scene.vox",
+  "/scene.vox.gz",
   ...FONTS.map((name) => `/fonts/${name}.ttf`),
 ]
 

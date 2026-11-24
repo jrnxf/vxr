@@ -4,6 +4,7 @@
 # stand-in model provider), run check.js in the page (every tool, camera, undo/redo, Cmd-K,
 # the assistant, Open, Save, resize, the projects list and drafts), check the landing page and
 # the boot screen (check-landing.js: first visit with progress and an early click, /about, the
+# share tags, share image, favicon.ico, robots.txt, sitemap, llms.txt and 404 page, the
 # returning-visit skip, ?open= ?project= ?embed, which also leave the first-run tour out), check
 # the embed folder the editor exported as its own page (check-embed.js: the exported viewer and
 # scene go live, and the poster frames the scene as the first live frame does), check
@@ -78,6 +79,7 @@ axi screenshot "$shots/web-landing-loading.png" >/dev/null
 land_results+=$'\n'"$(landing early)"
 axi open "${url}about" >/dev/null
 land_results+=$'\n'"$(landing ready)"
+land_results+=$'\n'"$(landing share)"
 axi screenshot "$shots/web-landing.png" >/dev/null
 land_results+=$'\n'"$(landing ready-click)"
 axi open "$url" >/dev/null

@@ -1,0 +1,14 @@
+# vxr
+
+> vxr is a free, open-source voxel scene editor. It runs in the browser on WebGPU at https://vxr.jrnxf.co and as a macOS app (`brew install jrnxf/tap/vxr`).
+
+- It opens and saves MagicaVoxel `.vox` files without loss, and edits scenes larger than 256 voxels on an axis.
+- It path-traces the scene live, and exports PNG renders, OBJ meshes and a one-tag `<voxel-scene>` web embed.
+- An assistant with your own API key, and terminal agents through `vxr mcp`, edit the scene with the same tools as the UI.
+- vxr is an independent project. It is not affiliated with MagicaVoxel or its author.
+
+## Links
+
+- [Editor](https://vxr.jrnxf.co/): the editor in the browser, no account needed
+- [Source](https://github.com/jrnxf/vxr): the Rust source, the README and the docs
+- [Controls](https://github.com/jrnxf/vxr/blob/main/docs/controls.md): every tool, key and panel

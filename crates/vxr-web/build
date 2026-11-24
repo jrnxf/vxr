@@ -57,11 +57,17 @@ const w = new api.VoxelWorld();
 api.generateIsland(w);
 fs.writeFileSync(process.argv[1], api.writeVox(w, api.defaultPalette()));
 " "$dist/scene.vox"
+# The island again, gzipped: the editor starts from this one (www/app.js unpacks it), because
+# Cloudflare compresses by content type and does not compress a .vox.
+node -e "
+const fs = require('fs'), zlib = require('zlib');
+fs.writeFileSync(process.argv[1] + '.gz', zlib.gzipSync(fs.readFileSync(process.argv[1]), { level: 9 }));
+" "$dist/scene.vox"
 # The sizes the landing page's progress is counted against (site/src/landing/preload.ts).
 node --input-type=module -e "
 import fs from 'node:fs';
 const sizes = {};
-for (const f of ['pkg/vxr_web_bg.wasm', 'scene.vox', ...fs.readdirSync(process.argv[1] + '/fonts').filter((n) => n.endsWith('.ttf')).map((n) => 'fonts/' + n)])
+for (const f of ['pkg/vxr_web_bg.wasm', 'scene.vox.gz', ...fs.readdirSync(process.argv[1] + '/fonts').filter((n) => n.endsWith('.ttf')).map((n) => 'fonts/' + n)])
   sizes[f] = fs.statSync(process.argv[1] + '/' + f).size;
 fs.writeFileSync(process.argv[1] + '/preload.json', JSON.stringify(sizes));
 " "$dist"
