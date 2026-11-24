@@ -1165,3 +1165,72 @@ fn several_picked_rows_show_selected_together_and_group_as_one() {
     assert!(s.undo());
     assert!(s.world().unwrap().tree.children(0).contains(&slab));
 }
+
+/// A save that cannot patch the file's chunks rebuilds the scene graph. The rebuild must
+/// still be lossless for what the edits did not touch: an animated object keeps its
+/// keyframes, its shape frames and attributes vxr does not know.
+#[test]
+fn a_rebuilt_save_keeps_keyframes_shape_frames_and_unknown_attributes() {
+    let (mut doc, mut w) = open(&fixture("17-animation"));
+    let mover = find(&w, "mover");
+    // A second object over 256 on an axis forces the rebuild.
+    let mut long = vxr_core::BrickMap::new([300, 1, 1]);
+    for x in 0..300 {
+        long.set(x, 0, 0, 3);
+    }
+    let added = w.add_object_after(mover, &long, [20, 0, 0]).unwrap();
+    w.set_name(added, Some("long"));
+    assert_eq!(w.save_into(&mut doc).unwrap(), WorldSave::Rebuilt);
+    let bytes = doc.write();
+    let back = Document::read(&bytes).unwrap();
+    let scene = back.scene().unwrap();
+    let trn = scene
+        .nodes
+        .values()
+        .find_map(|n| match n {
+            vxr_vox::scene::Node::Transform(t) if t.attrs.get("_name") == Some(&b"mover"[..]) => Some(t),
+            _ => None,
+        })
+        .expect("mover is still there");
+    assert_eq!(trn.attrs.get("_loop"), Some(&b"1"[..]), "an attribute vxr does not edit is kept");
+    let keys: Vec<_> = trn.frames.iter().map(|f| f.get("_f").map(<[u8]>::to_vec)).collect();
+    assert_eq!(keys, [Some(b"0".to_vec()), Some(b"10".to_vec()), Some(b"20".to_vec())], "the keyframes are kept");
+    let Some(vxr_vox::scene::Node::Shape(shape)) = scene.nodes.get(&trn.child) else { panic!("mover is a shape") };
+    let frames: Vec<_> = shape.models.iter().map(|(_, d)| d.get("_f").map(<[u8]>::to_vec)).collect();
+    assert_eq!(frames, [Some(b"0".to_vec()), Some(b"10".to_vec())], "the shape's model frames are kept");
+    // The two frames still show the red and the blue cube, and the long object is blocks.
+    let cube = |m: i32| scene.models[m as usize].effective_voxels();
+    assert_eq!((cube(shape.models[0].0).len(), cube(shape.models[1].0).len()), (27, 27));
+    assert_ne!(cube(shape.models[0].0)[0][3], cube(shape.models[1].0)[0][3], "red, then blue");
+    let (_, reopened) = open(&bytes);
+    assert!(matches!(reopened.tree.nodes[find(&reopened, "long")].kind, NodeKind::Group(_)));
+}
+
+/// The one thing a save changes that the user did not ask for is said in words: an object
+/// over 256 on an axis becomes a group of blocks. A save that keeps the scene as it is says
+/// nothing.
+#[test]
+fn a_save_that_splits_an_object_into_blocks_says_so() {
+    use vxr_core::files::vox_bytes_noted;
+    let plain = vxr_core::Scene::from_vox(&fixture("17-animation")).unwrap();
+    assert_eq!(vox_bytes_noted(&plain).unwrap().1, None, "an unedited file has nothing to say");
+    let mut scene = vxr_core::Scene::from_vox(&fixture("17-animation")).unwrap();
+    // A file with one object opens in that object's model: the world tools need the world.
+    assert!(scene.show_world());
+    scene
+        .edit_world(|w| {
+            let mut long = vxr_core::BrickMap::new([300, 1, 1]);
+            for x in 0..300 {
+                long.set(x, 0, 0, 3);
+            }
+            let mover = (0..w.tree.nodes.len()).find(|&i| w.tree.nodes[i].name.as_deref() == Some(&b"mover"[..]));
+            w.add_object_after(mover.unwrap(), &long, [20, 0, 0]).is_some()
+        })
+        .unwrap();
+    let (bytes, note) = vox_bytes_noted(&scene).unwrap();
+    let note = note.expect("a split object is named");
+    assert!(note.contains("saved as a group of blocks") && note.contains("256"), "{note}");
+    // Opened again, the file holds the blocks, so the next save has nothing to say.
+    let again = vxr_core::Scene::from_vox(&bytes).unwrap();
+    assert_eq!(vox_bytes_noted(&again).unwrap().1, None);
+}

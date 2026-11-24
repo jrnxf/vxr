@@ -605,7 +605,7 @@ impl Document {
         }
         let mut next = 0;
         let mut nodes = Vec::new();
-        emit_tree(tree, 0, &placed, &mut next, &mut nodes);
+        emit_tree(scene, tree, 0, &placed, &mut next, &mut nodes);
         geometry.extend(nodes);
         let is_geometry =
             |id: &[u8; 4]| [chunk::SIZE, chunk::XYZI, chunk::TDCZ, chunk::NTRN, chunk::NGRP, chunk::NSHP].contains(&id);
@@ -624,30 +624,73 @@ enum Placed {
     Blocks(Vec<(usize, [i32; 3])>),
 }
 
-/// Write node `i` and its subtree with fresh ids from `next`; returns its nTRN id.
-fn emit_tree(tree: &Tree, i: usize, placed: &[Placed], next: &mut i32, out: &mut Vec<Chunk>) -> i32 {
+/// Write node `i` and its subtree with fresh ids from `next`; returns its nTRN id. A node
+/// read from the file starts from the file's own chunks (`before`), so what the tree does not
+/// hold is kept: keyframes, attributes vxr does not know, the frames of an animated shape and
+/// bytes after a chunk's fields. Only an object whose model is now over 256 on an axis loses
+/// its shape chunk, since it becomes a group of blocks.
+fn emit_tree(before: &Scene, tree: &Tree, i: usize, placed: &[Placed], next: &mut i32, out: &mut Vec<Chunk>) -> i32 {
     let n = &tree.nodes[i];
     let (t, c) = (*next, *next + 1);
     *next += 2;
-    out.push(Chunk::new(chunk::NTRN, new_trn(t, c, n).encode()));
+    let (old_trn, old_child) = match n.ids {
+        Some((ti, ci)) => (before.nodes.get(&ti), before.nodes.get(&ci)),
+        None => (None, None),
+    };
+    let trn = match old_trn {
+        Some(Node::Transform(old)) => {
+            let mut trn = old.clone();
+            patch_trn(&mut trn, n);
+            trn.id = t;
+            trn.child = c;
+            trn
+        }
+        _ => new_trn(t, c, n),
+    };
+    out.push(Chunk::new(chunk::NTRN, trn.encode()));
     let at = out.len();
+    let plain = |c: i32, children: Vec<i32>| Ngrp { id: c, attrs: Dict::default(), children, extra: vec![] };
     let group = |c: i32, children: Vec<i32>| {
-        Chunk::new(chunk::NGRP, Ngrp { id: c, attrs: Dict::default(), children, extra: vec![] }.encode())
+        let g = match old_child {
+            Some(Node::Group(old)) => Ngrp { id: c, children, ..old.clone() },
+            _ => plain(c, children),
+        };
+        Chunk::new(chunk::NGRP, g.encode())
     };
     match &n.kind {
         Kind::Group(kids) => {
             out.push(group(c, vec![]));
-            let ids = kids.iter().map(|&k| emit_tree(tree, k, placed, next, out)).collect();
+            let ids = kids.iter().map(|&k| emit_tree(before, tree, k, placed, next, out)).collect();
             out[at] = group(c, ids);
         }
         Kind::Object(m) => match &placed[*m] {
             Placed::One(fm) => {
-                let shp =
-                    Nshp { id: c, attrs: Dict::default(), models: vec![(*fm as i32, Dict::default())], extra: vec![] };
+                let shp = match old_child {
+                    // The first model is the one the tree shows. The later ones are an
+                    // animation's other frames: each stays, pointing at where its model
+                    // went, unless that model is now blocks.
+                    Some(Node::Shape(old)) => {
+                        let mut models =
+                            vec![(*fm as i32, old.models.first().map(|f| f.1.clone()).unwrap_or_default())];
+                        for (id, dict) in old.models.iter().skip(1) {
+                            if let Some(Placed::One(to)) = usize::try_from(*id).ok().and_then(|k| placed.get(k)) {
+                                models.push((*to as i32, dict.clone()));
+                            }
+                        }
+                        Nshp { id: c, models, ..old.clone() }
+                    }
+                    _ => Nshp {
+                        id: c,
+                        attrs: Dict::default(),
+                        models: vec![(*fm as i32, Dict::default())],
+                        extra: vec![],
+                    },
+                };
                 out.push(Chunk::new(chunk::NSHP, shp.encode()));
             }
             Placed::Blocks(blocks) => {
-                out.push(group(c, vec![]));
+                let blocks_group = |children: Vec<i32>| Chunk::new(chunk::NGRP, plain(c, children).encode());
+                out.push(blocks_group(vec![]));
                 let mut ids = Vec::new();
                 for &(fm, bt) in blocks {
                     let (bt_id, bs_id) = (*next, *next + 1);
@@ -665,7 +708,7 @@ fn emit_tree(tree: &Tree, i: usize, placed: &[Placed], next: &mut i32, out: &mut
                     };
                     out.push(Chunk::new(chunk::NSHP, shp.encode()));
                 }
-                out[at] = group(c, ids);
+                out[at] = blocks_group(ids);
             }
         },
     }

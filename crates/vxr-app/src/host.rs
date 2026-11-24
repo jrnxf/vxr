@@ -30,7 +30,7 @@ use vxr_render::Gpu;
 
 use crate::Editor;
 use crate::editor::Button;
-use crate::files::{File, obj_files, palette_png, slices_png, sprite_png, vox_bytes};
+use crate::files::{File, obj_files, palette_png, slices_png, sprite_png, vox_bytes, vox_bytes_noted};
 use crate::projects::{Project, Read, THUMB, content_hash};
 use crate::sync::{Auth, Event, Reply};
 use crate::ui::{Action, FontBytes};
@@ -200,8 +200,12 @@ pub fn run_action(ed: &mut Editor, p: &mut dyn Platform, action: Action) {
         Action::Save | Action::AddToLibrary => {
             // Checked before any dialog or download: a scene that would not read back whole
             // is never offered for saving.
-            let bytes = match vox_bytes(&ed.scene) {
-                Ok(b) => b,
+            let bytes = match vox_bytes_noted(&ed.scene) {
+                Ok((b, note)) => {
+                    // Said once the file is written (`saved`), with the name it was saved as.
+                    ed.save_note = note;
+                    b
+                }
                 Err(e) => return toast(ed, format!("Could not save: {e}")),
             };
             let name = ed.ui.scene_name.clone();
@@ -490,7 +494,11 @@ pub fn saved(ed: &mut Editor, p: &mut dyn Platform, saved: Saved, position: u64)
     ed.ui.scene_name = name.clone();
     p.named(&name);
     let ctx = ed.ctx.clone();
-    ed.ui.toast(&ctx, format!("{} {name}", p.verb()));
+    match ed.save_note.take() {
+        // What the save changed beyond the edits stays up long enough to read.
+        Some(note) => ed.ui.alert(&ctx, format!("{} {name}. {note}.", p.verb())),
+        None => ed.ui.toast(&ctx, format!("{} {name}", p.verb())),
+    }
     ed.projects.saved(&name, path.as_deref(), handle, copy, position);
     ed.path = path;
     ed.mark_saved_at(position);

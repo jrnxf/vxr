@@ -800,6 +800,25 @@ fn look_answers_with_a_png_picture() {
     c.ok("new_scene", json!({"path": "other.vox", "size": [4, 4, 4]}));
 }
 
+/// A save that writes an object as blocks (a `.vox` model holds at most 256 on an axis) says
+/// so in its answer; any other save does not.
+#[test]
+fn save_says_when_it_wrote_a_large_object_as_blocks() {
+    let d = Dir::new("save-note");
+    let mut c = Client::new(&d.0);
+    c.ok("new_scene", json!({"path": "small.vox", "size": [8, 8, 8]}));
+    c.ok("box", json!({"from": [0, 0, 0], "to": [1, 1, 1], "slot": 5}));
+    assert!(!c.ok("save", json!({})).contains("Note:"));
+    // A new scene starts at 256 a side at most; resize takes it past that.
+    c.ok("new_scene", json!({"path": "wall.vox", "size": [8, 2, 2]}));
+    c.ok("resize", json!({"size": [300, 2, 2]}));
+    // Wider than the bounds on purpose: the cells outside are skipped, the rest fill the row.
+    c.ok("box", json!({"from": [-400, 0, 0], "to": [400, 0, 0], "slot": 5}));
+    let said = c.ok("save", json!({}));
+    assert!(said.starts_with("saved wall.vox"), "{said}");
+    assert!(said.contains("Note:") && said.contains("saved as a group of blocks"), "{said}");
+}
+
 #[test]
 fn export_writes_the_obj_and_the_slices_under_the_root() {
     let d = Dir::new("export");
