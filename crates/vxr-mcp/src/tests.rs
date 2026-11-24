@@ -800,6 +800,44 @@ fn look_answers_with_a_png_picture() {
     c.ok("new_scene", json!({"path": "other.vox", "size": [4, 4, 4]}));
 }
 
+/// An OBJ export writes three files under one name. A file the user already has under one of
+/// those names (a reference image `castle.png` beside `castle.vox`) is never replaced unless
+/// the call says so, and a refused export writes nothing at all.
+#[test]
+fn export_never_replaces_a_file_it_did_not_write_unless_told_to() {
+    let d = Dir::new("export-overwrite");
+    let mut c = Client::new(&d.0);
+    c.ok("new_scene", json!({"path": "castle.vox", "size": [8, 8, 8]}));
+    c.ok("box", json!({"from": [-1, 0, -1], "to": [1, 2, 1], "slot": 5}));
+    std::fs::write(d.0.join("castle.png"), b"the user's reference image").unwrap();
+    let e = c.err("export", json!({"kind": "obj"}));
+    assert!(e.contains("not exported: castle.png is already there"), "{e}");
+    assert!(e.contains("overwrite: true"), "{e}");
+    assert_eq!(std::fs::read(d.0.join("castle.png")).unwrap(), b"the user's reference image");
+    assert!(!d.0.join("castle.obj").exists() && !d.0.join("castle.mtl").exists(), "nothing was written");
+    // Another path leaves it alone and works.
+    let t: Value = serde_json::from_str(&c.ok("export", json!({"kind": "obj", "path": "out/castle.obj"}))).unwrap();
+    assert_eq!(t["exported"], json!(["out/castle.obj", "out/castle.mtl", "out/castle.png"]));
+    assert_eq!(std::fs::read(d.0.join("castle.png")).unwrap(), b"the user's reference image");
+    // What this session exported it replaces again without being told to.
+    c.ok("export", json!({"kind": "obj", "path": "out/castle.obj"}));
+    // Told to, it replaces the user's file, and every file named is listed when several are there.
+    std::fs::write(d.0.join("castle.mtl"), b"mine too").unwrap();
+    let e = c.err("export", json!({"kind": "obj"}));
+    assert!(e.contains("castle.mtl, castle.png are already there"), "{e}");
+    assert!(c.err("export", json!({"kind": "obj", "overwrite": "yes"})).contains("overwrite: true or false"));
+    c.ok("export", json!({"kind": "obj", "overwrite": true}));
+    assert_eq!(&std::fs::read(d.0.join("castle.png")).unwrap()[1..4], b"PNG");
+    assert!(std::fs::read_to_string(d.0.join("castle.mtl")).unwrap().contains("map_Kd castle.png"));
+    // No temporary file is left beside them.
+    let left: Vec<_> = std::fs::read_dir(&d.0).unwrap().flatten().map(|e| e.file_name()).collect();
+    assert!(left.iter().all(|n| !n.to_string_lossy().ends_with(".tmp")), "{left:?}");
+    // A single PNG export follows the same rule.
+    std::fs::write(d.0.join("castle-sprite.png"), b"mine").unwrap();
+    assert!(c.err("export", json!({"kind": "sprite"})).contains("castle-sprite.png is already there"));
+    assert_eq!(std::fs::read(d.0.join("castle-sprite.png")).unwrap(), b"mine");
+}
+
 #[test]
 fn export_writes_the_obj_and_the_slices_under_the_root() {
     let d = Dir::new("export");

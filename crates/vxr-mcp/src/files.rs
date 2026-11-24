@@ -66,7 +66,7 @@ fn own_tools() -> Vec<(&'static str, String, Value)> {
         edit_object_tool(),
         show_world_tool(),
         export_tool(
-            "Export the open scene (the model being edited, or every shown object of a world) as files under the root, as the Export menu does. kind obj writes <name>.obj with its <name>.mtl and 256x1 palette texture <name>.png; kind slices writes every layer of the model's bounds side by side, the bottom on the left, as one PNG; kind sprite writes the isometric sprite, one PNG of pixel art on a transparent background seen from the front-right-top corner, each voxel 4 pixels wide (2 pixels across for 1 down) and the top, right and left faces in three shades of its colour. kind palette writes the palette as a 256x1 PNG (pixel x is slot x + 1, the image MagicaVoxel loads as a palette) and, beside it with the same name, as .hex text (255 rrggbb lines, slot 1 first). path is where (relative to the root, ending in .obj for obj and .png for slices, sprite and palette), by default beside the scene: <scene>.obj, <scene>-slices.png, <scene>-sprite.png or <scene>-palette.png; an earlier file there is replaced. selection true exports only the selected voxels for these three kinds (select first), by default as <scene>-selection.obj, <scene>-selection-slices.png or <scene>-selection-sprite.png. kind render, the path-traced picture, kind turntable, a path-traced picture per frame of one turn, and kind embed, the folder for a web page with its path-traced poster, are made on the GPU by the vxr window: open the file in vxr and use vxr mcp --live for them, or look for a quick picture.",
+            "Export the open scene (the model being edited, or every shown object of a world) as files under the root, as the Export menu does. kind obj writes <name>.obj with its <name>.mtl and 256x1 palette texture <name>.png; kind slices writes every layer of the model's bounds side by side, the bottom on the left, as one PNG; kind sprite writes the isometric sprite, one PNG of pixel art on a transparent background seen from the front-right-top corner, each voxel 4 pixels wide (2 pixels across for 1 down) and the top, right and left faces in three shades of its colour. kind palette writes the palette as a 256x1 PNG (pixel x is slot x + 1, the image MagicaVoxel loads as a palette) and, beside it with the same name, as .hex text (255 rrggbb lines, slot 1 first). path is where (relative to the root, ending in .obj for obj and .png for slices, sprite and palette), by default beside the scene: <scene>.obj, <scene>-slices.png, <scene>-sprite.png or <scene>-palette.png. A file this session exported earlier is replaced; any other file already there (the user's own image or texture of that name, say) stops the export with nothing written, unless overwrite is true. selection true exports only the selected voxels for these three kinds (select first), by default as <scene>-selection.obj, <scene>-selection-slices.png or <scene>-selection-sprite.png. kind render, the path-traced picture, kind turntable, a path-traced picture per frame of one turn, and kind embed, the folder for a web page with its path-traced poster, are made on the GPU by the vxr window: open the file in vxr and use vxr mcp --live for them, or look for a quick picture.",
             Some(json!({"type": "string", "description": "where to write, relative to the root folder, without .."})),
         ),
         (
@@ -108,6 +108,7 @@ pub(crate) fn export_tool(description: &str, path: Option<Value>) -> (&'static s
     props["selection"] = json!({"type": "boolean", "description": "true: export only the selected voxels (select them first), as a model of their own, for kind obj, slices and sprite. The slices and the sprite take the selection's own box, the OBJ is centred on the selection, and the files get -selection in their names. Refused when nothing is selected. Default false: everything the view shows"});
     if let Some(p) = path {
         props["path"] = p;
+        props["overwrite"] = json!({"type": "boolean", "description": "true: replace files already at the path that this session did not export (for obj that is the .obj, its .mtl and its .png). Default false: the export stops and names them"});
     }
     (
         "export",
@@ -214,6 +215,9 @@ pub struct Files {
     open: Option<Open>,
     /// Files already copied to `<name>.vox.bak` in this session.
     backed_up: HashSet<PathBuf>,
+    /// The files this session's exports wrote: an export may replace them again without
+    /// being told to, and no other file.
+    exported: HashSet<PathBuf>,
     /// Each file's bytes (a hash) as this session last read or wrote them, so a save over
     /// any of them, not only the open one, can tell whether another program changed it.
     known: HashMap<PathBuf, u64>,
@@ -237,7 +241,7 @@ type R = Result<String, String>;
 
 impl Files {
     pub fn new(root: PathBuf) -> Files {
-        Files { root, open: None, backed_up: HashSet::new(), known: HashMap::new() }
+        Files { root, open: None, backed_up: HashSet::new(), exported: HashSet::new(), known: HashMap::new() }
     }
 
     pub fn call(&mut self, name: &str, args: &Value) -> R {
@@ -518,10 +522,37 @@ impl Files {
             return Err("not exported: the folder is outside the root".into());
         }
         let shown_dir = Path::new(&rel).parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+        let shown = |name: &str| clean(Path::new(&shown_dir).join(name).to_string_lossy().as_bytes());
+        // A file that was there before this session exported it is the user's (a texture or a
+        // reference image named like the scene, say): it is replaced only when asked.
+        let overwrite = match args.get("overwrite") {
+            None | Some(Value::Null) => false,
+            Some(v) => v.as_bool().ok_or("overwrite: true or false")?,
+        };
+        if !overwrite {
+            let names = files.iter().map(|f| f.0.as_str()).filter(|n| !self.exported.contains(&dir.join(n)));
+            let taken = vxr_core::files::in_the_way(&dir, names);
+            if !taken.is_empty() {
+                let list: Vec<String> = taken.iter().map(|n| shown(n)).collect();
+                return Err(format!(
+                    "not exported: {} already there and this session did not write {}; nothing was written. \
+                     Give another path, or pass overwrite: true to replace {}",
+                    match list.as_slice() {
+                        [one] => format!("{one} is"),
+                        many => format!("{} are", many.join(", ")),
+                    },
+                    if list.len() == 1 { "it" } else { "them" },
+                    if list.len() == 1 { "it" } else { "them" },
+                ));
+            }
+        }
         let mut written = Vec::new();
         for (name, bytes) in &files {
-            write_new(&dir.join(name), bytes)?;
-            written.push(clean(Path::new(&shown_dir).join(name).to_string_lossy().as_bytes()));
+            let to = dir.join(name);
+            // Each file whole or not at all: an export that fails midway leaves no half file.
+            vxr_core::files::save_atomic(&to, bytes).map_err(|e| format!("{}: {e}", clean(name.as_bytes())))?;
+            self.exported.insert(to);
+            written.push(shown(name));
         }
         Ok(json!({"exported": written, "what": what}).to_string())
     }

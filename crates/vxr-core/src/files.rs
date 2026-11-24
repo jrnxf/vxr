@@ -505,6 +505,13 @@ pub fn save_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+/// The names among `names` that something in `dir` already has: what writing them all would
+/// replace. An export writes a set of files (an `.obj` with its `.mtl` and texture), and the
+/// user named or confirmed at most one of them, so the rest are asked about first.
+pub fn in_the_way<'a>(dir: &Path, names: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    names.into_iter().filter(|n| std::fs::symlink_metadata(dir.join(n)).is_ok()).map(str::to_string).collect()
+}
+
 /// Write `bytes` to a new file at `path`, flushed to disk. An earlier regular file there is
 /// replaced; anything else (a symlink, a folder) is refused, so the write cannot be sent
 /// elsewhere.
