@@ -139,6 +139,51 @@ jobs:
           cargo run --release -p vxr-app -- --shot "$RUNNER_TEMP/shots" prototype/demo/scene.vox | tee "$RUNNER_TEMP/shot.log"
           echo "$(grep -c '^ok' "$RUNNER_TEMP/shot.log") steps ok"
 
+  # The embed viewer in headless Chrome (crates/vxr-embed/check). The runner has no GPU, so Chrome
+  # draws WebGPU with SwiftShader, its software Vulkan. The wasm tools come pinned from the
+  # Workers build script, as release.yml takes them.
+  embed:
+    name: Embed check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      AXI: 0.1.46
+      VXR_TOOLS: path
+      VXR_CHECK_CHROME_ARGS: --enable-unsafe-webgpu --ignore-gpu-blocklist --enable-features=Vulkan --use-angle=swiftshader --use-webgpu-adapter=swiftshader --no-sandbox
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: target
+          key: cargo-embed-${{ runner.os }}-${{ env.RUST }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-embed-${{ runner.os }}-${{ env.RUST }}-
+
+      - name: Build the embed viewer
+        run: |
+          eval "$(crates/vxr-web/cloudflare-build --tools)"
+          crates/vxr-embed/build
+
+      - name: Install the browser driver
+        run: |
+          npm install --global "chrome-devtools-axi@$AXI"
+          google-chrome --version
+
+      - name: Run the embed check
+        run: |
+          eval "$(crates/vxr-web/cloudflare-build --tools)"
+          crates/vxr-embed/check
+
+      - name: Keep the screenshots
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: embed-shots
+          path: crates/vxr-embed/shots
+          if-no-files-found: ignore
+
   # The Worker behind /api/* and /account, the account page and the landing page (site/): types, oxlint, oxfmt, and the tests in workerd
   # with local D1 and R2 (no test calls Turnstile or Resend). NODE matches the NODE_VERSION build
   # variable of Workers Builds.
