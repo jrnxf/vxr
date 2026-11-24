@@ -58,7 +58,9 @@ trap cleanup EXIT
 for _ in $(seq 50); do curl -sf "$url" >/dev/null && break; sleep 0.1; done
 
 # eval prints the returned string JSON-quoted twice; unwrap it to plain lines.
-unwrap() { sed -n 's/^result: //p' | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{let v=JSON.parse(s);while(typeof v==='string'&&v.startsWith('\"'))v=JSON.parse(v);console.log(v)})"; }
+# A stage that threw has no result: its error becomes one FAIL line, so the stages after it
+# still run and every result is printed.
+unwrap() { node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const m=s.match(/^result: (.*)$/m);if(!m){console.log('FAIL a stage threw: '+s.replace(/\s+/g,' ').slice(0,400));return}let v=JSON.parse(m[1]);while(typeof v==='string'&&v.startsWith('\"'))v=JSON.parse(v);console.log(v)})"; }
 
 export CHROME_DEVTOOLS_AXI_SESSION=$gpu
 export CHROME_DEVTOOLS_AXI_CHROME_ARGS='--enable-unsafe-webgpu --ignore-gpu-blocklist'
@@ -402,6 +404,13 @@ else
     --var "BETTER_AUTH_SECRET:$(openssl rand -hex 32)" --var TURNSTILE_SECRET_KEY:1x0000000000000000000000000000000AA \
     --var EMAIL_SENDER:log) >>"$wlog" 2>&1 &
   worker=$!
+  # A Worker that does not start (a bad export, a bad binding) is one clear failure here, with
+  # the runtime's own words, and not a silent exit at the first page that will not open.
+  for _ in $(seq 100); do curl -sf -o /dev/null "${aurl}api/me" && break; sleep 0.2; done
+  if ! curl -sf -o /dev/null "${aurl}api/me"; then
+    echo "FAIL the Worker starts under wrangler dev: $(grep -m1 -i 'error' "$wlog" | cut -c1-300)"
+    exit 1
+  fi
   for _ in $(seq 300); do curl -sf "${aurl}api/me" >/dev/null && break; sleep 0.1; done
   account() { axi eval --full "async () => ($(cat "$here/check-account.js"))('$1', '${2:-}')" | unwrap; }
   # Wait for the nth email in the wrangler log.
