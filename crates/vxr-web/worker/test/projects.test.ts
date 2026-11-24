@@ -1,7 +1,7 @@
 import { env } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
 
-import { LIMITS, projects } from '../projects';
+import { KEEP_VERSIONS, LIMITS, MIN_CHARGE, projects } from '../projects';
 import { voxProblem } from '../vox';
 import { type Client, png, vox, World } from './helpers';
 
@@ -33,7 +33,8 @@ describe('projects', () => {
 
     const list = await a.json('/api/projects');
     expect(list.body.projects).toMatchObject([{ id: 'p1', name: 'Island', version: v1, size: first.length, device: 'dev-a' }]);
-    expect(list.body.usage).toBe(first.length);
+    // A file this small counts as the least a project costs.
+    expect(list.body.usage).toBe(MIN_CHARGE);
 
     const read = await a.fetch('/api/projects/p1');
     expect(read.headers.get('x-vxr-version')).toBe(v1);
@@ -47,9 +48,51 @@ describe('projects', () => {
     expect(v2).not.toBe(v1);
     expect(await bytes(await a.fetch('/api/projects/p1'))).toEqual(second);
     expect((await a.json('/api/projects')).body.projects).toHaveLength(1);
-    // The old version's bytes are gone from R2.
-    const kept = await env.PROJECTS.list({ prefix: `${(await a.me()).user.id}/p1/` });
-    expect(kept.objects.map((o: R2Object) => o.key)).toEqual([`${(await a.me()).user.id}/p1/${v2}.vox`]);
+    // The version before stays in R2 as a backup, and only the newest is served.
+    const user = (await a.me()).user.id;
+    const stored = async () => (await env.PROJECTS.list({ prefix: `${user}/p1/` })).objects.map((o: R2Object) => o.key).toSorted();
+    expect(await stored()).toEqual([`${user}/p1/${v1}.vox`, `${user}/p1/${v2}.vox`].toSorted());
+    // Only the KEEP_VERSIONS newest stay: more saves drop the oldest.
+    let v = v2;
+    const versions = [v1, v2];
+    for (let i = 0; i < KEEP_VERSIONS; i++) {
+      // R2 orders versions by upload time, to the millisecond.
+      await new Promise((r) => setTimeout(r, 5));
+      v = (await a.put('p1', vox(6 + i), v)).body.project.version;
+      versions.push(v);
+    }
+    expect(await stored()).toEqual(
+      versions
+        .slice(-KEEP_VERSIONS)
+        .map((x) => `${user}/p1/${x}.vox`)
+        .toSorted(),
+    );
+    // The versions kept as a backup do not count toward the account limit.
+    expect((await a.json('/api/projects')).body.usage).toBe(MIN_CHARGE);
+  });
+
+  it('counts each project as 4 KB at least, and keeps at most the limit of projects', async () => {
+    const a = await signedIn(new World({ account: 3 * MIN_CHARGE, projects: 5 }));
+    // Three tiny files fill an account of three minimum charges.
+    for (const id of ['p1', 'p2', 'p3']) expect((await a.put(id, vox(), null)).status).toBe(201);
+    const over = await a.put('p4', vox(), null);
+    expect(over.status).toBe(413);
+    expect(over.body).toMatchObject({ error: 'quota', limit: 3 * MIN_CHARGE, usage: 3 * MIN_CHARGE });
+    expect((await a.me()).usage).toBe(3 * MIN_CHARGE);
+
+    const b = await signedIn(new World({ projects: 2 }));
+    const v = (await b.put('p1', vox(), null)).body.project.version;
+    expect((await b.put('p2', vox(), null)).status).toBe(201);
+    const third = await b.put('p3', vox(), null);
+    expect(third.status).toBe(413);
+    expect(third.body).toMatchObject({ error: 'too_many_projects', limit: 2 });
+    // A save over a project the account has still works, and a conflicted copy is one more project.
+    expect((await b.put('p1', vox(2), v)).status).toBe(200);
+    const copy = await b.put('p1', vox(3), v);
+    expect(copy.status).toBe(413);
+    expect(copy.body).toMatchObject({ error: 'too_many_projects', limit: 2 });
+    expect((await b.json('/api/projects')).body.projects).toHaveLength(2);
+    expect((await b.me()).limits).toMatchObject({ projects: 2 });
   });
 
   it('needs a precondition to save', async () => {
@@ -137,16 +180,16 @@ describe('projects', () => {
   });
 
   it('refuses a save over the account limit, counting the file it replaces', async () => {
-    const a = await signedIn(new World({ account: 3_000, file: 2_000 }));
-    const v = (await a.put('p1', vox(1, 1_500), null)).body.project.version;
-    const over = await a.put('p2', vox(1, 1_500), null);
+    const a = await signedIn(new World({ account: 10_000, file: 8_000 }));
+    const v = (await a.put('p1', vox(1, 5_500), null)).body.project.version;
+    const over = await a.put('p2', vox(1, 5_500), null);
     expect(over.status).toBe(413);
-    expect(over.body).toMatchObject({ error: 'quota', limit: 3_000 });
+    expect(over.body).toMatchObject({ error: 'quota', limit: 10_000 });
     // Replacing p1 with a file of the same size fits.
-    expect((await a.put('p1', vox(1, 1_400), v)).status).toBe(200);
+    expect((await a.put('p1', vox(1, 5_400), v)).status).toBe(200);
     expect((await a.json('/api/projects')).body.projects).toHaveLength(1);
     // A conflict copy counts too.
-    const copy = await a.put('p1', vox(2, 1_500), v);
+    const copy = await a.put('p1', vox(2, 5_500), v);
     expect(copy.status).toBe(413);
   });
 
@@ -177,7 +220,7 @@ describe('projects', () => {
     expect((await a.fetch('/api/projects/p1/thumb', { method: 'PUT', body: png(160) })).status).toBe(204);
     const list = (await a.json('/api/projects')).body;
     expect(list.projects[0].thumb).toBe(true);
-    expect(list.usage).toBe(vox(1).length + png(160).length);
+    expect(list.usage).toBe(MIN_CHARGE + png(160).length);
     expect(await bytes(await a.fetch('/api/projects/p1/thumb'))).toEqual(png(160));
     expect((await a.fetch('/api/projects/p1/thumb', { method: 'PUT', body: vox(1) })).status).toBe(400);
     expect((await a.fetch('/api/projects/p1/thumb', { method: 'PUT', body: png(4096) })).status).toBe(400);

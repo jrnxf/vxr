@@ -3,9 +3,9 @@
 import { env } from 'cloudflare:workers';
 
 import { type Deps, type Env, handle } from '../index';
+import { LIMITS, type Limits } from '../projects';
 
 import type { Mail } from '../mail';
-import type { Limits } from '../projects';
 
 export const ORIGIN = 'https://vxr.test';
 /** The Turnstile token the replaced check accepts. */
@@ -16,11 +16,12 @@ export class World {
   deps: Deps;
   /** The bindings each request gets: a test swaps one to break it for a request. */
   env: Env = env;
-  constructor(limits?: Limits) {
+  constructor(limits?: Partial<Limits>, mailPerDay?: number) {
     this.deps = {
       mailer: () => ({ send: async (m) => void this.mail.push(m) }),
       verify: () => async (token) => token === PASS,
-      limits,
+      limits: limits && { ...LIMITS, ...limits },
+      mailPerDay,
     };
   }
   client(ip = '192.0.2.10') {

@@ -2,7 +2,7 @@ import { env } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
 
 import { OTP_OFF } from '../auth';
-import { APP_MAIL_PER_HOUR, handle, HSTS, MAIL_PER_HOUR } from '../index';
+import { APP_MAIL_PER_HOUR, handle, HSTS, ipKey, MAIL_PER_HOUR, mailKey } from '../index';
 import { FROM, mailerFor, resendMailer, signInMail } from '../mail';
 import { TEST_SECRET, turnstile } from '../turnstile';
 import { ORIGIN, vox, World } from './helpers';
@@ -288,6 +288,75 @@ describe('sign-in', () => {
     expect(refreshed.status).toBe(200);
     expect(refreshed.headers.getSetCookie().join('\n')).toMatch(/session_token/);
     expect(refreshed.headers.get('set-auth-token')).toBeNull();
+  });
+
+  it('counts an IPv6 host by its /64 and an address without its +tag', async () => {
+    expect(ipKey('192.0.2.7')).toBe('192.0.2.7');
+    expect(ipKey('2001:db8:12:3400:aaaa:bbbb:cccc:dddd')).toBe('2001:db8:12:3400::/64');
+    expect(ipKey('2001:DB8:12:3400::1')).toBe('2001:db8:12:3400::/64');
+    expect(ipKey('2001:db8::1')).toBe('2001:db8:0:0::/64');
+    expect(ipKey('::ffff:192.0.2.7')).toBe('192.0.2.7');
+    expect(mailKey('ada+one@example.com')).toBe('ada@example.com');
+    expect(mailKey('ada@example.com')).toBe('ada@example.com');
+
+    // One host with a whole /64 is one sender for the app's per-IP limit.
+    const w = new World();
+    let sent = 0;
+    for (let i = 0; i < APP_MAIL_PER_HOUR.ip + 2; i++)
+      if ((await w.app(`2001:db8:77:1:${i + 1}::${i + 9}`).askCode(`v6-${i}@example.com`)).status === 200) sent++;
+    expect(sent).toBe(APP_MAIL_PER_HOUR.ip);
+    // Its neighbour in another /64 is not held back.
+    expect((await w.app('2001:db8:77:2::1').askCode('v6-other@example.com')).status).toBe(200);
+
+    // The +tag does not make a new address for the per-address limit; the mail goes where it was sent.
+    const tags = new World();
+    let tagged = 0;
+    for (let i = 0; i < MAIL_PER_HOUR.email + 2; i++)
+      if ((await tags.client(`198.51.100.${200 + i}`).askLink(`tess+${i}@example.com`)).status === 200) tagged++;
+    expect(tagged).toBe(MAIL_PER_HOUR.email);
+    expect(tags.mail.at(-1)?.to).toBe(`tess+${MAIL_PER_HOUR.email - 1}@example.com`);
+  });
+
+  it('stops every sign-in email at the daily cap', async () => {
+    const before = (await env.DB.prepare('select count(*) as n from mail_log').first<{ n: number }>())?.n ?? 0;
+    const w = new World(undefined, before + 1);
+    expect((await w.client('203.0.113.1').askLink('cap1@example.com')).status).toBe(200);
+    const web = await w.client('203.0.113.2').askLink('cap2@example.com');
+    expect(web.status).toBe(503);
+    expect(await web.json()).toEqual({ error: 'mail_cap' });
+    expect((await w.app('203.0.113.3').askCode('cap3@example.com')).status).toBe(503);
+    expect(w.mail).toHaveLength(1);
+  });
+
+  it('keeps the session token out of every web answer body, and takes no profile changes', async () => {
+    const w = new World();
+    const a = w.client('192.0.2.73');
+    const signIn = await a.codeSignIn('uma@example.com');
+    expect(signIn.status).toBe(200);
+    const body = (await signIn.json()) as { token?: unknown; user?: { email: string } };
+    expect(body.user?.email).toBe('uma@example.com');
+    expect('token' in body).toBe(false);
+    const session = (await a.json('/api/auth/get-session')).body;
+    expect(session.user.email).toBe('uma@example.com');
+    expect(session.session.id).toBeTruthy();
+    expect('token' in session.session).toBe(false);
+    // The app still gets its token from its own code sign-in.
+    const app = w.app('192.0.2.74');
+    await app.codeSignIn('uma@example.com');
+    expect(app.token).toMatch(/\./);
+
+    const changed = await a.fetch('/api/auth/update-user', {
+      method: 'POST',
+      json: { name: 'x'.repeat(100_000), image: 'y'.repeat(100_000) },
+    });
+    expect(changed.status).toBe(404);
+    expect((await a.me()).user.name).not.toMatch(/^x/);
+  });
+
+  it('sends a sign-in link with no token to the account page', async () => {
+    const res = await new World().client().fetch('/api/auth/magic-link/verify');
+    expect(res.status).toBe(302);
+    expect(res.headers.get('location')).toBe(`${ORIGIN}/account?link=expired`);
   });
 
   it('refuses the app path from a browser, which always sends Origin', async () => {

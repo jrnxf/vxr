@@ -28,6 +28,8 @@ export function reason(err: Problem | null): string {
       return "The check did not pass. Try again."
     case "too_many_links":
       return "Too many sign-in links asked for. Try again in an hour."
+    case "mail_cap":
+      return "Sign-in emails are paused for today. Try again tomorrow."
     case "email_off":
     case "sign_up_off":
     case "sign_in_off":
