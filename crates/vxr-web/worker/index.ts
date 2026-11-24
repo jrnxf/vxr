@@ -32,6 +32,8 @@ export interface Deps {
   mailer?: (env: Env, url: URL) => Mailer | null;
   verify?: (env: Env) => Verify | null;
   limits?: Limits;
+  /** In place of MAIL_PER_DAY. */
+  mailPerDay?: number;
 }
 
 /** Sign-in emails one address, and one IP, may ask for in an hour. */
@@ -42,6 +44,39 @@ export const MAIL_PER_HOUR = { email: 5, ip: 20 };
  * all app requests together have a ceiling, which caps what a script posing as the app can send.
  */
 export const APP_MAIL_PER_HOUR = { ip: 5, all: 200 };
+
+/**
+ * Every sign-in email of a day, for all addresses together. Past it no email goes out (it fails
+ * closed) and the Worker logs an error, so a flood cannot spend the sender's quota or its good
+ * name on mail to strangers.
+ */
+const MAIL_PER_DAY = 1000;
+
+/** The address the email limits count: without its +tag, so `a+1@x` and `a+2@x` are one. */
+export function mailKey(email: string): string {
+  const at = email.lastIndexOf('@');
+  const plus = email.indexOf('+');
+  return plus > 0 && plus < at ? email.slice(0, plus) + email.slice(at) : email;
+}
+
+/**
+ * The IP the email limits count. An IPv6 host is given a whole /64 (often a /56), so its
+ * addresses count as one by their first 64 bits; an IPv4 address counts as it is.
+ */
+export function ipKey(address: string): string {
+  if (!address.includes(':')) return address;
+  const [head, tail] = address.toLowerCase().split('::');
+  const first = head ? head.split(':') : [];
+  const last = tail ? tail.split(':') : [];
+  // An IPv4 address written as IPv6 (::ffff:192.0.2.1).
+  const mapped = (last.at(-1) ?? first.at(-1) ?? '').includes('.');
+  if (mapped) return (last.at(-1) ?? first.at(-1))!;
+  const groups = tail === undefined ? first : [...first, ...Array<string>(Math.max(0, 8 - first.length - last.length)).fill('0'), ...last];
+  return `${groups
+    .slice(0, 4)
+    .map((g) => (parseInt(g, 16) || 0).toString(16))
+    .join(':')}::/64`;
+}
 
 // The account page's policy: Turnstile's script and frame, and otherwise only this site.
 const ACCOUNT_CSP = [
@@ -109,32 +144,56 @@ async function emailLink(req: Request, env: Env, url: URL, deps: Deps): Promise<
   if (!email) return problem(400, 'bad_email');
   const now = Date.now();
   const hour = now - 3600_000;
-  const from = ip(req) ?? '';
-  const [byEmail, byIp, byAppIp, byApp] = await env.DB.batch<{ n: number }>([
-    env.DB.prepare('select count(*) as n from mail_log where email = ? and at > ?').bind(email, hour),
+  const from = ipKey(ip(req) ?? '');
+  const key = mailKey(email);
+  const [byEmail, byIp, byAppIp, byApp, byDay] = await env.DB.batch<{ n: number }>([
+    env.DB.prepare('select count(*) as n from mail_log where email = ? and at > ?').bind(key, hour),
     env.DB.prepare('select count(*) as n from mail_log where ip = ? and at > ?').bind(from, hour),
     env.DB.prepare('select count(*) as n from mail_log where ip = ? and app = 1 and at > ?').bind(from, hour),
     env.DB.prepare('select count(*) as n from mail_log where app = 1 and at > ?').bind(hour),
+    env.DB.prepare('select count(*) as n from mail_log where at > ?').bind(now - 86400_000),
   ]);
+  if (count(byDay) >= (deps.mailPerDay ?? MAIL_PER_DAY)) {
+    console.error('vxr worker: the daily cap on sign-in emails is reached, no email goes out');
+    return problem(503, 'mail_cap');
+  }
   if (count(byEmail) >= MAIL_PER_HOUR.email) return problem(429, 'too_many_links');
   if (from && count(byIp) >= MAIL_PER_HOUR.ip) return problem(429, 'too_many_links');
   if (app && (!from || count(byAppIp) >= APP_MAIL_PER_HOUR.ip)) return problem(429, 'too_many_links');
   if (app && count(byApp) >= APP_MAIL_PER_HOUR.all) return problem(429, 'too_many_links');
   await env.DB.batch([
-    env.DB.prepare('insert into mail_log (email, ip, at, app) values (?, ?, ?, ?)').bind(email, from, now, app ? 1 : 0),
+    env.DB.prepare('insert into mail_log (email, ip, at, app) values (?, ?, ?, ?)').bind(key, from, now, app ? 1 : 0),
     env.DB.prepare('delete from mail_log where at < ?').bind(now - 86400_000),
   ]);
   return null;
 }
 
 /**
- * The response without the bearer plugin's `set-auth-token`: the session token is for the app's
- * code sign-in only, and on the web it stays in its httpOnly cookie, out of reach of the page's
- * scripts.
+ * The response without the session token: not in the bearer plugin's `set-auth-token` header and
+ * not in a JSON body (`token` of a sign-in, `session.token` of get-session). The token is for the
+ * app's code sign-in only, and on the web it stays in its httpOnly cookie, out of reach of the
+ * page's scripts.
  */
-function withoutToken(res: Response): Response {
-  if (!res.headers.has('set-auth-token')) return res;
-  const out = new Response(res.body, res);
+async function withoutToken(res: Response): Promise<Response> {
+  let out = new Response(res.body, res);
+  if ((out.headers.get('content-type') ?? '').includes('application/json')) {
+    const text = await out.text();
+    let body: unknown = null;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      // Not JSON after all: it goes out as it came.
+    }
+    const top = body as { token?: unknown; session?: { token?: unknown } | null } | null;
+    const holds = top !== null && typeof top === 'object' && ('token' in top || (top.session != null && 'token' in top.session));
+    if (holds) {
+      delete top.token;
+      if (top.session) delete top.session.token;
+    }
+    out.headers.delete('content-length');
+    out = new Response(holds ? JSON.stringify(top) : text, out);
+  }
+  if (!out.headers.has('set-auth-token')) return out;
   out.headers.delete('set-auth-token');
   const exposed = (out.headers.get('access-control-expose-headers') ?? '')
     .split(',')
@@ -187,6 +246,9 @@ async function route(req: Request, env: Env, deps: Deps): Promise<Response> {
       const stop = await emailLink(req, env, url, deps);
       if (stop) return stop;
     }
+    // A sign-in link cut short in an email: the account page says what to do, not raw JSON.
+    if (req.method === 'GET' && path === '/api/auth/magic-link/verify' && !url.searchParams.get('token'))
+      return Response.redirect(new URL('/account?link=expired', url).href, 302);
     // The app reads its token only from its code sign-in; every other answer drops it.
     const keep = fromApp(req) && path === '/api/auth/sign-in/email-otp';
     return keep ? auth.handler(req) : withoutToken(await auth.handler(req));

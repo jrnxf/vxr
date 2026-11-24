@@ -10,8 +10,10 @@
 //
 // A save from a copy that is no longer the newest (someone saved it elsewhere since) never
 // overwrites: it is kept as a new project, "<name> (conflicted copy)", and answered with 409 and
-// both rows, so both copies stay. Limits are enforced here: 20 MB a file and 100 MB an account,
-// thumbnails included, and only .vox files (and PNG thumbnails) are kept.
+// both rows, so both copies stay. Limits are enforced here: 20 MB a file, 100 MB an account
+// (thumbnails included, and each project counting as 4 KB at least) and 1,000 projects an account,
+// and only .vox files (and PNG thumbnails) are kept. The two versions before the newest stay in
+// the bucket as a backup (`prune`); nothing serves them.
 import { thumbProblem, voxProblem } from './vox';
 
 export interface Limits {
@@ -19,9 +21,23 @@ export interface Limits {
   account: number;
   /** The largest file. */
   file: number;
+  /** The most projects one account keeps. */
+  projects: number;
 }
 
-export const LIMITS: Limits = { account: 100 * 1024 * 1024, file: 20 * 1024 * 1024 };
+export const LIMITS: Limits = { account: 100 * 1024 * 1024, file: 20 * 1024 * 1024, projects: 1000 };
+
+/**
+ * The least a project counts toward the account limit, in bytes: its row, its name and its R2
+ * object cost something however small the file, so tiny files cannot fill the database for free.
+ */
+export const MIN_CHARGE = 4096;
+const charge = (size: number) => Math.max(size, MIN_CHARGE);
+/** What an account uses, in SQL over its project rows: `charge` of each file plus its thumbnail. */
+const USED = `coalesce(sum(max(size, ${MIN_CHARGE}) + thumb), 0)`;
+
+/** The versions of a project's file kept in the bucket: the newest, and the two before it. */
+export const KEEP_VERSIONS = 3;
 
 export interface Store {
   DB: D1Database;
@@ -97,10 +113,7 @@ const thumbKey = (user: string, id: string) => `${user}/${id}/thumb.png`;
 
 /** The bytes the account keeps, files and thumbnails. */
 export async function usage(db: D1Database, user: string): Promise<number> {
-  const r = await db
-    .prepare('select coalesce(sum(size + thumb), 0) as used from project where user_id = ?')
-    .bind(user)
-    .first<{ used: number }>();
+  const r = await db.prepare(`select ${USED} as used from project where user_id = ?`).bind(user).first<{ used: number }>();
   return r?.used ?? 0;
 }
 
@@ -175,7 +188,7 @@ export async function projects(req: Request, env: Store, user: string, path: str
   if (id === undefined) {
     if (req.method !== 'GET') return problem(405, 'method');
     const { results } = await env.DB.prepare('select * from project where user_id = ? order by updated_at desc').bind(user).all<Row>();
-    const used = results.reduce((s, r) => s + r.size + r.thumb, 0);
+    const used = results.reduce((s, r) => s + charge(r.size) + r.thumb, 0);
     return json({ projects: results.map(show), usage: used, limits });
   }
   if (!ID.test(id)) return problem(400, 'bad_id');
@@ -237,17 +250,47 @@ async function save(req: Request, env: Store, user: string, id: string, limits: 
       ? env.DB.prepare(
           `update project set name = ?, version = ?, hash = ?, size = ?, device = ?, updated_at = ?
          where user_id = ? and id = ? and version = ?
-           and (select coalesce(sum(size + thumb), 0) from project where user_id = ?) - ? + ? <= ?`,
+           and (select ${USED} from project where user_id = ?) - ? + ? <= ?`,
         )
-          .bind(name, version, hash, bytes.length, device, now, user, id, base, user, current.size, bytes.length, limits.account)
+          .bind(
+            name,
+            version,
+            hash,
+            bytes.length,
+            device,
+            now,
+            user,
+            id,
+            base,
+            user,
+            charge(current.size),
+            charge(bytes.length),
+            limits.account,
+          )
           .run()
       : env.DB.prepare(
           `insert into project (user_id, id, name, version, hash, size, device, created_at, updated_at)
          select ?, ?, ?, ?, ?, ?, ?, ?, ?
-         where (select coalesce(sum(size + thumb), 0) from project where user_id = ?) + ? <= ?
+         where (select ${USED} from project where user_id = ?) + ? <= ?
+           and (select count(*) from project where user_id = ?) < ?
          on conflict do nothing`,
         )
-          .bind(user, id, name, version, hash, bytes.length, device, now, now, user, bytes.length, limits.account)
+          .bind(
+            user,
+            id,
+            name,
+            version,
+            hash,
+            bytes.length,
+            device,
+            now,
+            now,
+            user,
+            charge(bytes.length),
+            limits.account,
+            user,
+            limits.projects,
+          )
           .run(),
   );
   if (res.meta.changes !== 1) {
@@ -255,9 +298,9 @@ async function save(req: Request, env: Store, user: string, id: string, limits: 
     const now2 = await row(env.DB, user, id);
     const moved = create ? now2 !== null : now2?.version !== base;
     if (moved) return conflict(env, user, id, name, device, bytes, hash, now, now2, limits);
-    return problem(413, 'quota', { limit: limits.account, usage: await usage(env.DB, user) });
+    return full(env, user, limits);
   }
-  if (current) await env.PROJECTS.delete(voxKey(user, id, current.version));
+  if (current) await prune(env, user, id, version);
   const r = await row(env.DB, user, id);
   return saved(r!, current ? 200 : 201);
 }
@@ -273,6 +316,28 @@ async function kept<T>(env: Store, key: string, write: () => Promise<T>): Promis
     await env.PROJECTS.delete(key);
     throw e;
   }
+}
+
+/** Why a save found no room: the account has its most projects, or its bytes are used. */
+async function full(env: Store, user: string, limits: Limits, extra: Record<string, unknown> = {}): Promise<Response> {
+  const n = await env.DB.prepare('select count(*) as n from project where user_id = ?').bind(user).first<{ n: number }>();
+  if ((n?.n ?? 0) >= limits.projects) return problem(413, 'too_many_projects', { limit: limits.projects, ...extra });
+  return problem(413, 'quota', { limit: limits.account, usage: await usage(env.DB, user), ...extra });
+}
+
+/**
+ * Deletes the older versions of a project's file, all but the KEEP_VERSIONS newest: a bad save
+ * from a faulty client then never destroys the only copy the server has. The versions kept are
+ * not served and do not count toward the account limit; deleting the project or the account
+ * takes them too. `newest` is the version just saved, kept whatever the listing says.
+ */
+async function prune(env: Store, user: string, id: string, newest: string): Promise<void> {
+  const listed = await env.PROJECTS.list({ prefix: `${user}/${id}/` });
+  const old = listed.objects
+    .filter((o) => o.key.endsWith('.vox') && o.key !== voxKey(user, id, newest))
+    .toSorted((a, b) => b.uploaded.getTime() - a.uploaded.getTime())
+    .slice(KEEP_VERSIONS - 1);
+  if (old.length) await env.PROJECTS.delete(old.map((o) => o.key));
 }
 
 function saved(r: Row, status: number): Response {
@@ -300,14 +365,30 @@ async function conflict(
     env.DB.prepare(
       `insert into project (user_id, id, name, version, hash, size, device, created_at, updated_at)
        select ?, ?, ?, ?, ?, ?, ?, ?, ?
-       where (select coalesce(sum(size + thumb), 0) from project where user_id = ?) + ? <= ?`,
+       where (select ${USED} from project where user_id = ?) + ? <= ?
+         and (select count(*) from project where user_id = ?) < ?`,
     )
-      .bind(user, copy, conflictName(name), version, hash, bytes.length, device, now, now, user, bytes.length, limits.account)
+      .bind(
+        user,
+        copy,
+        conflictName(name),
+        version,
+        hash,
+        bytes.length,
+        device,
+        now,
+        now,
+        user,
+        charge(bytes.length),
+        limits.account,
+        user,
+        limits.projects,
+      )
       .run(),
   );
   if (res.meta.changes !== 1) {
     await env.PROJECTS.delete(key);
-    return problem(413, 'quota', { limit: limits.account, usage: await usage(env.DB, user), current: current && show(current) });
+    return full(env, user, limits, { current: current && show(current) });
   }
   const r = await row(env.DB, user, copy);
   return json({ error: 'conflict', id, copy: show(r!), current: current && show(current) }, 409);
@@ -345,7 +426,7 @@ async function thumb(req: Request, env: Store, user: string, id: string, limits:
   if (bad) return problem(400, 'not_png', { detail: bad });
   const res = await env.DB.prepare(
     `update project set thumb = ? where user_id = ? and id = ?
-       and (select coalesce(sum(size + thumb), 0) from project where user_id = ?) - thumb + ? <= ?`,
+       and (select ${USED} from project where user_id = ?) - thumb + ? <= ?`,
   )
     .bind(bytes.length, user, id, user, bytes.length, limits.account)
     .run();

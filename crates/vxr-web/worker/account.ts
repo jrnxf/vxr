@@ -4,9 +4,11 @@ import { problem, type Store } from './projects';
 //
 //   DELETE /api/account   body {"email": "<the account's email>"}, typed by the person to confirm
 //
-// It signs out (its answer carries the cookies that clear the session), deletes the user row,
-// which takes its sessions, sign-in records and project rows with it (`on delete cascade`), and
-// then every object under `<userId>/` in the projects bucket. Copies of scenes on the person's
+// It deletes every object under `<userId>/` in the projects bucket first, so a bucket that fails
+// stops the request with the account whole and the person can ask again. Then it signs out (its
+// answer carries the cookies that clear the session), deletes the user row, which takes its
+// sessions, sign-in records and project rows with it (`on delete cascade`), and clears the bucket
+// again for what a save put in the meantime. Copies of scenes on the person's
 // own devices stay. The sign-in email log keeps the address for up to a day, for the email
 // limits, and then drops it.
 import type { Auth } from './auth';
@@ -27,6 +29,7 @@ export async function deleteAccount(req: Request, env: Store, auth: Auth, user: 
     return problem(400, 'bad_body');
   }
   if (email !== user.email.toLowerCase()) return problem(400, 'confirm');
+  await clear(env.PROJECTS, `${user.id}/`);
   const out = await auth.api.signOut({ headers: req.headers, asResponse: true });
   await env.DB.batch([
     env.DB.prepare('delete from "user" where id = ?').bind(user.id),

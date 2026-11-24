@@ -79,6 +79,29 @@ describe('delete account', () => {
     expect(await keys(`${id}/`)).toHaveLength(1);
   });
 
+  it('keeps the account whole when the bucket fails, so the person can ask again', async () => {
+    const w = new World();
+    const { c, email, id } = await signedIn(w);
+    await c.put('p1', vox(), null);
+    // The bucket's listing fails for this request.
+    const broken = Object.create(env.PROJECTS) as R2Bucket;
+    broken.list = () => {
+      throw new Error('R2 is down');
+    };
+    w.env = { ...env, PROJECTS: broken };
+    const failed = await c.json('/api/account', { method: 'DELETE', json: { email } });
+    expect(failed).toMatchObject({ status: 500, body: { error: 'server' } });
+    w.env = env;
+    // Still signed in, with the account and its file: nothing is left with no owner.
+    expect((await c.me()).user.id).toBe(id);
+    expect((await c.json('/api/projects')).body.projects).toHaveLength(1);
+    expect(await keys(`${id}/`)).toHaveLength(1);
+    // The second ask deletes it all.
+    expect((await c.fetch('/api/account', { method: 'DELETE', json: { email } })).status).toBe(204);
+    expect(await keys(`${id}/`)).toEqual([]);
+    expect(await rows('select count(*) as n from "user" where id = ?', id)).toBe(0);
+  });
+
   it('works for the desktop app with its bearer token', async () => {
     const w = new World();
     const a: App = w.app(`192.0.2.${150 + ++accounts}`);

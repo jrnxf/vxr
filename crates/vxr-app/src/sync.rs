@@ -632,6 +632,11 @@ impl Library {
                                     used.unwrap_or_else(|| size(limit))
                                 )
                             }
+                            Some(("too_many_projects", limit, _)) => {
+                                format!(
+                                    "the library holds its most scenes ({limit}). Delete scenes from it to make room."
+                                )
+                            }
                             _ => "the library did not take it as a .vox file".into(),
                         };
                         events.push(Event::Toast(format!("Kept {name} on this device: {why}")));
@@ -853,6 +858,7 @@ fn auth_reason(reply: &Reply) -> String {
     match auth_code(reply).as_deref() {
         Some("challenge") => "The check did not pass. Try again.",
         Some("too_many_links") => "Too many sign-in emails asked for. Try again in an hour.",
+        Some("mail_cap") => "Sign-in emails are paused for today. Try again tomorrow.",
         Some("email_off" | "sign_up_off" | "sign_in_off") => "Sign-in is off here.",
         Some("bad_email" | "INVALID_EMAIL") => "That email address does not look right.",
         Some("INVALID_OTP") => "That code doesn't match. Check the newest email.",
@@ -1421,6 +1427,7 @@ mod tests {
         assert!(words(failed(400, r#"{"code":"OTP_EXPIRED"}"#)).contains("expired"));
         assert!(words(failed(403, r#"{"code":"TOO_MANY_ATTEMPTS"}"#)).contains("tried too often"));
         assert!(words(failed(429, r#"{"error":"too_many_links"}"#)).contains("in an hour"));
+        assert!(words(failed(503, r#"{"error":"mail_cap"}"#)).contains("paused for today"));
         assert!(words(failed(429, "")).contains("Wait a minute"));
         assert!(words(failed(0, "")).contains("connection"));
         assert!(words(failed(503, r#"{"error":"email_off"}"#)).contains("off here"));

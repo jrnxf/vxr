@@ -27,6 +27,10 @@
   "r2_buckets": [{ "binding": "PROJECTS", "bucket_name": "vxr-projects" }],
   "observability": { "enabled": true },
   "routes": [{ "pattern": "vxr.jrnxf.co", "custom_domain": true }],
+  // Production answers on its own domain only: no workers.dev address and no per-version preview
+  // address, either of which would serve production's secrets, database and bucket.
+  "workers_dev": false,
+  "preview_urls": false,
   // Branch builds (`--env preview`): a separate Worker, vxr-preview, on workers.dev only, with its
   // own database and bucket and its own secrets (none by default, so sign-in is off there).
   // README.md "Deploy" has how it was set up.
@@ -34,6 +38,7 @@
     "preview": {
       "routes": [],
       "workers_dev": true,
+      "preview_urls": true,
       "d1_databases": [
         {
           "binding": "DB",

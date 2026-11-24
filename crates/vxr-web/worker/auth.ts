@@ -31,6 +31,9 @@ export const OTP_OFF = [
   '/email-otp/change-email',
 ];
 
+/** The profile routes that stay off: vxr shows no name or picture, so nothing may store one. */
+export const PROFILE_OFF = ['/update-user'];
+
 /** Sends the sign-in email for `email` with its link (only the code for the app); null when there is no sender. */
 export type SendSignIn = ((email: string, link: string, app: boolean) => Promise<void>) | null;
 
@@ -54,7 +57,7 @@ export function authOptions(origin: string, secret: string, database: BetterAuth
     database,
     trustedOrigins: [origin],
     session: { expiresIn: 60 * 60 * 24 * 60, updateAge: 60 * 60 * 24 },
-    disabledPaths: OTP_OFF,
+    disabledPaths: [...OTP_OFF, ...PROFILE_OFF],
     advanced: {
       cookiePrefix: 'vxr',
       ipAddress: { ipAddressHeaders: ['cf-connecting-ip'] },
