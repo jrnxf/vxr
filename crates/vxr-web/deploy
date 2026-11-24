@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build the site, apply the D1 migrations and deploy it to Cloudflare (the Worker with its static
-# assets, see wrangler.jsonc), as Workers Builds does for every push to main (see the README).
+# assets, see wrangler.jsonc), as Workers Builds does for every push to main (see docs/deploy.md).
 # Deploy only from main; this is for deploying by hand. Log in once with `npx wrangler login`.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"

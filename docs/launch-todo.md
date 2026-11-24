@@ -34,8 +34,8 @@ Verify each point before acting on it.
 
 ### 8. Repo and docs a stranger can read
 
-- [ ] Rewrite `README.md` for a stranger: one sentence on what vxr is, a link to a screenshot or the site, install, short feature bullets, the agent and MCP story, links to `docs/`.
-- [ ] Add `CONTRIBUTING.md` that points at `AGENTS.md`.
+- [x] Rewrite `README.md` for a stranger: one sentence on what vxr is, a screenshot that links to the site, install, short feature bullets, the agent and MCP story, links to `docs/`. Deploy and Release moved to `docs/deploy.md` and `docs/release.md`.
+- [x] Add `CONTRIBUTING.md` that points at `AGENTS.md`, with `SECURITY.md` and a bug report template.
 - [ ] Bring `docs/controls.md`, `docs/checks.md` and the "What vxr has that MagicaVoxel does not" list up to date.
 - [ ] Move what the real crates still need out of `spikes/` and `prototype/` (for example the island generator in `prototype/src/build.mjs`), then list what is safe to delete.
 
@@ -45,7 +45,6 @@ Verify each point before acting on it.
 
 ## Release wiring
 
-- [ ] `release.yml` must run `crates/vxr-embed/build` before `crates/vxr-app/bundle`, and its Check step must assert that `Contents/Resources/embed` holds the three viewer files. Until then the Embed command of a released app says the build has no embed viewer.
 - [ ] Wire the Linux tarball into `release.yml` once it exists.
 
 ## Open owner decisions

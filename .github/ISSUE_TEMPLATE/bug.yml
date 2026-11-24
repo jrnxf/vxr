@@ -1,0 +1,61 @@
+name: Bug report
+description: Something in vxr does not work as it should.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you saw. A screenshot or a short recording helps.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to see it
+      placeholder: |
+        1. Open ...
+        2. Click ...
+    validations:
+      required: true
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where
+      options:
+        - The desktop app
+        - The browser editor (vxr.jrnxf.co)
+        - An embedded scene (<voxel-scene>)
+        - The command line or MCP (vxr mcp, vxr pair, vxr bridge)
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The output of `vxr --version`. For the browser editor, the date and time you used it.
+      placeholder: vxr 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: System
+      description: Your macOS version and Mac model, or your browser and its version.
+      placeholder: macOS 26.1, MacBook Air M3. Or Chrome 150 on Windows 11.
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU
+      description: On a Mac, Apple menu, About This Mac shows the chip. In Chrome, chrome://gpu shows it.
+    validations:
+      required: false
+  - type: textarea
+    id: file
+    attributes:
+      label: The file, if one is involved
+      description: Attach the `.vox` file if you can share it. Do not attach a file you do not want public.
+    validations:
+      required: false
