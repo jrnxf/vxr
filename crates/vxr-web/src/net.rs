@@ -70,6 +70,9 @@ async fn run(request: Request, s: &Rc<RefCell<Shared>>) -> Result<(), JsValue> {
     init.set_body(&JsValue::from_str(&request.body));
     init.set_signal(Some(&ctrl.signal()));
     init.set_referrer_policy(web_sys::ReferrerPolicy::NoReferrer);
+    // A redirect is an error, never followed: the key headers would go to a host the user
+    // did not name (the desktop client does the same, see `vxr-app`'s `net.rs`).
+    init.set_redirect(web_sys::RequestRedirect::Error);
     s.borrow_mut().abort = Some(ctrl);
     let url = request.url.clone();
     drop(request);

@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use egui::{Galley, ScrollArea, UiBuilder};
-use vxr_ai::net::{BROWSER_LIMIT, KeyPlace, browser_reachable};
+use vxr_ai::net::{BROWSER_LIMIT, KeyPlace, browser_reachable, clear_text_problem};
 use vxr_ai::provider::{COMPATIBLE_MODELS, Kind, MODELS, OPENROUTER, Settings};
 
 use super::*;
@@ -935,7 +935,14 @@ impl Hybrid {
             focus |= resp.has_focus();
             hits.push(("ai-base".into(), r));
             ui.add_space(6.0);
-            if chat.settings.browser && !st.base.trim().is_empty() && !browser_reachable(&st.base) {
+            // A URL that would send the key in clear text says so here, before anything is sent.
+            if let Some(why) = (!st.base.trim().is_empty()).then(|| clear_text_problem(&st.base)).flatten() {
+                let g = wrap(ui, &why, sans(11.5), th().mid, w, 4);
+                let (r, _) = ui.allocate_exact_size(vec2(w, g.size().y), Sense::hover());
+                ui.painter().galley(r.min, g, th().mid);
+                hits.push(("ai-base-clear-text".into(), r));
+                ui.add_space(6.0);
+            } else if chat.settings.browser && !st.base.trim().is_empty() && !browser_reachable(&st.base) {
                 let g = wrap(ui, BROWSER_LIMIT, sans(11.5), th().mid, w, 4);
                 let (r, _) = ui.allocate_exact_size(vec2(w, g.size().y), Sense::hover());
                 ui.painter().galley(r.min, g, th().mid);
@@ -1001,7 +1008,10 @@ impl Hybrid {
             KeyPlace::Browser => {
                 for (k, (title, note)) in [
                     ("This tab only", "The key is gone when this tab closes."),
-                    ("Remember in this browser", "Encrypted on this device, for the next visit."),
+                    (
+                        "Remember in this browser",
+                        "Stored in this browser for the next visit. Other sites cannot read it.",
+                    ),
                 ]
                 .into_iter()
                 .enumerate()

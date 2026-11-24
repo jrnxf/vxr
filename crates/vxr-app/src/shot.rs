@@ -8737,6 +8737,18 @@ fn assistant(dir: &Path) -> Result<(), String> {
     s.type_into("ai-base", "http://192.168.1.20:11434/v1")?;
     s.frames(2);
     check(!s.ed.ui.hits.contains_key("ai-base-limit"), "the desktop app reaches any compatible host".into())?;
+    check(
+        !s.ed.ui.hits.contains_key("ai-base-clear-text"),
+        "plain http to a server on this network needs no warning".into(),
+    )?;
+    s.type_into("ai-base", "http://example.com/v1")?;
+    s.frames(2);
+    check(
+        s.ed.ui.hits.contains_key("ai-base-clear-text"),
+        "plain http to a host on the internet says the key would go in clear text".into(),
+    )?;
+    s.type_into("ai-base", "http://192.168.1.20:11434/v1")?;
+    s.frames(2);
     s.ed.assistant.settings.browser = true;
     s.ed.assistant.version += 1;
     s.frames(2);

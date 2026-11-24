@@ -114,6 +114,61 @@ pub fn browser_reachable(url: &str) -> bool {
     host == "localhost" || host == "127.0.0.1"
 }
 
+/// Why a request must not go to `url`, or None when it may: it would carry the key and the
+/// scene in clear text. `https` is always fine. Plain `http` is fine only for a server on this
+/// computer or this network (Ollama, LM Studio): loopback, a private or link-local address, a
+/// `.local` or `.home.arpa` name, or a name with no dot.
+pub fn clear_text_problem(url: &str) -> Option<String> {
+    let o = origin(url);
+    if o.starts_with("https://") {
+        return None;
+    }
+    let Some(authority) = o.strip_prefix("http://") else {
+        return Some("The URL must start with https:// (or http:// for a server on this computer or network)".into());
+    };
+    let host = if let Some(v6) = authority.strip_prefix('[') {
+        v6.split(']').next().unwrap_or(v6)
+    } else {
+        match authority.rsplit_once(':') {
+            Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) => h,
+            _ => authority,
+        }
+    };
+    let local = match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
+        // Loopback, unique local (fc00::/7) and link-local (fe80::/10).
+        Ok(std::net::IpAddr::V6(ip)) => {
+            ip.is_loopback() || (ip.segments()[0] & 0xfe00) == 0xfc00 || (ip.segments()[0] & 0xffc0) == 0xfe80
+        }
+        Err(_) => {
+            !host.is_empty()
+                && (host == "localhost"
+                    || !host.contains('.')
+                    || host.ends_with(".local")
+                    || host.ends_with(".home.arpa"))
+        }
+    };
+    if local {
+        return None;
+    }
+    Some(format!(
+        "{host} is not on this computer or network, and http:// would send the key and the scene in clear text: use https://"
+    ))
+}
+
+/// A key as it is kept for the compatible endpoint: with the origin it was typed for, so it
+/// is only ever sent there. See [`key_for`].
+pub fn bind_key(base: &str, key: &str) -> String {
+    format!("{}\n{key}", origin(base))
+}
+
+/// The key in `kept` (made by [`bind_key`]) if it was typed for the origin of `base`. A key
+/// for another origin, or one kept before keys were bound, is not this endpoint's: None.
+pub fn key_for(base: &str, kept: &str) -> Option<String> {
+    let (o, key) = kept.split_once('\n')?;
+    (o == origin(base) && !key.is_empty()).then(|| key.to_string())
+}
+
 /// Keys in memory only.
 #[derive(Default)]
 pub struct MemoryKeys {
@@ -171,6 +226,56 @@ pub fn scrub(text: &str, key: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plain_http_is_only_for_this_computer_or_network() {
+        for ok in [
+            "https://openrouter.ai/api/v1",
+            "https://example.com/v1",
+            "http://localhost:11434/v1",
+            "http://127.0.0.1:1234/v1",
+            "http://[::1]:8080/v1",
+            "http://192.168.1.20:11434/v1",
+            "http://10.0.0.5/v1",
+            "http://172.16.4.2:8000/v1",
+            "http://169.254.10.1/v1",
+            "http://studio.local:1234/v1",
+            "http://gpu-box:8000/v1",
+            "http://[fd12:3456::1]:8000/v1",
+        ] {
+            assert_eq!(clear_text_problem(ok), None, "{ok}");
+        }
+        for bad in [
+            "http://openrouter.ai/api/v1",
+            "http://example.com/v1",
+            "http://8.8.8.8/v1",
+            "http://172.32.0.1/v1",
+            "http://user@example.com/v1",
+            "http://[2001:db8::1]/v1",
+            "ftp://localhost/v1",
+            "openrouter.ai/api/v1",
+            "",
+        ] {
+            assert!(clear_text_problem(bad).is_some(), "{bad}");
+        }
+        assert!(clear_text_problem("http://example.com/v1").unwrap().contains("clear text"));
+    }
+
+    #[test]
+    fn a_kept_key_is_only_for_the_origin_it_was_typed_for() {
+        let kept = bind_key("https://OpenRouter.ai/api/v1/", "sk-or-1");
+        assert_eq!(key_for("https://openrouter.ai/api/v1", &kept).as_deref(), Some("sk-or-1"));
+        assert_eq!(
+            key_for("https://openrouter.ai/other", &kept).as_deref(),
+            Some("sk-or-1"),
+            "the path is not the origin"
+        );
+        for other in ["https://example.com/v1", "http://openrouter.ai/api/v1", "https://openrouter.ai:8443/v1"] {
+            assert_eq!(key_for(other, &kept), None, "{other}");
+        }
+        // A key kept before keys were bound to an origin belongs to none.
+        assert_eq!(key_for("https://openrouter.ai/api/v1", "sk-or-legacy"), None);
+    }
 
     #[test]
     fn a_page_reaches_the_providers_and_local_servers_only() {

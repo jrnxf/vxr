@@ -1606,6 +1606,8 @@ async () => {
     step('picking the compatible endpoint keeps its settings open', ai().setup && !!at('ai-base') && !!at('ai-key'), JSON.stringify(ai()));
     await paste('ai-base', 'http://192.168.1.20:11434/v1');
     step('a host the browser cannot reach says so under the URL', !!at('ai-base-limit'));
+    await paste('ai-base', 'http://example.com/v1');
+    step('plain http to a host on the internet says the key would go in clear text', !!at('ai-base-clear-text') && !at('ai-base-limit'));
     await paste('ai-base', 'http://localhost:8080/v1');
     step('a local server on any port needs no line', !at('ai-base-limit'));
     await paste('ai-base', `${location.origin}/__fake/v1`);
