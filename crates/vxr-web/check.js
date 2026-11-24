@@ -1414,7 +1414,7 @@ async () => {
         // Hand the folder to the check's server, which serves it back as a plain host would:
         // crates/vxr-web/check opens its index.html next (check-embed.js).
         const kept = await Promise.all(Object.keys(files).map(async (n) => (await fetch('/__embed/' + n, { method: 'PUT', body: files[n] })).status));
-        step('the check keeps the folder to open its page', kept.length === 6 && kept.every((k) => k === 204), JSON.stringify(kept));
+        step('the check keeps the folder to open its page', kept.length === 7 && kept.every((k) => k === 204), JSON.stringify(kept));
         zipName = null;
         tags.length = 0;
         await key('k', cmd);
