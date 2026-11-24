@@ -7,6 +7,7 @@
 //   /api/account     deleting the account and everything it keeps (worker/account.ts)
 //   /account         the sign-in page (site/src/account/, built into dist/account.html)
 import { deleteAccount } from './account';
+import { HSTS } from './headers';
 import { type Auth, fromApp, makeAuth } from './auth';
 import { type Mailer, mailerFor } from './mail';
 import { LIMITS, type Limits, json, problem, projects, usage } from './projects';
@@ -49,7 +50,7 @@ export const APP_MAIL_PER_HOUR = { ip: 5, all: 200 };
  * closed) and the Worker logs an error, so a flood cannot spend the sender's quota or its good
  * name on mail to strangers.
  */
-export const MAIL_PER_DAY = 1000;
+const MAIL_PER_DAY = 1000;
 
 /** The address the email limits count: without its +tag, so `a+1@x` and `a+2@x` are one. */
 export function mailKey(email: string): string {
@@ -268,8 +269,6 @@ async function route(req: Request, env: Env, deps: Deps): Promise<Response> {
   return problem(404, 'not_found');
 }
 
-/** A year of HTTPS only, for every answer of the Worker (www/_headers says the same for the static files). */
-export const HSTS = 'max-age=31536000; includeSubDomains';
 
 /**
  * Answers one request. Anything thrown on the way is logged (Workers Logs keep it) and answered as
