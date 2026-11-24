@@ -629,6 +629,24 @@ fn phone(dir: &Path, load: &dyn Fn() -> Result<(Scene, String), String>) -> Resu
         )?;
         s.save_png(&dir.join(format!("app-3x-phone-{tag}.png")))?;
 
+        // With sign-in on, as the site has it, the account control joins the bar: the two
+        // islands of the top bar still stand apart, on every phone, upright and sideways.
+        s.ed.library.account = vxr_app::sync::Account::Out;
+        s.frames(3);
+        let hit = |n: &str| s.ed.ui.hits.get(n).copied();
+        let left = ["library", "scene-select"].iter().filter_map(|n| hit(n)).fold(f32::MIN, |m, r| m.max(r.right()));
+        let right = ["help", "theme", "ai-toggle", "keys", "account"]
+            .iter()
+            .filter_map(|n| hit(n))
+            .fold(f32::MAX, |m, r| m.min(r.left()));
+        check(
+            hit("account").is_some() && left + 4.0 <= right,
+            format!("{tag}: with the account control the top bar's two islands stand apart ({left} to {right})"),
+        )?;
+        s.save_png(&dir.join(format!("app-3x-phone-{tag}-account.png")))?;
+        s.ed.library.account = vxr_app::sync::Account::Off;
+        s.frames(3);
+
         // The assistant open: the dock stays reachable, so the colour button still opens the
         // palette over the assistant.
         s.ui_click("ai-toggle")?;

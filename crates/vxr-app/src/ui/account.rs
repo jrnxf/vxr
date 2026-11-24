@@ -471,6 +471,10 @@ impl Hybrid {
     /// signs in (and back).
     pub(super) fn account_chip_width(&self, ctx: &Context) -> f32 {
         let Some(a) = &self.account else { return 0.0 };
+        // Held upright, a phone shows "Sign in" as an icon the size of the avatar.
+        if self.narrow {
+            return 30.0;
+        }
         let t = ctx.animate_bool_with_time_and_easing(Id::unique("account-chip"), a.signed_in, 0.22, ease_out);
         let text = ctx.fonts_mut(|f| f.layout_no_wrap("Sign in".into(), sans_medium(13.0), th().text)).size().x;
         let out = 10.0 + text + 10.0;
@@ -496,6 +500,10 @@ impl Hybrid {
         soft(&p, 1.0 - t, 3.0 * t, |p, d| {
             let k = 1.0 - 0.04 * t;
             let color = if resp.hovered() || self.sign_in.open { th().text } else { th().muted };
+            if self.narrow {
+                p.text(r.center() + d, Align2::CENTER_CENTER, icon::USER, icon_font(16.0 * k), color);
+                return;
+            }
             let g = p.layout_no_wrap("Sign in".into(), sans_medium(13.0 * k), color);
             p.galley(pos2(r.left() + 10.0, r.center().y - g.size().y / 2.0) + d, g, color);
         });
