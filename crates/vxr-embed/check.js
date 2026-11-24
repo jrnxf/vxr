@@ -114,5 +114,28 @@ async (stage) => {
       && plain.shadowRoot.querySelector('img').complete);
     plain.scrollIntoView({ block: 'center' });
   }
+  if (stage === 'wide') {
+    // One element far wider than a GPU texture may be (5000 px at 2x is 10,000 pixels; the
+    // limit is 8192). It must still draw, in fewer pixels, and it must never take the other
+    // scenes on the page down with it.
+    scrollTo(0, 0);
+    await sleep(200);
+    const wide = document.createElement('voxel-scene');
+    wide.id = 'wide';
+    wide.setAttribute('src', 'world.vxrb');
+    wide.style.cssText = 'width:5000px;max-width:none;aspect-ratio:10/1';
+    a.before(wide);
+    step('a scene wider than a GPU texture still goes live', await until(() => live(wide) || wide.t.error), wide.t.error);
+    await sleep(300);
+    const side = Math.max(wide.canvas.width, wide.canvas.height);
+    step('its picture is drawn in fewer pixels, within the GPU limit', side <= 8192 && side >= 4096 && !wide.t.error, `${wide.canvas.width}x${wide.canvas.height} ${wide.t.error}`);
+    const s = wide.viewer ? scene(grab(wide)) : { share: 0, colours: 0 };
+    step('and shows lit voxels', s.share > 0.005 && s.colours >= 4, JSON.stringify(s));
+    a.scrollIntoView();
+    a.kick();
+    await sleep(300);
+    step('the other scenes on the page still draw', !!a.viewer && a.draw() === true && live(a) && !a.t.error, `${a.t.error}`);
+    wide.remove();
+  }
   return out.join('\n');
 }
