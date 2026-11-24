@@ -32,6 +32,13 @@ Five targets.
 ./dev --fuzz sh -c 'cd crates/vxr-core/fuzz && cargo fuzz run image_decode -- -max_total_time=600 -rss_limit_mb=2048'
 ```
 
+The short run of all five, which CI does on every pull request (it seeds the corpora first):
+
+```sh
+./dev --fuzz crates/vxr-core/fuzz/smoke        # 60 seconds each
+./dev --fuzz crates/vxr-core/fuzz/smoke 10     # or another number of seconds
+```
+
 A crash lands in `artifacts/<target>/`. Turn it into a test beside
 `crates/vxr-vox/tests/hostile.rs` (through `Scene::from_vox` in `crates/vxr-core/tests/`), or
 in `crates/vxr-core/tests/bricks.rs` for a brick scene file.

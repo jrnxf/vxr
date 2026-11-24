@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# A short run of every fuzz target: build all of them, seed the corpora, then run each for
+# a number of seconds (60 by default). It fails on the first build error or crash.
+#   ./dev --fuzz crates/vxr-core/fuzz/smoke [seconds]
+# CI runs it on every pull request, so a target that no longer compiles cannot stay unseen.
+# The long runs are in README.md.
+set -euo pipefail
+cd "$(dirname "$0")"
+seconds="${1:-60}"
+targets=(scene_from_vox bricks_decode embed_open palette_parse image_decode)
+
+listed="$(cargo fuzz list | sort | tr '\n' ' ')"
+wanted="$(printf '%s\n' "${targets[@]}" | sort | tr '\n' ' ')"
+[ "$listed" = "$wanted" ] || { echo "smoke runs [$wanted] but Cargo.toml has [$listed]: add the new target here" >&2; exit 1; }
+
+cargo fuzz build
+cargo run --quiet --example seed -- corpus/scene_from_vox
+cargo run --quiet --example seed -- --bricks corpus/bricks_decode
+mkdir -p corpus/embed_open
+
+for target in "${targets[@]}"; do
+  extra=()
+  # The embed opens both kinds of file, so it starts from both corpora.
+  [ "$target" != embed_open ] || extra=(corpus/embed_open corpus/scene_from_vox corpus/bricks_decode)
+  echo "== $target, $seconds s"
+  # The progress lines stay in the log; the run's own exit code is what fails the step.
+  log="$(mktemp)"
+  if ! cargo fuzz run "$target" ${extra[@]+"${extra[@]}"} -- -max_total_time="$seconds" -rss_limit_mb=2048 -print_final_stats=1 >"$log" 2>&1; then
+    tail -n 60 "$log" >&2
+    echo "FAIL $target" >&2
+    exit 1
+  fi
+  grep -E '^stat::(number_of_executed_units|new_units_added)' "$log" || { tail -n 20 "$log" >&2; echo "FAIL $target: no run statistics" >&2; exit 1; }
+  rm -f "$log"
+done
+echo "ok: ${#targets[@]} fuzz targets, $seconds s each"

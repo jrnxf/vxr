@@ -10,7 +10,7 @@ Verify each point before acting on it.
 
 - [ ] Remove or merge filler tests: the duplicated `a_missing_cli_says_how_to_add_by_hand` in `crates/vxr-app/src/pair.rs` and `setup.rs` (fold the near-identical code too), `neutral_keeps_the_shipped_tokens` and the default check in `theme.rs`, the easing-curve tests in `ui/account.rs`, the `send_budget` comparison in `courier.rs`, and the two one-literal wrappers in `crates/vxr-render/tests/render.rs`.
 - [ ] Loud skips: GPU tests without an adapter and island tests without the island must say they skipped. Keep CI's `VXR_REQUIRE_GPU=1` and add the same hard requirement for the island.
-- [ ] A floor on the `--shot` step count in CI: fail when the `ok` count drops below the last known count (1102 now; the browser check has 618).
+- [x] A floor on the `--shot` step count in CI: the UI checks job fails when the `ok` count drops below `SHOT_FLOOR` in `.github/workflows/ci.yml` (1101 on the Linux runner; a Mac prints 1102). Raise it in the pull request that adds steps. The browser check (618) has no floor until it runs in CI.
 - [ ] Direct tests, each proven by breaking the code: `line_cells`, `ball_cells` and `box_cells` in `crates/vxr-core/src/tools.rs` (property tests), `history.rs` (random edit, undo and redo against a model), `room_for` and `split_error` at the size limits, `world_blocks` at the 256 boundary, and `validate` and `set_layers` in `crates/vxr-vox/src/tree.rs` against hostile trees.
 - [ ] `unwrap` and `expect` on input from files, sockets or provider JSON: `crates/vxr-ai/src/chat.rs`, `crates/vxr-core/src/world.rs`, `scene.world().expect(...)` in `crates/vxr-ops/src/session.rs` and the readback in `crates/vxr-render/src/gpu.rs`. Return an error where outside input can reach it. Otherwise leave a one-line comment that says why it cannot.
 - [ ] A long fuzz run (about 20 minutes across cores) on the open path. Add each finding as a regression test.
@@ -18,7 +18,7 @@ Verify each point before acting on it.
 ### 5. CI covers what is checked by hand today
 
 - [ ] Run the browser checks (`crates/vxr-web/check`, `crates/vxr-embed/check`) in CI if headless Chrome with WebGPU runs on the runner. Otherwise write down what blocks it. They need wasm-bindgen-cli, binaryen and Chrome.
-- [ ] A fuzz smoke run of about a minute on the open path.
+- [x] A fuzz smoke run in CI: `crates/vxr-core/fuzz/smoke` builds all five targets and runs each for a minute (the Fuzz smoke job).
 
 ### 6. Platforms
 
