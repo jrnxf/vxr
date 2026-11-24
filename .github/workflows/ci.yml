@@ -140,8 +140,11 @@ jobs:
           echo "$(grep -c '^ok' "$RUNNER_TEMP/shot.log") steps ok"
 
   # The embed viewer in headless Chrome (crates/vxr-embed/check). The runner has no GPU, so Chrome
-  # draws WebGPU with SwiftShader, its software Vulkan. The wasm tools come pinned from the
-  # Workers build script, as release.yml takes them.
+  # gets its WebGPU device from Mesa's software Vulkan (lavapipe), as the Rust GPU tests do. The
+  # device works and the viewer runs, but headless Chrome does not show a WebGPU canvas there
+  # (it reads back empty), so the two steps that read pixels are skipped: VXR_CHECK_NO_PIXELS.
+  # Chrome's own SwiftShader adapter is worse: the viewer traps on it. The wasm tools come
+  # pinned from the Workers build script, as release.yml takes them.
   embed:
     name: Embed check
     runs-on: ubuntu-24.04
@@ -149,6 +152,7 @@ jobs:
     env:
       AXI: 0.1.46
       VXR_TOOLS: path
+      VXR_CHECK_NO_PIXELS: "1"
       VXR_CHECK_CHROME_ARGS: --enable-unsafe-webgpu --ignore-gpu-blocklist --enable-features=Vulkan --use-vulkan=native --use-angle=vulkan --disable-vulkan-surface --no-sandbox
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
