@@ -44,7 +44,8 @@ axi() { chrome-devtools-axi "$@"; }
 stage() { axi eval --full "async () => ($(cat "$here/check.js"))('$1')" | unwrap; }
 shot() { axi screenshot "$shots/embed-$1.png" >/dev/null; echo "wrote $shots/embed-$1.png"; }
 
-axi open "$url" >/dev/null
+# A browser that does not start says why, in place of a silent exit.
+axi open "$url" >/dev/null 2>&1 || { echo "FAIL the browser opens the page: $(axi open "$url" 2>&1 | tail -n 8 | tr '\n' ' ')"; exit 1; }
 axi emulate --viewport "900x700x2" >/dev/null
 axi open "$url" >/dev/null
 results="$(stage first)"
