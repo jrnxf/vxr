@@ -5,7 +5,7 @@ import { useEffect, useRef, useState } from "preact/hooks"
 import { reason, size, type Me } from "./reason"
 import { renderChallenge, spent, token } from "./turnstile"
 
-type View = "loading" | "off" | "out" | "sent" | "in"
+type View = "loading" | "error" | "off" | "out" | "sent" | "in"
 
 // Better Auth's client, made on first use (the pre-render has no location).
 let client: ReturnType<typeof makeAuth> | undefined
@@ -30,16 +30,22 @@ const tellEditors = (user: string | null) => {
   editors?.postMessage({ user })
 }
 
+// What /api/me says, or null when the server did not answer or failed: a second try follows a
+// server error or a dropped connection, because one bad answer is often a passing fault.
 async function me(): Promise<Me | null> {
-  try {
-    const res = await fetch("/api/me", {
-      credentials: "same-origin",
-      cache: "no-store",
-    })
-    return res.ok ? ((await res.json()) as Me) : null
-  } catch {
-    return null
+  for (let tries = 0; tries < 2; tries++) {
+    try {
+      const res = await fetch("/api/me", {
+        credentials: "same-origin",
+        cache: "no-store",
+      })
+      if (res.ok) return (await res.json()) as Me
+      if (res.status < 500) return null
+    } catch {
+      // The next try, or null.
+    }
   }
+  return null
 }
 
 // The account page: sign in by email. One email carries a link and a 6-digit code; the link signs
@@ -66,7 +72,9 @@ export function Account() {
 
   async function refresh() {
     const m = await me()
-    if (!m || !m.signIn) return setView("off")
+    // "Accounts are off" is only what the server itself says: no answer is a different view.
+    if (!m) return setView("error")
+    if (!m.signIn) return setView("off")
     tellEditors(m.user?.id ?? null)
     setInfo(m)
     if (m.user) setView("in")
@@ -164,6 +172,28 @@ export function Account() {
 
       <section id="loading" hidden={view !== "loading"}>
         <p class="muted">Loading…</p>
+      </section>
+
+      <section id="error" hidden={view !== "error"}>
+        <h1>vxr could not reach the server</h1>
+        <p class="muted">
+          Check your connection and try again. The editor still keeps your
+          projects in this browser.
+        </p>
+        <div class="stack">
+          <button
+            id="retry"
+            class="primary"
+            type="button"
+            disabled={busy}
+            onClick={(e) => void run(e.currentTarget, refresh)}
+          >
+            Try again
+          </button>
+          <a class="button" href="/">
+            Open the editor
+          </a>
+        </div>
       </section>
 
       <section id="off" hidden={view !== "off"}>

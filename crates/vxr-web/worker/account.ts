@@ -1,3 +1,5 @@
+import { problem, type Store } from './projects';
+
 // Deleting an account, for the signed-in user:
 //
 //   DELETE /api/account   body {"email": "<the account's email>"}, typed by the person to confirm
@@ -8,7 +10,6 @@
 // own devices stay. The sign-in email log keeps the address for up to a day, for the email
 // limits, and then drops it.
 import type { Auth } from './auth';
-import { problem, type Store } from './projects';
 
 interface User {
   id: string;
@@ -19,7 +20,9 @@ export async function deleteAccount(req: Request, env: Store, auth: Auth, user: 
   if (req.method !== 'DELETE') return problem(405, 'method');
   let email = '';
   try {
-    email = String(((await req.json()) as { email?: unknown }).email ?? '').trim().toLowerCase();
+    email = String(((await req.json()) as { email?: unknown }).email ?? '')
+      .trim()
+      .toLowerCase();
   } catch {
     return problem(400, 'bad_body');
   }

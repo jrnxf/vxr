@@ -1,7 +1,9 @@
 // What the Worker tests share: a browser-like client (one origin, a cookie jar), the Worker with
 // its email and Turnstile replaced, sign-in by emailed link or code, and generated .vox files.
 import { env } from 'cloudflare:workers';
-import { type Deps, handle } from '../index';
+
+import { type Deps, type Env, handle } from '../index';
+
 import type { Mail } from '../mail';
 import type { Limits } from '../projects';
 
@@ -12,6 +14,8 @@ export const PASS = 'turnstile-pass';
 export class World {
   mail: Mail[] = [];
   deps: Deps;
+  /** The bindings each request gets: a test swaps one to break it for a request. */
+  env: Env = env;
   constructor(limits?: Limits) {
     this.deps = {
       mailer: () => ({ send: async (m) => void this.mail.push(m) }),
@@ -27,14 +31,14 @@ export class World {
   }
   /** The sign-in link in the last mail to `to`. */
   link(to: string): string {
-    const m = [...this.mail].reverse().find((x) => x.to === to);
+    const m = this.mail.findLast((x) => x.to === to);
     const url = m?.text.match(/https?:\/\/\S+/)?.[0];
     if (!url) throw new Error(`no link mailed to ${to}`);
     return url;
   }
   /** The sign-in code in the last mail to `to`. */
   code(to: string): string {
-    const m = [...this.mail].reverse().find((x) => x.to === to);
+    const m = this.mail.findLast((x) => x.to === to);
     const code = m?.text.match(/^\d{6}$/m)?.[0];
     if (!code) throw new Error(`no code mailed to ${to}`);
     return code;
@@ -58,7 +62,11 @@ export class Client {
       headers.set('content-type', 'application/json');
       body = JSON.stringify(init.json);
     }
-    const res = await handle(new Request(new URL(path, ORIGIN), { ...init, headers, body, redirect: 'manual' }), env, this.world.deps);
+    const res = await handle(
+      new Request(new URL(path, ORIGIN), { ...init, headers, body, redirect: 'manual' }),
+      this.world.env,
+      this.world.deps,
+    );
     for (const c of res.headers.getSetCookie()) {
       const [pair, ...attrs] = c.split(';');
       const i = pair.indexOf('=');
@@ -140,7 +148,11 @@ export class App {
       headers.set('content-type', 'application/json');
       body = JSON.stringify(init.json);
     }
-    const res = await handle(new Request(new URL(path, ORIGIN), { ...init, headers, body, redirect: 'manual' }), env, this.world.deps);
+    const res = await handle(
+      new Request(new URL(path, ORIGIN), { ...init, headers, body, redirect: 'manual' }),
+      this.world.env,
+      this.world.deps,
+    );
     const token = res.headers.get('set-auth-token');
     if (token) this.token = token;
     return res;

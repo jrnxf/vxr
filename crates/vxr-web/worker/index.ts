@@ -56,22 +56,18 @@ const ACCOUNT_CSP = [
   "frame-ancestors 'none'",
 ].join('; ');
 
-const auths = new WeakMap<Deps, Map<string, Auth>>();
 const DEFAULT: Deps = {};
 
+/**
+ * Better Auth for this request, or null when sign-in is off. It is made anew for every request and
+ * never kept: the object holds this request's D1 handle and one promise for its own start-up, and
+ * a Worker must not use either from a later request (a promise made in a request that ended early
+ * never settles, and every later request in that isolate then fails).
+ */
 function authFor(env: Env, url: URL, deps: Deps): Auth | null {
   const secret = env.BETTER_AUTH_SECRET;
   if (!secret || secret.length < 32) return null;
-  let byOrigin = auths.get(deps);
-  if (!byOrigin) auths.set(deps, (byOrigin = new Map()));
-  const key = `${url.origin} ${secret}`;
-  let auth = byOrigin.get(key);
-  if (!auth) {
-    const mailer = (deps.mailer ?? mailerFor)(env, url);
-    auth = makeAuth(url.origin, secret, env.DB, mailer);
-    byOrigin.set(key, auth);
-  }
-  return auth;
+  return makeAuth(url.origin, secret, env.DB, (deps.mailer ?? mailerFor)(env, url));
 }
 
 function verifier(env: Env, deps: Deps): Verify | null {
@@ -80,6 +76,7 @@ function verifier(env: Env, deps: Deps): Verify | null {
 }
 
 const ip = (req: Request) => req.headers.get('cf-connecting-ip');
+const count = (r: D1Result<{ n: number }>) => r.results[0]?.n ?? 0;
 
 /** The signed-in user, or null. */
 async function who(auth: Auth, req: Request) {
@@ -102,7 +99,9 @@ async function emailLink(req: Request, env: Env, url: URL, deps: Deps): Promise<
   if (!app && !(await verify(req.headers.get('x-turnstile-token') ?? '', ip(req), url.hostname))) return problem(403, 'challenge');
   let email = '';
   try {
-    email = String(((await req.clone().json()) as { email?: unknown }).email ?? '').trim().toLowerCase();
+    email = String(((await req.clone().json()) as { email?: unknown }).email ?? '')
+      .trim()
+      .toLowerCase();
   } catch {
     return problem(400, 'bad_body');
   }
@@ -116,7 +115,6 @@ async function emailLink(req: Request, env: Env, url: URL, deps: Deps): Promise<
     env.DB.prepare('select count(*) as n from mail_log where ip = ? and app = 1 and at > ?').bind(from, hour),
     env.DB.prepare('select count(*) as n from mail_log where app = 1 and at > ?').bind(hour),
   ]);
-  const count = (r: D1Result<{ n: number }>) => r.results[0]?.n ?? 0;
   if (count(byEmail) >= MAIL_PER_HOUR.email) return problem(429, 'too_many_links');
   if (from && count(byIp) >= MAIL_PER_HOUR.ip) return problem(429, 'too_many_links');
   if (app && (!from || count(byAppIp) >= APP_MAIL_PER_HOUR.ip)) return problem(429, 'too_many_links');
@@ -152,7 +150,7 @@ function foreign(req: Request, url: URL): boolean {
   return origin !== null && origin !== url.origin;
 }
 
-export async function handle(req: Request, env: Env, deps: Deps = DEFAULT): Promise<Response> {
+async function route(req: Request, env: Env, deps: Deps): Promise<Response> {
   const url = new URL(req.url);
   const path = url.pathname;
   if (path === '/account') {
@@ -206,6 +204,29 @@ export async function handle(req: Request, env: Env, deps: Deps = DEFAULT): Prom
     return deleteAccount(req, env, auth, user);
   }
   return problem(404, 'not_found');
+}
+
+/** A year of HTTPS only, for every answer of the Worker (www/_headers says the same for the static files). */
+export const HSTS = 'max-age=31536000; includeSubDomains';
+
+/**
+ * Answers one request. Anything thrown on the way is logged (Workers Logs keep it) and answered as
+ * a JSON 500, so a caller always gets a problem it can read, not Cloudflare's error page.
+ */
+export async function handle(req: Request, env: Env, deps: Deps = DEFAULT): Promise<Response> {
+  let res: Response;
+  try {
+    res = await route(req, env, deps);
+  } catch (e) {
+    const path = new URL(req.url).pathname;
+    console.error(`vxr worker: ${req.method} ${path} threw`, e instanceof Error ? (e.stack ?? e.message) : e);
+    res = problem(500, 'server');
+  }
+  // A WebSocket upgrade carries its socket, which a copy would drop.
+  if (res.status === 101) return res;
+  const out = new Response(res.body, res);
+  out.headers.set('strict-transport-security', HSTS);
+  return out;
 }
 
 export default {

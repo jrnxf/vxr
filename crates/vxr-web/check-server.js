@@ -17,7 +17,7 @@ const path = require('node:path');
 const [dist, port, fixtures, bridgePort] = process.argv.slice(2);
 const types = {
   '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.wasm': 'application/wasm',
-  '.ttf': 'font/ttf', '.webp': 'image/webp', '.json': 'application/json', '.txt': 'text/plain', '.vox': 'application/octet-stream', '.png': 'image/png',
+  '.ttf': 'font/ttf', '.webp': 'image/webp', '.json': 'application/json', '.txt': 'text/plain', '.vox': 'application/octet-stream', '.png': 'image/png', '.svg': 'image/svg+xml',
 };
 
 // Cloudflare's _headers: a path pattern, then indented "Name: value" lines.
@@ -110,6 +110,8 @@ function standIn(req, res, body) {
 // landing page's progress and early click: a slow connection, with the rest of the page
 // already in). Counting from the request, not from this call, keeps the hold whole however
 // long the browser takes to start.
+let me = '500';
+let meCalls = 0;
 let holdUntil = 0;
 let holdNext = 0;
 
@@ -119,6 +121,23 @@ http.createServer((req, res) => {
     holdNext = +u.slice(8);
     res.writeHead(200);
     return res.end('held');
+  }
+  // /__me/<what> sets what /api/me answers here, where no Worker runs: 500 for a server that
+  // fails, off for one that says sign-in is off (the account page's error and off views).
+  if (u.startsWith('/__me/')) {
+    me = u.slice(6);
+    res.writeHead(200);
+    return res.end(me);
+  }
+  if (u === '/api/me') {
+    meCalls++;
+    if (me !== 'off') { res.writeHead(500, { 'content-type': 'text/plain' }); return res.end('error code: 1101'); }
+    res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+    return res.end(JSON.stringify({ signIn: false, email: false, user: null, limits: { account: 104857600, file: 20971520 } }));
+  }
+  if (u === '/__me-calls') {
+    res.writeHead(200);
+    return res.end(String(meCalls));
   }
   if (u === '/__fake/v1/chat/completions' && req.method === 'POST') {
     let body = '';
