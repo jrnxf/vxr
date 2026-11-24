@@ -43,6 +43,13 @@ pub const DEVICE: &str = "device.json";
 pub const LIST: &str = "list/";
 
 /// The key of project `id`'s record in the store.
+/// Whether `id` is a project id as the Worker makes and accepts them (its `ID` in
+/// `crates/vxr-web/worker/projects.ts`): 1 to 64 letters, digits, `_` and `-`. An id is part
+/// of a file name in the store, so nothing else may come in from a server's list.
+pub fn valid_id(id: &str) -> bool {
+    (1..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
 pub fn record_key(id: &str) -> String {
     format!("{LIST}{id}.json")
 }
@@ -1033,7 +1040,10 @@ impl Projects {
     /// library, and the library's version is listed beside it to download.
     pub fn merge_library(&mut self, user: &str, remote: &[crate::sync::Remote], fresh: &[String]) -> Merged {
         let mut merged = Merged::default();
-        for r in remote {
+        // An id becomes a file name here and a path at the Worker: a row whose id is not one
+        // the Worker makes is not listed.
+        let remote: Vec<&crate::sync::Remote> = remote.iter().filter(|r| valid_id(&r.id)).collect();
+        for &r in &remote {
             if fresh.contains(&r.id) {
                 continue;
             }

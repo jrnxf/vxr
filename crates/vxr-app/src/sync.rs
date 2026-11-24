@@ -1652,6 +1652,25 @@ mod tests {
         assert!(p.get(&id).is_some_and(|r| r.cloud.is_none() && r.has_file()), "a project with a copy here stays");
     }
 
+    /// A project id from the server becomes a file name in the store, so a list row with an
+    /// id the Worker would never make (a path, an empty or an overlong one) is not listed.
+    #[test]
+    fn a_library_row_with_an_id_that_is_not_an_id_is_not_listed() {
+        let (_, mut p, mut s) = device();
+        let mut lib = FakeLibrary::signed_in("u1");
+        let long = "x".repeat(65);
+        for bad in ["../../outside", "a/b", "dot.vox", "", long.as_str()] {
+            lib.put(Some(bad), "bad", vox(1));
+        }
+        lib.put(Some("c-ok_1"), "castle", vox(2));
+        s.check();
+        lib.serve(&mut s, &mut p);
+        assert!(p.get("c-ok_1").is_some(), "a real id is listed");
+        let listed: Vec<_> = p.list().iter().map(|r| r.name.clone()).collect();
+        assert_eq!(listed, ["castle"], "only the row with a real id is here");
+        assert!(crate::projects::valid_id(&"x".repeat(64)) && !crate::projects::valid_id(&long));
+    }
+
     #[test]
     fn exports_the_library_as_one_zip() {
         let (_, mut p, mut s) = device();

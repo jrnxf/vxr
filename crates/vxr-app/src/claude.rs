@@ -81,6 +81,22 @@ pub fn install_command(commands: &Path) -> Option<String> {
     }
 }
 
+/// Remove `/vxr` from `commands`, and say what was done. Only vxr's own file goes (the one
+/// with [`MARK`]): a file of the same name the user wrote or changed is left as it is.
+pub fn remove_command(commands: &Path) -> String {
+    let file = commands.join(COMMAND_FILE);
+    let shown = file.display();
+    match std::fs::read_to_string(&file) {
+        Ok(have) if have.contains(MARK) => match std::fs::remove_file(&file) {
+            Ok(()) => format!("claude: removed /vxr: {shown}"),
+            Err(e) => format!("claude: could not remove {shown}: {e}"),
+        },
+        Ok(_) => format!("claude: left {shown} alone: it is not vxr's"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => "claude: /vxr is not installed".into(),
+        Err(e) => format!("claude: could not read {shown}: {e}"),
+    }
+}
+
 /// The `--mcp-config` for this session: a `vxr-live` run by `exe` that connects at start.
 pub fn mcp_config(exe: &Path) -> String {
     serde_json::json!({"mcpServers": {"vxr-live": {
@@ -128,7 +144,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| format!("could not find the vxr binary: {e}"))?;
     let exe = setup::stable_exe(&exe);
     let root = setup::files_root(None)?;
-    std::fs::create_dir_all(&root).map_err(|e| format!("could not make {}: {e}", root.display()))?;
+    if let Some(line) = setup::make_root(&root)? {
+        eprintln!("{line}");
+    }
     let program = Path::new("claude");
     for line in prepare(program, &exe, &root, &claude_dir()?.join("commands"))? {
         eprintln!("{line}");
