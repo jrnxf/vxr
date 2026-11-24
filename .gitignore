@@ -19,3 +19,5 @@ prototype/demo/
 # The embed viewer, made by crates/vxr-embed/build, and its check screenshots.
 /crates/vxr-embed/dist/
 /crates/vxr-embed/shots/
+# The release writes the app's notices here (cargo-about, .github/workflows/release.yml).
+/THIRD_PARTY.md

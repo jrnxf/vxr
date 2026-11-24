@@ -129,6 +129,18 @@ jobs:
           eval "$(crates/vxr-web/cloudflare-build --tools)"
           VXR_TOOLS=path crates/vxr-embed/build
 
+      # about.toml lists the accepted licenses: a crate under any other fails here. Before the
+      # bundle, which copies THIRD_PARTY.md into Contents/Resources and then signs the app.
+      - name: Write the notices
+        run: |
+          name="cargo-about-$CARGO_ABOUT_VERSION-aarch64-apple-darwin"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$name.tar.gz" \
+            "https://github.com/EmbarkStudios/cargo-about/releases/download/$CARGO_ABOUT_VERSION/$name.tar.gz"
+          echo "$CARGO_ABOUT_SHA256  $RUNNER_TEMP/$name.tar.gz" | shasum -a 256 -c -
+          tar -xzf "$RUNNER_TEMP/$name.tar.gz" -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/$name/cargo-about" generate --locked --fail about.hbs -o THIRD_PARTY.md
+          grep -c '^### ' THIRD_PARTY.md
+
       - name: Build for arm64 and x86_64
         run: crates/vxr-app/bundle out aarch64-apple-darwin x86_64-apple-darwin
 
@@ -145,7 +157,10 @@ jobs:
           ls "$app/Contents/Resources/fonts" "$app/Contents/Resources/vxr.icns"
           # Without these the Embed command says the build has no embed viewer.
           ls "$app/Contents/Resources/embed/voxel-scene.js" "$app/Contents/Resources/embed/vxr_embed.js" \
-            "$app/Contents/Resources/embed/vxr_embed_bg.wasm"
+            "$app/Contents/Resources/embed/vxr_embed_bg.wasm" "$app/Contents/Resources/embed/licenses.txt"
+          # The notices travel inside the app, and with every embed folder it writes.
+          cmp THIRD_PARTY.md "$app/Contents/Resources/THIRD_PARTY.md"
+          grep -q '^- wgpu ' "$app/Contents/Resources/embed/licenses.txt"
           # macOS 13 is the oldest the formula allows, for both slices.
           for arch in arm64 x86_64; do
             vtool -arch "$arch" -show-build "$bin" | tee build.txt
@@ -173,17 +188,6 @@ jobs:
           fi
         env:
           TAG: ${{ github.ref_name }}
-
-      # about.toml lists the accepted licenses: a crate under any other fails here.
-      - name: Write the notices
-        run: |
-          name="cargo-about-$CARGO_ABOUT_VERSION-aarch64-apple-darwin"
-          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$name.tar.gz" \
-            "https://github.com/EmbarkStudios/cargo-about/releases/download/$CARGO_ABOUT_VERSION/$name.tar.gz"
-          echo "$CARGO_ABOUT_SHA256  $RUNNER_TEMP/$name.tar.gz" | shasum -a 256 -c -
-          tar -xzf "$RUNNER_TEMP/$name.tar.gz" -C "$RUNNER_TEMP"
-          "$RUNNER_TEMP/$name/cargo-about" generate --locked --fail about.hbs -o THIRD_PARTY.md
-          grep -c '^### ' THIRD_PARTY.md
 
       # Named for the version vxr prints, which the step above holds to the tag.
       - name: Archive

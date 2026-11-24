@@ -1098,8 +1098,9 @@ fn embed_export(dir: &Path) -> Result<(), String> {
                     "voxel-scene.js",
                     "vxr_embed.js",
                     "vxr_embed_bg.wasm",
+                    "licenses.txt",
                 ]
-            && s.ed.ui.toast_text() == Some("Saved my-house-embed (6 files). Its index.html shows the tag to paste."),
+            && s.ed.ui.toast_text() == Some("Saved my-house-embed (7 files). Its index.html shows the tag to paste."),
         format!("the folder my-house-embed holds the page, the scene, the poster and the viewer ({names:?})"),
     )?;
     let page = String::from_utf8_lossy(&files[0].1);
@@ -9365,10 +9366,26 @@ fn agents_look_render(
     let listed: Vec<&str> = answer["exported"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
     check(
         !e && names(&folder)
-            == ["house.png", "house.vxrb", "index.html", "voxel-scene.js", "vxr_embed.js", "vxr_embed_bg.wasm"]
+            == [
+                "house.png",
+                "house.vxrb",
+                "index.html",
+                "licenses.txt",
+                "voxel-scene.js",
+                "vxr_embed.js",
+                "vxr_embed_bg.wasm",
+            ]
             && listed
-                == ["index.html", "house.vxrb", "house.png", "voxel-scene.js", "vxr_embed.js", "vxr_embed_bg.wasm"]
-                    .map(path)
+                == [
+                    "index.html",
+                    "house.vxrb",
+                    "house.png",
+                    "voxel-scene.js",
+                    "vxr_embed.js",
+                    "vxr_embed_bg.wasm",
+                    "licenses.txt",
+                ]
+                .map(path)
             && shown == s.voxels()
             && poster == vxr_app::files::EMBED_POSTER
             && answer["what"].as_str().is_some_and(|w| w.contains(&vxr_app::files::embed_snippet("house.vox"))),

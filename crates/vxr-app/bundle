@@ -56,11 +56,18 @@ lipo -create -output "$app/Contents/MacOS/vxr" "${bins[@]}"
 iconutil -c icns "$tmp/vxr.iconset" -o "$app/Contents/Resources/vxr.icns"
 (cd "$here/fonts" && cp $(awk '{print $2}' "$here/fonts.sha256") "$app/Contents/Resources/fonts/")
 embed="$root/crates/vxr-embed/dist"
-if [ -f "$embed/voxel-scene.js" ] && [ -f "$embed/vxr_embed.js" ] && [ -f "$embed/vxr_embed_bg.wasm" ]; then
+if [ -f "$embed/voxel-scene.js" ] && [ -f "$embed/vxr_embed.js" ] && [ -f "$embed/vxr_embed_bg.wasm" ] && [ -f "$embed/licenses.txt" ]; then
   mkdir -p "$app/Contents/Resources/embed"
-  cp "$embed/voxel-scene.js" "$embed/vxr_embed.js" "$embed/vxr_embed_bg.wasm" "$app/Contents/Resources/embed/"
+  cp "$embed/voxel-scene.js" "$embed/vxr_embed.js" "$embed/vxr_embed_bg.wasm" "$embed/licenses.txt" "$app/Contents/Resources/embed/"
 else
   echo "bundle: warning: no embed viewer in crates/vxr-embed/dist (run crates/vxr-embed/build); this app's Embed command will say so" >&2
+fi
+
+# The notices for every Rust crate compiled into the app, when the release has written them
+# (THIRD_PARTY.md at the root, .github/workflows/release.yml): inside the app, so they go
+# wherever the app is copied. Before the signature, which seals Contents/Resources.
+if [ -f "$root/THIRD_PARTY.md" ]; then
+  cp "$root/THIRD_PARTY.md" "$app/Contents/Resources/"
 fi
 
 # The version the binary reports, which a release stamps from its tag (0.1.0 or 0.1.0-pre.3).

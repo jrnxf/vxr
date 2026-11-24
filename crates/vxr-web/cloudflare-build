@@ -16,6 +16,7 @@ rust=1.99.1         # rust-overlay's stable in nix/flake.lock, and RUST in .gith
 rustup=1.29.2
 wasm_bindgen=0.2.129 # the wasm-bindgen crate in Cargo.lock
 binaryen=133         # nixpkgs' binaryen in nix/flake.lock
+cargo_about=0.9.2    # CARGO_ABOUT_VERSION in .github/workflows/release.yml
 
 case "$(uname -sm)" in
   "Linux x86_64")
@@ -25,6 +26,8 @@ case "$(uname -sm)" in
     wasm_bindgen_sha=82d12bb940e2d4e72e0d5605387fc1b8ca179044e012b620f0ce4e7440e8320e
     binaryen_target=x86_64-linux
     binaryen_sha=2dc9c7813f5375db93d96ead4b78222fcc3e2677bbb832297af4797782a37489
+    cargo_about_target=x86_64-unknown-linux-musl
+    cargo_about_sha=9099a59e820c38a68b9d65f300662a567d56562f9a10f6aa4c7e86c17c2566af
     ;;
   "Darwin arm64")
     rustup_target=aarch64-apple-darwin
@@ -33,6 +36,8 @@ case "$(uname -sm)" in
     wasm_bindgen_sha=81d4a23d56b3c3eb8187658329116d50e0b228a93b343825fb71f70179051cd1
     binaryen_target=arm64-macos
     binaryen_sha=ad66da82ac13f163e424b1643f16c6dfcccc98b5966296b43e52d3cab04f84a8
+    cargo_about_target=aarch64-apple-darwin
+    cargo_about_sha=ae72f0df0c399a1e96336f696fa55b1b28679fd725632eba8cf8e4568467cc3e
     ;;
   *) echo "cloudflare-build: no pinned tools for $(uname -sm)" >&2; exit 1 ;;
 esac
@@ -87,10 +92,20 @@ if [ ! -x "$tools/binaryen-version_$binaryen/bin/wasm-opt" ]; then
   tar -xzf "$tmp/binaryen.tar.gz" -C "$tools"
 fi
 
+# The notices of the web and embed builds (./notices).
+if [ "$(cargo-about --version 2>/dev/null)" != "cargo-about $cargo_about" ]; then
+  name="cargo-about-$cargo_about-$cargo_about_target"
+  fetch "https://github.com/EmbarkStudios/cargo-about/releases/download/$cargo_about/$name.tar.gz" \
+    "$cargo_about_sha" "$tmp/cargo-about.tar.gz"
+  tar -xzf "$tmp/cargo-about.tar.gz" -C "$tmp"
+  cp "$tmp/$name/cargo-about" "$tools/bin/"
+fi
+
 if [ "${1:-}" = --tools ]; then
   cargo --version
   wasm-bindgen --version
   wasm-opt --version
+  cargo-about --version
   for name in RUSTUP_HOME CARGO_HOME RUSTUP_TOOLCHAIN PATH; do
     value="${!name}"
     printf "export %s='%s'\n" "$name" "${value//\'/\'\\\'\'}" >&3
@@ -101,6 +116,7 @@ fi
 cargo --version
 wasm-bindgen --version
 wasm-opt --version
+cargo-about --version
 node --version
 npm ci --prefix "$here" --no-audit --no-fund
 # The production Turnstile widget's site key (public), for vxr.jrnxf.co; a build variable of the

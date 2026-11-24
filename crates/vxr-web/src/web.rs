@@ -768,16 +768,16 @@ impl App {
         self.host.editor.ui.toast(&ctx, format!("Could not open {name}: {why}"));
     }
 
-    /// The embed viewer's files the page fetched for Embed (`loader`, `glue` and `module`, in
-    /// the order of `vxr_app::files::EMBED_VIEWER`), or with `error` why it could not. An
+    /// The embed viewer's files the page fetched for Embed (`loader`, `glue`, `module` and
+    /// `notices`, in the order of `vxr_app::files::EMBED_VIEWER`), or with `error` why it could not. An
     /// embed whose picture is already traced is written now. (No argument may be named
     /// `wasm`: in the generated glue it would hide the module every call goes through.)
-    pub fn embed_fetched(&mut self, loader: Vec<u8>, glue: Vec<u8>, module: Vec<u8>, error: &str) {
+    pub fn embed_fetched(&mut self, loader: Vec<u8>, glue: Vec<u8>, module: Vec<u8>, notices: Vec<u8>, error: &str) {
         self.woken = true;
         VIEWER.with_borrow_mut(|v| {
             *v = if error.is_empty() {
                 let names = vxr_app::files::EMBED_VIEWER;
-                Viewer::Here(names.iter().map(|n| n.to_string()).zip([loader, glue, module]).collect())
+                Viewer::Here(names.iter().map(|n| n.to_string()).zip([loader, glue, module, notices]).collect())
             } else {
                 Viewer::Failed(error.into())
             }

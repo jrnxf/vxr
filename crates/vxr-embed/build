@@ -25,6 +25,9 @@ run wasm-opt -O3 --enable-bulk-memory --enable-nontrapping-float-to-int --enable
   --enable-mutable-globals --enable-reference-types --strip-debug --strip-producers \
   -o "$dist/vxr_embed_bg.wasm" "$dist/vxr_embed_bg.wasm"
 cp "$here/web/voxel-scene.js" "$dist/"
+# The notices of the crates in the wasm: a fourth file, copied wherever the viewer goes. It is
+# not in the size budget below, since no page loads it.
+"$root/crates/vxr-web/notices" vxr-embed "$dist/licenses.txt"
 run node --input-type=module -e "
 import fs from 'node:fs';
 import zlib from 'node:zlib';

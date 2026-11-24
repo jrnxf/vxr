@@ -460,7 +460,8 @@ async function libraryFetch(id, method, path, flat, body) {
 
 // Bytes from the editor are a view of its memory, which moves: anything kept past the call
 // takes a copy (slice).
-// The embed viewer's three files (crates/vxr-embed, copied into embed/ by the build), fetched
+// The embed viewer's files (crates/vxr-embed, copied into embed/ by the build, with the notices
+// of the open source work in them), fetched
 // the first time Embed is used and handed to the editor, which packs them into the embed's zip.
 async function fetchEmbed() {
   const get = async (name) => {
@@ -469,10 +470,10 @@ async function fetchEmbed() {
     return new Uint8Array(await r.arrayBuffer());
   };
   try {
-    const files = await Promise.all(['voxel-scene.js', 'vxr_embed.js', 'vxr_embed_bg.wasm'].map(get));
+    const files = await Promise.all(['voxel-scene.js', 'vxr_embed.js', 'vxr_embed_bg.wasm', 'licenses.txt'].map(get));
     app.embed_fetched(...files, '');
   } catch (e) {
-    app.embed_fetched(new Uint8Array(), new Uint8Array(), new Uint8Array(), String(e?.message ?? e));
+    app.embed_fetched(new Uint8Array(), new Uint8Array(), new Uint8Array(), new Uint8Array(), String(e?.message ?? e));
   }
 }
 

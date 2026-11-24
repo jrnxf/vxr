@@ -1378,7 +1378,7 @@ async () => {
       step('Escape deselects and the tool is back', st().selected === 0 && st().tool === toolWas, `${st().selected} ${st().tool} ${toolWas}`);
       // Embed: the row puts the tag on the clipboard inside the click, traces the poster and
       // downloads island-embed.zip: a folder with the page, the scene as a brick scene file,
-      // the 1280x800 poster and the viewer's three files as the site serves them.
+      // the 1280x800 poster and the viewer's files as the site serves them.
       zipBlob = null; zipName = null;
       const tags = [];
       const realWrite = navigator.clipboard?.writeText;
@@ -1396,10 +1396,10 @@ async () => {
         const files = zipBlob ? unzip(new Uint8Array(await zipBlob.arrayBuffer())) : {};
         const at = (n) => files['island-embed/' + n];
         const names = Object.keys(files).join(',');
-        const want = ['index.html', 'island.vxrb', 'island.png', 'voxel-scene.js', 'vxr_embed.js', 'vxr_embed_bg.wasm'].map((n) => 'island-embed/' + n).join(',');
+        const want = ['index.html', 'island.vxrb', 'island.png', 'voxel-scene.js', 'vxr_embed.js', 'vxr_embed_bg.wasm', 'licenses.txt'].map((n) => 'island-embed/' + n).join(',');
         step('Embed traces the poster and downloads island-embed.zip, one folder of six files', tracing && zipName === 'island-embed.zip' && names === want, `${zipName} ${names} ${st().toast}`);
-        const served = await Promise.all(['voxel-scene.js', 'vxr_embed.js', 'vxr_embed_bg.wasm'].map(async (n) => new Uint8Array(await (await fetch('embed/' + n)).arrayBuffer())));
-        const viewer = ['voxel-scene.js', 'vxr_embed.js', 'vxr_embed_bg.wasm'].every((n, i) => at(n) && same(at(n), served[i]));
+        const served = await Promise.all(['voxel-scene.js', 'vxr_embed.js', 'vxr_embed_bg.wasm', 'licenses.txt'].map(async (n) => new Uint8Array(await (await fetch('embed/' + n)).arrayBuffer())));
+        const viewer = ['voxel-scene.js', 'vxr_embed.js', 'vxr_embed_bg.wasm', 'licenses.txt'].every((n, i) => at(n) && same(at(n), served[i]));
         const wasm = at('vxr_embed_bg.wasm');
         step('the zip carries the viewer as the site serves it', viewer && wasm && wasm.length > 100000 && wasm[1] === 0x61 && wasm[2] === 0x73 && wasm[3] === 0x6d, `${wasm && wasm.length} bytes of wasm`);
         const page = at('index.html') ? new TextDecoder().decode(at('index.html')) : '';

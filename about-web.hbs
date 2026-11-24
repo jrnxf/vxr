@@ -1,0 +1,15 @@
+Third-party notices
+
+This file lists the open source work compiled into these files, with each licence.
+{{#each licenses}}
+
+================================================================================
+{{{name}}}
+
+Used by:
+{{#each used_by}}
+- {{crate.name}} {{crate.version}}{{#if crate.repository}} ({{crate.repository}}){{/if}}
+{{/each}}
+
+{{{text}}}
+{{/each}}
