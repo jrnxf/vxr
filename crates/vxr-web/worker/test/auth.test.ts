@@ -2,7 +2,9 @@ import { env } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
 
 import { OTP_OFF } from '../auth';
-import { APP_MAIL_PER_HOUR, handle, HSTS, MAIL_PER_HOUR } from '../index';
+import { HSTS } from '../headers';
+import * as entry from '../index';
+import { APP_MAIL_PER_HOUR, handle, MAIL_PER_HOUR } from '../index';
 import { FROM, mailerFor, resendMailer, signInMail } from '../mail';
 import { TEST_SECRET, turnstile } from '../turnstile';
 import { ORIGIN, vox, World } from './helpers';
@@ -45,6 +47,16 @@ describe('sign-in', () => {
       const [a, b] = await Promise.all([out.json('/api/me'), signedIn.json('/api/me')]);
       expect([a.status, a.body.user, b.status, b.body.user?.email]).toEqual([200, null, 200, 'yan@example.com']);
     }
+  });
+
+  // The Workers runtime reads every named export of the entry module as a handler: a string or
+  // a number there stops the Worker from starting ("Incorrect type for map entry"), which no
+  // other test sees, since they call handle() and never start the runtime on index.ts.
+  it('exports nothing from the entry module that the runtime cannot take', () => {
+    const bad = Object.entries(entry)
+      .filter(([, v]) => typeof v !== 'function' && (typeof v !== 'object' || v === null))
+      .map(([k]) => k);
+    expect(bad).toEqual([]);
   });
 
   it('sends HSTS on every answer', async () => {

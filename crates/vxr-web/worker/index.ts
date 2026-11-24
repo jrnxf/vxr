@@ -7,6 +7,7 @@
 //   /api/account     deleting the account and everything it keeps (worker/account.ts)
 //   /account         the sign-in page (site/src/account/, built into dist/account.html)
 import { deleteAccount } from './account';
+import { HSTS } from './headers';
 import { type Auth, fromApp, makeAuth } from './auth';
 import { type Mailer, mailerFor } from './mail';
 import { LIMITS, type Limits, json, problem, projects, usage } from './projects';
@@ -206,8 +207,6 @@ async function route(req: Request, env: Env, deps: Deps): Promise<Response> {
   return problem(404, 'not_found');
 }
 
-/** A year of HTTPS only, for every answer of the Worker (www/_headers says the same for the static files). */
-export const HSTS = 'max-age=31536000; includeSubDomains';
 
 /**
  * Answers one request. Anything thrown on the way is logged (Workers Logs keep it) and answered as
