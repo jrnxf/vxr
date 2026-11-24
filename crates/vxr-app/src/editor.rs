@@ -220,6 +220,9 @@ pub struct Editor {
     projects_shown: bool,
     /// The window is to close (the close confirm's Save or Don't save): the native host exits.
     pub quit: bool,
+    /// What the save in progress changes beyond the edits (see
+    /// [`crate::files::vox_bytes_noted`]), for the toast once the file is written.
+    pub save_note: Option<String>,
     /// Help's demo tiles, made the first time Help shows and kept; nothing runs while it is
     /// closed. And whether Help was open last frame (closing it rewinds every demo).
     help_tiles: Option<crate::demo::Tiles>,
@@ -364,6 +367,7 @@ impl Editor {
             library: crate::sync::Library::default(),
             projects_shown: false,
             quit: false,
+            save_note: None,
             help_tiles: None,
             help_was_open: false,
             tour_tiles: None,

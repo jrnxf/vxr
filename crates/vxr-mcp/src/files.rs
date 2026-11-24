@@ -414,7 +414,7 @@ impl Files {
         {
             return Err(format!("{}: not a regular file", clean(rel.as_bytes())));
         }
-        let bytes = vxr_core::files::vox_bytes(&o.scene).map_err(|e| format!("not saved: {e}"))?;
+        let (bytes, note) = vxr_core::files::vox_bytes_noted(&o.scene).map_err(|e| format!("not saved: {e}"))?;
         // Another program (the user's vxr) may have saved the file since this session read
         // or wrote it: replacing it would lose that version. Checked after the scene is
         // encoded, which takes a while on a big one, so as near the write as it can be.
@@ -448,7 +448,12 @@ impl Files {
         o.path = path;
         o.bytes = bytes;
         o.unsaved = false;
-        Ok(format!("saved {} ({} bytes, {voxels} voxels, {objects} objects)", clean(o.rel.as_bytes()), o.bytes.len()))
+        let note = note.map(|n| format!(". Note: {n}; open the file again to edit it as saved")).unwrap_or_default();
+        Ok(format!(
+            "saved {} ({} bytes, {voxels} voxels, {objects} objects){note}",
+            clean(o.rel.as_bytes()),
+            o.bytes.len()
+        ))
     }
 
     /// `export`: the OBJ files, the PNG slices or the isometric sprite of the open scene, written under the root.

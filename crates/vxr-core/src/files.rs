@@ -367,12 +367,28 @@ pub fn png(w: u32, h: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
 /// A save that would lose any of them is an error naming the first thing it would lose,
 /// not a file.
 pub fn vox_bytes(scene: &Scene) -> Result<Vec<u8>, String> {
-    let bytes = scene.to_vox()?;
-    reads_back_as(&bytes, scene)?;
-    Ok(bytes)
+    vox_bytes_noted(scene).map(|(bytes, _)| bytes)
 }
 
-fn reads_back_as(bytes: &[u8], scene: &Scene) -> Result<(), String> {
+/// [`vox_bytes`], with what the save changed that the user did not ask for, in words for
+/// them, or None when the file holds the scene as it is. Today that is one thing: a `.vox`
+/// model holds at most 256 voxels on an axis, so a larger object is written as a group of
+/// blocks and opens as that group from then on.
+pub fn vox_bytes_noted(scene: &Scene) -> Result<(Vec<u8>, Option<String>), String> {
+    let bytes = scene.to_vox()?;
+    let again = reads_back_as(&bytes, scene)?;
+    let objects = |s: &Scene| s.world().map_or(1, |w| w.objects().len());
+    let (before, after) = (objects(scene), objects(&again));
+    // More objects in the file than in the scene: something was split.
+    let note = (after > before).then(|| {
+        "What is over 256 voxels on an axis was saved as a group of blocks, since a .vox model holds at most 256, \
+         and it opens as that group"
+            .to_string()
+    });
+    Ok((bytes, note))
+}
+
+fn reads_back_as(bytes: &[u8], scene: &Scene) -> Result<Scene, String> {
     let again = Scene::from_vox(bytes).map_err(|e| format!("the result does not read back: {e}"))?;
     for shown in [true, false] {
         let (want, got) = (scene.world_voxels(shown), again.world_voxels(shown));
@@ -390,7 +406,7 @@ fn reads_back_as(bytes: &[u8], scene: &Scene) -> Result<(), String> {
             return Err(format!("the result reads back with {}", outline_change(&want, &got)));
         }
     }
-    Ok(())
+    Ok(again)
 }
 
 /// The first cell that differs between `want` and `got`, what it would become, and the
@@ -625,18 +641,21 @@ mod tests {
         let relayered = doc.write();
         assert_eq!(Scene::from_vox(&relayered).unwrap().world_voxels(true), scene.world_voxels(true));
         assert_eq!(
-            reads_back_as(&relayered, &scene).unwrap_err(),
+            reads_back_as(&relayered, &scene).err().unwrap(),
             "the result reads back with a different name, hidden flag or layer on \"slab\" (shown, on layer 0)"
         );
 
         assert_eq!(
-            reads_back_as(&fixture("12-layers"), &scene).unwrap_err(),
+            reads_back_as(&fixture("12-layers"), &scene).err().unwrap(),
             "the result reads back with different shown voxels: [-4, 0, -3] in \"slab\" is empty, not colour 8"
         );
 
         let mut recoloured = Scene::from_vox(&bytes).unwrap();
         recoloured.palette[5][1] ^= 1;
-        assert_eq!(reads_back_as(&bytes, &recoloured).unwrap_err(), "the result reads back with a different colour 5");
+        assert_eq!(
+            reads_back_as(&bytes, &recoloured).err().unwrap(),
+            "the result reads back with a different colour 5"
+        );
     }
 
     #[test]
