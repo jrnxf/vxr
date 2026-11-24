@@ -387,7 +387,8 @@ bridge=""
 # and R2 in the temporary folder, the always-pass Turnstile test secret, emails printed to its
 # log, never sent): a code, a wrong code, the menu, Sign out, then a link opened in another tab,
 # then signed in again: Save to the library, Export library and Delete account
-# (check-account.js, one stage per call so each can be screenshotted).
+# (check-account.js, one stage per call so each can be screenshotted). Before those, the account
+# page of the static check server, whose /api/me fails: the error view and Try again.
 wrangler="$here/node_modules/.bin/wrangler"
 if [ ! -x "$wrangler" ]; then
   fail "the account popover signs in against wrangler dev" "no $wrangler: run npm ci --prefix crates/vxr-web"
@@ -411,6 +412,10 @@ else
   ashot() { axi screenshot "$shots/web-account-$1.png" >/dev/null; echo "wrote $shots/web-account-$1.png"; }
   axi open "$aurl" >/dev/null
   axi emulate --viewport "1280x800x2" >/dev/null
+  # The account page against a server that fails: the static check server's /api/me answers 500.
+  axi open "${url}account" >/dev/null
+  results+=$'\n'"$(account down)"
+  ashot down
   axi open "${aurl}about" >/dev/null
   results+=$'\n'"$(account landing)"
   axi open "$aurl" >/dev/null

@@ -1,5 +1,6 @@
 import { env } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
+
 import { LIMITS, projects } from '../projects';
 import { type App, type Client, png, vox, World } from './helpers';
 
@@ -14,7 +15,11 @@ async function signedIn(w = new World()): Promise<{ c: Client; email: string; id
 
 const keys = async (prefix: string) => (await env.PROJECTS.list({ prefix })).objects.map((o: R2Object) => o.key);
 const rows = async (sql: string, ...args: unknown[]) =>
-  (await env.DB.prepare(sql).bind(...args).first<{ n: number }>())?.n ?? 0;
+  (
+    await env.DB.prepare(sql)
+      .bind(...args)
+      .first<{ n: number }>()
+  )?.n ?? 0;
 
 describe('delete account', () => {
   it('deletes the user, its sessions, projects and files, and signs out', async () => {

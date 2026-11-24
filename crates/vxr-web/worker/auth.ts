@@ -9,6 +9,7 @@ import { betterAuth, type BetterAuthOptions } from 'better-auth';
 import { bearer } from 'better-auth/plugins/bearer';
 import { emailOTP } from 'better-auth/plugins/email-otp';
 import { magicLink } from 'better-auth/plugins/magic-link';
+
 import { appSignInMail, type Mailer, signInMail } from './mail';
 
 /** How long the link and the code in a sign-in email work, in seconds. */

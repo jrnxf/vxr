@@ -1,10 +1,18 @@
 import { env } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
+
 import { OTP_OFF } from '../auth';
+import { HSTS } from '../headers';
+import * as entry from '../index';
 import { APP_MAIL_PER_HOUR, handle, MAIL_PER_HOUR } from '../index';
 import { FROM, mailerFor, resendMailer, signInMail } from '../mail';
 import { TEST_SECRET, turnstile } from '../turnstile';
 import { ORIGIN, vox, World } from './helpers';
+
+/** A D1 call that fails. */
+const down = () => {
+  throw new Error('D1 is down');
+};
 
 describe('sign-in', () => {
   it('reports sign-in off without the secret, and still answers /api/me', async () => {
@@ -12,6 +20,50 @@ describe('sign-in', () => {
     expect(await res.json()).toMatchObject({ signIn: false, user: null });
     const list = await handle(new Request(`${ORIGIN}/api/projects`), { ...env, BETTER_AUTH_SECRET: undefined });
     expect(list.status).toBe(503);
+  });
+
+  it('answers a JSON 500 when a request throws, and the next request is not harmed by it', async () => {
+    const w = new World();
+    const a = w.client('192.0.2.70');
+    // The first request of this world meets a database that fails on every call.
+    w.env = { ...env, DB: { prepare: down, batch: down, exec: down } as unknown as D1Database };
+    const failed = await a.askLink('zoe@example.com');
+    expect(failed.status).toBe(500);
+    expect(failed.headers.get('content-type')).toBe('application/json');
+    expect(await failed.json()).toEqual({ error: 'server' });
+    // The next one gets its own Better Auth on its own database handle: nothing is kept from the
+    // request that failed.
+    w.env = env;
+    await a.emailSignIn('zoe@example.com');
+    expect((await a.me()).user).toMatchObject({ email: 'zoe@example.com' });
+  });
+
+  it('answers /api/me the same 60 times in a row, signed out and signed in', async () => {
+    const w = new World();
+    const out = w.client('192.0.2.71');
+    const signedIn = w.client('192.0.2.72');
+    await signedIn.emailSignIn('yan@example.com');
+    for (let i = 0; i < 30; i++) {
+      const [a, b] = await Promise.all([out.json('/api/me'), signedIn.json('/api/me')]);
+      expect([a.status, a.body.user, b.status, b.body.user?.email]).toEqual([200, null, 200, 'yan@example.com']);
+    }
+  });
+
+  // The Workers runtime reads every named export of the entry module as a handler: a string or
+  // a number there stops the Worker from starting ("Incorrect type for map entry"), which no
+  // other test sees, since they call handle() and never start the runtime on index.ts.
+  it('exports nothing from the entry module that the runtime cannot take', () => {
+    const bad = Object.entries(entry)
+      .filter(([, v]) => typeof v !== 'function' && (typeof v !== 'object' || v === null))
+      .map(([k]) => k);
+    expect(bad).toEqual([]);
+  });
+
+  it('sends HSTS on every answer', async () => {
+    const c = new World().client();
+    for (const path of ['/api/me', '/api/nope', '/api/auth/get-session', '/account']) {
+      expect((await c.fetch(path)).headers.get('strict-transport-security'), path).toBe(HSTS);
+    }
   });
 
   it('starts signed out', async () => {
@@ -118,7 +170,9 @@ describe('sign-in', () => {
     let last = 0;
     for (let i = 0; i <= 10 && last !== 429; i++) last = (await a.enterCode(`try${i}@example.com`, '123456')).status;
     expect(last).toBe(429);
-    const { n } = (await env.DB.prepare('select count(*) as n from rateLimit where key like ?').bind('%/sign-in/email-otp').first<{ n: number }>())!;
+    const { n } = (await env.DB.prepare('select count(*) as n from rateLimit where key like ?')
+      .bind('%/sign-in/email-otp')
+      .first<{ n: number }>())!;
     expect(n).toBeGreaterThan(0);
   });
 
@@ -183,7 +237,11 @@ describe('sign-in', () => {
     expect((await app.me()).user).toMatchObject({ email: 'fay@example.com' });
     // The token reaches the projects too.
     expect((await app.json('/api/projects')).status).toBe(200);
-    const put = await app.json('/api/projects/p1', { method: 'PUT', headers: { 'if-none-match': '*', 'x-vxr-name': 'Island' }, body: vox() });
+    const put = await app.json('/api/projects/p1', {
+      method: 'PUT',
+      headers: { 'if-none-match': '*', 'x-vxr-name': 'Island' },
+      body: vox(),
+    });
     expect(put.status).toBe(201);
   });
 
@@ -247,7 +305,11 @@ describe('sign-in', () => {
   it('refuses the app path from a browser, which always sends Origin', async () => {
     const w = new World();
     const a = w.client('192.0.2.17');
-    const res = await a.fetch('/api/auth/sign-in/magic-link', { method: 'POST', headers: { 'x-vxr-client': 'app' }, json: { email: 'kim@example.com' } });
+    const res = await a.fetch('/api/auth/sign-in/magic-link', {
+      method: 'POST',
+      headers: { 'x-vxr-client': 'app' },
+      json: { email: 'kim@example.com' },
+    });
     expect(res.status).toBe(403);
     expect(await res.json()).toMatchObject({ error: 'origin' });
     // And without the app header, a request with no Origin still needs the challenge.
@@ -286,7 +348,11 @@ describe('sign-in', () => {
     const at = Date.now();
     await env.DB.batch(
       Array.from({ length: APP_MAIL_PER_HOUR.all }, (_, i) =>
-        env.DB.prepare('insert into mail_log (email, ip, at, app) values (?, ?, ?, 1)').bind(`all${i}@example.com`, `203.0.113.${i % 250}`, at),
+        env.DB.prepare('insert into mail_log (email, ip, at, app) values (?, ?, ?, 1)').bind(
+          `all${i}@example.com`,
+          `203.0.113.${i % 250}`,
+          at,
+        ),
       ),
     );
     expect((await w.app('198.51.100.80').askCode('mo@example.com')).status).toBe(429);

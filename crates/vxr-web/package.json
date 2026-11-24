@@ -4,10 +4,10 @@
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc -p . && tsc -p site",
-    "lint": "oxlint --max-warnings 0 site",
-    "format": "oxfmt --write site",
-    "format:check": "oxfmt --check site",
-    "check": "oxlint --fix site && oxfmt --write site"
+    "lint": "oxlint --max-warnings 0 site worker",
+    "format": "oxfmt --write site worker",
+    "format:check": "oxfmt --check site worker",
+    "check": "oxlint --fix site worker && oxfmt --write site worker"
   },
   "dependencies": {
     "@better-auth/core": "1.7.11",

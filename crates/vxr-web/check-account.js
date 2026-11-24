@@ -6,7 +6,8 @@ async (stage, arg) => {
   // presses Enter, which runs Turnstile (the always-pass test key) and has the Worker send the
   // email; 'wrong' types a wrong code; 'code' types the code from the email (arg); 'menu' opens
   // the signed-in menu; 'out' signs out; 'listen' notes the account channel; 'link' finds this
-  // page signed in after the email's link was opened in another tab. 'landed', 'landed-out' and
+  // page signed in after the email's link was opened in another tab. 'down' is the account page
+  // when the server fails. 'landed', 'landed-out' and
   // 'expired' run on the account page itself (/account, Preact pre-rendered, no editor): 'landed'
   // is the tab the email's link opened (signed in, usage, the way back, the strict policy),
   // 'landed-out' presses its Sign out, 'expired' is a link that was used (?link=expired: the
@@ -14,6 +15,26 @@ async (stage, arg) => {
   // account page signed out), 'save' puts the scene in the library, 'export' downloads the
   // library as one zip, 'delete' opens Delete account and checks the email must be typed,
   // 'deleted' types it and deletes the account.
+  // 'down' runs on the account page of the static check server, whose /api/me fails (500) until
+  // /__me/off makes it answer that sign-in is off: the error view, its second try, Try again.
+  if (stage === 'down') {
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const waitFor = async (f, ms = 8000) => { for (let t = 0; !f() && t < ms; t += 30) await sleep(30); return f(); };
+    const shownId = () => document.querySelector('main > section:not([hidden])')?.id;
+    const lines = [];
+    const note = (what, ok, extra = '') => lines.push(`${ok ? 'ok' : 'FAIL'} ${what}${ok ? '' : ': ' + extra}`);
+    await waitFor(() => shownId() && shownId() !== 'loading');
+    // The calls this page made, not the server's count: in the whole check other pages ask too.
+    const calls = performance.getEntriesByType('resource').filter((e) => new URL(e.name).pathname === '/api/me').length;
+    const heading = document.querySelector('#error h1').textContent;
+    note('a server that fails shows "could not reach the server" with Try again, not "Accounts are off", after a second try',
+      shownId() === 'error' && /could not reach the server/.test(heading) && !!document.getElementById('retry') && calls === 2, JSON.stringify([shownId(), heading, calls]));
+    await fetch('/__me/off');
+    document.getElementById('retry').click();
+    await waitFor(() => shownId() === 'off');
+    note('Try again asks the server again, and "Accounts are off" shows only when the server says so', shownId() === 'off', String(shownId()));
+    return lines.join('\n');
+  }
   if (stage === 'landed' || stage === 'landed-out' || stage === 'expired') {
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const waitFor = async (f, ms = 8000) => { for (let t = 0; !f() && t < ms; t += 30) await sleep(30); return f(); };

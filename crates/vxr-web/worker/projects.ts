@@ -69,8 +69,8 @@ function show(r: Row): Project {
   };
 }
 
-export function json(body: unknown, status = 200, headers: HeadersInit = {}): Response {
-  return new Response(JSON.stringify(body), {
+export function json(value: unknown, status = 200, headers: HeadersInit = {}): Response {
+  return new Response(JSON.stringify(value), {
     status,
     headers: { 'content-type': 'application/json', 'cache-control': 'no-store', ...headers },
   });
@@ -82,7 +82,9 @@ export function problem(status: number, error: string, extra: Record<string, unk
 
 function newVersion(): string {
   const b = crypto.getRandomValues(new Uint8Array(9));
-  return btoa(String.fromCharCode(...b)).replace(/\+/g, '-').replace(/\//g, '_');
+  return btoa(String.fromCharCode(...b))
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_');
 }
 
 async function sha256(bytes: Uint8Array): Promise<string> {
@@ -147,7 +149,12 @@ function nameOf(req: Request): string {
   } catch {
     // Not percent-encoded: take it as it is.
   }
-  const name = raw.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, NAME_CHARS);
+  const name = raw
+    // Control characters are what this takes out of a name.
+    // oxlint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f]/g, '')
+    .trim()
+    .slice(0, NAME_CHARS);
   return name || 'Untitled';
 }
 
@@ -167,9 +174,7 @@ export async function projects(req: Request, env: Store, user: string, path: str
   if (rest.length) return problem(404, 'not_found');
   if (id === undefined) {
     if (req.method !== 'GET') return problem(405, 'method');
-    const { results } = await env.DB.prepare('select * from project where user_id = ? order by updated_at desc')
-      .bind(user)
-      .all<Row>();
+    const { results } = await env.DB.prepare('select * from project where user_id = ? order by updated_at desc').bind(user).all<Row>();
     const used = results.reduce((s, r) => s + r.size + r.thumb, 0);
     return json({ projects: results.map(show), usage: used, limits });
   }
@@ -229,21 +234,21 @@ async function save(req: Request, env: Store, user: string, id: string, limits: 
   // first so a row never points at a missing object.
   const res = await kept(env, key, () =>
     current
-    ? env.DB.prepare(
-        `update project set name = ?, version = ?, hash = ?, size = ?, device = ?, updated_at = ?
+      ? env.DB.prepare(
+          `update project set name = ?, version = ?, hash = ?, size = ?, device = ?, updated_at = ?
          where user_id = ? and id = ? and version = ?
            and (select coalesce(sum(size + thumb), 0) from project where user_id = ?) - ? + ? <= ?`,
-      )
-        .bind(name, version, hash, bytes.length, device, now, user, id, base, user, current.size, bytes.length, limits.account)
-        .run()
-    : env.DB.prepare(
-        `insert into project (user_id, id, name, version, hash, size, device, created_at, updated_at)
+        )
+          .bind(name, version, hash, bytes.length, device, now, user, id, base, user, current.size, bytes.length, limits.account)
+          .run()
+      : env.DB.prepare(
+          `insert into project (user_id, id, name, version, hash, size, device, created_at, updated_at)
          select ?, ?, ?, ?, ?, ?, ?, ?, ?
          where (select coalesce(sum(size + thumb), 0) from project where user_id = ?) + ? <= ?
          on conflict do nothing`,
-      )
-        .bind(user, id, name, version, hash, bytes.length, device, now, now, user, bytes.length, limits.account)
-        .run(),
+        )
+          .bind(user, id, name, version, hash, bytes.length, device, now, now, user, bytes.length, limits.account)
+          .run(),
   );
   if (res.meta.changes !== 1) {
     await env.PROJECTS.delete(key);

@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Check a deployed vxr's /api/me: call it many times, each on its own connection, some at once
+# (so several Worker isolates answer), and fail on any answer that is not a 200 with JSON.
+# Harmless GETs only: no account, no email, no writes.
+#   crates/vxr-web/check-live [origin] [calls]     default https://vxr.jrnxf.co, 60 calls
+# Prints ok or FAIL and exits 1 on a failure. Run it after a deploy. A Worker without the sign-in
+# secrets (the preview Worker) answers without Better Auth, so only production checks that path.
+set -euo pipefail
+origin="${1:-https://vxr.jrnxf.co}"
+calls="${2:-60}"
+one() {
+  local out
+  out="$(curl -s -m 20 -o - -w '\n%{http_code} %{content_type}' "$1/api/me" || true)"
+  case "$out" in
+    *'"signIn":'*$'\n''200 application/json'*) echo ok ;;
+    *) echo "bad: $(echo "$out" | tr '\n' ' ' | cut -c1-160)" ;;
+  esac
+}
+export -f one
+results="$(seq "$calls" | xargs -P 6 -I{} bash -c 'one "$0"' "$origin")"
+bad="$(echo "$results" | grep -c '^bad' || true)"
+if [ "$bad" -eq 0 ]; then
+  echo "ok $origin/api/me answered 200 with JSON $calls times of $calls"
+else
+  echo "FAIL $origin/api/me: $bad of $calls calls failed"
+  echo "$results" | grep '^bad' | sort | uniq -c | head -5
+  exit 1
+fi

@@ -1,5 +1,6 @@
 import { env } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
+
 import { LIMITS, projects } from '../projects';
 import { voxProblem } from '../vox';
 import { type Client, png, vox, World } from './helpers';
@@ -73,7 +74,7 @@ describe('projects', () => {
     expect(copy.id).not.toBe('p1');
 
     const list = (await a.json('/api/projects')).body.projects;
-    expect(list.map((p: { id: string }) => p.id).sort()).toEqual(['p1', copy.id].sort());
+    expect(list.map((p: { id: string }) => p.id).toSorted()).toEqual(['p1', copy.id].toSorted());
     expect(await bytes(await a.fetch(`/api/projects/${copy.id}`))).toEqual(mine);
     expect(await bytes(await a.fetch('/api/projects/p1'))).toEqual(vox(2));
   });
@@ -126,7 +127,12 @@ describe('projects', () => {
         c.close();
       },
     });
-    const streamed = await a.json('/api/projects/p2', { method: 'PUT', headers: { 'if-none-match': '*' }, body: stream, duplex: 'half' } as RequestInit);
+    const streamed = await a.json('/api/projects/p2', {
+      method: 'PUT',
+      headers: { 'if-none-match': '*' },
+      body: stream,
+      duplex: 'half',
+    } as RequestInit);
     expect(streamed.status).toBe(413);
   });
 
@@ -205,7 +211,9 @@ describe('projects', () => {
       },
       delete: (k: string | string[]) => env.PROJECTS.delete(k),
     });
-    expect((await projects(new Request('https://vxr.test/', { method: 'DELETE' }), { ...env, PROJECTS: late }, user, ['p1'], LIMITS)).status).toBe(204);
+    expect(
+      (await projects(new Request('https://vxr.test/', { method: 'DELETE' }), { ...env, PROJECTS: late }, user, ['p1'], LIMITS)).status,
+    ).toBe(204);
     expect(await left()).toEqual([]);
 
     // The delete runs between a thumbnail's row update and its put.

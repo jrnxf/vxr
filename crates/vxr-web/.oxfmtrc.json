@@ -39,5 +39,17 @@
   },
   "ignorePatterns": [
     "**/node_modules/**"
+  ],
+  "overrides": [
+    {
+      "files": [
+        "worker/**"
+      ],
+      "options": {
+        "printWidth": 140,
+        "semi": true,
+        "singleQuote": true
+      }
+    }
   ]
 }
