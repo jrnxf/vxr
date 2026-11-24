@@ -149,7 +149,7 @@ jobs:
     env:
       AXI: 0.1.46
       VXR_TOOLS: path
-      VXR_CHECK_CHROME_ARGS: --enable-unsafe-webgpu --ignore-gpu-blocklist --enable-features=Vulkan --use-angle=swiftshader --use-webgpu-adapter=swiftshader --no-sandbox
+      VXR_CHECK_CHROME_ARGS: --enable-unsafe-webgpu --ignore-gpu-blocklist --enable-features=Vulkan --use-vulkan=native --use-angle=vulkan --disable-vulkan-surface --no-sandbox
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -168,6 +168,7 @@ jobs:
 
       - name: Install the browser driver
         run: |
+          sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers
           npm install --global "chrome-devtools-axi@$AXI"
           google-chrome --version
 
