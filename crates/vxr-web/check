@@ -193,13 +193,15 @@ axi screenshot "$shots/web-restore.png" >/dev/null
 results+=$'\n'"$(restore restore)"
 forget
 
-# A key check.js asked this browser to remember comes back, encrypted, in a new page.
+# A key check.js asked this browser to remember is still there in a new page.
 axi open "$url" >/dev/null
 back="$(axi eval "async () => { for (let i = 0; i < 300 && !window.vxr; i++) await new Promise(r => setTimeout(r, 50)); await new Promise(r => setTimeout(r, 500)); const a = JSON.parse(window.vxr.ai()); await window.vxrKeys.forget('compatible'); return JSON.stringify([a.hasKey[2], a.remembered[2], a.kind]) }" | unwrap)"
-if [[ "$back" == '[true,true,"compatible"]' ]]; then
-  results+=$'\nok a key remembered in this browser is back in a new page (and forgotten again)'
+# It was typed for the check's own server. The new page starts on the default URL, another
+# origin, so the key is kept (remembered) and not used there: it is never sent to another host.
+if [[ "$back" == '[false,true,'* ]]; then
+  results+=$'\nok a key remembered in this browser is kept in a new page, and is not used for another URL (and forgotten again)'
 else
-  results+=$'\nFAIL a key remembered in this browser is back in a new page: '"$back"
+  results+=$'\nFAIL a key remembered in this browser is kept in a new page, and is not used for another URL: '"$back"
 fi
 
 # Live mode through a real vxr bridge: its live folder (socket and token) in the temporary

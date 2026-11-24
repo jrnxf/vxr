@@ -1672,7 +1672,7 @@ async () => {
     });
     const plain = stored && new TextDecoder().decode(new Uint8Array(stored.ct)).includes('sk-test');
     const back = await window.vxrKeys.load();
-    step('a remembered key is kept, stored encrypted and reads back', a.hasKey[2] && a.remembered[2] && !!stored && !plain && JSON.stringify(back) === '[["compatible","sk-test-not-a-real-key"]]', JSON.stringify([a.hasKey, a.remembered, !!stored, plain]));
+    step('a remembered key is kept with the origin it was typed for, stored wrapped and reads back', a.hasKey[2] && a.remembered[2] && !!stored && !plain && back.length === 1 && back[0][0] === 'compatible' && back[0][1] === location.origin + '\nsk-test-not-a-real-key', JSON.stringify([a.hasKey, a.remembered, !!stored, plain]));
     if (ai().setup) await clickAt('ai-done');
     step('the panel turns to the conversation', !ai().setup && !!at('ai-draft'), JSON.stringify(ai()));
     // A request: streamed from the stand-in, its box staged under the card, its answer sent back.
