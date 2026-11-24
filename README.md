@@ -5,7 +5,7 @@
 
 **vxr is a fast voxel scene editor for macOS and the browser.** It opens and saves MagicaVoxel `.vox` files without loss, path-traces the scene while you edit, and puts a scene on any web page with one tag.
 
-<a href="https://vxr.jrnxf.co"><img alt="The vxr editor with a voxel island open: the tool rail on the left, the live path-traced render in the corner" src="HERO_IMAGE_URL" width="100%"></a>
+<a href="https://vxr.jrnxf.co"><img alt="The vxr editor with a voxel island open: the tool rail on the left, the live path-traced render in the corner" src="https://github.com/user-attachments/assets/9b22dd7e-a955-464e-95c8-5ff70f3bc415" width="100%"></a>
 
 ## Try it
 
